@@ -63,6 +63,69 @@ class BrainAdapter:
     # to Consultant+ accounts; lower tiers still have access to single-sim.
     _no_multisim: bool = False
     _SINGLE_SIM_FALLBACK_CONCURRENCY: int = 3
+
+    # BRAIN server-side hard limit: <= 3 sims in-flight per account, *across all
+    # processes*. Per-process asyncio.Semaphore is insufficient when multiple
+    # celery workers run on the same account — each had its own counter and the
+    # account would overflow with N_workers × 3 in-flight, triggering 429
+    # CONCURRENT_SIMULATION_LIMIT_EXCEEDED. The slot is held from POST
+    # /simulations through to terminal status, mirroring BRAIN's accounting.
+    _BRAIN_GLOBAL_SIM_LIMIT: int = 3
+    _SLOT_COUNTER_KEY: str = "brain:concurrent_sims"
+    _SLOT_TTL_SEC: int = 1800   # safety: orphaned counter resets after 30 min
+    _SLOT_POLL_INTERVAL: float = 1.5
+    _SLOT_ACQUIRE_TIMEOUT: float = 1800.0   # 30 min upper bound on wait
+    _redis_client: Optional["redis.Redis"] = None
+
+    @classmethod
+    async def _get_slot_redis(cls):
+        # Separate cached connection from the per-instance _get_redis (used for
+        # session cookies) so we don't tear it down between sims.
+        if cls._redis_client is None:
+            cls._redis_client = redis.from_url(
+                settings.REDIS_URL, decode_responses=True
+            )
+        return cls._redis_client
+
+    @classmethod
+    async def _acquire_sim_slot(cls) -> bool:
+        """Atomically acquire one of the {_BRAIN_GLOBAL_SIM_LIMIT} slots.
+
+        Returns True when a slot is held; loops with sleep until acquired or
+        deadline. The TTL on the counter prevents a dead worker from starving
+        the pool forever.
+        """
+        r = await cls._get_slot_redis()
+        deadline = asyncio.get_event_loop().time() + cls._SLOT_ACQUIRE_TIMEOUT
+        warned = False
+        while True:
+            count = await r.incr(cls._SLOT_COUNTER_KEY)
+            if count <= cls._BRAIN_GLOBAL_SIM_LIMIT:
+                # Refresh expiry as a safety net
+                await r.expire(cls._SLOT_COUNTER_KEY, cls._SLOT_TTL_SEC)
+                return True
+            # Over capacity — release and back off
+            await r.decr(cls._SLOT_COUNTER_KEY)
+            if not warned:
+                logger.info(
+                    f"[BrainAdapter] BRAIN sim slot full ({count-1}/{cls._BRAIN_GLOBAL_SIM_LIMIT}); waiting"
+                )
+                warned = True
+            if asyncio.get_event_loop().time() > deadline:
+                logger.error("[BrainAdapter] BRAIN sim slot acquire timed out (30 min)")
+                return False
+            await asyncio.sleep(cls._SLOT_POLL_INTERVAL)
+
+    @classmethod
+    async def _release_sim_slot(cls) -> None:
+        try:
+            r = await cls._get_slot_redis()
+            n = await r.decr(cls._SLOT_COUNTER_KEY)
+            if n < 0:
+                # Recover from bad state (e.g. counter manually cleared)
+                await r.set(cls._SLOT_COUNTER_KEY, 0)
+        except Exception as e:
+            logger.warning(f"[BrainAdapter] release sim slot failed (non-fatal): {e}")
     
     def __init__(self, email: str = None, password: str = None):
         # Store explicit credentials if provided
@@ -316,21 +379,38 @@ class BrainAdapter:
             },
             "regular": expression
         }
-        
+
+        # Acquire one of BRAIN's 3 server-side concurrent sim slots (cross-process
+        # via Redis). Held until terminal status to mirror BRAIN's accounting.
+        slot_held = await BrainAdapter._acquire_sim_slot()
+        if not slot_held:
+            return {"success": False, "error": "BRAIN sim slot acquire timeout"}
+
         try:
-            response = await self.client.post(f"{self.BASE_URL}/simulations", json=sim_payload)
-            if response.status_code not in [200, 201, 202]:
-                logger.error(f"Brain Simulation Failed [{response.status_code}] | Payload: {json.dumps(sim_payload)} | Response: {response.text}")
-                return {"success": False, "error": f"Creation failed: {response.text}"}
-            
-            location = response.headers.get("Location")
-            if not location:
-                 location = f"/simulations/{response.json().get('id')}"
-                 
-            return await self._wait_for_simulation(location)
-        except Exception as e:
-            logger.error(f"Simulate error: {e}")
-            return {"success": False, "error": str(e)}
+            try:
+                response = await self.client.post(f"{self.BASE_URL}/simulations", json=sim_payload)
+                if response.status_code == 429 and "CONCURRENT_SIMULATION_LIMIT_EXCEEDED" in (response.text or ""):
+                    # Slot accounting drift (e.g. counter reset) — back off briefly
+                    # and let outer caller retry. Releasing here avoids deadlock.
+                    logger.warning(
+                        "[BrainAdapter] 429 CONCURRENT_SIMULATION_LIMIT_EXCEEDED despite slot held; "
+                        "Redis counter may be stale. Releasing and signalling failure."
+                    )
+                    return {"success": False, "error": "BRAIN concurrent limit exceeded"}
+                if response.status_code not in [200, 201, 202]:
+                    logger.error(f"Brain Simulation Failed [{response.status_code}] | Payload: {json.dumps(sim_payload)} | Response: {response.text}")
+                    return {"success": False, "error": f"Creation failed: {response.text}"}
+
+                location = response.headers.get("Location")
+                if not location:
+                     location = f"/simulations/{response.json().get('id')}"
+
+                return await self._wait_for_simulation(location)
+            except Exception as e:
+                logger.error(f"Simulate error: {e}")
+                return {"success": False, "error": str(e)}
+        finally:
+            await BrainAdapter._release_sim_slot()
 
     async def simulate_batch(self, expressions: List[str], region: str = "USA", universe: str = "TOP3000", delay: int = 1, decay: int = 4, neutralization: str = "SUBINDUSTRY", truncation: float = 0.08, test_period: str = "P2Y0M") -> List[Dict]:
         """
