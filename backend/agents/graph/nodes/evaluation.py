@@ -443,12 +443,25 @@ async def node_evaluate(
 
         # PASS_PROVISIONAL: 近成功池 (sharpe + fitness>=0.6 + turnover [0.01,0.85])
         # 用于 KB 学习/island 优化种子，但不视为可提交
+        #
+        # 议题 B (PnL 硬闸门，规模无关替代 expression injection):
+        #   self_corr 由 correlation_service 用 OS PnL 矩阵实测得出 (W0.5)。
+        #   - 已验证且 >= 0.7 (self_corr_ok=False, verified=True) → 直接 FAIL，
+        #     不污染 PROVISIONAL 池 (重复 alpha 没必要进 KB 学习)
+        #   - 未验证 (verified=False, cache miss + API fail) → 仍允许 PROVISIONAL
+        #     (defensive：宁可保留候选也不丢真信号)
+        #   - skipped (前置门没过自然没算 corr) → ok=True, verified=True (skipped
+        #     != unknown), 不影响其他门的判定
+        # 这套机制对 OS 池规模无关 — 不论 5 还是 10000 条提交 alpha,
+        # 单条 alpha 的 corrwith 都是 O(N列) ~50ms 量级。
+        self_corr_acceptable = self_corr_ok or not self_corr_verified
         near_pass = (
             sharpe >= sharpe_min
             and fitness >= 0.6
             and 0.01 <= turnover <= 0.85
             and sub_universe_ok
             and concentrated_ok
+            and self_corr_acceptable
         )
 
         # Determine quality status
