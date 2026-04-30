@@ -124,8 +124,17 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
         )
     
     if ctx.avoid_patterns:
+        # 议题 B: top-N entries are submitted-alpha expressions (BRAIN will
+        # reject anything correlating > 0.7 with these via SELF_CORRELATION).
+        # Be explicit and absolute about avoidance, not soft-prefer.
+        bullet = "\n  ".join(f"- `{p}`" for p in ctx.avoid_patterns[:10])
         constraints.append(
-            f"Patterns that underperformed recently: {'; '.join(ctx.avoid_patterns[:3])}"
+            "**ALREADY-SUBMITTED ALPHAS — DO NOT generate variants of these "
+            "(BRAIN's SELF_CORRELATION check rejects anything > 0.7 correlated):**\n  "
+            + bullet
+            + "\n  Aim for structurally different operators / fields / "
+            "transformations. Ranking-of-rankings of similar fundamental "
+            "ratios will fail; vary the signal source."
         )
     
     # CRITICAL TYPE CONSTRAINTS

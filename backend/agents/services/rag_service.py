@@ -17,7 +17,7 @@ from sqlalchemy import select, and_, or_, func, desc
 from sqlalchemy.dialects.postgresql import JSONB
 from loguru import logger
 
-from backend.models import KnowledgeEntry, DatasetMetadata
+from backend.models import KnowledgeEntry, DatasetMetadata, Alpha
 
 
 # Dataset category mapping for intelligent pattern matching
@@ -515,6 +515,39 @@ class RAGService:
             f"[RAGService] few-shot pool | region={region} dataset={dataset_id} "
             f"returned={len(out)} (HITL={sum(1 for e in out if e['source']=='HITL')}, "
             f"hitl_bonus_active={apply_hitl_bonus}, global_hitl={hitl_count})"
+        )
+        return out
+
+    async def get_submitted_alpha_expressions(
+        self,
+        region: Optional[str] = None,
+        limit: int = 20,
+    ) -> List[str]:
+        """议题 B (post-Step1): return expressions of already-submitted alphas
+        for the LLM to AVOID regenerating.
+
+        Step 1 found 12/16 unsubmitted PASS candidates fail BRAIN
+        SELF_CORRELATION because the LLM keeps generating variants of the 5
+        OS-active alphas. Feeding those expressions back into the prompt as
+        an explicit avoid-list short-circuits the loop.
+
+        Sources:
+          - Local alphas table where stage='OS' AND status='ACTIVE' (i.e.
+            submitted alphas synced from BRAIN). This is fast and cached.
+        """
+        stmt = (
+            select(Alpha.expression)
+            .where(Alpha.stage == "OS", Alpha.status == "ACTIVE")
+            .order_by(Alpha.is_sharpe.desc().nullslast())
+            .limit(limit)
+        )
+        if region:
+            stmt = stmt.where(Alpha.region == region)
+        rows = (await self.db.execute(stmt)).scalars().all()
+        out = [e for e in rows if e]
+        logger.info(
+            f"[RAGService] submitted-alpha avoid-list | region={region} "
+            f"returned={len(out)}"
         )
         return out
 

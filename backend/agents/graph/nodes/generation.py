@@ -446,7 +446,11 @@ async def node_code_gen(
     )
     
     # W6: rolling few-shot pool — pull last 7d PASS/PROVISIONAL with HITL bias
+    # 议题 B: also pull submitted-alpha expressions to inject into avoid_patterns
+    # so the LLM stops regenerating variants of already-submitted alphas
+    # (root cause of 12/16 SELF_CORRELATION FAILs found in Step 1 harvest).
     recent_pass_examples = []
+    submitted_avoid_list: list = []
     try:
         from backend.agents.services.rag_service import RAGService
         from backend.database import AsyncSessionLocal
@@ -456,6 +460,10 @@ async def node_code_gen(
                 region=state.region,
                 dataset_id=state.dataset_id,
                 limit=5,
+            )
+            submitted_avoid_list = await _rag.get_submitted_alpha_expressions(
+                region=state.region,
+                limit=20,
             )
     except Exception as _ex:
         logger.warning(f"[{node_name}] few-shot pool fetch failed (non-fatal): {_ex}")
@@ -484,7 +492,9 @@ async def node_code_gen(
             h.get("statement", h.get("idea", str(h))) if isinstance(h, dict) else str(h)
             for h in state.hypotheses[:3]
         ],
-        avoid_patterns=avoid_patterns,
+        # 议题 B: prepend submitted alphas — these are the highest-priority
+        # avoid signals (BRAIN /correlations/SELF will reject anything similar).
+        avoid_patterns=submitted_avoid_list + (avoid_patterns or []),
         num_alphas=state.num_alphas_target,
         exploration_weight=exploration_weight,
     )

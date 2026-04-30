@@ -410,6 +410,18 @@ async def node_evaluate(
             sub_universe_check is None
             or sub_universe_check.get("result") != "FAIL"
         )
+        # Post-Step1 (2026-04-30): BRAIN /check rejects ~25% of project's PASS
+        # alphas on CONCENTRATED_WEIGHT (single position > 10% on some date).
+        # Local hard_gate now mirrors that rule using sim_result's checks block.
+        concentrated_check = next(
+            (c for c in metrics.get("checks", [])
+             if c.get("name") == "CONCENTRATED_WEIGHT"),
+            None,
+        )
+        concentrated_ok = (
+            concentrated_check is None
+            or concentrated_check.get("result") != "FAIL"
+        )
         max_correlation = getattr(settings, "MAX_CORRELATION", 0.7)
         self_corr_ok = self_corr < max_correlation
         # W0.5: self_corr_source defaults to "skipped" when corr check was not
@@ -424,6 +436,7 @@ async def node_evaluate(
             and fitness >= fitness_min
             and 0.01 <= turnover <= turnover_max
             and sub_universe_ok
+            and concentrated_ok
             and self_corr_ok
             and self_corr_verified
         )
@@ -435,6 +448,7 @@ async def node_evaluate(
             and fitness >= 0.6
             and 0.01 <= turnover <= 0.85
             and sub_universe_ok
+            and concentrated_ok
         )
 
         # Determine quality status
