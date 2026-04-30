@@ -23,6 +23,7 @@ class MiningStatus(str, enum.Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     STOPPED = "STOPPED"
+    EARLY_STOPPED = "EARLY_STOPPED"  # W1: round-level pruner triggered
 
 
 class DatasetStrategy(str, enum.Enum):
@@ -52,6 +53,9 @@ class QualityStatus(str, enum.Enum):
     """Quality status of an alpha."""
     PENDING = "PENDING"
     PASS = "PASS"
+    PASS_PROVISIONAL = "PASS_PROVISIONAL"  # near-PASS: 134-class candidates from R4/R5
+    OPTIMIZE = "OPTIMIZE"
+    FAIL = "FAIL"
     REJECT = "REJECT"
 
 

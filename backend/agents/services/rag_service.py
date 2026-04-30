@@ -416,6 +416,108 @@ class RAGService:
         
         return blacklist
     
+    async def get_recent_pass_examples(
+        self,
+        region: Optional[str] = None,
+        dataset_id: Optional[str] = None,
+        limit: int = 5,
+        days_window: int = 7,
+        prefer_hitl: bool = True,
+        hitl_min_count: int = 5,
+    ) -> List[Dict]:
+        """W6 (revised post-T9): rolling few-shot pool with dataset HARD filter.
+
+        Changes vs. v1:
+          - Dataset mismatch is now a HARD filter (not a -0.2 score). Mismatched
+            patterns are dropped instead of ranked lower. T9 confirmed that a
+            single mismatched HITL sample (fnd6) ranked #1 on a fundamental2 task
+            and produced no learning.
+          - HITL bonus only kicks in when global HITL count >= `hitl_min_count`
+            (default 5). One-off HITL signals are too noisy to bias prompts.
+
+        Region remains soft-match (+0.2 score) to allow cross-region transfer.
+        """
+        from datetime import datetime, timedelta
+        from sqlalchemy import func
+
+        cutoff = datetime.utcnow() - timedelta(days=days_window)
+
+        # Count global HITL samples to decide whether to apply HITL bonus
+        hitl_count_stmt = select(func.count(KnowledgeEntry.id)).where(
+            KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
+            KnowledgeEntry.is_active == True,
+            KnowledgeEntry.created_by == "HITL",
+        )
+        hitl_count = (await self.db.execute(hitl_count_stmt)).scalar() or 0
+        apply_hitl_bonus = prefer_hitl and hitl_count >= hitl_min_count
+
+        stmt = (
+            select(KnowledgeEntry)
+            .where(
+                KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
+                KnowledgeEntry.is_active == True,
+                KnowledgeEntry.updated_at >= cutoff,
+            )
+            .order_by(KnowledgeEntry.usage_count.desc())
+            .limit(limit * 6)  # over-fetch since dataset filter may drop many
+        )
+        result = await self.db.execute(stmt)
+        rows = list(result.scalars().all())
+        if not rows:
+            return []
+
+        # HARD dataset filter: only keep entries whose metadata.dataset matches
+        # (or entries with NO dataset metadata — those are region-generic).
+        if dataset_id:
+            filtered = []
+            for e in rows:
+                md = e.meta_data or {}
+                entry_ds = md.get("dataset_id") or md.get("dataset")
+                if entry_ds is None or entry_ds == "":
+                    filtered.append(e)  # generic patterns OK
+                elif str(entry_ds).lower() == str(dataset_id).lower():
+                    filtered.append(e)
+                # else: drop (hard filter)
+            dropped = len(rows) - len(filtered)
+            rows = filtered
+            if dropped:
+                logger.info(
+                    f"[RAGService] few-shot dataset filter | dropped={dropped} "
+                    f"(target={dataset_id})"
+                )
+
+        if not rows:
+            return []
+
+        def score(e: KnowledgeEntry) -> float:
+            md = e.meta_data or {}
+            conf = float(md.get("confidence", 0.5) or 0.5)
+            is_hitl = e.created_by == "HITL" or md.get("source") == "hitl"
+            hitl_bonus = 0.5 if (apply_hitl_bonus and is_hitl) else 0.0
+            region_match = 0.2 if region and (md.get("region") == region or region in (md.get("regions") or [])) else 0.0
+            usage = min(0.2, (e.usage_count or 0) * 0.02)
+            return conf + hitl_bonus + region_match + usage
+
+        rows.sort(key=score, reverse=True)
+        out = []
+        for entry in rows[:limit]:
+            md = entry.meta_data or {}
+            out.append({
+                "pattern": entry.pattern,
+                "description": entry.description or "",
+                "expected_sharpe": md.get("expected_sharpe"),
+                "expected_fitness": md.get("expected_fitness"),
+                "confidence": md.get("confidence", 0.5),
+                "source": entry.created_by,
+                "usage_count": entry.usage_count,
+            })
+        logger.info(
+            f"[RAGService] few-shot pool | region={region} dataset={dataset_id} "
+            f"returned={len(out)} (HITL={sum(1 for e in out if e['source']=='HITL')}, "
+            f"hitl_bonus_active={apply_hitl_bonus}, global_hitl={hitl_count})"
+        )
+        return out
+
     async def _get_dataset_info(self, dataset_id: str) -> Optional[Dict]:
         """Get dataset metadata."""
         query = select(DatasetMetadata).where(

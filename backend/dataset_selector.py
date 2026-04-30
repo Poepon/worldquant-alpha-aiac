@@ -497,15 +497,62 @@ class DatasetSelector:
         logger.debug(f"[DatasetSelector] Loaded {len(datasets)} datasets as Bandit arms")
         
     async def _load_bandit_state(self):
-        """Load persisted Bandit state from database"""
-        # Try to load from KnowledgeEntry or a dedicated table
-        # For now, we start fresh each session but could persist to JSON
-        pass
-        
+        """W3: Load persisted Bandit state from bandit_state table.
+
+        Pre-populates each arm's pulls / total_reward from the row
+        matching (region, dataset_id). Missing rows are left at zero
+        (cold start)."""
+        if not self.bandit or not self.bandit.arms:
+            return
+        try:
+            from sqlalchemy import select as sa_select
+            from backend.models import BanditState
+            stmt = sa_select(BanditState).where(BanditState.region == self.region)
+            result = await self.db.execute(stmt)
+            rows = {r.dataset_id: r for r in result.scalars().all()}
+            for arm in self.bandit.arms:
+                row = rows.get(arm.dataset_id)
+                if row is not None:
+                    arm.pulls = row.pulls
+                    arm.total_reward = row.total_reward
+                    # Stash sim_count_today on arm so update_reward can use it
+                    setattr(arm, "sim_count_today", row.sim_count_today)
+            logger.debug(
+                f"[DatasetSelector] Loaded bandit state | "
+                f"region={self.region} arms_with_state={len(rows)}"
+            )
+        except Exception as e:
+            logger.warning(f"[DatasetSelector] _load_bandit_state failed: {e}")
+
     async def _save_bandit_state(self):
-        """Persist Bandit state to database"""
-        # Could save to a dedicated table or KnowledgeEntry
-        pass
+        """W3: Persist arm state via INSERT ... ON CONFLICT atomic upsert."""
+        if not self.bandit or not self.bandit.arms:
+            return
+        try:
+            from sqlalchemy.dialects.postgresql import insert as pg_insert
+            from sqlalchemy.sql import func as sa_func
+            from backend.models import BanditState
+            for arm in self.bandit.arms:
+                values = {
+                    "region": self.region,
+                    "dataset_id": arm.dataset_id,
+                    "pulls": int(getattr(arm, "pulls", 0) or 0),
+                    "total_reward": float(getattr(arm, "total_reward", 0.0) or 0.0),
+                    "sim_count_today": int(getattr(arm, "sim_count_today", 0) or 0),
+                }
+                stmt = pg_insert(BanditState).values(**values)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["region", "dataset_id"],
+                    set_={
+                        "pulls": stmt.excluded.pulls,
+                        "total_reward": stmt.excluded.total_reward,
+                        "sim_count_today": stmt.excluded.sim_count_today,
+                    },
+                )
+                await self.db.execute(stmt)
+            await self.db.commit()
+        except Exception as e:
+            logger.warning(f"[DatasetSelector] _save_bandit_state failed: {e}")
         
     async def select_dataset(self, n: int = 1) -> List[str]:
         """
@@ -549,13 +596,30 @@ class DatasetSelector:
         if not self._initialized:
             return
             
-        # Calculate reward: pass rate with Sharpe bonus
+        # Raw reward: pass rate with Sharpe bonus
         pass_rate = pass_count / total_count if total_count > 0 else 0
         sharpe_bonus = min(avg_sharpe / 3.0, 0.5) if avg_sharpe > 0 else 0  # Cap at 0.5
-        reward = pass_rate + sharpe_bonus * 0.3
-        
+        reward_raw = pass_rate + sharpe_bonus * 0.3
+
+        # W3: cost-aware FLAML-CFO-style adjustment.
+        # cost_factor downweights datasets we've already simulated heavily
+        # today, encouraging exploration of cheaper alternatives. Floor 0.3
+        # prevents starvation of high-pyramid datasets in the morning when
+        # everyone's sim_count is zero. Per plan R3 #6 simplification we
+        # use sim_count_today (reset by celery beat) rather than a sliding
+        # 24h window — simpler and BanditState row already carries it.
+        import math as _math
+        arm = next((a for a in (self.bandit.arms if self.bandit else []) if a.dataset_id == dataset_id), None)
+        sim_count_today = int(getattr(arm, "sim_count_today", 0) or 0) if arm else 0
+        # Increment for THIS round's simulations
+        sim_count_today += int(total_count or 0)
+        if arm is not None:
+            setattr(arm, "sim_count_today", sim_count_today)
+        cost_factor = max(0.3, 1.0 / (1.0 + _math.log(1 + sim_count_today)))
+        reward = reward_raw * cost_factor
+
         success = pass_count > 0
-        
+
         self.bandit.update(
             dataset_id=dataset_id,
             reward=reward,
@@ -563,13 +627,15 @@ class DatasetSelector:
             region=self.region,
             universe=self.universe
         )
-        
+
         logger.info(
             f"[DatasetSelector] Updated reward | dataset={dataset_id} "
-            f"pass={pass_count}/{total_count} reward={reward:.3f}"
+            f"pass={pass_count}/{total_count} raw={reward_raw:.3f} "
+            f"cost_factor={cost_factor:.3f} reward={reward:.3f} "
+            f"sim_count_today={sim_count_today}"
         )
-        
-        # Persist state
+
+        # Persist state (incl. sim_count_today on the arm)
         await self._save_bandit_state()
         
     def get_stats(self) -> Dict:

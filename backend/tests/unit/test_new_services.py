@@ -276,7 +276,7 @@ class TestConfigService:
         # Should return defaults
         assert thresholds.sharpe_min == 1.5
         assert thresholds.turnover_max == 0.7
-        assert thresholds.fitness_min == 0.6
+        assert thresholds.fitness_min == 1.0
     
     @pytest.mark.asyncio
     async def test_update_thresholds(self, db_session):

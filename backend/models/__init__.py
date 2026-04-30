@@ -42,6 +42,8 @@ from backend.models.knowledge import (
     OperatorPreference,
     RLState,
     RLAction,
+    BanditState,
+    compute_pattern_hash,
 )
 
 # Metadata models
@@ -90,6 +92,8 @@ __all__ = [
     "OperatorPreference",
     "RLState",
     "RLAction",
+    "BanditState",
+    "compute_pattern_hash",
     # Metadata
     "DatasetMetadata",
     "DataField",

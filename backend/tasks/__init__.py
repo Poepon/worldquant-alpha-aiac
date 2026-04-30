@@ -36,6 +36,7 @@ from backend.tasks.sync_tasks import (
     sync_operators_from_brain,
     sync_fields_from_brain,
     sync_user_alphas,
+    refresh_os_correlation_cache,
 )
 
 __all__ = [
@@ -54,4 +55,5 @@ __all__ = [
     "sync_operators_from_brain",
     "sync_fields_from_brain",
     "sync_user_alphas",
+    "refresh_os_correlation_cache",
 ]

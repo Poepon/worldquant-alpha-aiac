@@ -13,4 +13,15 @@ logs/
 .cursorignore
 .claudeignore
 .cursorignore
-backend/alembic/versions/
+backend/alembic/versions/__pycache__/
+backend/data/correlation_cache/
+/.vs
+
+# local probe / experiment scripts (kept out of repo)
+.brain-probe.py
+.refresh-corr-cache.py
+.test-fallback.py
+.test-pnl-fetch.py
+.test-w2-island.py
+.test-w3-upsert.py
+.test-w6-fewshot.py

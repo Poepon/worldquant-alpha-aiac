@@ -46,4 +46,9 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.sync_datasets",
         "schedule": crontab(hour=6, minute=0),
     },
+    # W0.5: refresh OS-alpha PnL cache daily at 06:30 (after dataset sync)
+    "refresh-os-correlation-cache": {
+        "task": "backend.tasks.refresh_os_correlation_cache",
+        "schedule": crontab(hour=6, minute=30),
+    },
 }

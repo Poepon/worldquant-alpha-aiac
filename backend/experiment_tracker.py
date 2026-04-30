@@ -329,7 +329,7 @@ class ExperimentConfig:
     
     # Thresholds
     sharpe_min: float = 1.5
-    fitness_min: float = 0.6
+    fitness_min: float = 1.0
     turnover_max: float = 0.7
     corr_check_threshold: float = 0.5
     dedup_similarity_threshold: float = 0.9

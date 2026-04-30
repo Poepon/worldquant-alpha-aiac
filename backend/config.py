@@ -40,10 +40,17 @@ class Settings(BaseSettings):
     BRAIN_EMAIL: str = os.getenv("BRAIN_EMAIL", "")
     BRAIN_PASSWORD: str = os.getenv("BRAIN_PASSWORD", "")
     
-    # LLM Configuration (OpenAI Compatible)
+    # LLM Configuration (OpenAI Compatible — fallback / legacy)
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     OPENAI_BASE_URL: str = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
     OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4")
+
+    # W5: LLM Provider switch — "openai" (Qwen/DeepSeek/etc.) or "anthropic"
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
+    # Anthropic Claude (for prompt-cache-friendly inference)
+    ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
+    # Default model for code_gen (cheaper); override per-call via call(model=...)
+    ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
     
     # Mining Configuration
     DEFAULT_REGION: str = "USA"
@@ -53,7 +60,7 @@ class Settings(BaseSettings):
     # Quality Thresholds (Traditional)
     SHARPE_MIN: float = 1.5
     TURNOVER_MAX: float = 0.7
-    FITNESS_MIN: float = 0.6
+    FITNESS_MIN: float = 1.0
     MAX_CORRELATION: float = 0.7
     
     # Multi-Objective Scoring Thresholds

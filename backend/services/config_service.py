@@ -26,7 +26,7 @@ class ThresholdsConfig:
     """Quality thresholds configuration."""
     sharpe_min: float = 1.5
     turnover_max: float = 0.7
-    fitness_min: float = 0.6
+    fitness_min: float = 1.0
     returns_min: float = 0.0
     max_dd_max: float = 0.3
 

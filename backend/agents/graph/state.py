@@ -139,6 +139,17 @@ class MiningState(BaseModel):
     trace_steps: List[TraceStepData] = Field(default_factory=list)
     
     # -------------------------------------------------------------------------
+    # Round-level history (W1: round-level early-stop / median pruner)
+    # -------------------------------------------------------------------------
+    # Each entry: {round_index, pass_rate, mean_score, best_sharpe,
+    #              pass_count, optimize_count, fail_count, alphas_count}
+    round_history: List[Dict] = Field(default_factory=list)
+    current_round: int = 0
+    early_stopped: bool = False
+    early_stop_reason: Optional[str] = None
+    multi_fidelity_enabled: bool = False  # W4 nice-to-have
+
+    # -------------------------------------------------------------------------
     # Control Flags
     # -------------------------------------------------------------------------
     should_stop: bool = False

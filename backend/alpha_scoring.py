@@ -374,13 +374,21 @@ def evaluate_alpha_comprehensive(
                     # 根据检查类型给出建议
                     recommendations.extend(_get_recommendations_for_check(check_name))
             
-            # 如果平台已经告诉我们可以提交，直接使用
+            # 平台 can_submit 仅验证合规性 (语法/操作员/字段)，不保证性能。
+            # PASS 必须额外通过 IS metrics 红线 (sharpe/fitness/turnover)。
             if brain_eval['can_submit'] and not failed_tests:
-                eval_result.passed = True
-                eval_result.quality_status = "PASS"
-                eval_result.failed_tests = []
-                eval_result.recommendations = []
-                return eval_result
+                is_metrics_ok = (
+                    is_sharpe >= thresholds.adjusted_sharpe_min()
+                    and fitness >= thresholds.fitness_min
+                    and 0.01 <= turnover <= thresholds.turnover_max
+                )
+                if is_metrics_ok:
+                    eval_result.passed = True
+                    eval_result.quality_status = "PASS"
+                    eval_result.failed_tests = []
+                    eval_result.recommendations = []
+                    return eval_result
+                # else: fall through to local checks to record specific failures
     
     # =========================================================================
     # Fallback: 使用本地阈值判断（当 BRAIN checks 不可用时）
@@ -397,10 +405,13 @@ def evaluate_alpha_comprehensive(
             failed_tests.append(f"LOW_FITNESS (fit={fitness:.2f} < {thresholds.fitness_min:.2f})")
             recommendations.append("Try different neutralization or add risk controls")
         
-        # Test 3: Turnover
+        # Test 3: Turnover (BRAIN red-line: 0.01 <= turnover <= 0.70)
         if turnover > thresholds.turnover_max:
             failed_tests.append(f"HIGH_TURNOVER (to={turnover:.2f} > {thresholds.turnover_max:.2f})")
             recommendations.append("Add ts_decay_linear or increase lookback windows")
+        if turnover < 0.01:
+            failed_tests.append(f"LOW_TURNOVER (to={turnover:.4f} < 0.01)")
+            recommendations.append("Alpha barely trades — increase signal magnitude or remove flat conditions")
         
         # Test 4: OS performance
         if is_sharpe > 0.5 and os_sharpe < thresholds.os_sharpe_min:
@@ -535,10 +546,13 @@ def calculate_alpha_score(
         w['investability_penalty'] * investability_penalty
     )
     
+    # _safe_float guards against None coming from BRAIN responses (see edge case
+    # EC-1: 32% of historical alphas have returns < 0, and some metric fields
+    # can be missing entirely on partial sims). f-string :.3f throws on None.
     logger.debug(
-        f"得分明细: 测试集={test_sharpe:.3f}, 训练集={train_sharpe:.3f}, "
-        f"Fitness={fitness:.3f}, 相关性惩罚={corr_penalty:.3f}, "
-        f"换手惩罚={turnover_penalty:.3f}, 可投资性惩罚={investability_penalty:.3f} -> 总分 {score:.3f}"
+        f"得分明细: 测试集={_safe_float(test_sharpe):.3f}, 训练集={_safe_float(train_sharpe):.3f}, "
+        f"Fitness={_safe_float(fitness):.3f}, 相关性惩罚={_safe_float(corr_penalty):.3f}, "
+        f"换手惩罚={_safe_float(turnover_penalty):.3f}, 可投资性惩罚={_safe_float(investability_penalty):.3f} -> 总分 {_safe_float(score):.3f}"
     )
     
     return score

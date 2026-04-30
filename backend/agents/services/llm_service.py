@@ -17,6 +17,14 @@ from loguru import logger
 from backend.config import settings
 from backend.protocols.llm_protocol import LLMProtocol, LLMResponse as LLMResponseProtocol
 
+# W5: Anthropic SDK is optional — only loaded when LLM_PROVIDER=anthropic.
+try:
+    import anthropic
+    _ANTHROPIC_AVAILABLE = True
+except ImportError:
+    anthropic = None
+    _ANTHROPIC_AVAILABLE = False
+
 
 class LLMResponse(BaseModel):
     """Standard LLM response wrapper."""
@@ -60,21 +68,61 @@ class LLMService:
         self,
         api_key: str = None,
         base_url: str = None,
-        model: str = None
+        model: str = None,
+        provider: str = None,
     ):
+        # W5: provider switch (openai-compat vs anthropic). Provider is
+        # selected from settings.LLM_PROVIDER ("openai" | "anthropic"); the
+        # corresponding api_key/model override applies. The opposite
+        # provider's credentials are still loaded as fallback.
+        self.provider = (provider or getattr(settings, 'LLM_PROVIDER', 'openai')).lower()
+
+        # OpenAI-compatible (Qwen/DeepSeek/etc.) — always set up so caller can
+        # fall back per-call by passing provider="openai".
         self.api_key = api_key or settings.OPENAI_API_KEY
         self.base_url = base_url or settings.OPENAI_BASE_URL
-        self.model = model or getattr(settings, 'OPENAI_MODEL', 'deepseek-chat')
+        self.openai_model = model if (model and self.provider == 'openai') else getattr(
+            settings, 'OPENAI_MODEL', 'deepseek-chat'
+        )
+
+        # Anthropic (W5)
+        self.anthropic_api_key = getattr(settings, 'ANTHROPIC_API_KEY', '') or ''
+        self.anthropic_model = model if (model and self.provider == 'anthropic') else getattr(
+            settings, 'ANTHROPIC_MODEL', 'claude-haiku-4-5'
+        )
+
+        # Active model for self.model (back-compat with downstream readers)
+        self.model = (
+            self.anthropic_model if self.provider == 'anthropic' else self.openai_model
+        )
 
         self._credentials_lock = asyncio.Lock()
         self._credentials_loaded = False
-        
+
         self.client = openai.AsyncOpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
         )
-        
-        logger.info(f"[LLMService] Initialized | model={self.model} base_url={self.base_url}")
+
+        # Lazy-init anthropic client only when provider=anthropic and SDK
+        # is available; raises clear error if not installed.
+        self.anthropic_client = None
+        if self.provider == 'anthropic':
+            if not _ANTHROPIC_AVAILABLE:
+                raise RuntimeError(
+                    "LLM_PROVIDER=anthropic but `anthropic` SDK is not installed. "
+                    "Run: pip install anthropic>=0.40"
+                )
+            if not self.anthropic_api_key:
+                raise RuntimeError(
+                    "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is empty"
+                )
+            self.anthropic_client = anthropic.AsyncAnthropic(api_key=self.anthropic_api_key)
+
+        logger.info(
+            f"[LLMService] Initialized | provider={self.provider} model={self.model} "
+            f"openai_base_url={self.base_url}"
+        )
 
     async def _ensure_credentials_loaded(self):
         if self._credentials_loaded:
@@ -143,42 +191,80 @@ class LLMService:
         
         try:
             await self._ensure_credentials_loaded()
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                response_format={"type": "json_object"} if json_mode else None
-            )
-            
-            # Defensive: handle empty/malformed responses
-            choices = getattr(response, "choices", None)
-            if not response or not choices:
-                status = getattr(response, "status", None)
-                msg = getattr(response, "msg", None)
-                extra = f" | status={status} msg={msg}" if status or msg else ""
-                raise ValueError(f"Empty response from LLM API{extra}")
 
-            if len(choices) == 0:
-                raise ValueError("Empty choices from LLM API")
-            
-            message = response.choices[0].message
-            if not message:
-                raise ValueError("No message in LLM response")
-                
-            content = message.content or ""
-            if json_mode and not content.strip():
-                finish_reason = getattr(response.choices[0], "finish_reason", None)
-                reasoning_content = getattr(message, "reasoning_content", None)
-                extra = f"finish_reason={finish_reason}" if finish_reason else ""
-                if reasoning_content:
-                    extra = (extra + " | reasoning_content_present=True").strip()
-                raise ValueError(f"Empty content in LLM response ({extra})")
-            tokens_used = response.usage.total_tokens if response.usage else 0
-            latency_ms = int((time.time() - start_time) * 1000)
+            # W5: Anthropic provider uses messages.create + system prompt with
+            # cache_control. JSON mode is enforced by prompt instructions
+            # (Anthropic doesn't have a response_format flag; the existing
+            # prompts already say "Output Schema: JSON ...").
+            if self.provider == 'anthropic':
+                resp = await self.anthropic_client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    system=[{
+                        "type": "text",
+                        "text": system_prompt,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+                # Extract text from the first content block (TextBlock)
+                content = ""
+                for block in resp.content:
+                    if getattr(block, "type", "") == "text":
+                        content = block.text
+                        break
+                if not content:
+                    raise ValueError("Empty content in Anthropic response")
+                # Token accounting (input + output, log cache hit ratio)
+                u = resp.usage
+                tokens_used = (u.input_tokens or 0) + (u.output_tokens or 0)
+                cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
+                cache_create = getattr(u, "cache_creation_input_tokens", 0) or 0
+                latency_ms = int((time.time() - start_time) * 1000)
+                if cache_read or cache_create:
+                    logger.debug(
+                        f"[LLMService] Anthropic cache | id={call_id} "
+                        f"input={u.input_tokens} cache_read={cache_read} "
+                        f"cache_create={cache_create}"
+                    )
+            else:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    response_format={"type": "json_object"} if json_mode else None
+                )
+
+                # Defensive: handle empty/malformed responses
+                choices = getattr(response, "choices", None)
+                if not response or not choices:
+                    status = getattr(response, "status", None)
+                    msg = getattr(response, "msg", None)
+                    extra = f" | status={status} msg={msg}" if status or msg else ""
+                    raise ValueError(f"Empty response from LLM API{extra}")
+
+                if len(choices) == 0:
+                    raise ValueError("Empty choices from LLM API")
+
+                message = response.choices[0].message
+                if not message:
+                    raise ValueError("No message in LLM response")
+
+                content = message.content or ""
+                if json_mode and not content.strip():
+                    finish_reason = getattr(response.choices[0], "finish_reason", None)
+                    reasoning_content = getattr(message, "reasoning_content", None)
+                    extra = f"finish_reason={finish_reason}" if finish_reason else ""
+                    if reasoning_content:
+                        extra = (extra + " | reasoning_content_present=True").strip()
+                    raise ValueError(f"Empty content in LLM response ({extra})")
+                tokens_used = response.usage.total_tokens if response.usage else 0
+                latency_ms = int((time.time() - start_time) * 1000)
             
             # Parse JSON if requested
             parsed = None
@@ -252,20 +338,53 @@ class LLMService:
             return None, response
     
     def _clean_json(self, content: str) -> str:
-        """Remove markdown code blocks from JSON response."""
+        """Remove markdown blocks + trim text trailing the JSON object.
+
+        OpenAI/Qwen with response_format=json_object guarantee pure JSON;
+        Anthropic Claude doesn't have such a flag, so it occasionally emits
+        natural-language commentary after the JSON object. We extract the
+        first complete JSON object/array by brace-matching with string-aware
+        escape handling.
+        """
         content = content.strip()
-        
-        # Remove leading markdown
+
+        # Strip markdown fences
         if content.startswith('```json'):
             content = content[7:]
         elif content.startswith('```'):
             content = content[3:]
-        
-        # Remove trailing markdown
         if content.endswith('```'):
             content = content[:-3]
-        
-        return content.strip()
+        content = content.strip()
+
+        if not content or content[0] not in ('{', '['):
+            return content
+
+        opener = content[0]
+        closer = '}' if opener == '{' else ']'
+        depth = 0
+        in_string = False
+        escape = False
+        for i, ch in enumerate(content):
+            if escape:
+                escape = False
+                continue
+            if ch == '\\':
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == opener:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    return content[: i + 1]
+        # Unbalanced — return as-is so json.loads raises a clear error
+        return content
 
 
 # Singleton instance for reuse

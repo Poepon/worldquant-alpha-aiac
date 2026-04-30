@@ -16,7 +16,37 @@ from backend.celery_app import celery_app
 from backend.database import AsyncSessionLocal
 from backend.adapters.brain_adapter import BrainAdapter
 from backend.models import DatasetMetadata, DataField, Operator, Alpha
+from backend.services.correlation_service import CorrelationService
 from backend.tasks import run_async
+
+
+@celery_app.task(name="backend.tasks.refresh_os_correlation_cache")
+def refresh_os_correlation_cache():
+    """Refresh OS-alpha PnL cache for all major regions (scheduled).
+
+    Runs daily at 06:30 (after sync-datasets). Powers fast local self-correlation
+    in evaluation.py, avoiding BRAIN /correlations/SELF rate-limit risk.
+    """
+    logger.info("Refreshing OS correlation cache...")
+
+    async def _run():
+        async with BrainAdapter() as brain:
+            svc = CorrelationService(brain)
+            results = {}
+            for region in ["USA", "CHN", "EUR", "HKG", "JPN"]:
+                try:
+                    new_count, total = await svc.refresh_os_alpha_cache(
+                        region=region, incremental=True
+                    )
+                    results[region] = {"new": new_count, "total": total}
+                except Exception as e:
+                    logger.warning(f"[refresh_os_corr] {region} failed: {e}")
+                    results[region] = {"error": str(e)}
+            return results
+
+    results = run_async(_run())
+    logger.info(f"OS correlation cache refresh: {results}")
+    return results
 
 
 @celery_app.task(name="backend.tasks.sync_datasets")

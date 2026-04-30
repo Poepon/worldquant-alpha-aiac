@@ -31,6 +31,33 @@ class AlphaListFilters:
     human_feedback: Optional[str] = None
     dataset_id: Optional[str] = None
     task_id: Optional[int] = None
+    # Expression substring search (case-insensitive ILIKE)
+    expression_search: Optional[str] = None
+    # IS metric range filters (None = no bound)
+    min_sharpe: Optional[float] = None
+    max_sharpe: Optional[float] = None
+    min_fitness: Optional[float] = None
+    max_fitness: Optional[float] = None
+    min_turnover: Optional[float] = None
+    max_turnover: Optional[float] = None
+    min_returns: Optional[float] = None
+    max_returns: Optional[float] = None
+
+
+# Sort key mapping: external name -> SQLAlchemy column attribute. Keeps the
+# API stable while DB column names ("is_*") remain implementation detail.
+_SORT_COLUMN_MAP = {
+    "sharpe": "is_sharpe",
+    "fitness": "is_fitness",
+    "turnover": "is_turnover",
+    "returns": "is_returns",
+    "drawdown": "is_drawdown",
+    "created_at": "date_created",
+    "date_created": "date_created",
+    "id": "id",
+    "region": "region",
+    "quality_status": "quality_status",
+}
 
 
 @dataclass
@@ -139,12 +166,33 @@ class AlphaService(BaseService):
         if filters.task_id:
             query = query.where(Alpha.task_id == filters.task_id)
             count_query = count_query.where(Alpha.task_id == filters.task_id)
-        
+
+        if filters.expression_search:
+            pattern = f"%{filters.expression_search}%"
+            query = query.where(Alpha.expression.ilike(pattern))
+            count_query = count_query.where(Alpha.expression.ilike(pattern))
+
+        # Numeric range filters on IS metrics
+        for column, lo, hi in (
+            (Alpha.is_sharpe,   filters.min_sharpe,   filters.max_sharpe),
+            (Alpha.is_fitness,  filters.min_fitness,  filters.max_fitness),
+            (Alpha.is_turnover, filters.min_turnover, filters.max_turnover),
+            (Alpha.is_returns,  filters.min_returns,  filters.max_returns),
+        ):
+            if lo is not None:
+                query = query.where(column >= lo)
+                count_query = count_query.where(column >= lo)
+            if hi is not None:
+                query = query.where(column <= hi)
+                count_query = count_query.where(column <= hi)
+
         # Get total count
         total = (await self.db.execute(count_query)).scalar() or 0
-        
-        # Apply sorting
-        sort_column = getattr(Alpha, sort_by, Alpha.date_created)
+
+        # Apply sorting via the public sort-key map. Unknown keys fall back to
+        # date_created to avoid leaking arbitrary column access.
+        sort_attr = _SORT_COLUMN_MAP.get(sort_by, "date_created")
+        sort_column = getattr(Alpha, sort_attr, Alpha.date_created)
         if sort_order.lower() == "desc":
             query = query.order_by(sort_column.desc().nullslast())
         else:
@@ -342,9 +390,27 @@ class AlphaService(BaseService):
             .values(human_feedback=rating, feedback_comment=comment)
         )
         await self.commit()
-        
-        # TODO: Trigger Feedback Agent to learn from this feedback
-        
+
+        # W3: dispatch Voyager-style skill promotion to Celery worker.
+        # Branch logic per plan R3 #1 modification:
+        #   LIKED + PASS              → promote SUCCESS_PATTERN, +0.2 confidence
+        #   LIKED + PASS_PROVISIONAL  → promote (lower confidence)
+        #   LIKED + OPTIMIZE          → "user prefers this direction" hint
+        #   LIKED + FAIL              → record only as direction signal
+        #   DISLIKED                  → -0.15 confidence on existing pattern
+        try:
+            from backend.tasks import learn_from_alpha
+            user_feedback_payload = {
+                "rating": rating,
+                "comment": comment,
+                "quality_status": alpha.quality_status,
+            }
+            learn_from_alpha.delay(alpha_id, user_feedback=user_feedback_payload)
+            logger.info(f"[AlphaService] HITL feedback dispatched: alpha={alpha_id} rating={rating}")
+        except Exception as e:
+            # Non-fatal: feedback row is already saved, learning is best-effort
+            logger.warning(f"[AlphaService] failed to dispatch learn_from_alpha for {alpha_id}: {e}")
+
         return True
     
     # =========================================================================

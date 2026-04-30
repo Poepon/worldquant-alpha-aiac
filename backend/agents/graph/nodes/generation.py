@@ -445,7 +445,29 @@ async def node_code_gen(
         f"feedback_len={len(experiment_feedback)}"
     )
     
-    # Build structured prompt context
+    # W6: rolling few-shot pool — pull last 7d PASS/PROVISIONAL with HITL bias
+    recent_pass_examples = []
+    try:
+        from backend.agents.services.rag_service import RAGService
+        from backend.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as _db:
+            _rag = RAGService(_db)
+            recent_pass_examples = await _rag.get_recent_pass_examples(
+                region=state.region,
+                dataset_id=state.dataset_id,
+                limit=5,
+            )
+    except Exception as _ex:
+        logger.warning(f"[{node_name}] few-shot pool fetch failed (non-fatal): {_ex}")
+
+    # Build structured prompt context — merge recent_pass_examples into the
+    # success_patterns slot so the existing prompt builder picks them up.
+    merged_patterns = list(recent_pass_examples)
+    # Keep regular RAG patterns afterwards as backup so total stays moderate
+    for p in (state.patterns or [])[:5]:
+        if not any(p.get("pattern") == ex.get("pattern") for ex in merged_patterns):
+            merged_patterns.append(p)
+
     prompt_context = PromptContext(
         dataset_id=state.dataset_id,
         dataset_description=state.dataset_description or "",
@@ -454,7 +476,7 @@ async def node_code_gen(
         universe=state.universe,
         fields=state.focused_fields if state.focused_fields else state.fields[:30],
         operators=state.operators[:50],
-        success_patterns=state.patterns[:5],
+        success_patterns=merged_patterns[:8],
         failure_pitfalls=state.pitfalls[:5],
         preferred_fields=preferred_fields,
         avoid_fields=avoid_fields,
@@ -466,7 +488,7 @@ async def node_code_gen(
         num_alphas=state.num_alphas_target,
         exploration_weight=exploration_weight,
     )
-    
+
     # Use enhanced prompt builder with hypothesis and feedback context
     prompt = build_alpha_generation_prompt(
         prompt_context,

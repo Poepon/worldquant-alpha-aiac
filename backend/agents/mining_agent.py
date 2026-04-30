@@ -280,7 +280,9 @@ class MiningAgent:
         all_alphas: List[Alpha] = []
         all_failures: List[Dict] = []
         strategy_history: List[EvolutionStrategy] = []
-        
+        # W1: round-level history for early-stop policy
+        round_history: List[Dict] = []
+
         # Start with provided or default strategy
         current_strategy = initial_strategy or EvolutionStrategy.default()
         
@@ -344,6 +346,18 @@ class MiningAgent:
                         f"total={total_success}/{target_alphas}"
                     )
                     
+                    # W1: append round summary for early-stop policy
+                    total_alphas_round = max(1, round_result.total_simulated or 1)
+                    round_history.append({
+                        "round_index": iteration,
+                        "alphas_count": round_result.total_simulated,
+                        "pass_count": round_result.passed_count,
+                        "fail_count": round_result.failed_count,
+                        "pass_rate": round_result.passed_count / total_alphas_round,
+                        "best_sharpe": round_result.best_sharpe or 0.0,
+                        "mean_score": 0.0,
+                    })
+
                     # Check termination: goal reached
                     if total_success >= target_alphas:
                         logger.info(
@@ -351,11 +365,29 @@ class MiningAgent:
                             f"{total_success}/{target_alphas} in {iteration} rounds"
                         )
                         break
-                    
+
                     # Check termination: task stopped externally
                     await self.db.refresh(task)
                     if task.status in ["STOPPED", "PAUSED"]:
                         logger.info(f"[MiningAgent] Task {task.status}, stopping")
+                        break
+
+                    # W1: round-level early-stop policy
+                    from backend.agents.graph.early_stop import should_stop_early
+                    early_stop, early_reason = should_stop_early(round_history, max_iterations)
+                    if early_stop:
+                        logger.warning(
+                            f"[MiningAgent] Early stop after round {iteration}: "
+                            f"{early_reason}"
+                        )
+                        # Mark task as EARLY_STOPPED rather than COMPLETED so the
+                        # frontend can show "exploration halted, manual review"
+                        try:
+                            from backend.models import MiningStatus
+                            task.status = MiningStatus.EARLY_STOPPED.value
+                            await self.db.commit()
+                        except Exception as e:
+                            logger.warning(f"[MiningAgent] failed to mark task EARLY_STOPPED: {e}")
                         break
                     
                     # === STRATEGY EVOLUTION ===
@@ -858,6 +890,14 @@ class MiningAgent:
                     sharpe = metrics.get("sharpe", 0)
                     
                     if sharpe > 1.2: # Simple threshold for now
+                        # PASS only when all three BRAIN red-lines clear; otherwise OPTIMIZE.
+                        fitness = metrics.get("fitness", 0) or 0
+                        turnover = metrics.get("turnover", 0) or 0
+                        hard_gate_pass = (
+                            sharpe >= 1.5
+                            and fitness >= 1.0
+                            and 0.01 <= turnover <= 0.7
+                        )
                         # Save successful optimization
                         alpha = Alpha(
                             task_id=task.id,
@@ -869,7 +909,7 @@ class MiningAgent:
                             universe=task.universe,
                             dataset_id=task.dataset_id if hasattr(task, 'dataset_id') else "unknown",
                             simulation_status="SUCCESS",
-                            quality_status="PASS" if sharpe > 1.5 else "OPTIMIZE",
+                            quality_status="PASS" if hard_gate_pass else "OPTIMIZE",
                             metrics=metrics
                         )
                         self.db.add(alpha)

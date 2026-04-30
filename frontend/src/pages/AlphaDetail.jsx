@@ -243,8 +243,25 @@ export default function AlphaDetail() {
             </Descriptions>
           </Card>
 
-          {/* Human Feedback */}
-          <Card className="glass-card" title="人工反馈" style={{ marginTop: 16 }}>
+          {/* Human Feedback — W3: prominent HITL guidance per plan R3 #1 */}
+          <Card
+            className="glass-card"
+            title={
+              <Space>
+                <span>人工反馈</span>
+                {alpha.human_feedback === 'NONE' && (
+                  <Tag color="gold">需要你的评价</Tag>
+                )}
+              </Space>
+            }
+            style={{ marginTop: 16, borderColor: alpha.human_feedback === 'NONE' ? '#faad14' : undefined }}
+          >
+            {alpha.human_feedback === 'NONE' && (
+              <Paragraph type="secondary" style={{ marginBottom: 16 }}>
+                你的反馈会直接进知识库：👍 LIKED 升级为 SUCCESS_PATTERN（+confidence），
+                👎 DISLIKED 削弱已知模式（-confidence）。每条评价都会被下一轮 mining 学习。
+              </Paragraph>
+            )}
             <div style={{ marginBottom: 16 }}>
               <Text>当前评价: </Text>
               {alpha.human_feedback === 'LIKED' && (
@@ -258,22 +275,25 @@ export default function AlphaDetail() {
               )}
             </div>
 
-            <Space>
-              <Button 
-                icon={<LikeOutlined />} 
+            <Space size="middle">
+              <Button
+                size="large"
+                icon={<LikeOutlined />}
                 type={alpha.human_feedback === 'LIKED' ? 'primary' : 'default'}
                 onClick={() => handleFeedback('LIKED')}
                 loading={feedbackMutation.isLoading}
+                style={alpha.human_feedback === 'NONE' ? { boxShadow: '0 0 0 2px #52c41a44' } : undefined}
               >
-                点赞
+                👍 点赞 (LIKED)
               </Button>
-              <Button 
-                icon={<DislikeOutlined />} 
+              <Button
+                size="large"
+                icon={<DislikeOutlined />}
                 danger={alpha.human_feedback === 'DISLIKED'}
                 onClick={() => handleFeedback('DISLIKED')}
                 loading={feedbackMutation.isLoading}
               >
-                踩
+                👎 踩 (DISLIKED)
               </Button>
             </Space>
 

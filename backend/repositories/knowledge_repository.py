@@ -9,11 +9,12 @@ import logging
 from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func, and_, or_
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB, insert as pg_insert
 
 from backend.repositories.base_repository import BaseRepository
 from backend.protocols.repository_protocol import PaginationParams, PaginatedResult
 from backend.models import KnowledgeEntry, KnowledgeEntryType
+from backend.models.knowledge import compute_pattern_hash
 
 logger = logging.getLogger("repositories.knowledge")
 
@@ -30,7 +31,86 @@ class KnowledgeRepository(BaseRepository[KnowledgeEntry]):
     
     def __init__(self, db: AsyncSession):
         super().__init__(db, KnowledgeEntry)
-    
+
+    # =========================================================================
+    # W3: Idempotent upsert via pattern_hash UNIQUE
+    # =========================================================================
+
+    async def find_by_pattern_text(
+        self,
+        pattern_text: str,
+        region: Optional[str] = None,
+        dataset_id: Optional[str] = None,
+    ) -> Optional[KnowledgeEntry]:
+        """Lookup by frozen pattern_hash (sha256(pattern|region|dataset_id)[:32])."""
+        ph = compute_pattern_hash(pattern_text, region, dataset_id)
+        stmt = select(KnowledgeEntry).where(KnowledgeEntry.pattern_hash == ph)
+        result = await self.db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def upsert_pattern(
+        self,
+        entry_type: str,
+        pattern_text: str,
+        description: Optional[str] = None,
+        meta_data: Optional[Dict[str, Any]] = None,
+        region: Optional[str] = None,
+        dataset_id: Optional[str] = None,
+        created_by: str = "SYSTEM",
+    ) -> KnowledgeEntry:
+        """Atomic INSERT ... ON CONFLICT (pattern_hash) DO UPDATE.
+
+        On insert: usage_count=1.
+        On conflict (same pattern + region + dataset_id):
+          - usage_count += 1
+          - is_active forced True (re-enable any disambiguated dups)
+          - meta_data fully replaced by `meta_data` arg (caller is
+            responsible for read-modify-write of confidence/score —
+            see feedback_agent for the bump policy)
+          - description coalesced (keeps existing if no new value)
+
+        TOCTOU-safe replacement for the ``_pattern_exists() + create()``
+        dance in feedback_agent; multiple concurrent writers can call
+        this without producing duplicate rows.
+        """
+        meta = dict(meta_data or {})
+        if region and "region" not in meta:
+            meta["region"] = region
+        if dataset_id and "dataset_id" not in meta:
+            meta["dataset_id"] = dataset_id
+        if dataset_id and "dataset" not in meta:
+            meta["dataset"] = dataset_id
+
+        ph = compute_pattern_hash(pattern_text, region, dataset_id)
+
+        stmt = pg_insert(KnowledgeEntry).values(
+            entry_type=entry_type,
+            pattern=pattern_text,
+            description=description,
+            meta_data=meta,
+            pattern_hash=ph,
+            usage_count=1,
+            is_active=True,
+            created_by=created_by,
+        )
+
+        excluded = stmt.excluded
+        update_set = {
+            "usage_count": KnowledgeEntry.usage_count + 1,
+            "is_active": True,
+            "description": func.coalesce(excluded.description, KnowledgeEntry.description),
+            "meta_data": excluded.meta_data,
+        }
+
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["pattern_hash"],
+            set_=update_set,
+        ).returning(KnowledgeEntry)
+
+        result = await self.db.execute(stmt)
+        await self.db.commit()
+        return result.scalar_one()
+
     # =========================================================================
     # Category-Based Queries
     # =========================================================================

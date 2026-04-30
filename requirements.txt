@@ -21,6 +21,7 @@ aiohttp>=3.9.1
 # LLM Integration
 openai>=1.10.0
 litellm>=1.17.0
+anthropic>=0.40  # W5: Claude provider with prompt caching
 
 # LangGraph (NEW)
 langgraph>=0.2.0

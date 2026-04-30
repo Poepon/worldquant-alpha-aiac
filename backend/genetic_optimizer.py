@@ -83,6 +83,10 @@ class Individual:
     mutation_description: str = ""
     simulated: bool = False
     passed: bool = False
+
+    # W2: Island provenance — track which sub-population the individual
+    # currently lives in so update_individual can route metrics back.
+    island_id: int = 0
     
     @property
     def fingerprint(self) -> str:
@@ -184,14 +188,21 @@ class OptimizationConfig:
     crossover_rate: float = 0.2
     elite_ratio: float = 0.1
     tournament_size: int = 3
-    
+
     # Thresholds for passing
     sharpe_threshold: float = 1.25
     fitness_threshold: float = 1.0
     turnover_threshold: float = 0.7
-    
+
     # Simulation budget
     max_simulations: int = 100
+
+    # W2: Island-model parameters (per plan R3 — kept budget-neutral)
+    # Total budget ≈ num_islands * island_size * generations.
+    # Default 4×12×5 = 240, comparable to legacy single-pool 50×5 = 250.
+    num_islands: int = 4
+    migration_interval: int = 5  # generations between elite migrations
+    migration_ratio: float = 0.10  # fraction of island swapped on each migration
 
 
 # =============================================================================
@@ -421,12 +432,20 @@ class GeneticOptimizer:
     
     def __init__(self, config: OptimizationConfig = None):
         self.config = config or OptimizationConfig()
-        self.population = Population()
-        self.all_fingerprints: Set[str] = set()  # Global dedup
+        self.all_fingerprints: Set[str] = set()  # Global dedup across islands
         self.simulations_used = 0
-        
-        # Adaptive mutation rates
-        self.mutation_rates = {
+
+        # W2: Island model — 4 isolated sub-populations exchanging elite
+        # individuals every `migration_interval` generations. Per plan R3
+        # we keep the total budget close to the legacy single-pool size to
+        # avoid quietly inflating BRAIN simulation usage.
+        self._island_size = max(8, self.config.population_size // self.config.num_islands)
+        self.islands: List[Population] = [Population() for _ in range(self.config.num_islands)]
+
+        # Per-island adaptive mutation rates (initially uniform; diversity
+        # emerges via adapt_mutation_rates over generations rather than
+        # hand-coded biases — see plan R5 修订项 1).
+        default_rates = {
             "operator_sub": 0.25,
             "window": 0.25,
             "add_wrapper": 0.15,
@@ -434,7 +453,16 @@ class GeneticOptimizer:
             "sign_flip": 0.10,
             "structure": 0.15,
         }
-        
+        self.mutation_rates_per_island: List[Dict[str, float]] = [
+            dict(default_rates) for _ in range(self.config.num_islands)
+        ]
+
+        # Backwards-compat: callers that touch self.population get island 0
+        # as a stand-in (sufficient for read-only stats/best lookups; for
+        # mutating ops use the new island-aware methods).
+        self.population = self.islands[0]
+        self.mutation_rates = self.mutation_rates_per_island[0]
+
         # Tracking
         self.generation_stats: List[Dict] = []
     
@@ -444,46 +472,51 @@ class GeneticOptimizer:
         seed_metrics: Dict[str, float] = None
     ):
         """
-        Initialize population with seed expression and its mutations.
-        
-        Args:
-            seed_expression: Starting alpha expression
-            seed_metrics: Optional metrics from seed simulation
+        Initialize island populations with the seed expression and per-island
+        mutations. Each island starts with the same seed but evolves
+        independently; periodic migration cross-pollinates elite individuals.
         """
-        self.population = Population()
+        self.islands = [Population() for _ in range(self.config.num_islands)]
+        self.population = self.islands[0]
         self.all_fingerprints.clear()
-        
-        # Add seed as first individual
-        seed = Individual(
-            expression=seed_expression,
-            generation=0,
-            mutation_type="seed",
-            mutation_description="original",
-        )
-        
-        if seed_metrics:
-            seed.sharpe = seed_metrics.get("sharpe", 0)
-            seed.fitness = seed_metrics.get("fitness", 0)
-            seed.turnover = seed_metrics.get("turnover", 0)
-            seed.os_sharpe = seed_metrics.get("os_sharpe", 0)
-            seed.calculate_fitness()
-            seed.simulated = True
-        
-        self.population.add(seed)
-        self.all_fingerprints.add(seed.fingerprint)
-        
-        # Generate initial mutations
-        self._generate_initial_mutations(seed_expression)
-        
+
+        for island_id, island in enumerate(self.islands):
+            seed = Individual(
+                expression=seed_expression,
+                generation=0,
+                mutation_type="seed",
+                mutation_description="original",
+                island_id=island_id,
+            )
+            if seed_metrics:
+                seed.sharpe = seed_metrics.get("sharpe", 0)
+                seed.fitness = seed_metrics.get("fitness", 0)
+                seed.turnover = seed_metrics.get("turnover", 0)
+                seed.os_sharpe = seed_metrics.get("os_sharpe", 0)
+                seed.calculate_fitness()
+                seed.simulated = True
+            island.add(seed)
+            self.all_fingerprints.add(seed.fingerprint)
+            self._generate_initial_mutations_for_island(seed_expression, island_id)
+
+        total = sum(len(i.individuals) for i in self.islands)
         logger.info(
-            f"[GeneticOpt] Initialized | population={len(self.population.individuals)} "
-            f"seed_fitness={seed.overall_fitness:.3f}"
+            f"[GeneticOpt] Initialized {self.config.num_islands} islands "
+            f"(total population={total}, per-island={self._island_size}) "
+            f"seed_fitness={self.islands[0].individuals[0].overall_fitness:.3f}"
         )
     
     def _generate_initial_mutations(self, seed: str, count: int = None):
-        """Generate initial population through mutations."""
-        target_count = count or self.config.population_size
-        
+        """Backwards-compat shim: populate island 0 only."""
+        self._generate_initial_mutations_for_island(seed, island_id=0, count=count)
+
+    def _generate_initial_mutations_for_island(
+        self, seed: str, island_id: int, count: int = None
+    ):
+        """Generate initial mutations for a specific island."""
+        target_count = count or self._island_size
+        island = self.islands[island_id]
+
         mutation_funcs = [
             mutate_operator_substitution,
             mutate_window_parameter,
@@ -492,15 +525,14 @@ class GeneticOptimizer:
             mutate_sign_flip,
             mutate_structure_modification,
         ]
-        
+
         attempts = 0
         max_attempts = target_count * 3
-        
-        while len(self.population.individuals) < target_count and attempts < max_attempts:
-            # Apply random mutation
+
+        while len(island.individuals) < target_count and attempts < max_attempts:
             mutation_func = random.choice(mutation_funcs)
             mutated, description = mutation_func(seed)
-            
+
             if mutated != seed and "no_" not in description:
                 ind = Individual(
                     expression=mutated,
@@ -508,34 +540,52 @@ class GeneticOptimizer:
                     parent_expression=seed,
                     mutation_type=mutation_func.__name__.replace("mutate_", ""),
                     mutation_description=description,
+                    island_id=island_id,
                 )
-                
+
                 if ind.fingerprint not in self.all_fingerprints:
-                    self.population.add(ind)
+                    island.add(ind)
                     self.all_fingerprints.add(ind.fingerprint)
             
             attempts += 1
     
     def get_simulation_candidates(self, batch_size: int = 10) -> List[Individual]:
         """
-        Get unsimulated individuals for batch simulation.
-        
-        Returns individuals prioritized by expected quality.
+        Get unsimulated individuals for batch simulation across all islands.
+
+        Returns individuals prioritized by expected quality, drawn evenly
+        from each island so no single island starves the BRAIN budget.
         """
-        unsimulated = [i for i in self.population.individuals if not i.simulated]
-        
-        # Prioritize by mutation type (some mutations are more likely to succeed)
+        # Collect unsimulated per island and round-robin to balance
+        per_island_pools: List[List[Individual]] = [
+            [i for i in island.individuals if not i.simulated]
+            for island in self.islands
+        ]
+
         priority_order = ["window", "operator_sub", "sign_flip", "add_wrapper", "structure"]
-        
+
         def priority_key(ind: Individual) -> int:
             try:
                 return priority_order.index(ind.mutation_type)
             except ValueError:
                 return len(priority_order)
-        
-        unsimulated.sort(key=priority_key)
-        
-        return unsimulated[:batch_size]
+
+        for pool in per_island_pools:
+            pool.sort(key=priority_key)
+
+        out: List[Individual] = []
+        # Round-robin pick from each island until batch full
+        cursor = 0
+        while len(out) < batch_size and any(per_island_pools):
+            island_idx = cursor % len(per_island_pools)
+            if per_island_pools[island_idx]:
+                out.append(per_island_pools[island_idx].pop(0))
+            cursor += 1
+            # break once we've cycled through all islands without finding any
+            if cursor > batch_size * len(self.islands) * 2:
+                break
+
+        return out[:batch_size]
     
     def update_individual(
         self,
@@ -572,68 +622,168 @@ class GeneticOptimizer:
     
     def evolve(self):
         """
-        Evolve population to next generation.
-        
-        1. Select parents (tournament selection)
-        2. Create offspring through mutation and crossover
-        3. Add elite individuals
-        4. Maintain diversity
+        Evolve every island to its next generation independently, then
+        trigger periodic migration across islands when configured.
         """
-        self.population.generation += 1
-        gen = self.population.generation
-        
-        # Record stats before evolution
-        stats = self.population.stats()
-        self.generation_stats.append(stats)
-        
-        # Get simulated individuals
-        simulated = [i for i in self.population.individuals if i.simulated]
-        
+        # Per-island evolution
+        per_island_stats = []
+        for island_id, island in enumerate(self.islands):
+            self._evolve_island(island_id, island)
+            per_island_stats.append(island.stats())
+
+        # Migration: every `migration_interval` generations, exchange elite
+        # individuals around a ring topology (top-K from island i replace
+        # bottom-K of island (i+1) % N).
+        gen = self.islands[0].generation
+        if gen and gen % self.config.migration_interval == 0:
+            self._migrate(gen)
+
+        # Aggregate stats so external code that reads generation_stats keeps
+        # working (uses union across islands).
+        aggregate = {
+            "generation": gen,
+            "size": sum(s.get("size", 0) for s in per_island_stats),
+            "simulated": sum(s.get("simulated", 0) for s in per_island_stats),
+            "passed": sum(s.get("passed", 0) for s in per_island_stats),
+            "max_fitness": max((s.get("max_fitness", 0) for s in per_island_stats), default=0),
+            "avg_fitness": sum(
+                s.get("avg_fitness", 0) for s in per_island_stats
+            ) / max(1, len(per_island_stats)),
+            "per_island": per_island_stats,
+        }
+        self.generation_stats.append(aggregate)
+
+        logger.info(
+            f"[GeneticOpt] Generation {gen} | islands={len(self.islands)} "
+            f"total_pop={aggregate['size']} max_fitness={aggregate['max_fitness']:.3f}"
+        )
+
+    def _evolve_island(self, island_id: int, island: Population):
+        """Run one generation of evolution within a single island."""
+        island.generation += 1
+        gen = island.generation
+
+        simulated = [i for i in island.individuals if i.simulated]
         if not simulated:
-            logger.warning("[GeneticOpt] No simulated individuals to evolve from")
+            logger.debug(f"[GeneticOpt] island={island_id} no simulated individuals; skip")
             return
-        
-        # Sort by fitness
+
         simulated.sort(key=lambda x: x.overall_fitness, reverse=True)
-        
-        # New population
+
         new_individuals: List[Individual] = []
-        
-        # Elite preservation
+
+        # Elite preservation (per-island)
         elite_count = max(1, int(len(simulated) * self.config.elite_ratio))
-        elites = simulated[:elite_count]
-        for elite in elites:
-            new_individuals.append(elite)
-        
-        # Generate offspring
-        target_size = self.config.population_size - len(new_individuals)
-        
-        while len(new_individuals) < self.config.population_size:
-            # Tournament selection
+        new_individuals.extend(simulated[:elite_count])
+
+        target = self._island_size
+        rates = self.mutation_rates_per_island[island_id]
+
+        attempts = 0
+        max_attempts = target * 5
+        while len(new_individuals) < target and attempts < max_attempts:
+            attempts += 1
             parent = self._tournament_select(simulated)
-            
-            # Mutation
+
             if random.random() < self.config.mutation_rate:
-                offspring = self._mutate(parent.expression, gen)
+                offspring = self._mutate_with_rates(parent.expression, gen, rates, island_id)
                 if offspring and offspring.fingerprint not in self.all_fingerprints:
                     new_individuals.append(offspring)
                     self.all_fingerprints.add(offspring.fingerprint)
-            
-            # Crossover
+
             if random.random() < self.config.crossover_rate and len(simulated) > 1:
                 parent2 = self._tournament_select(simulated)
                 offspring = self._crossover(parent, parent2, gen)
                 if offspring and offspring.fingerprint not in self.all_fingerprints:
+                    offspring.island_id = island_id
                     new_individuals.append(offspring)
                     self.all_fingerprints.add(offspring.fingerprint)
-        
-        # Update population
-        self.population.individuals = new_individuals
-        self.population.fingerprints = {i.fingerprint for i in new_individuals}
-        
+
+        island.individuals = new_individuals
+        island.fingerprints = {i.fingerprint for i in new_individuals}
+
+    def _migrate(self, gen: int):
+        """Ring-topology migration: top-K from island i → island (i+1)%N."""
+        n = len(self.islands)
+        if n < 2:
+            return
+        k = max(1, int(self._island_size * self.config.migration_ratio))
+        migrants_to_send: List[List[Individual]] = []
+        for island in self.islands:
+            simulated = sorted(
+                (i for i in island.individuals if i.simulated),
+                key=lambda x: x.overall_fitness,
+                reverse=True,
+            )
+            migrants_to_send.append(simulated[:k])
+
+        for src in range(n):
+            dst = (src + 1) % n
+            island_dst = self.islands[dst]
+            # Drop the bottom-K from destination (un-passed worst first)
+            island_dst.individuals.sort(key=lambda x: x.overall_fitness)
+            island_dst.individuals = island_dst.individuals[k:]
+            island_dst.fingerprints = {i.fingerprint for i in island_dst.individuals}
+            for migrant in migrants_to_send[src]:
+                # Clone with new island id (avoid double-counting in source)
+                clone = Individual(**{
+                    **migrant.__dict__,
+                    "island_id": dst,
+                })
+                if clone.fingerprint not in island_dst.fingerprints:
+                    island_dst.add(clone)
         logger.info(
-            f"[GeneticOpt] Generation {gen} | population={len(new_individuals)} "
-            f"elite={elite_count} best_fitness={stats['max_fitness']:.3f}"
+            f"[GeneticOpt] Migration at gen {gen} | k={k} per island, "
+            f"ring topology over {n} islands"
+        )
+
+    def _mutate_with_rates(
+        self,
+        expression: str,
+        generation: int,
+        rates: Dict[str, float],
+        island_id: int,
+    ) -> Optional[Individual]:
+        """Same as _mutate but uses per-island rates and stamps island_id."""
+        offspring = self._mutate_using(expression, generation, rates)
+        if offspring is not None:
+            offspring.island_id = island_id
+        return offspring
+
+    def _mutate_using(
+        self,
+        expression: str,
+        generation: int,
+        rates: Dict[str, float],
+    ) -> Optional[Individual]:
+        mutation_funcs = [
+            (mutate_operator_substitution, rates["operator_sub"]),
+            (mutate_window_parameter, rates["window"]),
+            (mutate_add_wrapper, rates["add_wrapper"]),
+            (mutate_remove_wrapper, rates["remove_wrapper"]),
+            (mutate_sign_flip, rates["sign_flip"]),
+            (mutate_structure_modification, rates["structure"]),
+        ]
+        total_weight = sum(w for _, w in mutation_funcs)
+        if total_weight <= 0:
+            return None
+        r = random.random() * total_weight
+        cumulative = 0.0
+        selected_func = mutation_funcs[0][0]
+        for func, weight in mutation_funcs:
+            cumulative += weight
+            if r <= cumulative:
+                selected_func = func
+                break
+        mutated, description = selected_func(expression)
+        if mutated == expression or "no_" in description:
+            return None
+        return Individual(
+            expression=mutated,
+            generation=generation,
+            parent_expression=expression,
+            mutation_type=selected_func.__name__.replace("mutate_", ""),
+            mutation_description=description,
         )
     
     def _tournament_select(self, candidates: List[Individual]) -> Individual:
@@ -705,58 +855,64 @@ class GeneticOptimizer:
         return None
     
     def get_best_individuals(self, n: int = 5) -> List[Individual]:
-        """Get top N individuals by fitness."""
-        return self.population.get_best(n)
-    
+        """Get top N individuals across ALL islands."""
+        all_individuals: List[Individual] = []
+        for island in self.islands:
+            all_individuals.extend(island.individuals)
+        all_individuals.sort(key=lambda x: x.overall_fitness, reverse=True)
+        return all_individuals[:n]
+
     def get_passed_individuals(self) -> List[Individual]:
-        """Get all individuals that passed quality thresholds."""
-        return self.population.get_passed()
-    
+        """Get all individuals across islands that passed quality thresholds."""
+        out: List[Individual] = []
+        for island in self.islands:
+            out.extend(island.get_passed())
+        return out
+
     def get_optimization_report(self) -> Dict[str, Any]:
-        """Generate optimization report."""
+        """Generate optimization report aggregating all islands."""
+        per_island = [
+            {**island.stats(), "island_id": idx, "mutation_rates": self.mutation_rates_per_island[idx]}
+            for idx, island in enumerate(self.islands)
+        ]
         return {
-            "generations": self.population.generation,
+            "generations": self.islands[0].generation if self.islands else 0,
             "simulations_used": self.simulations_used,
-            "population_stats": self.population.stats(),
+            "num_islands": len(self.islands),
+            "per_island_stats": per_island,
             "generation_history": self.generation_stats,
             "best_individuals": [i.to_dict() for i in self.get_best_individuals(5)],
             "passed_count": len(self.get_passed_individuals()),
-            "mutation_rates": self.mutation_rates,
         }
-    
+
     def adapt_mutation_rates(self):
         """
-        Adapt mutation rates based on success history.
-        
-        Increase rates for mutations that led to improvements.
+        Adapt per-island mutation rates based on each island's success history.
+
+        Per plan R5 修订项 1: islands evolve their own mutation biases rather
+        than being assigned hand-crafted ones at initialization. This is the
+        OpenEvolve-style "specialization through evolution" mechanism.
         """
         if len(self.generation_stats) < 2:
             return
-        
-        # Check which mutation types led to improvements
-        passed = self.get_passed_individuals()
-        
-        mutation_success = defaultdict(int)
-        mutation_total = defaultdict(int)
-        
-        for ind in self.population.individuals:
-            if ind.simulated:
-                mutation_total[ind.mutation_type] += 1
-                if ind.passed or ind.overall_fitness > 0.5:
-                    mutation_success[ind.mutation_type] += 1
-        
-        # Update rates
-        base_rate = 1.0 / len(self.mutation_rates)
-        
-        for mut_type in self.mutation_rates:
-            total = mutation_total.get(mut_type, 0)
-            success = mutation_success.get(mut_type, 0)
-            
-            if total > 3:
-                success_rate = success / total
-                # Adjust rate towards success rate
-                current = self.mutation_rates[mut_type]
-                self.mutation_rates[mut_type] = 0.7 * current + 0.3 * max(0.05, success_rate)
+
+        for island_id, island in enumerate(self.islands):
+            mutation_success: Dict[str, int] = defaultdict(int)
+            mutation_total: Dict[str, int] = defaultdict(int)
+            for ind in island.individuals:
+                if ind.simulated:
+                    mutation_total[ind.mutation_type] += 1
+                    if ind.passed or ind.overall_fitness > 0.5:
+                        mutation_success[ind.mutation_type] += 1
+
+            rates = self.mutation_rates_per_island[island_id]
+            for mut_type in rates:
+                total = mutation_total.get(mut_type, 0)
+                success = mutation_success.get(mut_type, 0)
+                if total > 3:
+                    success_rate = success / total
+                    current = rates[mut_type]
+                    rates[mut_type] = 0.7 * current + 0.3 * max(0.05, success_rate)
 
 
 # =============================================================================

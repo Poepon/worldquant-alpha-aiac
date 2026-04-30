@@ -56,6 +56,13 @@ class BrainAdapter:
     _cached_email: Optional[str] = None
     _cached_password: Optional[str] = None
     _credentials_loaded: bool = False
+
+    # Multi-simulation permission gate. Set to True after first 403 from
+    # POST /simulations (list payload) so subsequent simulate_batch calls go
+    # straight to the single-sim fallback. BRAIN exposes multi-simulation only
+    # to Consultant+ accounts; lower tiers still have access to single-sim.
+    _no_multisim: bool = False
+    _SINGLE_SIM_FALLBACK_CONCURRENCY: int = 3
     
     def __init__(self, email: str = None, password: str = None):
         # Store explicit credentials if provided
@@ -329,7 +336,17 @@ class BrainAdapter:
         """
         Simulate multiple alphas in a single batch request (Multi-Simulation).
         Returns a list of results in the same order as expressions.
+
+        Falls back to bounded-concurrency single simulations when the account
+        lacks Consultant-level multi-simulation permission (BRAIN returns 403).
         """
+        # If we've already learned this account can't do multi-sim, skip the probe.
+        if BrainAdapter._no_multisim:
+            return await self._simulate_via_single(
+                expressions, region, universe, delay, decay,
+                neutralization, truncation, test_period,
+            )
+
         # Construct payload list
         sim_payloads = []
         for expr in expressions:
@@ -343,37 +360,87 @@ class BrainAdapter:
                 },
                 "regular": expr
             })
-        
+
         try:
             # POST list of configs
             response = await self.client.post(f"{self.BASE_URL}/simulations", json=sim_payloads)
-            
+
+            # Account is not Consultant-level — multi-sim is blocked. Latch the
+            # gate so future calls skip the probe, and fall back to single-sim.
+            if response.status_code == 403:
+                BrainAdapter._no_multisim = True
+                logger.warning(
+                    f"Multi-simulation denied (403); switching to single-sim fallback "
+                    f"(concurrency={self._SINGLE_SIM_FALLBACK_CONCURRENCY}). "
+                    f"Body: {response.text[:200]}"
+                )
+                return await self._simulate_via_single(
+                    expressions, region, universe, delay, decay,
+                    neutralization, truncation, test_period,
+                )
+
             if response.status_code not in [200, 201, 202]:
                 logger.error(f"Batch Simulation Failed [{response.status_code}] | Response: {response.text}")
                 # Return failures for all
                 return [{"success": False, "error": f"Batch creation failed: {response.text}"} for _ in expressions]
-            
+
             location = response.headers.get("Location")
             if not location:
                 # If no location header, check body (unlikely for multi-sim)
                 return [{"success": False, "error": "No location header"} for _ in expressions]
-                 
+
             # Wait for parent simulation
             parent_result = await self._wait_for_multisim(location)
-            
+
             if not parent_result["success"]:
                 return [{"success": False, "error": parent_result.get("error")} for _ in expressions]
-            
-            # Map results back to order is tricky if Brain doesn't guarantee order, 
+
+            # Map results back to order is tricky if Brain doesn't guarantee order,
             # but usually 'children' list order might allow correlation if we trust it?
-            # Better: match by alpha ID if possible? 
+            # Better: match by alpha ID if possible?
             # Actually ace_lib iterates children and fetches results.
-            
+
             return parent_result["results"]
-            
+
         except Exception as e:
             logger.error(f"Batch Simulate error: {e}")
             return [{"success": False, "error": str(e)} for _ in expressions]
+
+    async def _simulate_via_single(
+        self,
+        expressions: List[str],
+        region: str,
+        universe: str,
+        delay: int,
+        decay: int,
+        neutralization: str,
+        truncation: float,
+        test_period: str,
+    ) -> List[Dict]:
+        """Run single-sim per expression, bounded concurrency. Used when the
+        account can't do multi-simulation. Result shape matches simulate_batch
+        (each entry is what _get_completed_alpha_details / _wait_for_simulation
+        would return)."""
+        sem = asyncio.Semaphore(self._SINGLE_SIM_FALLBACK_CONCURRENCY)
+
+        async def run_one(expr: str) -> Dict:
+            async with sem:
+                try:
+                    return await self.simulate_alpha(
+                        expression=expr,
+                        region=region,
+                        universe=universe,
+                        delay=delay,
+                        decay=decay,
+                        neutralization=neutralization,
+                        truncation=truncation,
+                        test_period=test_period,
+                    )
+                except Exception as e:
+                    logger.error(f"Single-sim fallback error for {expr[:80]!r}: {e}")
+                    return {"success": False, "error": str(e)}
+
+        return await asyncio.gather(*(run_one(e) for e in expressions))
 
     async def _wait_for_multisim(self, location: str, max_wait: int = 900) -> Dict:
         """

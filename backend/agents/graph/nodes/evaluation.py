@@ -236,30 +236,35 @@ async def node_evaluate(
         - trace_steps
     """
     from backend.alpha_scoring import (
-        calculate_alpha_score, 
-        should_optimize, 
+        calculate_alpha_score,
+        should_optimize,
         get_failed_tests,
         evaluate_with_brain_checks,  # 新增：BRAIN官方检查
     )
-    
+    from backend.services.correlation_service import CorrelationService
+
     start_time = time.time()
     node_name = "EVALUATE"
-    
+
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
-    
+
     updated_alphas = state.pending_alphas.copy()
     pass_count = 0
     fail_count = 0
     optimize_count = 0
     corr_checks_performed = 0
     corr_checks_skipped = 0
+
+    # W0.5: local PnL-matrix self-correlation with BRAIN-API fallback.
+    # Shared across all alphas in this round to amortise the cache load.
+    correlation_service = CorrelationService(brain) if brain is not None else None
     
     logger.info(f"[{node_name}] Starting two-stage evaluation | count={len(state.pending_alphas)}")
     
     # Thresholds
     sharpe_min = getattr(settings, 'SHARPE_MIN', 1.5)
     turnover_max = getattr(settings, 'TURNOVER_MAX', 0.7)
-    fitness_min = getattr(settings, 'FITNESS_MIN', 0.6)
+    fitness_min = getattr(settings, 'FITNESS_MIN', 1.0)
     score_pass_threshold = getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8)
     score_optimize_threshold = getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3)
     corr_check_threshold = getattr(settings, 'CORR_CHECK_THRESHOLD', 0.5)
@@ -268,9 +273,12 @@ async def node_evaluate(
     failure_feedback_queue = []
     
     for i, alpha in enumerate(updated_alphas):
+        # Hard rule: anything that didn't simulate successfully cannot be PASS,
+        # regardless of any earlier transient status. Metrics are missing, so
+        # gates are unverifiable.
         if not alpha.is_simulated or not alpha.simulation_success:
-            if alpha.quality_status == "PENDING":
-                alpha.quality_status = "FAIL"
+            alpha.quality_status = "FAIL"
+            fail_count += 1
             continue
         
         metrics = alpha.metrics or {}
@@ -354,14 +362,28 @@ async def node_evaluate(
             except Exception as e:
                 logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
             
-            try:
-                self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
-                if isinstance(self_corr_result, dict):
-                    self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
-            except Exception as e:
-                logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
+            # W0.5: prefer local PnL-matrix; fall back to BRAIN API; finally
+            # mark unknown so hard_gate downgrades to PASS_PROVISIONAL.
+            self_corr_source = "unknown"
+            if correlation_service is not None:
+                try:
+                    self_corr, self_corr_source = await correlation_service.get_with_fallback(
+                        alpha.alpha_id, region=state.region
+                    )
+                except Exception as e:
+                    logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
+                    self_corr_source = "unknown"
+            else:
+                try:
+                    self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
+                    if isinstance(self_corr_result, dict):
+                        self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
+                        self_corr_source = "brain"
+                except Exception as e:
+                    logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
         else:
             corr_checks_skipped += 1
+            self_corr_source = "skipped"
         
         # Final score with correlation penalty
         score = calculate_alpha_score(
@@ -372,11 +394,56 @@ async def node_evaluate(
         
         should_opt, opt_reason = should_optimize(sim_result)
         failed_tests = get_failed_tests(sim_result)
-        
+
+        # Hard skill gate (BRAIN red-line on IS metrics) — see plan §
+        # "BRAIN Gate 真实值校准". PASS requires ALL of:
+        #   sharpe >= SHARPE_MIN AND fitness >= FITNESS_MIN
+        #   AND 0.01 <= turnover <= TURNOVER_MAX
+        #   AND sub-universe check not FAIL
+        #   AND self_corr < MAX_CORRELATION
+        sub_universe_check = next(
+            (c for c in metrics.get("checks", [])
+             if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
+            None,
+        )
+        sub_universe_ok = (
+            sub_universe_check is None
+            or sub_universe_check.get("result") != "FAIL"
+        )
+        max_correlation = getattr(settings, "MAX_CORRELATION", 0.7)
+        self_corr_ok = self_corr < max_correlation
+        # W0.5: self_corr_source defaults to "skipped" when corr check was not
+        # triggered (sharpe/fitness/turnover not promising); in that case treat
+        # as ok. When source is "unknown" (both local cache and BRAIN API
+        # failed) the alpha cannot fully clear PASS — downgrade to provisional.
+        self_corr_source = locals().get("self_corr_source", "skipped")
+        self_corr_verified = self_corr_source != "unknown"
+
+        hard_gate_pass = (
+            sharpe >= sharpe_min
+            and fitness >= fitness_min
+            and 0.01 <= turnover <= turnover_max
+            and sub_universe_ok
+            and self_corr_ok
+            and self_corr_verified
+        )
+
+        # PASS_PROVISIONAL: 近成功池 (sharpe + fitness>=0.6 + turnover [0.01,0.85])
+        # 用于 KB 学习/island 优化种子，但不视为可提交
+        near_pass = (
+            sharpe >= sharpe_min
+            and fitness >= 0.6
+            and 0.01 <= turnover <= 0.85
+            and sub_universe_ok
+        )
+
         # Determine quality status
-        if meets_thresholds or score >= score_pass_threshold:
+        if hard_gate_pass and (meets_thresholds or score >= score_pass_threshold):
             alpha.quality_status = "PASS"
             pass_count += 1
+        elif near_pass:
+            alpha.quality_status = "PASS_PROVISIONAL"
+            optimize_count += 1
         elif should_opt and score >= score_optimize_threshold:
             alpha.quality_status = "OPTIMIZE"
             optimize_count += 1
