@@ -78,15 +78,48 @@ class BrainAdapter:
     _SLOT_POLL_INTERVAL: float = 1.5
     _SLOT_ACQUIRE_TIMEOUT: float = 1800.0   # 30 min upper bound on wait
     _redis_client: Optional["redis.Redis"] = None
+    # Bug fix (2026-05-01): redis.from_url binds to whatever event loop is
+    # current when called. tasks/__init__.run_async creates a new loop per
+    # Celery task and closes it on exit, so the cached _redis_client outlives
+    # its loop and the next task hits "Event loop is closed". We track which
+    # loop the client was created on; if it differs from the current one, we
+    # rebuild.
+    _redis_client_loop_id: Optional[int] = None
 
     @classmethod
     async def _get_slot_redis(cls):
         # Separate cached connection from the per-instance _get_redis (used for
         # session cookies) so we don't tear it down between sims.
+        try:
+            current_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            current_loop = None
+
+        current_loop_id = id(current_loop) if current_loop is not None else None
+        loop_changed = (
+            cls._redis_client is not None
+            and cls._redis_client_loop_id is not None
+            and current_loop_id is not None
+            and current_loop_id != cls._redis_client_loop_id
+        )
+        loop_dead = (
+            cls._redis_client is not None
+            and current_loop is not None
+            and current_loop.is_closed()
+        )
+        if loop_changed or loop_dead:
+            # The old client's transport is bound to a closed/different loop.
+            # Don't try to await disconnect across loops — just drop the ref;
+            # GC + the OS will reclaim the socket. This is the standard
+            # "asyncio singleton across loops" pattern.
+            cls._redis_client = None
+            cls._redis_client_loop_id = None
+
         if cls._redis_client is None:
             cls._redis_client = redis.from_url(
                 settings.REDIS_URL, decode_responses=True
             )
+            cls._redis_client_loop_id = current_loop_id
         return cls._redis_client
 
     @classmethod
