@@ -178,6 +178,8 @@ function TierAlphaTable({ tier }) {
     quality_status: undefined,
     min_sharpe: undefined,
     expression_search: undefined,
+    submitted: undefined,
+    can_submit: undefined,
   })
 
   const queryParams = useMemo(() => {
@@ -251,6 +253,33 @@ function TierAlphaTable({ tier }) {
       dataIndex: 'quality_status',
       width: 130,
       render: (s) => <Tag color={STATUS_COLORS[s] || 'default'}>{s}</Tag>,
+    },
+    {
+      title: '提交',
+      dataIndex: 'date_submitted',
+      width: 100,
+      render: (ts) =>
+        ts ? (
+          <Tooltip title={`已提交：${new Date(ts).toLocaleString()}`}>
+            <Tag color="green">✅ 已提交</Tag>
+          </Tooltip>
+        ) : (
+          <Tag>未提交</Tag>
+        ),
+    },
+    {
+      title: '可提交',
+      dataIndex: 'can_submit',
+      width: 110,
+      render: (v) => {
+        if (v === true) {
+          return <Tooltip title="BRAIN is.checks 全无 FAIL"><Tag color="success">✅ 可提交</Tag></Tooltip>
+        }
+        if (v === false) {
+          return <Tooltip title="BRAIN is.checks 含 FAIL，未达提交门槛"><Tag color="error">⚠️ 不可提交</Tag></Tooltip>
+        }
+        return <Tooltip title="未调 BRAIN 检查"><Tag>—</Tag></Tooltip>
+      },
     },
     {
       title: 'Region',
@@ -369,6 +398,33 @@ function TierAlphaTable({ tier }) {
           onChange={(v) =>
             setFilters((f) => ({ ...f, min_sharpe: v }))
           }
+        />
+        <Select
+          allowClear
+          placeholder="提交状态"
+          style={{ width: 130 }}
+          value={filters.submitted}
+          onChange={(v) =>
+            setFilters((f) => ({ ...f, submitted: v }))
+          }
+          options={[
+            { value: true, label: '已提交' },
+            { value: false, label: '未提交' },
+          ]}
+        />
+        <Select
+          allowClear
+          placeholder="可提交性"
+          style={{ width: 140 }}
+          value={filters.can_submit}
+          onChange={(v) =>
+            setFilters((f) => ({ ...f, can_submit: v }))
+          }
+          options={[
+            { value: 'true', label: '✅ 可提交' },
+            { value: 'false', label: '⚠️ 不可提交' },
+            { value: 'null', label: '未检查' },
+          ]}
         />
         <Search
           placeholder="表达式包含..."

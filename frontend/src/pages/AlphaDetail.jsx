@@ -26,6 +26,7 @@ import {
   CopyOutlined,
   BranchesOutlined,
   HistoryOutlined,
+  ReloadOutlined,
 } from '@ant-design/icons'
 import { 
   LineChart, 
@@ -57,6 +58,52 @@ const mockPnL = [
   { date: '2025-12', returns: 12.5 },
 ]
 
+function CanSubmitTag({ canSubmit, failed, pending, loading, onRefresh }) {
+  if (canSubmit === true) {
+    const pendN = pending?.length || 0
+    const tip = pendN > 0
+      ? `is.checks 全无 FAIL；仍有 ${pendN} 项 PENDING（如 SELF_CORRELATION）— 通过后才是最终结论。`
+      : 'is.checks 全部 PASS — 满足 BRAIN 提交门槛。'
+    return (
+      <AntTooltip title={tip}>
+        <Tag color="success" icon={loading ? <ReloadOutlined spin /> : null} onClick={onRefresh} style={{ cursor: 'pointer' }}>
+          ✅ 可提交{pendN > 0 ? ` (${pendN} pending)` : ''}
+        </Tag>
+      </AntTooltip>
+    )
+  }
+  if (canSubmit === false) {
+    const tip = (
+      <div>
+        <div style={{ marginBottom: 4 }}>{failed.length} 个 BRAIN 检查 FAIL：</div>
+        {failed.map((c) => (
+          <div key={c.name} style={{ fontFamily: 'monospace', fontSize: 12 }}>
+            • {c.name}
+            {c.value !== undefined && c.limit !== undefined
+              ? ` (value=${c.value}, limit=${c.limit})`
+              : ''}
+          </div>
+        ))}
+      </div>
+    )
+    return (
+      <AntTooltip title={tip}>
+        <Tag color="error" icon={loading ? <ReloadOutlined spin /> : null} onClick={onRefresh} style={{ cursor: 'pointer' }}>
+          ⚠️ 不可提交 ({failed.length} FAIL)
+        </Tag>
+      </AntTooltip>
+    )
+  }
+  return (
+    <AntTooltip title="尚未调用 BRAIN GET /alphas/{id} 校验 is.checks，点击立即检查">
+      <Tag onClick={onRefresh} style={{ cursor: 'pointer' }} icon={loading ? <ReloadOutlined spin /> : <ReloadOutlined />}>
+        🔍 检查可提交性
+      </Tag>
+    </AntTooltip>
+  )
+}
+
+
 export default function AlphaDetail() {
   const { id } = useParams()
   const navigate = useNavigate()
@@ -77,6 +124,21 @@ export default function AlphaDetail() {
     },
   })
 
+  const refreshCanSubmitMutation = useMutation({
+    mutationFn: () => api.refreshCanSubmit(id),
+    onSuccess: (data) => {
+      if (data.can_submit === null || data.can_submit === undefined) {
+        message.warning(data.message || 'BRAIN 未返回结果，未更新')
+      } else if (data.can_submit) {
+        message.success(`✅ 可提交（${data.pending_checks?.length || 0} 项待定）`)
+      } else {
+        message.error(`⚠️ 不可提交：${data.failed_checks.length} 个 FAIL`)
+      }
+      queryClient.invalidateQueries(['alpha', id])
+    },
+    onError: (e) => message.error(`刷新失败：${e?.message || e}`),
+  })
+
   const handleFeedback = (rating) => {
     feedbackMutation.mutate({ rating })
   }
@@ -84,6 +146,12 @@ export default function AlphaDetail() {
   const copyExpression = () => {
     navigator.clipboard.writeText(alpha.expression)
     message.success('表达式已复制到剪贴板')
+  }
+
+  const copyBrainId = () => {
+    if (!alpha?.alpha_id) return
+    navigator.clipboard.writeText(alpha.alpha_id)
+    message.success('BRAIN Alpha ID 已复制')
   }
 
   if (isLoading) {
@@ -116,9 +184,38 @@ export default function AlphaDetail() {
             <Title level={3} style={{ margin: 0 }}>
               Alpha #{alpha.id}
             </Title>
+            {alpha.alpha_id && (
+              <AntTooltip title="点击复制 BRAIN Alpha ID">
+                <Tag
+                  color="geekblue"
+                  style={{ cursor: 'pointer', fontFamily: 'monospace' }}
+                  onClick={copyBrainId}
+                  icon={<CopyOutlined />}
+                >
+                  BRAIN: {alpha.alpha_id}
+                </Tag>
+              </AntTooltip>
+            )}
             <Tag color={alpha.quality_status === 'PASS' ? 'success' : 'default'}>
               {alpha.quality_status}
             </Tag>
+            {alpha.date_submitted ? (
+              <AntTooltip title={`已提交至 BRAIN：${new Date(alpha.date_submitted).toLocaleString()}`}>
+                <Tag color="green">✅ 已提交</Tag>
+              </AntTooltip>
+            ) : (
+              <AntTooltip title="尚未提交至 BRAIN">
+                <Tag>⚪ 未提交</Tag>
+              </AntTooltip>
+            )}
+            <CanSubmitTag
+              canSubmit={alpha.can_submit}
+              failed={alpha.metrics?._brain_failed_checks || []}
+              pending={alpha.metrics?._brain_pending_checks || []}
+              loading={refreshCanSubmitMutation.isPending}
+              onRefresh={() => refreshCanSubmitMutation.mutate()}
+              alphaId={alpha.alpha_id}
+            />
           </Space>
         </Col>
       </Row>
@@ -226,6 +323,17 @@ export default function AlphaDetail() {
           {/* Metadata */}
           <Card className="glass-card" title="元数据" style={{ marginTop: 16 }}>
             <Descriptions column={1} size="small">
+              <Descriptions.Item label="BRAIN Alpha ID">
+                {alpha.alpha_id ? (
+                  <Space size={4}>
+                    <Text code copyable={{ text: alpha.alpha_id, tooltips: ['复制', '已复制'] }}>
+                      {alpha.alpha_id}
+                    </Text>
+                  </Space>
+                ) : (
+                  <Text type="secondary">未提交至 BRAIN</Text>
+                )}
+              </Descriptions.Item>
               <Descriptions.Item label="地区">{alpha.region}</Descriptions.Item>
               <Descriptions.Item label="股票池">{alpha.universe}</Descriptions.Item>
               <Descriptions.Item label="数据集">{alpha.dataset_id}</Descriptions.Item>
@@ -245,6 +353,11 @@ export default function AlphaDetail() {
               </Descriptions.Item>
               <Descriptions.Item label="创建时间">
                 {new Date(alpha.created_at).toLocaleString()}
+              </Descriptions.Item>
+              <Descriptions.Item label="提交时间">
+                {alpha.date_submitted
+                  ? new Date(alpha.date_submitted).toLocaleString()
+                  : <Text type="secondary">未提交</Text>}
               </Descriptions.Item>
             </Descriptions>
           </Card>

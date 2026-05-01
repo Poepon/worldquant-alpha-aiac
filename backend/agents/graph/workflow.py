@@ -399,6 +399,10 @@ class MiningWorkflow:
             from datetime import datetime as _dt
             task_metrics_snapshot_at = _dt.utcnow()
 
+            # B7: collect alpha objects to enqueue can_submit refresh after commit
+            # (need .id which is only populated post-flush).
+            can_submit_refresh_targets: list = []
+
             for alpha_result in result.get("generated_alphas", []):
                 # PR7 — skip rows already INSERTed by node_save_results in
                 # incremental mode. AlphaResult.persisted is set True only
@@ -447,6 +451,8 @@ class MiningWorkflow:
                         metrics_snapshot_at=task_metrics_snapshot_at,
                     )
                     self.db.add(alpha)
+                    if alpha_result.quality_status in ("PASS", "PASS_PROVISIONAL") and alpha_result.alpha_id:
+                        can_submit_refresh_targets.append(alpha)
                 except Exception as e:
                     logger.warning(f"[MiningWorkflow] Failed to add alpha: {e}")
             
@@ -488,6 +494,17 @@ class MiningWorkflow:
             
             await self.db.commit()
             logger.info(f"[MiningWorkflow] 持久化完成 | task={task.id}")
+
+            # B7: post-commit, alpha.id is populated — enqueue async can_submit
+            # refresh for each new PASS/PROV alpha. 30s countdown lets BRAIN
+            # finish async checks before we re-fetch.
+            if can_submit_refresh_targets:
+                from backend.tasks.refresh_tasks import enqueue_can_submit_refresh
+                for a in can_submit_refresh_targets:
+                    enqueue_can_submit_refresh(a.id, a.alpha_id, countdown=30)
+                logger.info(
+                    f"[MiningWorkflow] enqueued {len(can_submit_refresh_targets)} can_submit refreshes"
+                )
             
         except Exception as e:
             logger.error(f"[MiningWorkflow] Persistence failed: {e}")

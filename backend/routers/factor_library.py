@@ -65,6 +65,9 @@ class FactorAlpha(BaseModel):
     is_turnover: Optional[float]
     metrics_snapshot_at: Optional[datetime]
     created_at: Optional[datetime]
+    status: Optional[str] = None  # BRAIN status: ACTIVE / UNSUBMITTED / created
+    date_submitted: Optional[datetime] = None
+    can_submit: Optional[bool] = None  # NULL = 未检查；True = 可提交；False = 不可提交
 
 
 class AlphaListResponse(BaseModel):
@@ -185,6 +188,8 @@ async def list_alphas_by_tier(
     min_sharpe: Optional[float] = None,
     max_sharpe: Optional[float] = None,
     expression_search: Optional[str] = None,
+    submitted: Optional[bool] = None,  # True = 已提交, False = 未提交, None = 不筛选
+    can_submit: Optional[str] = None,  # 'true' | 'false' | 'null' | None (无筛选)
     sort_by: str = Query("is_sharpe", pattern="^(is_sharpe|is_fitness|is_turnover|created_at)$"),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(50, ge=1, le=500),
@@ -208,6 +213,16 @@ async def list_alphas_by_tier(
         conds.append(Alpha.is_sharpe <= max_sharpe)
     if expression_search:
         conds.append(Alpha.expression.ilike(f"%{expression_search}%"))
+    if submitted is True:
+        conds.append(Alpha.date_submitted.isnot(None))
+    elif submitted is False:
+        conds.append(Alpha.date_submitted.is_(None))
+    if can_submit == "true":
+        conds.append(Alpha.can_submit.is_(True))
+    elif can_submit == "false":
+        conds.append(Alpha.can_submit.is_(False))
+    elif can_submit == "null":
+        conds.append(Alpha.can_submit.is_(None))
 
     if conds:
         base = base.where(and_(*conds))
@@ -238,6 +253,9 @@ async def list_alphas_by_tier(
             is_turnover=a.is_turnover,
             metrics_snapshot_at=a.metrics_snapshot_at,
             created_at=a.created_at,
+            status=a.status,
+            date_submitted=a.date_submitted,
+            can_submit=a.can_submit,
         )
         for a in rows
     ]
@@ -323,4 +341,74 @@ async def seed_availability(
         available_seeds=count,
         min_required=min_req,
         is_ready=count >= min_req,
+    )
+
+
+class CanSubmitRefreshBatchResponse(BaseModel):
+    scanned: int
+    refreshed: int
+    pass_count: int  # can_submit=True
+    fail_count: int  # can_submit=False
+    skipped: int     # BRAIN unreachable / missing alpha_id
+    sampled_failures: List[dict] = []  # first ~5 alphas with FAIL details for UI
+
+
+@router.post(
+    "/refresh-can-submit",
+    response_model=CanSubmitRefreshBatchResponse,
+)
+async def refresh_can_submit_batch(
+    quality_status: str = Query(
+        "PASS",
+        description="Filter by quality_status. Default 'PASS' to spare BRAIN quota.",
+    ),
+    tier: Optional[int] = Query(None, ge=1, le=3),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk re-check can_submit for a tranche of alphas. Sequential 1 req/sec
+    pacing inside; do not call concurrently with another batch refresh.
+
+    Caller selects scope via quality_status + tier; default selects all PASS
+    alphas of any tier. Use this to backfill historical alphas after they were
+    first ingested without BRAIN-checks resolution.
+    """
+    import asyncio
+    from backend.adapters.brain_adapter import BrainAdapter
+    from backend.services.alpha_service import AlphaService
+
+    q = select(Alpha.id).where(Alpha.quality_status == quality_status).where(Alpha.alpha_id.isnot(None))
+    if tier is not None:
+        q = q.where(Alpha.factor_tier == tier)
+    q = q.order_by(Alpha.id.desc()).limit(limit)
+    ids = [r[0] for r in (await db.execute(q)).all()]
+
+    svc = AlphaService(db)
+    refreshed = pass_n = fail_n = skipped = 0
+    sampled_failures = []
+    async with BrainAdapter() as ba:
+        for aid in ids:
+            await asyncio.sleep(1.0)  # spare BRAIN quota
+            res = await svc.refresh_can_submit(aid, brain_adapter=ba)
+            if res is None:
+                skipped += 1
+                continue
+            refreshed += 1
+            if res["can_submit"]:
+                pass_n += 1
+            else:
+                fail_n += 1
+                if len(sampled_failures) < 5:
+                    sampled_failures.append({
+                        "alpha_pk": aid,
+                        "failed": res["failed_checks"],
+                        "pending": res["pending_checks"],
+                    })
+    return CanSubmitRefreshBatchResponse(
+        scanned=len(ids),
+        refreshed=refreshed,
+        pass_count=pass_n,
+        fail_count=fail_n,
+        skipped=skipped,
+        sampled_failures=sampled_failures,
     )

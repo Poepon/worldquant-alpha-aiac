@@ -109,6 +109,11 @@ async def _incremental_save_alphas(
             persisted=True,
             db_id=db_id,
         ))
+        # B7: schedule can_submit refresh ~30s out so BRAIN has time to finish
+        # async checks (CONCENTRATED_WEIGHT, LOW_SUB_UNIVERSE_SHARPE).
+        if db_id is not None and alpha.alpha_id:
+            from backend.tasks.refresh_tasks import enqueue_can_submit_refresh
+            enqueue_can_submit_refresh(db_id, alpha.alpha_id, countdown=30)
     return out
 
 

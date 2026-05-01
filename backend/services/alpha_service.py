@@ -103,6 +103,8 @@ class AlphaDetail:
     is_metrics: Dict[str, Any]
     os_metrics: Dict[str, Any]
     created_at: Optional[datetime]
+    date_submitted: Optional[datetime]
+    can_submit: Optional[bool]
 
 
 class AlphaService(BaseService):
@@ -257,6 +259,67 @@ class AlphaService(BaseService):
         
         return self._to_detail(alpha)
     
+    async def refresh_can_submit(
+        self,
+        alpha_pk: int,
+        brain_adapter=None,
+    ) -> Optional[Dict[str, Any]]:
+        """Re-fetch BRAIN GET /alphas/{id}, recompute can_submit, persist.
+
+        Writes:
+          - alphas.can_submit (top-level column for fast filter)
+          - metrics._brain_failed_checks (list of compact FAIL items)
+          - metrics._brain_pending_checks (list of compact PENDING items)
+          - metrics._brain_can_submit (mirror of can_submit, kept for legacy
+            consumers that already read this field — see evaluation.py line 592)
+
+        BRAIN unreachable / empty response → return None (no overwrite).
+        Caller is responsible for owning the BrainAdapter lifecycle (passes it
+        in to keep this method test-friendly).
+
+        Returns dict {can_submit, failed_checks, pending_checks} on success,
+        None if the alpha is missing alpha_id or BRAIN call failed.
+        """
+        from backend.can_submit import compute_can_submit
+
+        alpha = await self.alpha_repo.get_by_id(alpha_pk)
+        if not alpha or not alpha.alpha_id:
+            return None
+
+        if brain_adapter is None:
+            from backend.adapters.brain_adapter import BrainAdapter
+            async with BrainAdapter() as ba:
+                detail = await ba.get_alpha(alpha.alpha_id)
+        else:
+            detail = await brain_adapter.get_alpha(alpha.alpha_id)
+
+        if not detail:
+            return None
+
+        ok, failed, pending = compute_can_submit(detail)
+        if ok is None:
+            return None
+
+        alpha.can_submit = ok
+        new_metrics = dict(alpha.metrics or {})
+        new_metrics["_brain_can_submit"] = ok
+        new_metrics["_brain_failed_checks"] = failed
+        new_metrics["_brain_pending_checks"] = pending
+        alpha.metrics = new_metrics
+        # Force JSONB column re-write — SQLAlchemy doesn't auto-detect mutation
+        # on a plain dict assignment when the JSONB type is the same identity;
+        # reassignment + flag_modified is the safe pattern.
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(alpha, "metrics")
+
+        await self.db.commit()
+
+        return {
+            "can_submit": ok,
+            "failed_checks": failed,
+            "pending_checks": pending,
+        }
+
     async def get_alpha_by_brain_id(self, brain_alpha_id: str) -> Optional[AlphaDetail]:
         """
         Get alpha by BRAIN platform ID.
@@ -295,6 +358,8 @@ class AlphaService(BaseService):
             is_metrics=alpha.is_metrics or {},
             os_metrics=alpha.os_metrics or {},
             created_at=alpha.created_at,
+            date_submitted=alpha.date_submitted,
+            can_submit=alpha.can_submit,
         )
     
     # =========================================================================

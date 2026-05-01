@@ -95,6 +95,9 @@ class Alpha(SQLAlchemyBase):
     factor_tier = Column(Integer, nullable=True, index=True)  # 1/2/3 or NULL (not in tier hierarchy)
     parent_alpha_id = Column(Integer, ForeignKey("alphas.id"), nullable=True, index=True)
     metrics_snapshot_at = Column(DateTime(timezone=True), nullable=True)  # Last refresh from BRAIN
+    # NULL = not yet refreshed from BRAIN GET /alphas/{id};
+    # True = is.checks 全无 FAIL；False = 至少 1 个 FAIL
+    can_submit = Column(Boolean, nullable=True)
 
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

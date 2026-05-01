@@ -82,9 +82,11 @@ class AlphaDetailResponse(BaseModel):
     metrics: dict = {}
     is_metrics: dict = {}
     os_metrics: dict = {}
-    
+
     created_at: Optional[datetime] = None
-    
+    date_submitted: Optional[datetime] = None
+    can_submit: Optional[bool] = None
+
     class Config:
         from_attributes = True
 
@@ -230,7 +232,35 @@ async def get_alpha(
         is_metrics=alpha.is_metrics,
         os_metrics=alpha.os_metrics,
         created_at=alpha.created_at,
+        date_submitted=alpha.date_submitted,
+        can_submit=alpha.can_submit,
     )
+
+
+class CanSubmitRefreshResponse(BaseModel):
+    can_submit: Optional[bool] = None
+    failed_checks: list = []
+    pending_checks: list = []
+    message: Optional[str] = None
+
+
+@router.post("/{alpha_id}/refresh-can-submit", response_model=CanSubmitRefreshResponse)
+async def refresh_can_submit(
+    alpha_id: int,
+    service: AlphaService = Depends(get_alpha_service),
+):
+    """Re-fetch BRAIN GET /alphas/{id}, recompute can_submit based on
+    is.checks (no FAIL → True). Persists to alphas.can_submit + metrics
+    audit fields. Returns the new verdict + diagnostic check lists.
+
+    BRAIN unreachable / no alpha_id → returns can_submit=None with a message.
+    """
+    result = await service.refresh_can_submit(alpha_id)
+    if result is None:
+        return CanSubmitRefreshResponse(
+            message="BRAIN 调用失败或 alpha 缺少 alpha_id；can_submit 未更新"
+        )
+    return CanSubmitRefreshResponse(**result)
 
 
 @router.post("/{alpha_id}/feedback")
@@ -450,4 +480,6 @@ async def get_alpha_by_brain_id(
         is_metrics=alpha.is_metrics,
         os_metrics=alpha.os_metrics,
         created_at=alpha.created_at,
+        date_submitted=alpha.date_submitted,
+        can_submit=alpha.can_submit,
     )

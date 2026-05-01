@@ -155,6 +155,16 @@ const api = {
     return data
   },
 
+  refreshCanSubmit: async (id) => {
+    const { data } = await client.post(`/alphas/${id}/refresh-can-submit`)
+    return data
+  },
+
+  refreshCanSubmitBatch: async (params = {}) => {
+    const { data } = await client.post('/factor-library/refresh-can-submit', null, { params })
+    return data
+  },
+
   syncAlphas: async () => {
     const { data } = await client.post('/alphas/sync')
     return data

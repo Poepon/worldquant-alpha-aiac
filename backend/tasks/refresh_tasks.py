@@ -163,3 +163,84 @@ async def _refresh_kb_referenced_alphas_async() -> Dict:
         "failed": failed,
         "kb_deactivated": deactivated_kb,
     }
+
+
+def enqueue_can_submit_refresh(alpha_pk: int, brain_alpha_id: str | None = None, countdown: int = 30) -> None:
+    """Fire-and-forget helper: schedule can_submit refresh `countdown` seconds
+    after now. Skips when alpha lacks a BRAIN id. Wrapped in try/except so a
+    Celery broker outage cannot break the mining pipeline.
+    """
+    if not brain_alpha_id:
+        return
+    try:
+        refresh_can_submit_for_alpha.apply_async(args=[alpha_pk], countdown=countdown)
+    except Exception as e:
+        logger.warning(f"[refresh_can_submit] enqueue failed for alpha_pk={alpha_pk}: {e}")
+
+
+@celery_app.task(name="backend.tasks.refresh_can_submit_for_alpha")
+def refresh_can_submit_for_alpha(alpha_pk: int) -> Dict:
+    """Auto-triggered post-simulation refresh of can_submit.
+
+    Called via .apply_async(args=[alpha_pk], countdown=30) from the evaluation
+    node — the 30s buffer lets BRAIN finish computing CONCENTRATED_WEIGHT and
+    LOW_SUB_UNIVERSE_SHARPE checks (which are async on BRAIN's side and
+    typically arrive ~10-20s after the simulate response).
+
+    Idempotent: safe to retry. Returns {can_submit, alpha_pk, error?}.
+    """
+    return run_async(_refresh_can_submit_async(alpha_pk))
+
+
+async def _refresh_can_submit_async(alpha_pk: int) -> Dict:
+    from backend.database import AsyncSessionLocal
+    from backend.models import Alpha
+    from backend.services.alpha_service import AlphaService
+
+    try:
+        async with AsyncSessionLocal() as db:
+            svc = AlphaService(db)
+            result = await svc.refresh_can_submit(alpha_pk)
+            if result is None:
+                return {"alpha_pk": alpha_pk, "can_submit": None, "skipped": True}
+
+            # P1: can_submit=False → 把每个 BRAIN FAIL 写回 RAG pitfall 池，
+            # 让下一轮 LLM 能学到「避坑」。同条 alpha 多个 FAIL 各算一个 pitfall。
+            kb_recorded = 0
+            if result["can_submit"] is False and result["failed_checks"]:
+                from backend.agents.services.rag_service import RAGService
+
+                alpha = await svc.alpha_repo.get_by_id(alpha_pk)
+                if alpha and alpha.expression:
+                    rag = RAGService(db)
+                    for chk in result["failed_checks"]:
+                        check_name = chk.get("name")
+                        if not check_name:
+                            continue
+                        try:
+                            await rag.record_failure_pattern(
+                                expression=alpha.expression,
+                                error_type=check_name,
+                                metrics=alpha.metrics or {},
+                                region=alpha.region,
+                                dataset_id=alpha.dataset_id,
+                            )
+                            kb_recorded += 1
+                        except Exception as e:
+                            logger.warning(
+                                f"[refresh_can_submit] RAG record failed for "
+                                f"alpha_pk={alpha_pk} check={check_name}: {e}"
+                            )
+                    if kb_recorded > 0:
+                        await db.commit()
+
+        return {
+            "alpha_pk": alpha_pk,
+            "can_submit": result["can_submit"],
+            "fail_count": len(result["failed_checks"]),
+            "pending_count": len(result["pending_checks"]),
+            "kb_pitfalls_recorded": kb_recorded,
+        }
+    except Exception as e:
+        logger.warning(f"[refresh_can_submit] alpha_pk={alpha_pk} failed: {e}")
+        return {"alpha_pk": alpha_pk, "can_submit": None, "error": str(e)}
