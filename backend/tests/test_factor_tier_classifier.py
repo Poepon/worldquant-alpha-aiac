@@ -12,6 +12,9 @@ _BUILTIN_TS_OPS / _BUILTIN_GROUP_OPS / _BUILTIN_PURE_XS_OPS sets.
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from backend.factor_tier_classifier import (
@@ -309,3 +312,86 @@ class TestNegationWrapperTransparency:
     def test_negated_t1_passes_t1_predicate(self):
         assert is_t1_expression("multiply(-1, ts_rank(close, 20))") is True
         assert is_t1_expression("multiply(ts_rank(close, 20), -1)") is True
+
+
+# -----------------------------------------------------------------------------
+# Real-data fixture probes (plan §"验证 / 单元测试": 50+ real samples)
+#
+# brain_alphas_4135.json captures all alpha expressions from the BRAIN account
+# (refresh via scripts/dump_brain_alphas_for_fixture.py). The classifier runs
+# without DB-backed DataField cache here, so most fundamental-field-driven
+# alphas resolve to None — that is expected. These probes assert form-level
+# invariants that hold regardless of field-identification:
+#   - every classification call is total (no exception, returns 1/2/3/None)
+#   - every `trade_when(...)` expression classifies as T3 (or stays None when
+#     the wrapped body itself is unclassifiable, but never as T1/T2)
+#   - tier counts cover all three tiers — fixture isn't degenerate
+# -----------------------------------------------------------------------------
+
+_FIXTURE_PATH = Path(__file__).parent / "fixtures" / "brain_alphas_4135.json"
+
+
+@pytest.fixture(scope="module")
+def brain_alpha_expressions() -> list[str]:
+    if not _FIXTURE_PATH.exists():
+        pytest.skip(
+            f"BRAIN fixture missing at {_FIXTURE_PATH}; "
+            "run scripts/dump_brain_alphas_for_fixture.py to generate."
+        )
+    data = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
+    return [d["expression"] for d in data if d.get("expression")]
+
+
+class TestRealDataFixture:
+    def test_classifier_total_on_real_alphas(self, brain_alpha_expressions):
+        """classify_tier never raises on any real BRAIN expression."""
+        valid = {None, 1, 2, 3}
+        for expr in brain_alpha_expressions:
+            tier = classify_tier(expr)
+            assert tier in valid, f"unexpected tier={tier!r} for {expr[:80]}"
+
+    def test_trade_when_never_misclassified_as_lower_tier(
+        self, brain_alpha_expressions
+    ):
+        """trade_when at top level is T3 if the body is classifiable, else None.
+        It must never be T1 or T2 — that would be a hierarchy violation."""
+        tw = [e for e in brain_alpha_expressions if e.lstrip().startswith("trade_when(")]
+        assert len(tw) > 0, "fixture has no trade_when samples — refresh fixture"
+        for expr in tw:
+            tier = classify_tier(expr)
+            assert tier in (3, None), (
+                f"trade_when classified as T{tier} (must be 3 or None): {expr[:120]}"
+            )
+
+    def test_tier_distribution_non_degenerate(self, brain_alpha_expressions):
+        """Sanity: fixture covers all three tiers with meaningful counts."""
+        counts = {1: 0, 2: 0, 3: 0, None: 0}
+        for expr in brain_alpha_expressions:
+            counts[classify_tier(expr)] += 1
+        # Lower bounds chosen well below current observed counts (T1=213, T2=148, T3=65)
+        # so a fixture refresh that shifts the mix doesn't false-fail the test.
+        assert counts[1] >= 50, f"too few T1 samples: {counts[1]}"
+        assert counts[2] >= 30, f"too few T2 samples: {counts[2]}"
+        assert counts[3] >= 10, f"too few T3 samples: {counts[3]}"
+        assert sum(counts.values()) == len(brain_alpha_expressions)
+
+    def test_extract_tier1_seed_on_real_t2_alphas(self, brain_alpha_expressions):
+        """For every T2-classified alpha in fixture, extract_tier1_seed should
+        return either a T1 expression or None (per plan §"factor_tier_classifier"
+        — the helper does single-layer strip; T2 → T1 is its primary use case.
+        T3 input yields a T2-shape, not a T1, so the helper is documented to
+        only be called on T2 expressions for the cold-start RAG fallback)."""
+        t2_exprs = [e for e in brain_alpha_expressions if classify_tier(e) == 2]
+        non_t1_seeds = []
+        for expr in t2_exprs:
+            seed = extract_tier1_seed(expr)
+            if seed is not None and not is_t1_expression(seed):
+                non_t1_seeds.append((expr[:80], seed[:80]))
+        # Some T2 alphas may have unrecognized fundamental fields, causing the
+        # stripped kernel to fail is_t1_expression — that's acceptable since
+        # the RAG fallback drops such kernels. But the count should be tiny
+        # relative to total T2 — most strips should produce valid T1 form.
+        assert len(non_t1_seeds) <= len(t2_exprs) * 0.5, (
+            f"too many T2 strips returned non-T1 seeds "
+            f"({len(non_t1_seeds)}/{len(t2_exprs)}); first few: {non_t1_seeds[:3]}"
+        )

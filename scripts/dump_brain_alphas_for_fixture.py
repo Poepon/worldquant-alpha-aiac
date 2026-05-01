@@ -84,9 +84,8 @@ async def dump_alphas(adapter: BrainAdapter, limit: int) -> List[Dict]:
 
 
 async def main(output: Path, limit: int) -> None:
-    adapter = BrainAdapter()
-    await adapter.login()
-    alphas = await dump_alphas(adapter, limit=limit)
+    async with BrainAdapter() as adapter:
+        alphas = await dump_alphas(adapter, limit=limit)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as f:
         json.dump(alphas, f, indent=2, default=str)
