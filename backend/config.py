@@ -57,11 +57,60 @@ class Settings(BaseSettings):
     DEFAULT_UNIVERSE: str = "TOP3000"
     DEFAULT_DAILY_GOAL: int = 4
     
-    # Quality Thresholds (Traditional)
+    # Quality Thresholds (Traditional — kept as fallback / pre-tier baseline)
     SHARPE_MIN: float = 1.5
     TURNOVER_MAX: float = 0.7
     FITNESS_MIN: float = 1.0
     MAX_CORRELATION: float = 0.7
+
+    # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
+    # T1: 找到方向 — 裸 ts_op 信号；低门槛驱动 T2 种子产能
+    TIER1_SHARPE_MIN: float = 0.8
+    TIER1_FITNESS_MIN: float = 0.5
+    TIER1_TURNOVER_MIN: float = 0.01
+    TIER1_TURNOVER_MAX: float = 0.70
+    TIER1_SUBUNIV_MIN: float = 0.1
+    # T2: 包装后成型 — group/pure-xs/smoothing wrapper 套 T1 信号
+    TIER2_SHARPE_MIN: float = 1.0
+    TIER2_FITNESS_MIN: float = 0.8
+    TIER2_TURNOVER_MIN: float = 0.01
+    TIER2_TURNOVER_MAX: float = 0.55  # 与 T3 trade_when 协同：T3 entry-filter 把 T2 0.55 降到 0.20-0.30
+    TIER2_SUBUNIV_MIN: float = 0.2
+    # T3: 接近可提交 — trade_when 择时；保 BRAIN /check buffer
+    TIER3_SHARPE_MIN: float = 1.5
+    TIER3_FITNESS_MIN: float = 1.0
+    TIER3_TURNOVER_MIN: float = 0.01
+    TIER3_TURNOVER_MAX: float = 0.70
+    TIER3_SELF_CORR_MAX: float = 0.7  # 仅 T3 严格判 self_corr（T1/T2 跳过）
+
+    # PASS_PROVISIONAL 阈值（同梯度，各项放宽 30-40%）
+    TIER1_PROVISIONAL_SHARPE_MIN: float = 0.5
+    TIER1_PROVISIONAL_FITNESS_MIN: float = 0.3
+    TIER1_PROVISIONAL_TURNOVER_MAX: float = 0.85
+    TIER1_PROVISIONAL_SUBUNIV_MIN: float = 0.0  # 仍要为正
+    TIER2_PROVISIONAL_SHARPE_MIN: float = 0.8
+    TIER2_PROVISIONAL_FITNESS_MIN: float = 0.6
+    TIER2_PROVISIONAL_TURNOVER_MAX: float = 0.65
+    TIER2_PROVISIONAL_SUBUNIV_MIN: float = 0.1
+    TIER3_PROVISIONAL_SHARPE_MIN: float = 1.3
+    TIER3_PROVISIONAL_FITNESS_MIN: float = 0.8
+    TIER3_PROVISIONAL_TURNOVER_MAX: float = 0.70
+    # T3 sub-universe min 用 BRAIN 动态 limit；PROVISIONAL 用 limit×0.7
+
+    # Tier system feature flags & 启动门槛
+    ENABLE_FACTOR_TIERING: bool = True  # 总开关；False 时 router 拒收 AUTONOMOUS_TIER* mode
+    T1_USE_LLM_GUIDED_STRATEGY: bool = True  # False 时 T1 task 回退 W0 ALPHA_GENERATION_SYSTEM
+    MIN_TIER_SEED_COUNT: int = 5  # T2/T3 task 启动门槛 + node_tier_seed_load 早停门槛共用
+
+    # 各 region 可用 group 列表（T2 wrapping 时用，过滤 group_neutralize/group_rank 等的 group 取值）
+    # 默认值；可在 .env 用 JSON 字符串覆盖（例：REGION_GROUPS='{"USA":["industry","subindustry","sector","market"]}'）
+    REGION_GROUPS: dict = {
+        "USA": ["industry", "subindustry", "sector", "market"],
+        "CHN": ["industry", "subindustry", "market"],  # CHN 无 sector
+        "EUR": ["industry", "subindustry", "sector", "market", "country"],
+        "ASI": ["industry", "subindustry", "market", "country"],
+        "GLB": ["industry", "subindustry", "sector", "market", "country"],
+    }
     
     # Multi-Objective Scoring Thresholds
     SCORE_PASS_THRESHOLD: float = 0.8      # Composite score to pass

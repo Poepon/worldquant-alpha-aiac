@@ -36,6 +36,9 @@ from backend.models.alpha import (
     AlphaPnl,
 )
 
+# Status transition audit
+from backend.models.transition import AlphaStatusTransition
+
 # Knowledge models
 from backend.models.knowledge import (
     KnowledgeEntry,
@@ -87,6 +90,7 @@ __all__ = [
     "Alpha",
     "AlphaFailure",
     "AlphaPnl",
+    "AlphaStatusTransition",
     # Knowledge
     "KnowledgeEntry",
     "OperatorPreference",

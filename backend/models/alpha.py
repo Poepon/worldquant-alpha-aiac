@@ -90,13 +90,19 @@ class Alpha(SQLAlchemyBase):
     logic_explanation = Column(Text)
     fields_used = Column(JSONB, default=[])
     operators_used = Column(JSONB, default=[])
-    
+
+    # Tier system (T1/T2/T3 factor library)
+    factor_tier = Column(Integer, nullable=True, index=True)  # 1/2/3 or NULL (not in tier hierarchy)
+    parent_alpha_id = Column(Integer, ForeignKey("alphas.id"), nullable=True, index=True)
+    metrics_snapshot_at = Column(DateTime(timezone=True), nullable=True)  # Last refresh from BRAIN
+
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
+
     # Relationships
     task = relationship("MiningTask", back_populates="alphas")
     trace_step = relationship("TraceStep", back_populates="alpha")
+    parent = relationship("Alpha", remote_side=[id], backref="children")
 
 
 class AlphaFailure(SQLAlchemyBase):

@@ -34,8 +34,11 @@ class DatasetStrategy(str, enum.Enum):
 
 class AgentMode(str, enum.Enum):
     """Mode of agent operation."""
-    AUTONOMOUS = "AUTONOMOUS"   # Fully automatic
+    AUTONOMOUS = "AUTONOMOUS"   # Fully automatic (default; behaves as T1 when ENABLE_FACTOR_TIERING)
     INTERACTIVE = "INTERACTIVE"  # Pause at each step
+    AUTONOMOUS_TIER1 = "AUTONOMOUS_TIER1"  # T1 LLM-guided programmatic field/op selection
+    AUTONOMOUS_TIER2 = "AUTONOMOUS_TIER2"  # T2 wrap T1 PASS seeds with cross-sectional / smoothing wrappers
+    AUTONOMOUS_TIER3 = "AUTONOMOUS_TIER3"  # T3 wrap T2 PASS seeds with trade_when entry filters
 
 
 class TraceStepType(str, enum.Enum):
@@ -47,6 +50,9 @@ class TraceStepType(str, enum.Enum):
     SIMULATE = "SIMULATE"
     SELF_CORRECT = "SELF_CORRECT"
     EVALUATE = "EVALUATE"
+    TIER_SEED_LOAD = "TIER_SEED_LOAD"  # T2/T3: load + refresh seed pool from prior tier's PASS alphas
+    STRATEGY_SELECT = "STRATEGY_SELECT"  # All tiers: LLM strategy decision (T1 fields/ops, T2/T3 wrappers)
+    TIER_WRAP = "TIER_WRAP"  # All tiers: programmatic expansion (T1 enumerate, T2/T3 wrap)
 
 
 class QualityStatus(str, enum.Enum):
