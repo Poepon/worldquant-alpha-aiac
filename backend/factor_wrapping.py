@@ -166,6 +166,25 @@ def _allowed_groups(region: str) -> set:
     return set(region_groups.get(region, ["industry", "subindustry", "sector", "market"]))
 
 
+# group_mean(x, weight, group) is BRAIN's only 3-arg group_* operator.
+# We default the weight to a market-cap field so the result is a
+# cap-weighted within-group mean — the canonical "industry/sector residualize"
+# financial construct. If a region lacks `cap` we skip group_mean expansion
+# rather than producing an invalid 2-arg call.
+GROUP_MEAN_WEIGHT_BY_REGION: Dict[str, str] = {
+    "USA": "cap",
+    "CHN": "cap",
+    "EUR": "cap",
+    "ASI": "cap",
+    "GLB": "cap",
+    "JPN": "cap",
+    "AMR": "cap",
+    "TWN": "cap",
+    "HKG": "cap",
+    "KOR": "cap",
+}
+
+
 # =============================================================================
 # T2 LLM decision + expansion
 # =============================================================================
@@ -230,6 +249,24 @@ def expand_t2_strategy(
         for g in choices:
             if g not in allowed:
                 logger.debug(f"[factor_wrapping] T2 skip {op_name}_{g} (region={region})")
+                continue
+            # group_mean is the only 3-arg group_* op — needs a weight field.
+            # See GROUP_MEAN_WEIGHT_BY_REGION; skip the variant if no weight
+            # mapping exists for this region (rather than emit an invalid
+            # 2-arg `group_mean(x, group)` that BRAIN rejects with
+            # "Invalid number of inputs : 2, should be exactly 3").
+            if op_name == "group_mean":
+                weight = GROUP_MEAN_WEIGHT_BY_REGION.get(region)
+                if weight is None:
+                    logger.debug(
+                        f"[factor_wrapping] T2 skip group_mean_{g} "
+                        f"(no weight field for region={region})"
+                    )
+                    continue
+                out.append({
+                    "expression": f"group_mean({seed}, {weight}, {g})",
+                    "wrapper_kind": f"group_mean_{weight}_{g}",
+                })
                 continue
             out.append({
                 "expression": f"{op_name}({seed}, {g})",
