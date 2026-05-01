@@ -113,6 +113,27 @@ class Settings(BaseSettings):
     ENABLE_T1_SIGN_FLIP_RETRY: bool = True
     T1_FLIP_RETRY_SHARPE: float = 0.5  # min |sharpe| to trigger flip; below = noise
     T1_FLIP_RETRY_CAP: int = 5  # max flips per round
+
+    # PR7 — incremental persistence for T2/T3 tasks. By default, T2/T3 work-
+    # flow batches all 8+ seeds before run_with_persistence writes Alpha rows
+    # to DB (workflow.run() only returns at END). This means a 1-hour task
+    # has 1-hour write-amplification: if worker dies, all PASS alphas in
+    # state.generated_alphas are lost. With this flag True, node_save_results
+    # writes Alpha rows + alpha_status_transitions immediately for each seed
+    # batch, so frontend / downstream can see PASSes in near-real-time and
+    # crashes don't lose accumulated work. Only affects factor_tier ∈ (2,3);
+    # T1 tasks already persist per round.
+    T2_INCREMENTAL_PERSISTENCE: bool = True
+
+    # PR7 — wrapper-aware simulation settings. When True, node_simulate
+    # consults backend.sim_settings.smart_simulation_settings to pick BRAIN
+    # delay/decay/neutralization/truncation per alpha based on expression
+    # form (e.g. group_neutralize wrapper → BRAIN neutralization=NONE to
+    # avoid double-neut). Default False — first roll out as opt-in pending
+    # data showing edge-case PROV alphas need the help. Smart settings
+    # already used in flip-retry path even when this flag is False (since
+    # flip-retry only sims one alpha at a time, no batch grouping cost).
+    ENABLE_SMART_SIM_SETTINGS: bool = False
     # PR4 — P0 实验结论：BRAIN GET /alphas/{id} 返回冻结的 sim 时 snapshot，不是
     # rolling 重算。所以 node_tier_seed_load 调 BRAIN refresh metrics 是 no-op，
     # 浪费配额。默认关闭；只有当 BRAIN 行为改变（比如未来开放 rolling endpoint）
