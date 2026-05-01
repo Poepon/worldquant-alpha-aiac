@@ -303,7 +303,12 @@ const OperatorsTab = () => {
         dataSource={operators || []}
         rowKey="id"
         loading={isLoading}
-        pagination={{ pageSize: 20 }}
+        pagination={{
+          defaultPageSize: 20,
+          pageSizeOptions: ['10', '20', '50', '100'],
+          showSizeChanger: true,
+          showTotal: (total) => `共 ${total} 个算子`,
+        }}
       />
     </div>
   )
