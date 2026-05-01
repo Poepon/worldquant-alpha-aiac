@@ -1,14 +1,14 @@
-import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useState, useEffect, useMemo } from 'react'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { 
-  Row, 
-  Col, 
-  Card, 
-  Table, 
-  Button, 
-  Tag, 
-  Space, 
+import {
+  Row,
+  Col,
+  Card,
+  Table,
+  Button,
+  Tag,
+  Space,
   Typography,
   Modal,
   Form,
@@ -16,6 +16,8 @@ import {
   Select,
   InputNumber,
   message,
+  Alert,
+  Descriptions,
 } from 'antd'
 import {
   PlusOutlined,
@@ -54,20 +56,75 @@ const REGION_NAMES = {
   IND: 'IND (India)',
 }
 
+// PR3: tier-aware preset thresholds shown alongside the agent_mode selector
+const TIER_PREVIEW = {
+  AUTONOMOUS_TIER1:
+    'sharpe ≥ 0.8 · fitness ≥ 0.5 · turnover [0.01, 0.70] · sub-universe ≥ 0.1 · 不查 self_corr / concentrated',
+  AUTONOMOUS_TIER2:
+    'sharpe ≥ 1.0 · fitness ≥ 0.8 · turnover [0.01, 0.55] · sub-universe ≥ 0.2 · 检查 concentrated · 不查 self_corr',
+  AUTONOMOUS_TIER3:
+    'sharpe ≥ 1.5 · fitness ≥ 1.0 · turnover [0.01, 0.70] · sub-universe ≥ BRAIN 动态 · self_corr verified < 0.7',
+  AUTONOMOUS:
+    'sharpe ≥ 1.5 · fitness ≥ 1.0 · turnover ≤ 0.70 · self_corr < 0.7 (legacy thresholds)',
+}
+
+
 export default function TaskManagement() {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [datasetStrategy, setDatasetStrategy] = useState('AUTO')
   const [selectedRegion, setSelectedRegion] = useState('USA')
-  
+  const [agentMode, setAgentMode] = useState('AUTONOMOUS')
+
   const [form] = Form.useForm()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   // Fetch tasks
   const { data: tasks, isLoading } = useQuery({
     queryKey: ['tasks'],
     queryFn: () => api.getTasks({ limit: 50 }),
     refetchInterval: 10000,
+  })
+
+  // PR3: handle ?mode=AUTONOMOUS_TIER2&seed_alpha_id=123 deep-link from
+  // FactorLibrary's "派生 →" button. Opens the create modal with mode and
+  // task_name pre-filled.
+  useEffect(() => {
+    const modeFromUrl = searchParams.get('mode')
+    const seedId = searchParams.get('seed_alpha_id')
+    if (modeFromUrl) {
+      setIsModalOpen(true)
+      setAgentMode(modeFromUrl)
+      const initial = {
+        agent_mode: modeFromUrl,
+        region: 'USA',
+        universe: 'TOP3000',
+        dataset_strategy: 'AUTO',
+        daily_goal: 4,
+        max_iterations: 10,
+        name: seedId
+          ? `${modeFromUrl.replace('AUTONOMOUS_', '')} from #${seedId}`
+          : '',
+      }
+      form.setFieldsValue(initial)
+      // Clear the URL params after consuming so refresh doesn't reopen
+      setSearchParams({})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // PR3: seed availability check for T2/T3 modes (drives start-button enable)
+  const tierFromMode = useMemo(() => {
+    if (agentMode === 'AUTONOMOUS_TIER2') return 2
+    if (agentMode === 'AUTONOMOUS_TIER3') return 3
+    return null
+  }, [agentMode])
+
+  const { data: seedAvail } = useQuery({
+    queryKey: ['seed-availability', tierFromMode, selectedRegion],
+    queryFn: () => api.getSeedAvailability(tierFromMode, selectedRegion),
+    enabled: !!tierFromMode && !!selectedRegion,
   })
 
   // Create task mutation
@@ -305,13 +362,52 @@ export default function TaskManagement() {
             </Col>
             <Col span={12}>
               <Form.Item name="agent_mode" label="Agent 模式">
-                <Select>
-                  <Option value="AUTONOMOUS">自动 (Fully Auto)</Option>
+                <Select onChange={(v) => setAgentMode(v)}>
+                  <Option value="AUTONOMOUS">自动 (Legacy)</Option>
+                  <Option value="AUTONOMOUS_TIER1">T1 — 一阶（裸 ts_op）</Option>
+                  <Option value="AUTONOMOUS_TIER2">T2 — 二阶（横截面 / 平滑包装）</Option>
+                  <Option value="AUTONOMOUS_TIER3">T3 — 三阶（trade_when 择时）</Option>
                   <Option value="INTERACTIVE">交互 (Step-by-step)</Option>
                 </Select>
               </Form.Item>
             </Col>
           </Row>
+
+          {/* PR3: tier preview banner — shows the PASS thresholds for the
+              currently selected mode so users have realistic expectations */}
+          {TIER_PREVIEW[agentMode] && (
+            <Alert
+              type={agentMode.startsWith('AUTONOMOUS_TIER') ? 'info' : 'warning'}
+              message={`PASS 阈值预览（${agentMode}）`}
+              description={TIER_PREVIEW[agentMode]}
+              style={{ marginBottom: 16 }}
+              showIcon
+            />
+          )}
+
+          {/* PR3: seed availability for T2/T3 — fetched from
+              /factor-library/seed-availability for the chosen region */}
+          {tierFromMode && seedAvail && (
+            <Alert
+              type={seedAvail.is_ready ? 'success' : 'warning'}
+              message={
+                seedAvail.is_ready
+                  ? `T${tierFromMode} 种子可用：${seedAvail.available_seeds} 条 PASS T${
+                      tierFromMode - 1
+                    } alpha 在 ${seedAvail.region}（最少需 ${seedAvail.min_required}）`
+                  : `T${tierFromMode} 种子不足：${seedAvail.available_seeds}/${seedAvail.min_required}`
+              }
+              description={
+                seedAvail.is_ready
+                  ? null
+                  : `请先跑 AUTONOMOUS_TIER${
+                      tierFromMode - 1
+                    } 任务积累 ≥${seedAvail.min_required} 条 PASS 种子，再启动本任务`
+              }
+              style={{ marginBottom: 16 }}
+              showIcon
+            />
+          )}
 
           {datasetStrategy === 'SPECIFIC' && (
             <Form.Item
@@ -340,7 +436,12 @@ export default function TaskManagement() {
           <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
             <Space>
               <Button onClick={() => setIsModalOpen(false)}>取消</Button>
-              <Button type="primary" htmlType="submit" loading={createTaskMutation.isLoading}>
+              <Button
+                type="primary"
+                htmlType="submit"
+                loading={createTaskMutation.isLoading}
+                disabled={tierFromMode && seedAvail && !seedAvail.is_ready}
+              >
                 创建
               </Button>
             </Space>

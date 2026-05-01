@@ -11,7 +11,7 @@ from backend.config import settings
 from backend.database import init_db
 
 # Import all routers
-from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs
+from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, factor_library
 
 
 @asynccontextmanager
@@ -61,6 +61,8 @@ app.include_router(knowledge.router, prefix=settings.API_V1_STR)
 app.include_router(config.router, prefix=settings.API_V1_STR)
 app.include_router(datasets.router, prefix=settings.API_V1_STR)
 app.include_router(operators.router, prefix=settings.API_V1_STR)
+# PR3: tier-aware analytics for the FactorLibrary frontend
+app.include_router(factor_library.router, prefix=settings.API_V1_STR)
 
 # Keep existing routers if needed
 try:

@@ -139,6 +139,17 @@ const api = {
     return data
   },
 
+  // PR3: Tier-aware lineage tree + transition history (used by AlphaDetail)
+  getAlphaLineage: async (id) => {
+    const { data } = await client.get(`/alphas/${id}/lineage`)
+    return data
+  },
+
+  getAlphaTransitions: async (id, limit = 50) => {
+    const { data } = await client.get(`/alphas/${id}/transitions`, { params: { limit } })
+    return data
+  },
+
   submitAlphaFeedback: async (id, rating, comment = null) => {
     const { data } = await client.post(`/alphas/${id}/feedback`, { rating, comment })
     return data
@@ -146,6 +157,29 @@ const api = {
 
   syncAlphas: async () => {
     const { data } = await client.post('/alphas/sync')
+    return data
+  },
+
+  // PR3: Factor Library (tier system analytics + seed availability)
+  getFactorLibraryStats: async () => {
+    const { data } = await client.get('/factor-library/stats')
+    return data
+  },
+
+  getFactorLibraryAlphas: async (params = {}) => {
+    const { data } = await client.get('/factor-library/alphas', { params })
+    return data
+  },
+
+  getFactorPromotionCount: async (days = 30) => {
+    const { data } = await client.get('/factor-library/promotion-count', { params: { days } })
+    return data
+  },
+
+  getSeedAvailability: async (tier, region, datasetId = null) => {
+    const params = { tier, region }
+    if (datasetId) params.dataset_id = datasetId
+    const { data } = await client.get('/factor-library/seed-availability', { params })
     return data
   },
 

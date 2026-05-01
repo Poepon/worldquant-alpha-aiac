@@ -7,6 +7,7 @@ import TaskManagement from './pages/TaskManagement'
 import TaskDetail from './pages/TaskDetail'
 import AlphaLab from './pages/AlphaLab'
 import AlphaDetail from './pages/AlphaDetail'
+import FactorLibrary from './pages/FactorLibrary'
 import ConfigCenter from './pages/ConfigCenter'
 import DataManagement from './pages/DataManagement'
 
@@ -26,6 +27,7 @@ function App() {
             <Route path="/tasks/:id" element={<TaskDetail />} />
             <Route path="/alphas" element={<AlphaLab />} />
             <Route path="/alphas/:id" element={<AlphaDetail />} />
+            <Route path="/factor-library" element={<FactorLibrary />} />
             <Route path="/data" element={<DataManagement />} />
             <Route path="/config" element={<ConfigCenter />} />
           </Routes>

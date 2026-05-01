@@ -66,6 +66,13 @@ export default function Dashboard() {
     refetchInterval: 5000,
   })
 
+  // PR3: tier KPI bar — counts today_pass_increment per T1/T2/T3
+  const { data: tierStats } = useQuery({
+    queryKey: ['factor-library-stats-dashboard'],
+    queryFn: api.getFactorLibraryStats,
+    refetchInterval: 60_000,
+  })
+
   // Live feed SSE connection
   useEffect(() => {
     const eventSource = new EventSource('/api/v1/stats/live-feed')
@@ -228,6 +235,32 @@ export default function Dashboard() {
           </Card>
         </Col>
       </Row>
+
+      {/* PR3: Third Row — per-tier today's PASS increment from
+          alpha_status_transitions (drives the tier system rollout dashboard) */}
+      {tierStats?.tiers && (
+        <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+          {tierStats.tiers.map((t) => (
+            <Col xs={12} sm={8} key={t.tier}>
+              <Card className="glass-card">
+                <Statistic
+                  title={`T${t.tier} 今日 PASS 增量`}
+                  value={t.today_pass_increment}
+                  prefix={<Tag color={t.tier === 1 ? 'blue' : t.tier === 2 ? 'purple' : 'volcano'}>T{t.tier}</Tag>}
+                  valueStyle={{
+                    color: t.tier === 1 ? '#1677ff' : t.tier === 2 ? '#722ed1' : '#fa541c',
+                  }}
+                  suffix={
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      （池中 {t.pass_count} PASS）
+                    </Text>
+                  }
+                />
+              </Card>
+            </Col>
+          ))}
+        </Row>
+      )}
 
       {/* Third Row: Live Feed + PnL Chart */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>

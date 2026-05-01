@@ -272,11 +272,149 @@ async def get_alpha_trace(
     Shows the full context: RAG query, hypothesis, code generation, etc.
     """
     trace = await service.get_alpha_trace(alpha_id)
-    
+
     if trace is None:
         raise HTTPException(status_code=404, detail="Alpha not found")
-    
+
     return trace
+
+
+# =============================================================================
+# PR3 — Tier system: lineage tree + transition history
+# =============================================================================
+
+class LineageNode(BaseModel):
+    id: int
+    alpha_id: Optional[str] = None
+    expression: str
+    factor_tier: Optional[int] = None
+    quality_status: str
+    is_sharpe: Optional[float] = None
+
+
+class LineageResponse(BaseModel):
+    self: LineageNode
+    ancestors: List[LineageNode] = []      # parent → grandparent → ... up to root
+    descendants: List[LineageNode] = []    # direct children only (one level)
+    note: Optional[str] = None             # e.g. "not in tier hierarchy"
+
+
+class TransitionEntry(BaseModel):
+    id: int
+    old_status: Optional[str] = None
+    new_status: str
+    sharpe_at_transition: Optional[float] = None
+    reason: Optional[str] = None
+    source: Optional[str] = None
+    transitioned_at: datetime
+
+
+class TransitionsResponse(BaseModel):
+    alpha_id: int
+    transitions: List[TransitionEntry] = []
+
+
+@router.get("/{alpha_id}/lineage", response_model=LineageResponse)
+async def get_alpha_lineage(
+    alpha_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Tier-aware lineage tree for an alpha.
+
+    - alpha.factor_tier in {1,2,3}: returns ancestors (parent_alpha_id chain)
+      and direct descendants (rows where parent_alpha_id == this id).
+    - alpha.factor_tier IS NULL: returns empty lists with a note. Frontend
+      shows an info banner instead of the tree.
+    """
+    from sqlalchemy import select as _select
+    from backend.models import Alpha as _Alpha
+
+    target = await db.get(_Alpha, alpha_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Alpha not found")
+
+    def _to_node(a: _Alpha) -> LineageNode:
+        return LineageNode(
+            id=a.id,
+            alpha_id=a.alpha_id,
+            expression=(a.expression or "")[:300],
+            factor_tier=a.factor_tier,
+            quality_status=a.quality_status or "PENDING",
+            is_sharpe=a.is_sharpe,
+        )
+
+    self_node = _to_node(target)
+    if target.factor_tier is None:
+        return LineageResponse(
+            self=self_node,
+            ancestors=[],
+            descendants=[],
+            note="not in tier hierarchy",
+        )
+
+    # Ancestors — walk parent_alpha_id up to root, capping at 5 to prevent
+    # accidental loops (shouldn't happen but defensive).
+    ancestors: List[LineageNode] = []
+    current = target
+    for _ in range(5):
+        if not current.parent_alpha_id:
+            break
+        parent = await db.get(_Alpha, current.parent_alpha_id)
+        if parent is None or parent.id == current.id:
+            break
+        ancestors.append(_to_node(parent))
+        current = parent
+
+    # Direct descendants — one-level fanout for now (recursive could be added
+    # but UI renders only one level cleanly).
+    desc_q = (
+        _select(_Alpha)
+        .where(_Alpha.parent_alpha_id == alpha_id)
+        .order_by(_Alpha.is_sharpe.desc().nullslast())
+        .limit(50)
+    )
+    desc_rows = (await db.execute(desc_q)).scalars().all()
+    descendants = [_to_node(d) for d in desc_rows]
+
+    return LineageResponse(
+        self=self_node,
+        ancestors=ancestors,
+        descendants=descendants,
+    )
+
+
+@router.get("/{alpha_id}/transitions", response_model=TransitionsResponse)
+async def get_alpha_transitions(
+    alpha_id: int,
+    limit: int = Query(50, ge=1, le=500),
+    db: AsyncSession = Depends(get_db),
+):
+    """Status transition history for an alpha (newest-first)."""
+    from sqlalchemy import select as _select
+    from backend.models import AlphaStatusTransition
+
+    q = (
+        _select(AlphaStatusTransition)
+        .where(AlphaStatusTransition.alpha_id == alpha_id)
+        .order_by(AlphaStatusTransition.transitioned_at.desc())
+        .limit(limit)
+    )
+    rows = (await db.execute(q)).scalars().all()
+    return TransitionsResponse(
+        alpha_id=alpha_id,
+        transitions=[
+            TransitionEntry(
+                id=r.id,
+                old_status=r.old_status,
+                new_status=r.new_status,
+                sharpe_at_transition=r.sharpe_at_transition,
+                reason=r.reason,
+                source=r.source,
+                transitioned_at=r.transitioned_at,
+            )
+            for r in rows
+        ],
+    )
 
 
 @router.get("/by-brain-id/{brain_alpha_id}", response_model=AlphaDetailResponse)

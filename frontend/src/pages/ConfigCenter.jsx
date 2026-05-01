@@ -1,10 +1,10 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { 
-  Row, 
-  Col, 
-  Card, 
-  Typography, 
+import {
+  Row,
+  Col,
+  Card,
+  Typography,
   Tabs,
   Slider,
   Switch,
@@ -20,6 +20,9 @@ import {
   Spin,
   Tooltip,
   Divider,
+  Select,
+  Modal,
+  Descriptions,
 } from 'antd'
 import {
   SettingOutlined,
@@ -536,6 +539,11 @@ export default function ConfigCenter() {
       ),
     },
     {
+      key: 'knowledge-library',
+      label: '因子库 KB',
+      children: <KnowledgeLibraryTab />,
+    },
+    {
       key: 'failure-pitfalls',
       label: '失败教训',
       children: (
@@ -561,5 +569,313 @@ export default function ConfigCenter() {
 
       <Tabs items={tabs} size="large" defaultActiveKey="credentials" />
     </div>
+  )
+}
+
+
+// PR3: tier-aware Knowledge Library browser. Lists all SUCCESS_PATTERN
+// KB entries with filters (tier multi-select / source / region) and inline
+// edit (confidence + soft-delete via is_active toggle).
+const TIER_TAG_COLORS = { 1: 'blue', 2: 'purple', 3: 'volcano' }
+
+function KnowledgeLibraryTab() {
+  const queryClient = useQueryClient()
+  const [filters, setFilters] = useState({
+    tiers: [],          // multi-select; empty = all tiers + NULL
+    source: undefined,
+    region: undefined,
+    only_active: true,
+  })
+  const [detailModal, setDetailModal] = useState(null)
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['knowledge-library', filters],
+    queryFn: async () => {
+      // /knowledge router supports basic listing; tier filter applied client-side
+      // since the existing endpoint doesn't yet expose factor_tier query.
+      const params = {
+        entry_type: 'SUCCESS_PATTERN',
+        limit: 200,
+      }
+      if (filters.only_active) params.is_active = true
+      const resp = await api.getKnowledgeEntries(params)
+      return Array.isArray(resp) ? resp : resp.items || []
+    },
+  })
+
+  const filtered = (data || []).filter((row) => {
+    if (filters.tiers.length > 0) {
+      const t = row.factor_tier ?? null
+      if (!filters.tiers.includes(t === null ? 'null' : t)) return false
+    }
+    if (filters.source && row.created_by !== filters.source) return false
+    if (filters.region) {
+      const meta = row.meta_data || {}
+      if (meta.region !== filters.region) return false
+    }
+    return true
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, updates }) => api.updateKnowledgeEntry(id, updates),
+    onSuccess: () => {
+      message.success('已更新')
+      queryClient.invalidateQueries({ queryKey: ['knowledge-library'] })
+    },
+    onError: (e) => message.error(`更新失败: ${e.message}`),
+  })
+
+  const deactivateMutation = useMutation({
+    mutationFn: (id) => api.updateKnowledgeEntry(id, { is_active: false }),
+    onSuccess: () => {
+      message.success('已软删除')
+      queryClient.invalidateQueries({ queryKey: ['knowledge-library'] })
+    },
+  })
+
+  const columns = [
+    {
+      title: '模式',
+      dataIndex: 'pattern',
+      ellipsis: true,
+      width: 320,
+      render: (p) => (
+        <Tooltip title={p}>
+          <Text code style={{ fontSize: 12 }}>
+            {p?.length > 60 ? `${p.slice(0, 60)}...` : p}
+          </Text>
+        </Tooltip>
+      ),
+    },
+    {
+      title: 'Tier',
+      dataIndex: 'factor_tier',
+      width: 70,
+      render: (t) =>
+        t == null ? (
+          <Tag>—</Tag>
+        ) : (
+          <Tag color={TIER_TAG_COLORS[t]}>T{t}</Tag>
+        ),
+    },
+    {
+      title: '来源',
+      dataIndex: 'created_by',
+      width: 90,
+      render: (s) => (
+        <Tag color={s === 'HITL' ? 'gold' : s === 'USER' ? 'blue' : 'default'}>
+          {s || 'SYSTEM'}
+        </Tag>
+      ),
+    },
+    {
+      title: 'Region',
+      width: 80,
+      render: (_, row) => row.meta_data?.region || '—',
+    },
+    {
+      title: 'Dataset',
+      width: 130,
+      ellipsis: true,
+      render: (_, row) =>
+        row.meta_data?.dataset_id || row.meta_data?.dataset || '—',
+    },
+    {
+      title: 'Confidence',
+      width: 110,
+      render: (_, row) => {
+        const c = row.meta_data?.confidence
+        return c != null ? c.toFixed(2) : '—'
+      },
+    },
+    {
+      title: 'Usage',
+      dataIndex: 'usage_count',
+      width: 70,
+    },
+    {
+      title: 'Active',
+      dataIndex: 'is_active',
+      width: 80,
+      render: (a, row) => (
+        <Switch
+          size="small"
+          checked={a}
+          onChange={(checked) =>
+            updateMutation.mutate({ id: row.id, updates: { is_active: checked } })
+          }
+        />
+      ),
+    },
+    {
+      title: '创建时间',
+      dataIndex: 'created_at',
+      width: 130,
+      render: (t) =>
+        t ? (
+          <Text type="secondary" style={{ fontSize: 11 }}>
+            {new Date(t).toLocaleDateString()}
+          </Text>
+        ) : (
+          '—'
+        ),
+    },
+    {
+      title: '操作',
+      width: 130,
+      render: (_, row) => (
+        <Space size={4}>
+          <Button size="small" onClick={() => setDetailModal(row)}>
+            详情
+          </Button>
+          {row.is_active && (
+            <Button
+              size="small"
+              danger
+              onClick={() => deactivateMutation.mutate(row.id)}
+            >
+              停用
+            </Button>
+          )}
+        </Space>
+      ),
+    },
+  ]
+
+  return (
+    <Card className="glass-card">
+      <Space style={{ marginBottom: 12 }} wrap>
+        <Text>Tier:</Text>
+        <Select
+          mode="multiple"
+          allowClear
+          placeholder="全部"
+          style={{ width: 180 }}
+          value={filters.tiers}
+          onChange={(v) => setFilters((f) => ({ ...f, tiers: v }))}
+          options={[
+            { value: 1, label: 'T1' },
+            { value: 2, label: 'T2' },
+            { value: 3, label: 'T3' },
+            { value: 'null', label: '不分层' },
+          ]}
+        />
+        <Text>来源:</Text>
+        <Select
+          allowClear
+          placeholder="全部"
+          style={{ width: 130 }}
+          value={filters.source}
+          onChange={(v) => setFilters((f) => ({ ...f, source: v }))}
+          options={[
+            { value: 'SYSTEM', label: 'SYSTEM' },
+            { value: 'HITL', label: 'HITL' },
+            { value: 'USER', label: 'USER' },
+          ]}
+        />
+        <Text>Region:</Text>
+        <Select
+          allowClear
+          placeholder="全部"
+          style={{ width: 110 }}
+          value={filters.region}
+          onChange={(v) => setFilters((f) => ({ ...f, region: v }))}
+          options={['USA', 'CHN', 'EUR', 'ASI', 'GLB'].map((r) => ({
+            value: r,
+            label: r,
+          }))}
+        />
+        <Switch
+          checked={filters.only_active}
+          onChange={(v) => setFilters((f) => ({ ...f, only_active: v }))}
+        />
+        <Text>仅显示 active</Text>
+      </Space>
+      <Table
+        rowKey="id"
+        size="small"
+        columns={columns}
+        dataSource={filtered}
+        loading={isLoading}
+        pagination={{ pageSize: 20, showTotal: (t) => `共 ${t} 条` }}
+        scroll={{ x: 1200 }}
+      />
+      {detailModal && (
+        <KnowledgeDetailModal
+          entry={detailModal}
+          onClose={() => setDetailModal(null)}
+          onSaveConfidence={(id, confidence) =>
+            updateMutation.mutate({
+              id,
+              updates: {
+                meta_data: {
+                  ...(detailModal.meta_data || {}),
+                  confidence,
+                },
+              },
+            })
+          }
+        />
+      )}
+    </Card>
+  )
+}
+
+
+function KnowledgeDetailModal({ entry, onClose, onSaveConfidence }) {
+  const meta = entry.meta_data || {}
+  const [confidence, setConfidence] = useState(meta.confidence ?? 0.5)
+  return (
+    <Modal
+      open
+      title={`KB Entry #${entry.id}`}
+      onCancel={onClose}
+      onOk={() => {
+        onSaveConfidence(entry.id, confidence)
+        onClose()
+      }}
+      width={720}
+    >
+      <Descriptions bordered size="small" column={1}>
+        <Descriptions.Item label="Pattern">
+          <Text code style={{ wordBreak: 'break-all' }}>{entry.pattern}</Text>
+        </Descriptions.Item>
+        <Descriptions.Item label="Description">
+          {entry.description || '—'}
+        </Descriptions.Item>
+        <Descriptions.Item label="Tier">
+          {entry.factor_tier == null ? '—' : `T${entry.factor_tier}`}
+        </Descriptions.Item>
+        <Descriptions.Item label="Region / Dataset">
+          {meta.region || '—'} / {meta.dataset_id || meta.dataset || '—'}
+        </Descriptions.Item>
+        <Descriptions.Item label="Source">{entry.created_by || 'SYSTEM'}</Descriptions.Item>
+        <Descriptions.Item label="Usage / Active">
+          {entry.usage_count} / {entry.is_active ? 'YES' : 'NO'}
+        </Descriptions.Item>
+        <Descriptions.Item label="alpha_id_ref">
+          {meta.alpha_id_ref ?? '—'}
+        </Descriptions.Item>
+        <Descriptions.Item label="Confidence">
+          <InputNumber
+            value={confidence}
+            min={0}
+            max={1}
+            step={0.05}
+            onChange={(v) => setConfidence(v)}
+          />
+          <Text type="secondary" style={{ marginLeft: 8 }}>
+            (确定后保存到 meta_data.confidence)
+          </Text>
+        </Descriptions.Item>
+        <Descriptions.Item label="Full meta_data">
+          <Paragraph style={{ marginBottom: 0 }}>
+            <code style={{ fontSize: 11 }}>
+              {JSON.stringify(meta, null, 2)}
+            </code>
+          </Paragraph>
+        </Descriptions.Item>
+      </Descriptions>
+    </Modal>
   )
 }

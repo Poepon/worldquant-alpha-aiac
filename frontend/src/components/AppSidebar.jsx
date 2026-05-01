@@ -8,6 +8,7 @@ import {
   SettingOutlined,
   RocketOutlined,
   DatabaseOutlined,
+  ApartmentOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -27,6 +28,11 @@ const menuItems = [
     key: '/alphas',
     icon: <ExperimentOutlined />,
     label: '因子实验室',
+  },
+  {
+    key: '/factor-library',
+    icon: <ApartmentOutlined />,
+    label: '因子库',
   },
   {
     key: '/data',

@@ -1,25 +1,31 @@
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { 
-  Row, 
-  Col, 
-  Card, 
-  Typography, 
-  Tag, 
-  Button, 
-  Space, 
+import {
+  Row,
+  Col,
+  Card,
+  Typography,
+  Tag,
+  Button,
+  Space,
   Descriptions,
   Spin,
   Empty,
   Input,
   message,
   Divider,
+  Alert,
+  Timeline,
+  Tabs,
+  Tooltip as AntTooltip,
 } from 'antd'
 import {
   ArrowLeftOutlined,
   LikeOutlined,
   DislikeOutlined,
   CopyOutlined,
+  BranchesOutlined,
+  HistoryOutlined,
 } from '@ant-design/icons'
 import { 
   LineChart, 
@@ -309,6 +315,209 @@ export default function AlphaDetail() {
           </Card>
         </Col>
       </Row>
+
+      {/* PR3: Tier-aware lineage tree + transition history */}
+      <LineageSection alphaId={id} />
     </div>
+  )
+}
+
+const TIER_COLORS = { 1: '#1677ff', 2: '#722ed1', 3: '#fa541c' }
+const STATUS_COLORS = {
+  PASS: 'success',
+  PASS_PROVISIONAL: 'gold',
+  OPTIMIZE: 'processing',
+  FAIL: 'default',
+  PENDING: 'default',
+  REJECT: 'error',
+}
+
+
+function LineageNodeCard({ node, navigate, label }) {
+  if (!node) return null
+  const tier = node.factor_tier
+  return (
+    <Card
+      size="small"
+      style={{
+        marginBottom: 8,
+        borderLeft: tier ? `4px solid ${TIER_COLORS[tier]}` : undefined,
+        cursor: 'pointer',
+      }}
+      onClick={() => navigate(`/alphas/${node.id}`)}
+      hoverable
+    >
+      <Space>
+        {label && <Tag>{label}</Tag>}
+        <a>#{node.id}</a>
+        {tier && <Tag color={TIER_COLORS[tier]}>T{tier}</Tag>}
+        <Tag color={STATUS_COLORS[node.quality_status] || 'default'}>
+          {node.quality_status}
+        </Tag>
+        {node.is_sharpe != null && (
+          <Text type="secondary">sharpe={node.is_sharpe.toFixed(2)}</Text>
+        )}
+        <AntTooltip title={node.expression}>
+          <Text code style={{ fontSize: 11 }}>
+            {(node.expression || '').slice(0, 60)}
+            {node.expression?.length > 60 ? '...' : ''}
+          </Text>
+        </AntTooltip>
+      </Space>
+    </Card>
+  )
+}
+
+
+function LineageSection({ alphaId }) {
+  const navigate = useNavigate()
+
+  const { data: lineage, isLoading: lineageLoading } = useQuery({
+    queryKey: ['alpha', alphaId, 'lineage'],
+    queryFn: () => api.getAlphaLineage(alphaId),
+    enabled: !!alphaId,
+  })
+
+  const { data: transitionsResp, isLoading: transLoading } = useQuery({
+    queryKey: ['alpha', alphaId, 'transitions'],
+    queryFn: () => api.getAlphaTransitions(alphaId, 50),
+    enabled: !!alphaId,
+  })
+
+  if (lineageLoading) return null
+
+  const transitions = transitionsResp?.transitions || []
+
+  return (
+    <Card
+      className="glass-card"
+      style={{ marginTop: 16 }}
+      title={
+        <Space>
+          <BranchesOutlined />
+          <span>谱系 & 状态变迁</span>
+        </Space>
+      }
+    >
+      <Tabs
+        defaultActiveKey="lineage"
+        items={[
+          {
+            key: 'lineage',
+            label: <Space><BranchesOutlined />谱系</Space>,
+            children: lineage ? (
+              <>
+                {lineage.note && (
+                  <Alert
+                    type="info"
+                    message={
+                      lineage.note === 'not in tier hierarchy'
+                        ? '该 alpha 不在因子库 tier 体系内（multi-field 算术 / 单层 rank 等形态）'
+                        : lineage.note
+                    }
+                    style={{ marginBottom: 16 }}
+                    showIcon
+                  />
+                )}
+
+                <Row gutter={16}>
+                  <Col span={12}>
+                    <Title level={5}>祖先链（向上追溯到根）</Title>
+                    {lineage.ancestors && lineage.ancestors.length > 0 ? (
+                      lineage.ancestors.map((node, idx) => (
+                        <LineageNodeCard
+                          key={node.id}
+                          node={node}
+                          navigate={navigate}
+                          label={idx === 0 ? '父' : `祖辈 ${idx + 1}`}
+                        />
+                      ))
+                    ) : (
+                      <Empty
+                        description={
+                          lineage.self?.factor_tier === 1
+                            ? '已是 T1 根，无祖先'
+                            : '无祖先记录'
+                        }
+                      />
+                    )}
+                  </Col>
+                  <Col span={12}>
+                    <Title level={5}>派生（直接子代）</Title>
+                    {lineage.descendants && lineage.descendants.length > 0 ? (
+                      lineage.descendants.slice(0, 20).map((node) => (
+                        <LineageNodeCard
+                          key={node.id}
+                          node={node}
+                          navigate={navigate}
+                          label={`T${node.factor_tier} 子`}
+                        />
+                      ))
+                    ) : (
+                      <Empty description="尚无派生 alpha" />
+                    )}
+                    {lineage.descendants?.length > 20 && (
+                      <Text type="secondary">
+                        还有 {lineage.descendants.length - 20} 条未显示
+                      </Text>
+                    )}
+                  </Col>
+                </Row>
+              </>
+            ) : null,
+          },
+          {
+            key: 'transitions',
+            label: (
+              <Space>
+                <HistoryOutlined />
+                状态变迁
+                {transitions.length > 0 && <Tag>{transitions.length}</Tag>}
+              </Space>
+            ),
+            children: transLoading ? (
+              <Spin />
+            ) : transitions.length === 0 ? (
+              <Empty description="尚无状态变迁记录" />
+            ) : (
+              <Timeline
+                items={transitions.map((t) => ({
+                  color: STATUS_COLORS[t.new_status] || 'gray',
+                  children: (
+                    <Space direction="vertical" size={2}>
+                      <Space>
+                        {t.old_status && (
+                          <Tag color={STATUS_COLORS[t.old_status]}>
+                            {t.old_status}
+                          </Tag>
+                        )}
+                        <span>→</span>
+                        <Tag color={STATUS_COLORS[t.new_status]}>
+                          {t.new_status}
+                        </Tag>
+                        {t.sharpe_at_transition != null && (
+                          <Text type="secondary">
+                            sharpe@trans={t.sharpe_at_transition.toFixed(2)}
+                          </Text>
+                        )}
+                      </Space>
+                      {t.reason && (
+                        <Text type="secondary">{t.reason}</Text>
+                      )}
+                      <Space>
+                        {t.source && <Tag>{t.source}</Tag>}
+                        <Text type="secondary" style={{ fontSize: 11 }}>
+                          {new Date(t.transitioned_at).toLocaleString()}
+                        </Text>
+                      </Space>
+                    </Space>
+                  ),
+                }))}
+              />
+            ),
+          },
+        ]}
+      />
+    </Card>
   )
 }
