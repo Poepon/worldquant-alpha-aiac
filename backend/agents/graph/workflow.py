@@ -400,6 +400,12 @@ class MiningWorkflow:
             task_metrics_snapshot_at = _dt.utcnow()
 
             for alpha_result in result.get("generated_alphas", []):
+                # PR7 — skip rows already INSERTed by node_save_results in
+                # incremental mode. AlphaResult.persisted is set True only
+                # by _incremental_save_alphas; legacy buffered path leaves
+                # it False, so this gate is a no-op for T1 / disabled-flag.
+                if getattr(alpha_result, "persisted", False):
+                    continue
                 try:
                     # P0-fix-2: Compute expression hash for DB-level deduplication
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None

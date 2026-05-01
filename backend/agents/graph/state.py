@@ -62,6 +62,12 @@ class AlphaResult(BaseModel):
     # Tier system fields propagated to the Alpha DB row
     parent_alpha_id: Optional[int] = None
     wrapper_kind: Optional[str] = None
+    # PR7 — set True by node_save_results when it has already INSERTed the
+    # corresponding Alpha row (T2/T3 incremental persistence path).
+    # workflow.run_with_persistence checks this and skips its own batch
+    # write to avoid duplicating the row.
+    persisted: bool = False
+    db_id: Optional[int] = None  # alphas.id when persisted=True
 
 
 class FailureRecord(BaseModel):
