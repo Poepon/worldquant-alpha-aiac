@@ -798,6 +798,11 @@ def should_optimize(sim_result: Dict) -> Tuple[bool, str]:
     test_sharpe = _safe_float(os_stats.get('sharpe', os_stats.get('Sharpe', 0)))
     test_fitness = _safe_float(os_stats.get('fitness', os_stats.get('Fitness', 0)))
 
+    # OS 数据是否可用：BRAIN simulate 当下 OS test/os 字段会被填空 0，
+    # bookSize/pnl 也都为 0。test_sharpe==0 且 test_fitness==0 视为 OS 未跑，
+    # 此时不应让 OS-相关启发式启动（会把所有 IS 高分 alpha 误判为"OOS 偏弱"）。
+    os_available = bool(os_stats) and not (test_sharpe == 0.0 and test_fitness == 0.0)
+
     invest_sharpe = _safe_float(invest_stats.get('sharpe', invest_stats.get('Sharpe', train_sharpe)))
 
     risk_neutral = sim_result.get('riskNeutralized', {}) or {}
@@ -805,7 +810,7 @@ def should_optimize(sim_result: Dict) -> Tuple[bool, str]:
 
     # ---- 0) Fast reject: clearly bad / noisy ----
     # Negative in both IS and OOS: usually not worth 100-budget optimization
-    if train_sharpe <= 0 and test_sharpe <= 0:
+    if train_sharpe <= 0 and os_available and test_sharpe <= 0:
         return False, "IS/OOS均为负，淘汰"
 
     # Very weak + not rescued by RN: low ROI to optimize
@@ -815,7 +820,9 @@ def should_optimize(sim_result: Dict) -> Tuple[bool, str]:
     # ---- 1) Already good (prefer tests-based if you have it) ----
     # If you can access pass/fail tests, check them here instead of hardcoding.
     if train_sharpe >= 1.58 and train_fitness >= 1.0:
-        # still sanity-check OOS
+        if not os_available:
+            return False, "已接近/达到门槛，OS 暂未跑，跳过优化"
+        # OS 已跑：还得 sanity-check OOS
         if test_sharpe >= 0.8:
             return False, "已接近/达到门槛且OOS不差，跳过优化"
         # else: good IS but weak OOS -> optimize for robustness
@@ -830,8 +837,8 @@ def should_optimize(sim_result: Dict) -> Tuple[bool, str]:
     if (train_sharpe - invest_sharpe) >= 0.25 and train_sharpe >= 0.3:
         return True, "可投资性约束下掉得多：优先降集中/做更强归一化/更平滑"
 
-    # C) Overfitting: big IS→OOS gap
-    if train_sharpe >= 0.4:
+    # C) Overfitting: big IS→OOS gap (only meaningful when OS actually ran)
+    if os_available and train_sharpe >= 0.4:
         ratio = test_sharpe / (train_sharpe + 1e-9)
         gap = train_sharpe - test_sharpe
         if ratio < 0.5 and gap >= 0.3:
