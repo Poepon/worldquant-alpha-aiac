@@ -61,11 +61,20 @@ def _recompute_quality_status(
     is_fitness: Optional[float],
     is_turnover: Optional[float],
     sub_universe_sharpe: Optional[float] = None,
+    metrics: Optional[Dict] = None,
 ) -> str:
-    """Lightweight reproduction of evaluation.node_evaluate's PASS/PROVISIONAL/FAIL gate.
+    """Reproduction of evaluation.node_evaluate's PASS/PROVISIONAL/FAIL gate
+    for backfill dry-run impact preview.
 
-    Only used by the dry-run for impact preview. The real apply path goes through
-    alpha_service.apply_quality_status_change() with full evaluation context.
+    PR4 fix — also inspects metrics.checks for hard-gate FAILs that earlier
+    evaluation runs may have missed. Without this check, alphas where
+    CONCENTRATED_WEIGHT or LOW_SUB_UNIVERSE_SHARPE failed at sim time would
+    silently re-pass through backfill (caused 4 false PASS to slip through
+    today before the manual audit caught them).
+
+    Tier-aware skip: T1 ignores BRAIN's submission-level checks entirely
+    (project thresholds rule). T2 keeps concentrated, skips self_corr.
+    T3 / NULL apply every check.
     """
     from backend.agents.graph.tier_thresholds import get_tier_thresholds
 
@@ -73,6 +82,23 @@ def _recompute_quality_status(
         return "PENDING"
 
     t = get_tier_thresholds(factor_tier)
+
+    # PR4: hard-gate failures from metrics.checks. T1 skips entirely (BRAIN
+    # checks reflect submission criteria, not T1 seed criteria).
+    if factor_tier != 1 and metrics:
+        checks = metrics.get("checks") or [] if isinstance(metrics, dict) else []
+        for c in checks:
+            if not isinstance(c, dict) or c.get("result") != "FAIL":
+                continue
+            name = c.get("name", "")
+            # CONCENTRATED_WEIGHT and LOW_SUB_UNIVERSE_SHARPE are non-negotiable
+            # for T2/T3/NULL — same rule as evaluation.node_evaluate.
+            if name in ("CONCENTRATED_WEIGHT", "LOW_SUB_UNIVERSE_SHARPE"):
+                return "PASS_PROVISIONAL"
+            # SELF_CORRELATION FAIL only blocks T3 (T2 explicitly skips per plan)
+            if name == "SELF_CORRELATION" and factor_tier == 3:
+                return "PASS_PROVISIONAL"
+
     # PASS check (subuniv_min only enforced if value provided in metrics)
     pass_sharpe = is_sharpe >= t["sharpe_min"]
     pass_fitness = is_fitness >= t["fitness_min"]
@@ -161,7 +187,8 @@ async def analyze_quality_recompute(db: AsyncSession) -> Dict:
         except Exception:
             pass
         new_status = _recompute_quality_status(
-            new_tier, row.is_sharpe, row.is_fitness, row.is_turnover, sub_uni
+            new_tier, row.is_sharpe, row.is_fitness, row.is_turnover, sub_uni,
+            metrics=row.metrics,
         )
         if new_status != row.quality_status:
             transitions[(row.quality_status or "PENDING", new_status)] += 1
