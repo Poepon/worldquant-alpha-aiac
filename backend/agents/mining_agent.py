@@ -137,6 +137,14 @@ class MiningAgent:
         from backend.services.task_service import TaskService
         factor_tier = TaskService.factor_tier_from_mode(task.agent_mode) or 1
 
+        # PR6 fix — inject DB session / brain adapter / alpha service into
+        # configurable. T2/T3's node_tier_seed_load reads these from config
+        # to query predecessor-tier seeds and persist demote transitions.
+        # Without this, tier_seed_load returns early with should_stop=True
+        # and the entire T2 workflow runs empty.
+        from backend.services.alpha_service import AlphaService
+        alpha_service = AlphaService(self.db)
+
         try:
             # Run workflow with strategy context
             result = await self._workflow.run_with_persistence(
@@ -150,6 +158,10 @@ class MiningAgent:
                         "trace_service": trace_service,
                         "strategy": strategy.to_dict(),  # Pass strategy to all nodes
                         "run_id": run_id,
+                        # T2/T3 tier_seed_load deps
+                        "db_session": self.db,
+                        "brain_adapter": self.brain,
+                        "alpha_service": alpha_service,
                     }
                 },
                 factor_tier=factor_tier,
