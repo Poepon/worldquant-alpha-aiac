@@ -245,3 +245,67 @@ class TestRobustness:
     def test_top_level_arithmetic_not_classifiable(self):
         # f(x) + g(y) is not a single top-level call — should be None
         assert classify_tier("ts_rank(close, 20) + ts_rank(volume, 20)") is None
+
+
+class TestNegationWrapperTransparency:
+    """multiply(-1, X), multiply(X, -1), subtract(0, X) are sign-flip wrappers
+    that don't change tier — produced by PR5 sign-flip retry and
+    genetic_optimizer's _mutate_sign mutation."""
+
+    def test_multiply_neg1_first_arg(self):
+        # multiply(-1, T1) → T1
+        assert classify_tier("multiply(-1, ts_rank(close, 20))") == 1
+        assert classify_tier("multiply(-1, ts_zscore(returns, 5))") == 1
+
+    def test_multiply_neg1_second_arg(self):
+        # multiply(T1, -1) → T1 (BRAIN allows either argument order)
+        assert classify_tier("multiply(ts_rank(close, 20), -1)") == 1
+
+    def test_subtract_zero(self):
+        # subtract(0, T1) → T1 (semantic: 0 - X = -X)
+        assert classify_tier("subtract(0, ts_rank(close, 20))") == 1
+
+    def test_negated_t2_stays_t2(self):
+        # Negating a T2 expression keeps it T2 — sign-flip preserves tier semantics
+        assert classify_tier("multiply(-1, group_neutralize(ts_rank(close, 20), industry))") == 2
+        assert classify_tier("multiply(-1, rank(ts_rank(close, 20)))") == 2
+
+    def test_negated_inside_t2_stays_t2(self):
+        # T2 wrapper around a negated T1 — still T2 because inner classify_tier=1
+        assert classify_tier("group_neutralize(multiply(-1, ts_rank(close, 20)), industry)") == 2
+        assert classify_tier("rank(multiply(-1, ts_zscore(returns, 5)))") == 2
+
+    def test_negated_t3_stays_t3(self):
+        # trade_when wrapping a negated T1/T2 — outer stays T3
+        expr = "trade_when(volume > ts_mean(volume, 240), multiply(-1, ts_rank(close, 20)), -1)"
+        assert classify_tier(expr) == 3
+
+    def test_double_negation_returns_to_original(self):
+        # multiply(-1, multiply(-1, X)) recurses twice → X tier
+        assert classify_tier("multiply(-1, multiply(-1, ts_rank(close, 20)))") == 1
+
+    def test_negation_around_unclassifiable_stays_none(self):
+        # If inner is not classifiable, negation stays None
+        assert classify_tier("multiply(-1, divide(close, volume))") is None
+        # Non-zero subtract is real arithmetic, not negation
+        assert classify_tier("subtract(close, open)") is None
+
+    def test_extract_tier1_seed_handles_negation(self):
+        # multiply(-1, T2) → strip negation → strip T2 wrapper → T1 kernel
+        result = extract_tier1_seed(
+            "multiply(-1, group_neutralize(ts_rank(close, 20), industry))"
+        )
+        # strips the outer multiply(-1, ...) first, then strips group_neutralize → ts_rank(close, 20)
+        assert result == "ts_rank(close, 20)"
+
+    def test_extract_seed_negated_t2_inner(self):
+        # T2 with negated T1 inside → strip outer → multiply(-1, ts_rank(close, 20))
+        result = extract_tier1_seed(
+            "group_neutralize(multiply(-1, ts_rank(close, 20)), industry)"
+        )
+        # The inner is multiply(-1, T1) which classifies as T1, so it's a valid kernel
+        assert result == "multiply(-1, ts_rank(close, 20))"
+
+    def test_negated_t1_passes_t1_predicate(self):
+        assert is_t1_expression("multiply(-1, ts_rank(close, 20))") is True
+        assert is_t1_expression("multiply(ts_rank(close, 20), -1)") is True

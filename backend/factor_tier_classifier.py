@@ -278,6 +278,39 @@ def _is_scalar_or_param(arg: str) -> bool:
 # Tier classification
 # =============================================================================
 
+def _is_negation_wrapper(expr: str) -> Optional[str]:
+    """Recognize sign-flip wrappers that don't change tier semantics.
+
+    A negated tier-N expression is still a tier-N signal, just direction-
+    flipped. Sources:
+      - PR5 sign-flip retry in evaluation.node_evaluate (auto-flip FAIL with
+        |sharpe| ≥ 0.5)
+      - genetic_optimizer's _mutate_sign mutation
+      - Any future code path that produces an inverted expression
+
+    Recognized patterns (all BRAIN-valid):
+      - multiply(-1, X)
+      - multiply(X, -1)
+      - subtract(0, X)
+
+    Returns the inner expression X if the top-level call matches, else None.
+    Caller is expected to recurse into X to determine the actual tier.
+    """
+    parsed = _top_level_call(_strip_outer_parens(expr))
+    if not parsed:
+        return None
+    op, args = parsed
+    if op == "multiply" and len(args) == 2:
+        a, b = args[0].strip(), args[1].strip()
+        if a == "-1":
+            return b
+        if b == "-1":
+            return a
+    if op == "subtract" and len(args) == 2 and args[0].strip() == "0":
+        return args[1].strip()
+    return None
+
+
 def _is_t1(expr: str) -> bool:
     """T1: top-level is a ts_* op AND first arg is a single known field."""
     parsed = _top_level_call(expr)
@@ -337,10 +370,20 @@ def classify_tier(expression: str) -> Optional[int]:
         2 — wrapper(T1_expr, ...) cross-sectional or smoothing wrapper
         3 — trade_when(..., <T2 or T3-eligible expr>, ...) entry-filter
         None — multi-field arithmetic, single-layer rank on field, unknown form
+
+    Sign-flip wrappers (`multiply(-1, X)` etc.) are transparent — the tier of
+    `multiply(-1, X)` equals the tier of X.
     """
     if not expression or not expression.strip():
         return None
     s = _strip_outer_parens(expression.strip())
+
+    # Negation wrappers are transparent — recurse into the inner expression.
+    # Done first so the inner classification governs tier assignment regardless
+    # of whether the outer is multiply(-1, ts_rank(...)) or multiply(-1, group_*(...)).
+    inner_negated = _is_negation_wrapper(s)
+    if inner_negated is not None:
+        return classify_tier(inner_negated)
 
     # T3: trade_when(...) at top level
     parsed = _top_level_call(s)
@@ -376,10 +419,20 @@ def extract_tier1_seed(expression: str) -> Optional[str]:
 
     Returns None if extraction fails (malformed structure / not a T2/T3 expr).
     Note: only one layer is stripped. T3 → strip → T2 (not T1). For T3 → T1, call twice.
+
+    Negation wrappers (`multiply(-1, X)`) are transparent — we recurse into X
+    so a negated T2 still yields the T1 kernel correctly.
     """
     if not expression:
         return None
-    parsed = _top_level_call(_strip_outer_parens(expression.strip()))
+    s = _strip_outer_parens(expression.strip())
+
+    # Transparent unwrap of sign-flip wrapper before tier-stripping.
+    inner_negated = _is_negation_wrapper(s)
+    if inner_negated is not None:
+        return extract_tier1_seed(inner_negated)
+
+    parsed = _top_level_call(s)
     if not parsed:
         return None
     op, args = parsed
