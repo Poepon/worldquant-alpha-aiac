@@ -503,7 +503,7 @@ class BrainAdapter:
 
         try:
             try:
-                response = await self.client.post(f"{self.BASE_URL}/simulations", json=sim_payload)
+                response = await self._request("POST", f"{self.BASE_URL}/simulations", json=sim_payload)
                 if response.status_code == 429 and "CONCURRENT_SIMULATION_LIMIT_EXCEEDED" in (response.text or ""):
                     # Slot accounting drift (e.g. counter reset) — back off briefly
                     # and let outer caller retry. Releasing here avoids deadlock.
@@ -558,7 +558,7 @@ class BrainAdapter:
 
         try:
             # POST list of configs
-            response = await self.client.post(f"{self.BASE_URL}/simulations", json=sim_payloads)
+            response = await self._request("POST", f"{self.BASE_URL}/simulations", json=sim_payloads)
 
             # Account is not Consultant-level — multi-sim is blocked. Latch the
             # gate so future calls skip the probe, and fall back to single-sim.
@@ -655,8 +655,8 @@ class BrainAdapter:
         
         while True:
             try:
-                response = await self.client.get(poll_url)
-                
+                response = await self._request("GET", poll_url)
+
                 # Handle non-2xx with retry
                 if response.status_code // 100 != 2:
                     logger.error(f"Multi-sim poll {poll_url}, Status: {response.status_code}, Retry")
@@ -704,7 +704,7 @@ class BrainAdapter:
                 return {"success": False, "error": data.get("message", "Multi-simulation failed")}
             # Log child errors
             for child_id in children:
-                child_resp = await self.client.get(f"{self.BASE_URL}/simulations/{child_id}")
+                child_resp = await self._request("GET", f"{self.BASE_URL}/simulations/{child_id}")
                 logger.error(f"Child simulation {child_id} failed: {child_resp.json()}")
             return {"success": False, "error": "Multi-simulation children failed"}
         
@@ -718,7 +718,7 @@ class BrainAdapter:
             try:
                 # Fetch child simulation to get alpha ID
                 child_url = f"{self.BASE_URL}/simulations/{child_id}"
-                child_resp = await self.client.get(child_url)
+                child_resp = await self._request("GET", child_url)
                 
                 if child_resp.status_code != 200:
                     logger.error(f"Failed to fetch child sim {child_id}: {child_resp.status_code}")
@@ -760,8 +760,8 @@ class BrainAdapter:
         
         while True:
             try:
-                response = await self.client.get(poll_url)
-                
+                response = await self._request("GET", poll_url)
+
                 # Handle non-2xx response with retry
                 if response.status_code // 100 != 2:
                     logger.error(f"Simulation poll {poll_url}, Status: {response.status_code}, Retry")
@@ -838,10 +838,10 @@ class BrainAdapter:
             
         try:
             url = f"{self.BASE_URL}/alphas/{alpha_id}"
-            
+
             # Poll until no retry-after header (matching ace_lib.py pattern)
             while True:
-                response = await self.client.get(url)
+                response = await self._request("GET", url)
                 
                 # Check for retry-after header (case-insensitive)
                 retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
@@ -958,6 +958,30 @@ class BrainAdapter:
         except Exception as e:
             logger.error(f"Get alpha details error: {e}")
             return {"success": False, "error": str(e)}
+
+    async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """Single-shot HTTP call with 401 → re-auth → retry-once.
+
+        For methods that own their own state machine (simulate POST + poll
+        loop, slot accounting, paginated cursors) and can't easily wrap the
+        full _safe_api_call retry/backoff machinery. This is just the
+        token-refresh path — 429/5xx still need to be handled by the caller.
+
+        Why this exists: BRAIN session tokens expire every 4h. Task #19
+        loop-stuck for 2.6h with all simulates returning 401 because
+        simulate_alpha / simulate_batch / poll GET / get_alpha_pnl etc.
+        were calling self.client.* directly, bypassing _safe_api_call's
+        re-auth branch.
+        """
+        response = await getattr(self.client, method.lower())(url, **kwargs)
+        if response.status_code == 401:
+            logger.warning(f"401 on {method} {url} — re-authenticating")
+            try:
+                if await self.authenticate():
+                    response = await getattr(self.client, method.lower())(url, **kwargs)
+            except Exception as e:
+                logger.error(f"Re-auth failed: {e}")
+        return response
 
     async def _safe_api_call(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
         """
@@ -1101,7 +1125,7 @@ class BrainAdapter:
 
     async def get_alpha_pnl(self, alpha_id: str) -> Dict:
         try:
-            response = await self.client.get(f"{self.BASE_URL}/alphas/{alpha_id}/recordsets/pnl")
+            response = await self._request("GET", f"{self.BASE_URL}/alphas/{alpha_id}/recordsets/pnl")
             return response.json() if response.status_code == 200 else {}
         except Exception:
             return {}
@@ -1128,7 +1152,7 @@ class BrainAdapter:
 
     async def check_correlation(self, alpha_id: str, check_type: str = "PROD") -> Dict:
         try:
-            response = await self.client.get(f"{self.BASE_URL}/alphas/{alpha_id}/correlations/{check_type}")
+            response = await self._request("GET", f"{self.BASE_URL}/alphas/{alpha_id}/correlations/{check_type}")
             return response.json() if response.status_code == 200 else {}
         except Exception:
             return {}
