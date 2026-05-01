@@ -259,16 +259,95 @@ class TaskService(BaseService):
     # Create Operations
     # =========================================================================
     
+    # PR2 — agent_mode → factor_tier mapping shared across router and beat task.
+    AGENT_MODE_TO_TIER = {
+        "AUTONOMOUS": 1,        # legacy mode behaves as T1 when tier system on
+        "AUTONOMOUS_TIER1": 1,
+        "AUTONOMOUS_TIER2": 2,
+        "AUTONOMOUS_TIER3": 3,
+        "INTERACTIVE": None,    # tier-agnostic
+    }
+
+    @classmethod
+    def factor_tier_from_mode(cls, agent_mode: str) -> Optional[int]:
+        """Resolve agent_mode → factor_tier. Returns None for INTERACTIVE / unknown."""
+        return cls.AGENT_MODE_TO_TIER.get(agent_mode)
+
+    async def _validate_tier_eligibility(self, data: "TaskCreateData") -> None:
+        """PR2: gate tier-mode tasks on feature flag + prerequisites.
+
+        - ENABLE_FACTOR_TIERING=False → reject all AUTONOMOUS_TIER* modes.
+        - T2/T3 → require MIN_TIER_SEED_COUNT PASS alphas in the predecessor tier
+          for the target region (dataset filter is too narrow this early —
+          users often haven't picked dataset yet for AUTO strategy).
+        - T1 → require at least one DataField row for the region (proxy for
+          "dataset has been synced from BRAIN"); skip if dataset_strategy=AUTO
+          and no specific datasets pinned.
+
+        Raises ValueError with a user-facing message; router maps to HTTP 400.
+        """
+        from backend.config import settings
+
+        tier = self.factor_tier_from_mode(data.agent_mode)
+        if data.agent_mode and data.agent_mode.startswith("AUTONOMOUS_TIER"):
+            if not getattr(settings, "ENABLE_FACTOR_TIERING", True):
+                raise ValueError(
+                    "tier system is disabled (ENABLE_FACTOR_TIERING=False); "
+                    "use agent_mode='AUTONOMOUS' instead"
+                )
+
+        if tier in (2, 3):
+            from backend.models import Alpha
+            from backend.agents.graph.tier_thresholds import get_min_seed_count
+
+            prior_tier = tier - 1
+            min_required = get_min_seed_count()
+            count_q = (
+                select(func.count(Alpha.id))
+                .where(Alpha.factor_tier == prior_tier)
+                .where(Alpha.quality_status == "PASS")
+                .where(Alpha.region == data.region)
+            )
+            seed_count = (await self.db.execute(count_q)).scalar() or 0
+            if seed_count < min_required:
+                raise ValueError(
+                    f"T{tier} task needs at least {min_required} PASS alphas "
+                    f"at T{prior_tier} for region={data.region}; found {seed_count}. "
+                    f"Run a T{prior_tier} task first to accumulate seeds."
+                )
+
+        if tier == 1 and data.dataset_strategy != "AUTO":
+            from backend.models import DataField
+
+            # Validate that pinned target_datasets exist in DataField table
+            if data.target_datasets:
+                ds_count_q = (
+                    select(func.count(DataField.id))
+                    .where(DataField.dataset_id.in_(data.target_datasets))
+                )
+                if (await self.db.execute(ds_count_q)).scalar() == 0:
+                    raise ValueError(
+                        f"none of {data.target_datasets} have synced DataField rows; "
+                        f"run sync_datasets task first"
+                    )
+
     async def create_task(self, data: TaskCreateData) -> TaskSummary:
         """
         Create a new mining task.
-        
+
         Args:
             data: Task creation data
-            
+
         Returns:
             Created TaskSummary
+
+        Raises:
+            ValueError: when tier-mode prerequisites aren't met (mapped to HTTP
+                400 by the router). Examples: tier system disabled, T2/T3
+                without enough prior-tier PASS seeds, T1 with unsynced dataset.
         """
+        await self._validate_tier_eligibility(data)
+
         task = MiningTask(
             task_name=data.name,
             region=data.region,
@@ -280,10 +359,10 @@ class TaskService(BaseService):
             config=data.config,
             status="PENDING",
         )
-        
+
         created = await self.task_repo.create(task)
         await self.commit()
-        
+
         return self._to_summary(created)
     
     # =========================================================================

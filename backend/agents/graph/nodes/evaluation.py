@@ -260,14 +260,36 @@ async def node_evaluate(
     correlation_service = CorrelationService(brain) if brain is not None else None
     
     logger.info(f"[{node_name}] Starting two-stage evaluation | count={len(state.pending_alphas)}")
-    
-    # Thresholds
-    sharpe_min = getattr(settings, 'SHARPE_MIN', 1.5)
-    turnover_max = getattr(settings, 'TURNOVER_MAX', 0.7)
-    fitness_min = getattr(settings, 'FITNESS_MIN', 1.0)
+
+    # PR2: tier-aware thresholds + gate config. state.factor_tier is set by the
+    # router from agent_mode (AUTONOMOUS_TIER1 → 1, AUTONOMOUS_TIER2 → 2,
+    # AUTONOMOUS_TIER3 → 3). For legacy AUTONOMOUS, factor_tier defaults to 1
+    # via MiningState; setting ENABLE_FACTOR_TIERING=False keeps it on legacy
+    # globals via the tier=None fallback inside tier_thresholds.
+    from backend.agents.graph.tier_thresholds import get_tier_thresholds
+
+    tier_cfg = get_tier_thresholds(getattr(state, "factor_tier", None))
+    sharpe_min = tier_cfg["sharpe_min"]
+    fitness_min = tier_cfg["fitness_min"]
+    turnover_min = tier_cfg["turnover_min"]
+    turnover_max = tier_cfg["turnover_max"]
+    max_correlation = tier_cfg.get("self_corr_max") or getattr(settings, "MAX_CORRELATION", 0.7)
+    check_self_corr = tier_cfg["check_self_corr"]
+    check_concentrated = tier_cfg["check_concentrated"]
+    # PROVISIONAL config: tier-specific looser bar for near-PASS pool (KB / island GA seeds).
+    prov_cfg = tier_cfg.get("provisional") or {}
+    prov_sharpe_min = prov_cfg.get("sharpe_min", sharpe_min)
+    prov_fitness_min = prov_cfg.get("fitness_min", 0.6)
+    prov_turnover_max = prov_cfg.get("turnover_max", 0.85)
+
     score_pass_threshold = getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8)
     score_optimize_threshold = getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3)
     corr_check_threshold = getattr(settings, 'CORR_CHECK_THRESHOLD', 0.5)
+    logger.info(
+        f"[{node_name}] tier={tier_cfg['tier']} sharpe>={sharpe_min} fitness>={fitness_min} "
+        f"turnover [{turnover_min}, {turnover_max}] check_self_corr={check_self_corr} "
+        f"check_concentrated={check_concentrated}"
+    )
     
     eval_details = []
     failure_feedback_queue = []
@@ -346,13 +368,18 @@ async def node_evaluate(
             )
         
         # Stage 2: Correlation check for promising candidates
+        # PR2: T1/T2 tier skips self_corr entirely (check_self_corr=False).
+        # The 8-12 LLM-guided wrapper variants per seed are necessarily
+        # PnL-correlated; gating them on self_corr would FAIL the whole T2
+        # batch. self_corr is only meaningful at T3 (vs already-submitted OS
+        # pool), which is where we keep the strict gate.
         prod_corr = 0.0
         self_corr = 0.0
-        needs_corr_check = (
+        needs_corr_check = check_self_corr and (
             preliminary_score >= corr_check_threshold or
             meets_thresholds
         )
-        
+
         if needs_corr_check and brain and alpha.alpha_id:
             corr_checks_performed += 1
             try:
@@ -361,7 +388,7 @@ async def node_evaluate(
                     prod_corr = float(prod_corr_result.get("max", 0.0) or 0.0)
             except Exception as e:
                 logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
-            
+
             # W0.5: prefer local PnL-matrix; fall back to BRAIN API; finally
             # mark unknown so hard_gate downgrades to PASS_PROVISIONAL.
             self_corr_source = "unknown"
@@ -383,7 +410,9 @@ async def node_evaluate(
                     logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
         else:
             corr_checks_skipped += 1
-            self_corr_source = "skipped"
+            # tier_skipped means "by tier policy, not because we couldn't measure" —
+            # downstream gate should treat as ok+verified, NOT downgrade to PROVISIONAL
+            self_corr_source = "tier_skipped" if not check_self_corr else "skipped"
         
         # Final score with correlation penalty
         score = calculate_alpha_score(
@@ -418,23 +447,30 @@ async def node_evaluate(
              if c.get("name") == "CONCENTRATED_WEIGHT"),
             None,
         )
-        concentrated_ok = (
-            concentrated_check is None
-            or concentrated_check.get("result") != "FAIL"
-        )
-        max_correlation = getattr(settings, "MAX_CORRELATION", 0.7)
-        self_corr_ok = self_corr < max_correlation
-        # W0.5: self_corr_source defaults to "skipped" when corr check was not
-        # triggered (sharpe/fitness/turnover not promising); in that case treat
-        # as ok. When source is "unknown" (both local cache and BRAIN API
-        # failed) the alpha cannot fully clear PASS — downgrade to provisional.
+        # PR2: T1 skips concentrated_weight check (raw signal evaluation only).
+        # T2/T3 keep BRAIN's CONCENTRATED_WEIGHT rule.
+        if check_concentrated:
+            concentrated_ok = (
+                concentrated_check is None
+                or concentrated_check.get("result") != "FAIL"
+            )
+        else:
+            concentrated_ok = True
+
+        # PR2: tier-aware self_corr gate. T1/T2 force ok+verified so PASS path
+        # is reachable for wrapper variants; T3 uses real self_corr value.
         self_corr_source = locals().get("self_corr_source", "skipped")
-        self_corr_verified = self_corr_source != "unknown"
+        if check_self_corr:
+            self_corr_ok = self_corr < max_correlation
+            self_corr_verified = self_corr_source not in ("unknown",)
+        else:
+            self_corr_ok = True
+            self_corr_verified = True  # tier_skipped, not unknown
 
         hard_gate_pass = (
             sharpe >= sharpe_min
             and fitness >= fitness_min
-            and 0.01 <= turnover <= turnover_max
+            and turnover_min <= turnover <= turnover_max
             and sub_universe_ok
             and concentrated_ok
             and self_corr_ok
@@ -455,10 +491,14 @@ async def node_evaluate(
         # 这套机制对 OS 池规模无关 — 不论 5 还是 10000 条提交 alpha,
         # 单条 alpha 的 corrwith 都是 O(N列) ~50ms 量级。
         self_corr_acceptable = self_corr_ok or not self_corr_verified
+        # PR2: PROVISIONAL bar uses tier-specific looser thresholds (plan §"PASS_PROVISIONAL 阈值").
+        # T1: sharpe>0.5, fitness>0.3, turnover<0.85
+        # T2: sharpe>0.8, fitness>0.6, turnover<0.65
+        # T3: sharpe>=1.3, fitness>=0.8, turnover<0.70
         near_pass = (
-            sharpe >= sharpe_min
-            and fitness >= 0.6
-            and 0.01 <= turnover <= 0.85
+            sharpe >= prov_sharpe_min
+            and fitness >= prov_fitness_min
+            and turnover_min <= turnover <= prov_turnover_max
             and sub_universe_ok
             and concentrated_ok
             and self_corr_acceptable

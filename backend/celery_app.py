@@ -51,4 +51,11 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.refresh_os_correlation_cache",
         "schedule": crontab(hour=6, minute=30),
     },
+    # PR2: refresh KB-referenced alpha metrics + demote drifters at 06:15
+    # (between sync-datasets and refresh-os-correlation-cache to avoid BRAIN
+    # rate-limit overlap with sync_datasets, which can run for ~10 minutes).
+    "refresh-kb-referenced-alphas": {
+        "task": "backend.tasks.refresh_kb_referenced_alphas",
+        "schedule": crontab(hour=6, minute=15),
+    },
 }

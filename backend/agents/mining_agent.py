@@ -132,6 +132,11 @@ class MiningAgent:
         # Initialize TraceService
         trace_service = TraceService(self.db, task.id, iteration=iteration, run_id=run_id)
         
+        # PR2: derive factor_tier from task.agent_mode. AUTONOMOUS_TIER1/2/3
+        # → 1/2/3; everything else (legacy AUTONOMOUS, INTERACTIVE) → 1.
+        from backend.services.task_service import TaskService
+        factor_tier = TaskService.factor_tier_from_mode(task.agent_mode) or 1
+
         try:
             # Run workflow with strategy context
             result = await self._workflow.run_with_persistence(
@@ -146,7 +151,8 @@ class MiningAgent:
                         "strategy": strategy.to_dict(),  # Pass strategy to all nodes
                         "run_id": run_id,
                     }
-                }
+                },
+                factor_tier=factor_tier,
             )
             
             # Collect generated alphas from database

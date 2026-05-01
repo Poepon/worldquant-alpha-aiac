@@ -22,6 +22,7 @@ from backend.models import AlphaFailure, KnowledgeEntry, Alpha
 from backend.agents.prompts import FAILURE_ANALYSIS_SYSTEM, FAILURE_ANALYSIS_USER
 from backend.config import settings
 from backend.agents.services.llm_service import LLMService, get_llm_service
+from backend.factor_tier_classifier import classify_tier
 from backend.protocols import LLMProtocol
 
 from loguru import logger
@@ -360,7 +361,9 @@ class FeedbackAgent:
             await self._increment_pattern_usage(pattern)
             return {"action": "incremented", "pattern": pattern}
         
-        # Create new success pattern
+        # Create new success pattern (PR2: tag with factor_tier + alpha_id_ref
+        # so the daily refresh beat can locate the source alpha and so RAG can
+        # filter patterns by tier).
         entry = KnowledgeEntry(
             entry_type='SUCCESS_PATTERN',
             pattern=pattern,
@@ -369,8 +372,10 @@ class FeedbackAgent:
                 'sharpe': alpha.metrics.get('sharpe') if alpha.metrics else None,
                 'dataset': alpha.dataset_id,
                 'region': alpha.region,
-                'human_feedback': alpha.human_feedback
+                'human_feedback': alpha.human_feedback,
+                'alpha_id_ref': alpha.id,
             },
+            factor_tier=classify_tier(alpha.expression or ''),
             created_by='SYSTEM'
         )
         self.db.add(entry)
@@ -853,6 +858,13 @@ class FeedbackAgent:
             new_entries = 0
             
             # 1. Store New Patterns (with templates and variants)
+            # Pick a representative source alpha for alpha_id_ref. The pattern
+            # is LLM-aggregated across multiple successes, so any one of them
+            # serves as a usable backref for the daily refresh beat. Using the
+            # first matching success keeps determinism without expensive
+            # similarity matching.
+            representative_alpha_id = successes[0].id if successes else None
+
             for p in analysis.get("new_patterns", []):
                 pattern_str = p.get("pattern", "")
                 if pattern_str and not await self._pattern_exists(pattern_str):
@@ -868,8 +880,10 @@ class FeedbackAgent:
                             'template': p.get("template"),  # Generalized template
                             'economic_logic': p.get("economic_logic"),
                             'variants': p.get("variants", []),
-                            'source': 'evolution_loop'
-                        }
+                            'source': 'evolution_loop',
+                            'alpha_id_ref': representative_alpha_id,
+                        },
+                        factor_tier=classify_tier(pattern_str),
                     )
                     self.db.add(entry)
                     new_entries += 1

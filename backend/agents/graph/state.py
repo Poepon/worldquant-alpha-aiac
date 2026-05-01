@@ -19,25 +19,33 @@ class AlphaCandidate(BaseModel):
     hypothesis: Optional[str] = None
     explanation: Optional[str] = None
     expected_sharpe: Optional[float] = None
-    
+
     # Validation state
     is_valid: Optional[bool] = None
     validation_error: Optional[str] = None
-    
+
     # Simulation state
     is_simulated: bool = False
     simulation_success: Optional[bool] = None
     alpha_id: Optional[str] = None
     metrics: Dict = Field(default_factory=dict)
     simulation_error: Optional[str] = None
-    
+
     # Correction state
     correction_attempts: int = 0
     original_expression: Optional[str] = None  # If corrected
-    
+
     # Evaluation state
     quality_status: str = "PENDING"  # PASS, FAIL, PENDING
-    
+
+    # Tier system: parent alphas.id when this candidate is a T2/T3 wrapping
+    # of a prior-tier seed. None for T1 candidates and legacy AUTONOMOUS.
+    parent_alpha_id: Optional[int] = None
+    # Generation provenance: e.g. "group_neutralize_industry" / "rank" /
+    # "trade_when_high_volume_entry". Used by post-task analytics to compute
+    # wrapper-kind yield rates.
+    wrapper_kind: Optional[str] = None
+
     # Additional metadata for tracking
     metadata: Dict = Field(default_factory=dict)
 
@@ -51,6 +59,9 @@ class AlphaResult(BaseModel):
     metrics: Dict = Field(default_factory=dict)
     quality_status: str = "PENDING"  # PASS, REJECT, PENDING
     trace_step_id: Optional[int] = None
+    # Tier system fields propagated to the Alpha DB row
+    parent_alpha_id: Optional[int] = None
+    wrapper_kind: Optional[str] = None
 
 
 class FailureRecord(BaseModel):
@@ -148,6 +159,25 @@ class MiningState(BaseModel):
     early_stopped: bool = False
     early_stop_reason: Optional[str] = None
     multi_fidelity_enabled: bool = False  # W4 nice-to-have
+
+    # -------------------------------------------------------------------------
+    # Tier system (T1/T2/T3 factor library) — populated by router from agent_mode
+    # -------------------------------------------------------------------------
+    # factor_tier: 1 = T1 (LLM-guided field/op selection),
+    #              2 = T2 (wrap T1 PASS seeds with cross-sectional / smoothing),
+    #              3 = T3 (wrap T2 PASS seeds with trade_when filters).
+    # Default 1 keeps the legacy AUTONOMOUS path classified as T1 when
+    # ENABLE_FACTOR_TIERING is on.
+    factor_tier: int = 1
+    # current_strategy: Pydantic model serialized via .model_dump(); T1 stores
+    # T1Strategy, T2/T3 store T{2,3}Strategy. Consumers reconstitute the typed
+    # object before passing to expand_*_strategy.
+    current_strategy: Optional[Dict] = None
+    # T2/T3 only: seeds loaded once at task start by node_tier_seed_load.
+    # Each entry: {alpha_id, expression, region, dataset_id, metrics, snapshot_at}
+    tier_seeds: List[Dict] = Field(default_factory=list)
+    current_seed_index: int = 0
+    current_seed: Optional[Dict] = None
 
     # -------------------------------------------------------------------------
     # Control Flags

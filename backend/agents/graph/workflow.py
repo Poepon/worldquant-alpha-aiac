@@ -22,13 +22,65 @@ from backend.agents.graph.nodes import (
     node_evaluate,
     node_save_results
 )
+from backend.agents.graph.nodes.t1_nodes import (
+    node_t1_strategy_select,
+    node_t1_expand,
+)
+from backend.agents.graph.nodes.tier_seed import (
+    node_tier_seed_load,
+    node_tier_strategy_select,
+    node_tier_wrap_one,
+)
 from backend.agents.graph.edges import (
     route_after_validate,
     route_check_error
 )
 from backend.agents.services import LLMService, RAGService, get_llm_service
 from backend.adapters.brain_adapter import BrainAdapter
+from backend.config import settings
 from backend.models import MiningTask
+
+
+# =============================================================================
+# Tier-aware routing functions (PR2)
+# =============================================================================
+
+def _route_at_start(state: MiningState) -> str:
+    """Conditional entry point. T1 → legacy/llm-guided rag flow; T2/T3 → tier_seed_load."""
+    if state.factor_tier and state.factor_tier > 1:
+        return "tier_seed_load"
+    return "rag_query"
+
+
+def _route_after_distill(state: MiningState) -> str:
+    """T1 task: feature flag picks LLM-guided vs legacy hypothesis path."""
+    if getattr(settings, "T1_USE_LLM_GUIDED_STRATEGY", True):
+        return "t1_strategy_select"
+    return "hypothesis"
+
+
+def _route_after_seed_load(state: MiningState) -> str:
+    """If tier_seed_load found insufficient seeds, end the run."""
+    if getattr(state, "should_stop", False):
+        return "END"
+    if not state.tier_seeds:
+        return "END"
+    return "tier_strategy_select"
+
+
+def _route_after_save_results(state: MiningState) -> str:
+    """T1 → END (mining_agent's outer loop handles multi-round).
+    T2/T3 → loop to next seed if any remain, else END."""
+    if state.factor_tier and state.factor_tier > 1:
+        next_idx = state.current_seed_index + 1
+        if next_idx < len(state.tier_seeds):
+            return "tier_strategy_select"
+    return "END"
+
+
+async def node_advance_seed(state: MiningState, config=None) -> Dict:
+    """Pure state increment: advance current_seed_index for next T2/T3 round."""
+    return {"current_seed_index": state.current_seed_index + 1}
 
 
 class MiningWorkflow:
@@ -124,20 +176,56 @@ class MiningWorkflow:
         
         # Save results node (handles both success and failure saving)
         workflow.add_node("save_results", node_save_results)
-        
-        
+
+        # PR2: T1 LLM-guided generation nodes
+        workflow.add_node("t1_strategy_select", node_t1_strategy_select)
+        workflow.add_node("t1_expand", node_t1_expand)
+
+        # PR2: T2/T3 tier-seed-driven wrapping nodes
+        workflow.add_node("tier_seed_load", node_tier_seed_load)
+        workflow.add_node("tier_strategy_select", node_tier_strategy_select)
+        workflow.add_node("tier_wrap_one", node_tier_wrap_one)
+        workflow.add_node("advance_seed", node_advance_seed)
+
         # =====================================================================
         # Add Edges
         # =====================================================================
-        
-        # Linear flow: START → rag_query → distill_context → hypothesis → code_gen → validate
-        workflow.set_entry_point("rag_query")
+
+        # PR2: Conditional entry point — T1 enters via rag_query, T2/T3 via
+        # tier_seed_load. set_conditional_entry_point lets the same compiled
+        # graph serve both task shapes.
+        workflow.set_conditional_entry_point(
+            _route_at_start,
+            {
+                "rag_query": "rag_query",
+                "tier_seed_load": "tier_seed_load",
+            },
+        )
+
+        # T1 path
         workflow.add_edge("rag_query", "distill_context")
-        workflow.add_edge("distill_context", "hypothesis")
+        # PR2: After distill_context, route between legacy hypothesis path and
+        # the new LLM-guided strategy/expand path based on
+        # T1_USE_LLM_GUIDED_STRATEGY feature flag.
+        workflow.add_conditional_edges(
+            "distill_context",
+            _route_after_distill,
+            {
+                "hypothesis": "hypothesis",
+                "t1_strategy_select": "t1_strategy_select",
+            },
+        )
+
+        # T1 LLM-guided arm
+        workflow.add_edge("t1_strategy_select", "t1_expand")
+        workflow.add_edge("t1_expand", "validate")
+
+        # T1 legacy arm (original)
         workflow.add_edge("hypothesis", "code_gen")
         workflow.add_edge("code_gen", "validate")
-        
-        # After validate: conditional routing (Batch)
+
+        # After validate: existing self-correct vs simulate routing (shared by
+        # all T1 paths and by T2/T3 wrap-one output).
         workflow.add_conditional_edges(
             "validate",
             route_after_validate,
@@ -146,19 +234,39 @@ class MiningWorkflow:
                 "self_correct": "self_correct"
             }
         )
-        
-        # After self-correct: Always back to validate (to re-check fixes)
         workflow.add_edge("self_correct", "validate")
-        
-        # After simulate: Unconditional -> evaluate
+
+        # T2/T3 path
+        # tier_seed_load may early-stop (insufficient seeds); route accordingly.
+        workflow.add_conditional_edges(
+            "tier_seed_load",
+            _route_after_seed_load,
+            {
+                "tier_strategy_select": "tier_strategy_select",
+                "END": END,
+            },
+        )
+        workflow.add_edge("tier_strategy_select", "tier_wrap_one")
+        # T2/T3 variants skip VALIDATE (programmatic _dedup_and_validate already
+        # filtered them) and go straight to simulate.
+        workflow.add_edge("tier_wrap_one", "simulate")
+
+        # Shared post-pipeline
         workflow.add_edge("simulate", "evaluate")
-        
-        # After evaluate: Unconditional -> save_results
         workflow.add_edge("evaluate", "save_results")
-        
-        # After save_results: END
-        workflow.add_edge("save_results", END)
-        
+
+        # After save_results: T1 → END (mining_agent loops); T2/T3 → next seed
+        # via advance_seed → tier_strategy_select, or END if last seed.
+        workflow.add_conditional_edges(
+            "save_results",
+            _route_after_save_results,
+            {
+                "tier_strategy_select": "advance_seed",
+                "END": END,
+            },
+        )
+        workflow.add_edge("advance_seed", "tier_strategy_select")
+
         return workflow
     
     def compile(self):
@@ -172,26 +280,31 @@ class MiningWorkflow:
         fields: List[Dict],
         operators: List[str],
         num_alphas: int = 3,
-        config: Dict[str, Any] = None
+        config: Dict[str, Any] = None,
+        factor_tier: int = 1,
     ) -> Dict[str, Any]:
         """
         Execute the mining workflow.
-        
+
         Args:
             task: Mining task instance
             dataset_id: Dataset to mine
             fields: Available data fields
             operators: Available operators
             num_alphas: Target number of alphas
-            
+            factor_tier: 1 / 2 / 3. PR2 — derived from task.agent_mode by the
+                router (AUTONOMOUS_TIER1 → 1, AUTONOMOUS_TIER2 → 2,
+                AUTONOMOUS_TIER3 → 3, AUTONOMOUS → 1). evaluation node and
+                future tier_seed nodes branch on this.
+
         Returns:
-            Dictionary with generated_alphas and failures
+            Dictionary with generated_alphas, failures, trace_steps, factor_tier.
         """
         logger.info(
             f"[MiningWorkflow] 开始执行 | "
-            f"task={task.id} dataset={dataset_id} target={num_alphas}"
+            f"task={task.id} dataset={dataset_id} target={num_alphas} tier={factor_tier}"
         )
-        
+
         # Initialize state
         initial_state = MiningState(
             task_id=task.id,
@@ -200,7 +313,8 @@ class MiningWorkflow:
             dataset_id=dataset_id,
             fields=fields,
             operators=operators,
-            num_alphas_target=num_alphas
+            num_alphas_target=num_alphas,
+            factor_tier=factor_tier,
         )
         
         # Compile and run
@@ -232,10 +346,20 @@ class MiningWorkflow:
             f"success={len(generated_alphas)} failed={len(failures)}"
         )
         
+        # Extract tier from final_state for run_and_persist propagation. Falls
+        # back to the input factor_tier if state didn't carry it (legacy path).
+        if hasattr(final_state, 'factor_tier'):
+            ft = final_state.factor_tier
+        elif isinstance(final_state, dict):
+            ft = final_state.get('factor_tier', factor_tier)
+        else:
+            ft = factor_tier
+
         return {
             "generated_alphas": generated_alphas,
             "failures": failures,
-            "trace_steps": final_state.trace_steps if hasattr(final_state, 'trace_steps') else []
+            "trace_steps": final_state.trace_steps if hasattr(final_state, 'trace_steps') else [],
+            "factor_tier": ft,
         }
     
     async def run_with_persistence(
@@ -245,28 +369,41 @@ class MiningWorkflow:
         fields: List[Dict],
         operators: List[str],
         num_alphas: int = 3,
-        config: Dict[str, Any] = None
+        config: Dict[str, Any] = None,
+        factor_tier: int = 1,
     ):
         """
         Execute workflow and persist results to database.
+
+        factor_tier (PR2): caller-supplied tier. The router maps task.agent_mode
+        to {1,2,3} and passes here. Defaults to 1 to keep legacy AUTONOMOUS
+        path identical to T1 behavior under ENABLE_FACTOR_TIERING.
         """
         from backend.models import Alpha, AlphaFailure, TraceStep
-        
-        result = await self.run(task, dataset_id, fields, operators, num_alphas, config)
+
+        result = await self.run(
+            task, dataset_id, fields, operators, num_alphas, config,
+            factor_tier=factor_tier,
+        )
 
         configurable = (config or {}).get("configurable", {})
         run_id = configurable.get("run_id")
-        
+
         try:
             # Persist alphas
             # P0-fix-2: Import hash function for deduplication
             from backend.alpha_semantic_validator import compute_expression_hash
-            
+
+            # PR2: tier from result (state.factor_tier, propagated through run()).
+            task_factor_tier = result.get("factor_tier", factor_tier)
+            from datetime import datetime as _dt
+            task_metrics_snapshot_at = _dt.utcnow()
+
             for alpha_result in result.get("generated_alphas", []):
                 try:
                     # P0-fix-2: Compute expression hash for DB-level deduplication
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
-                    
+
                     alpha = Alpha(
                         task_id=task.id,
                         run_id=run_id,
@@ -279,7 +416,11 @@ class MiningWorkflow:
                         universe=task.universe,
                         dataset_id=dataset_id,
                         quality_status=alpha_result.quality_status,
-                        metrics=alpha_result.metrics
+                        metrics=alpha_result.metrics,
+                        # Tier system: per-task factor_tier + per-alpha lineage.
+                        factor_tier=task_factor_tier,
+                        parent_alpha_id=getattr(alpha_result, "parent_alpha_id", None),
+                        metrics_snapshot_at=task_metrics_snapshot_at,
                     )
                     self.db.add(alpha)
                 except Exception as e:

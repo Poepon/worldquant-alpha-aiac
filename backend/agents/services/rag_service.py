@@ -424,6 +424,7 @@ class RAGService:
         days_window: int = 7,
         prefer_hitl: bool = True,
         hitl_min_count: int = 5,
+        factor_tier: Optional[int] = None,
     ) -> List[Dict]:
         """W6 (revised post-T9): rolling few-shot pool with dataset HARD filter.
 
@@ -436,6 +437,15 @@ class RAGService:
             (default 5). One-off HITL signals are too noisy to bias prompts.
 
         Region remains soft-match (+0.2 score) to allow cross-region transfer.
+
+        PR2 — tier filter:
+          - `factor_tier` (1/2/3) restricts results to that tier; T1 task should
+            pass factor_tier=1 to avoid contaminating LLM context with T2/T3
+            wrappers.
+          - Cold-start fallback: when factor_tier=1 returns < 3 rows, the method
+            pulls historical T2 PASS patterns and strips one wrapper layer to
+            synthesize T1 kernels (marked `is_synthesized=True`). Caller's prompt
+            should warn the LLM these aren't real T1 PASS examples.
         """
         from datetime import datetime, timedelta
         from sqlalchemy import func
@@ -461,6 +471,8 @@ class RAGService:
             .order_by(KnowledgeEntry.usage_count.desc())
             .limit(limit * 6)  # over-fetch since dataset filter may drop many
         )
+        if factor_tier is not None:
+            stmt = stmt.where(KnowledgeEntry.factor_tier == factor_tier)
         result = await self.db.execute(stmt)
         rows = list(result.scalars().all())
         if not rows:
@@ -510,10 +522,53 @@ class RAGService:
                 "confidence": md.get("confidence", 0.5),
                 "source": entry.created_by,
                 "usage_count": entry.usage_count,
+                "factor_tier": entry.factor_tier,
             })
+
+        # T1 cold-start fallback (PR2): when T1 KB has < 3 entries, synthesize
+        # T1 kernels by stripping one wrapper layer from historical T2 KB rows.
+        # The LLM sees these flagged as is_synthesized=True so the prompt can
+        # warn against treating them as proven PASS examples.
+        if factor_tier == 1 and len(out) < 3:
+            from backend.factor_tier_classifier import extract_tier1_seed, is_t1_expression
+
+            t2_stmt = (
+                select(KnowledgeEntry)
+                .where(
+                    KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
+                    KnowledgeEntry.is_active == True,
+                    KnowledgeEntry.factor_tier == 2,
+                )
+                .order_by(KnowledgeEntry.usage_count.desc())
+                .limit(10)
+            )
+            t2_rows = (await self.db.execute(t2_stmt)).scalars().all()
+            synthesized = []
+            for t2 in t2_rows:
+                kernel = extract_tier1_seed(t2.pattern or "")
+                if kernel and is_t1_expression(kernel):
+                    md = t2.meta_data or {}
+                    synthesized.append({
+                        "pattern": kernel,
+                        "description": (t2.description or "") + " (synthesized T1 kernel from T2)",
+                        "expected_sharpe": md.get("expected_sharpe"),
+                        "expected_fitness": md.get("expected_fitness"),
+                        "confidence": (md.get("confidence", 0.5) or 0.5) * 0.5,  # lower trust
+                        "source": "synthesized",
+                        "usage_count": t2.usage_count,
+                        "factor_tier": 1,
+                        "is_synthesized": True,
+                    })
+            out.extend(synthesized[: max(0, 5 - len(out))])
+            logger.info(
+                f"[RAGService] T1 cold-start fallback synthesized {len(synthesized)} "
+                f"kernels from T2 KB (out_total={len(out)})"
+            )
+
         logger.info(
             f"[RAGService] few-shot pool | region={region} dataset={dataset_id} "
-            f"returned={len(out)} (HITL={sum(1 for e in out if e['source']=='HITL')}, "
+            f"tier={factor_tier} returned={len(out)} "
+            f"(HITL={sum(1 for e in out if e.get('source')=='HITL')}, "
             f"hitl_bonus_active={apply_hitl_bonus}, global_hitl={hitl_count})"
         )
         return out

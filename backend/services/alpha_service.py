@@ -18,7 +18,7 @@ from sqlalchemy import select, update, func
 from backend.services.base import BaseService
 from backend.repositories import AlphaRepository
 from backend.protocols.repository_protocol import PaginationParams, PaginatedResult
-from backend.models import Alpha, TraceStep
+from backend.models import Alpha, AlphaStatusTransition, TraceStep
 
 logger = logging.getLogger("services.alpha")
 
@@ -432,11 +432,72 @@ class AlphaService(BaseService):
     async def get_region_distribution(self, task_id: Optional[int] = None) -> Dict[str, int]:
         """
         Get distribution of alphas by region.
-        
+
         Args:
             task_id: Optional task filter
-            
+
         Returns:
             Dict of region -> count
         """
         return await self.alpha_repo.get_region_distribution(task_id)
+
+    # =========================================================================
+    # Tier System — quality_status transition audit (PR2)
+    # =========================================================================
+
+    async def apply_quality_status_change(
+        self,
+        alpha_id: int,
+        new_status: str,
+        reason: str,
+        source: str,
+    ) -> bool:
+        """Single-point writer for alpha.quality_status changes.
+
+        Atomically updates alphas.quality_status and inserts an
+        alpha_status_transitions row capturing the change. Wrapping both in
+        one transaction guarantees the audit log can never miss a transition.
+
+        Args:
+            alpha_id: Database ID (NOT BRAIN alpha_id) of the alpha.
+            new_status: Target QualityStatus value (PASS / PASS_PROVISIONAL /
+                FAIL / OPTIMIZE / REJECT / PENDING).
+            reason: Free-text human-readable explanation. Examples:
+                "tier_seed_refresh — sharpe drifted below T3 threshold",
+                "user manual review", "tier reclassified".
+            source: Controlled enum identifying the code path that triggered
+                the change. One of: "node_evaluate" / "tier_seed_refresh" /
+                "daily_beat_kb" / "daily_beat_os" / "backfill" / "manual_api".
+
+        Returns:
+            True if a transition row was written, False if no-op (status
+            unchanged or alpha not found).
+
+        The session commit is the caller's responsibility — this method only
+        flushes so the transition is visible within the same transaction.
+        """
+        alpha = await self.alpha_repo.get_by_id(alpha_id)
+        if alpha is None:
+            logger.warning(
+                f"[AlphaService] apply_quality_status_change: alpha_id={alpha_id} not found"
+            )
+            return False
+        if alpha.quality_status == new_status:
+            return False  # no-op, don't pollute audit log
+
+        transition = AlphaStatusTransition(
+            alpha_id=alpha_id,
+            old_status=alpha.quality_status,
+            new_status=new_status,
+            sharpe_at_transition=alpha.is_sharpe,
+            reason=reason,
+            source=source,
+        )
+        self.db.add(transition)
+        alpha.quality_status = new_status
+        await self.db.flush()
+        logger.info(
+            f"[AlphaService] alpha_id={alpha_id} {transition.old_status} -> {new_status} "
+            f"(source={source}, reason={reason!r})"
+        )
+        return True

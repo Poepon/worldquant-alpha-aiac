@@ -155,8 +155,13 @@ async def create_task(
         daily_goal=request.daily_goal,
         config=request.config,
     )
-    
-    task = await service.create_task(data)
+
+    # PR2: tier eligibility check raises ValueError with a user-facing message
+    # when prereqs aren't met (feature flag off, missing seed alphas, etc).
+    try:
+        task = await service.create_task(data)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     
     return TaskResponse(
         id=task.id,

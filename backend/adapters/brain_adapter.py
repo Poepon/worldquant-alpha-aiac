@@ -13,6 +13,8 @@ Refactored based on ace_lib.py best practices:
 import os
 import asyncio
 import json
+import random
+import time
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta
 import httpx
@@ -126,7 +128,87 @@ class BrainAdapter:
                 await r.set(cls._SLOT_COUNTER_KEY, 0)
         except Exception as e:
             logger.warning(f"[BrainAdapter] release sim slot failed (non-fatal): {e}")
-    
+
+    # ---- Cross-process rate-limit cooldown -----------------------------------
+    # Each endpoint shares a Redis-backed cooldown so that when one caller is
+    # rate-limited, every other caller (across processes) pauses before its
+    # next request. A separate "strike counter" decays after a quiet window so
+    # the backoff floor grows under sustained pressure even when each call
+    # individually retries-and-succeeds (which would otherwise reset its local
+    # `retries` counter to 0 every invocation).
+    _RL_COOLDOWN_PREFIX: str = "brain:rl_cooldown"
+    _RL_STRIKE_TTL_SEC: int = 60
+    _RL_BACKOFF_CAP_SEC: float = 60.0
+
+    @classmethod
+    async def _rl_remaining(cls, endpoint: str) -> float:
+        try:
+            r = await cls._get_slot_redis()
+            ms = await r.pttl(f"{cls._RL_COOLDOWN_PREFIX}:{endpoint}")
+            return ms / 1000.0 if ms and ms > 0 else 0.0
+        except Exception:
+            return 0.0
+
+    @classmethod
+    async def _rl_set_cooldown(cls, endpoint: str, seconds: float) -> None:
+        try:
+            r = await cls._get_slot_redis()
+            await r.set(
+                f"{cls._RL_COOLDOWN_PREFIX}:{endpoint}",
+                "1",
+                px=max(1, int(seconds * 1000)),
+            )
+        except Exception:
+            pass
+
+    @classmethod
+    async def _rl_record_strike(cls, endpoint: str) -> int:
+        try:
+            r = await cls._get_slot_redis()
+            key = f"{cls._RL_COOLDOWN_PREFIX}:{endpoint}:strikes"
+            n = await r.incr(key)
+            await r.expire(key, cls._RL_STRIKE_TTL_SEC)
+            return int(n)
+        except Exception:
+            return 1
+
+    # Baseline inter-request gap — applied even at strikes=0 so paginated
+    # bursts don't trigger the first 429 in the first place. Each 429 then
+    # multiplies this gap on top.
+    _RL_BASELINE_GAP_SEC: float = 0.3
+    _RL_PACE_CAP_SEC: float = 16.0
+
+    @classmethod
+    async def _rl_pace(cls, endpoint: str) -> None:
+        """Proactive rate-limit pacing: ensure a minimum inter-request gap on
+        this endpoint to avoid bursting into 429.
+
+        - strikes == 0: baseline gap (~0.3s) — keeps paginated reads safe.
+        - strikes >= 1: gap doubles per strike (1, 2, 4, 8, 16s) capped at 16s.
+        - strikes counter naturally TTLs out after 60s of quiet — pacing relaxes
+          back to baseline automatically.
+
+        Cross-process via Redis so all callers cooperate on the same endpoint.
+        """
+        try:
+            r = await cls._get_slot_redis()
+            strikes_raw = await r.get(f"{cls._RL_COOLDOWN_PREFIX}:{endpoint}:strikes")
+            strikes = int(strikes_raw) if strikes_raw else 0
+            if strikes <= 0:
+                min_gap = cls._RL_BASELINE_GAP_SEC
+            else:
+                min_gap = float(min(2 ** min(strikes - 1, 4), cls._RL_PACE_CAP_SEC))
+            last_key = f"{cls._RL_COOLDOWN_PREFIX}:{endpoint}:last_req_at"
+            last_raw = await r.get(last_key)
+            now = time.time()
+            if last_raw:
+                elapsed = now - float(last_raw)
+                if elapsed < min_gap:
+                    await asyncio.sleep(min_gap - elapsed)
+            await r.set(last_key, str(time.time()), ex=120)
+        except Exception:
+            pass
+
     def __init__(self, email: str = None, password: str = None):
         # Store explicit credentials if provided
         self._explicit_email = email
@@ -846,49 +928,74 @@ class BrainAdapter:
 
     async def _safe_api_call(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
         """
-        Execute API call with auto-reauth on 401 and retry on 429/5xx.
+        Execute API call with auto-reauth on 401 and exponential backoff +
+        jitter on 429/5xx. Backoff is shared across processes via Redis so
+        concurrent callers cooperate when a rate limit is hit.
         """
         url = f"{self.BASE_URL}{endpoint}"
         retries = 0
         max_retries = 5
-        
+
         while retries < max_retries:
+            # 1) Hard cooldown set by a recent 429 — sleep until it expires.
+            cooldown = await self._rl_remaining(endpoint)
+            if cooldown > 0:
+                await asyncio.sleep(cooldown)
+            # 2) Soft pacing while strikes are warm — enforces a minimum gap
+            #    between consecutive requests (across processes) so paginated
+            #    bursts don't burst right back into the next 429.
+            await self._rl_pace(endpoint)
+
             try:
                 response = await getattr(self.client, method.lower())(url, **kwargs)
-                
+
                 # 1. Handle 401 Unauthorized (Token Expiry)
                 if response.status_code == 401:
                     logger.warning(f"401 Unauthorized for {endpoint}, re-authenticating...")
                     if await self.authenticate():
-                        # Retry immediately with new token
                         response = await getattr(self.client, method.lower())(url, **kwargs)
-                
+
                 # 2. Handle 429 Too Many Requests (Rate Limit)
                 if response.status_code == 429:
                     retry_after = response.headers.get("Retry-After")
-                    wait_time = float(retry_after) if retry_after else (2 ** (retries + 1))
-                    logger.warning(f"429 Rate Limit for {endpoint}. Sleeping {wait_time}s (Attempt {retries+1}/{max_retries})")
+                    strikes = await self._rl_record_strike(endpoint)
+                    # Exponential floor that grows with recent 429s across all
+                    # callers: 2,4,8,16,32,64s (capped). Retry-After acts as a
+                    # lower bound so we never wait less than the server asks.
+                    backoff = min(2 ** min(strikes, 6), self._RL_BACKOFF_CAP_SEC)
+                    base = max(float(retry_after), backoff) if retry_after else backoff
+                    wait_time = base + random.uniform(0, base * 0.25)
+                    await self._rl_set_cooldown(endpoint, wait_time)
+                    logger.warning(
+                        f"429 Rate Limit for {endpoint}. Sleeping {wait_time:.2f}s "
+                        f"(Retry-After={retry_after}, strikes={strikes}, "
+                        f"attempt {retries+1}/{max_retries})"
+                    )
                     await asyncio.sleep(wait_time)
                     retries += 1
                     continue
-                
+
                 # 3. Handle 5xx Server Errors (Temporary Glitch)
                 if 500 <= response.status_code < 600:
-                    wait_time = 2 ** (retries + 1)
-                    logger.warning(f"Server Error {response.status_code} for {endpoint}. Sleeping {wait_time}s")
+                    base = min(2 ** (retries + 1), self._RL_BACKOFF_CAP_SEC)
+                    wait_time = base + random.uniform(0, base * 0.25)
+                    logger.warning(
+                        f"Server Error {response.status_code} for {endpoint}. "
+                        f"Sleeping {wait_time:.2f}s (attempt {retries+1}/{max_retries})"
+                    )
                     await asyncio.sleep(wait_time)
                     retries += 1
                     continue
-                
+
                 return response
-                
+
             except (httpx.RequestError, httpx.TimeoutException) as e:
-                # Network level errors
-                wait_time = 2 ** (retries + 1)
-                logger.error(f"Network error {endpoint}: {e}. Retrying in {wait_time}s...")
+                base = min(2 ** (retries + 1), self._RL_BACKOFF_CAP_SEC)
+                wait_time = base + random.uniform(0, base * 0.25)
+                logger.error(f"Network error {endpoint}: {e}. Retrying in {wait_time:.2f}s...")
                 await asyncio.sleep(wait_time)
                 retries += 1
-                
+
         # If exhausted retries, return the last response or raise
         logger.error(f"Max retries exceeded for {endpoint}")
         if 'response' in locals():
@@ -964,6 +1071,26 @@ class BrainAdapter:
             response = await self.client.get(f"{self.BASE_URL}/alphas/{alpha_id}/recordsets/pnl")
             return response.json() if response.status_code == 200 else {}
         except Exception:
+            return {}
+
+    async def get_alpha(self, alpha_id: str) -> Dict:
+        """GET /alphas/{id} — full alpha detail with current is.sharpe / is.fitness /
+        metrics.checks. Distinct from get_alpha_pnl which fetches the PnL series.
+
+        Used by node_tier_seed_load to refresh metrics on T2/T3 candidate seeds at
+        task start. Goes through _safe_api_call so cross-process rate-limit
+        cooldowns and retries apply.
+        """
+        try:
+            response = await self._safe_api_call("GET", f"/alphas/{alpha_id}")
+            if response.status_code == 200:
+                return response.json()
+            logger.warning(
+                f"[BrainAdapter] get_alpha({alpha_id}) status={response.status_code}"
+            )
+            return {}
+        except Exception as e:
+            logger.warning(f"[BrainAdapter] get_alpha({alpha_id}) failed: {e}")
             return {}
 
     async def check_correlation(self, alpha_id: str, check_type: str = "PROD") -> Dict:

@@ -38,6 +38,8 @@ from backend.tasks.sync_tasks import (
     sync_user_alphas,
     refresh_os_correlation_cache,
 )
+# PR2: tier-system refresh beat
+from backend.tasks.refresh_tasks import refresh_kb_referenced_alphas
 
 __all__ = [
     # Utilities
@@ -56,4 +58,6 @@ __all__ = [
     "sync_fields_from_brain",
     "sync_user_alphas",
     "refresh_os_correlation_cache",
+    # PR2: tier system
+    "refresh_kb_referenced_alphas",
 ]

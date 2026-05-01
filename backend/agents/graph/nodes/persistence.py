@@ -51,6 +51,9 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                 alpha_id=alpha.alpha_id,
                 metrics=alpha.metrics,
                 quality_status=alpha.quality_status,
+                # Tier system: propagate lineage + wrapper provenance to DB row
+                parent_alpha_id=alpha.parent_alpha_id,
+                wrapper_kind=alpha.wrapper_kind,
             )
             success_batch.append(res)
             logger.info(
