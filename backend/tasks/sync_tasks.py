@@ -571,38 +571,72 @@ def _parse_to_beijing(iso_str):
 
 
 def _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_metrics, date_submitted):
-    """Update an existing alpha with new data."""
+    """Update an existing alpha with new data.
+
+    Auto-fills tier-system fields (factor_tier, can_submit, metrics_snapshot_at)
+    so /alphas/sync produces ready-to-use rows for FactorLibrary + T2/T3
+    seed pools without an extra backfill step.
+    """
+    from backend.can_submit import compute_can_submit
+    from backend.factor_tier_classifier import classify_tier
+
     existing.status = a_data.get("status")
     existing.stage = stage
     existing.settings = settings
     existing.tags = a_data.get("tags")
     existing.checks = a_data.get("is", {}).get("checks", [])
-    
+
     existing.is_metrics = is_metrics
     existing.os_metrics = os_metrics
-    
+
     existing.is_sharpe = is_metrics.get("sharpe")
     existing.is_fitness = is_metrics.get("fitness")
     existing.is_returns = is_metrics.get("returns")
     existing.is_turnover = is_metrics.get("turnover")
     existing.is_drawdown = is_metrics.get("drawdown")
-    
+
     existing.date_modified = datetime.now()
     if date_submitted:
         existing.date_submitted = date_submitted
-    
+
     existing.dataset_id = settings.get("datasetId")
-    existing.metrics = is_metrics
-    
+
+    # Tier system auto-fill — only set factor_tier when classify_tier returns
+    # a definite value; never overwrite an existing tier with None (prior
+    # backfill might have classified it more precisely than the live value).
+    if existing.expression:
+        new_tier = classify_tier(existing.expression)
+        if new_tier is not None:
+            existing.factor_tier = new_tier
+
+    can_sub, failed, pending = compute_can_submit(a_data)
+    if can_sub is not None:
+        existing.can_submit = can_sub
+
+    existing.metrics_snapshot_at = datetime.now(timezone.utc)
+    existing.metrics = {
+        **(is_metrics or {}),
+        "_brain_can_submit": can_sub,
+        "_brain_failed_checks": failed,
+        "_brain_pending_checks": pending,
+    }
+
     existing.is_margin = is_metrics.get("margin")
     existing.is_long_count = is_metrics.get("longCount")
     existing.is_short_count = is_metrics.get("shortCount")
 
 
 def _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_created, date_submitted):
-    """Create a new alpha from BRAIN data."""
+    """Create a new alpha from BRAIN data.
+
+    Auto-fills tier-system fields (factor_tier, can_submit, metrics_snapshot_at)
+    so /alphas/sync produces ready-to-use rows for FactorLibrary + T2/T3
+    seed pools without an extra backfill step.
+    """
     from backend.alpha_semantic_validator import compute_expression_hash
-    
+    from backend.can_submit import compute_can_submit
+    from backend.factor_tier_classifier import classify_tier
+
     expr_code = (
         a_data.get("regular", {}).get("code") or
         a_data.get("combo", {}).get("code") or
@@ -610,7 +644,10 @@ def _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_crea
         "N/A"
     )
     expr_hash = compute_expression_hash(expr_code) if expr_code != "N/A" else None
-    
+
+    factor_tier = classify_tier(expr_code) if expr_code != "N/A" else None
+    can_sub, failed, pending = compute_can_submit(a_data)
+
     return Alpha(
         alpha_id=a_data.get("id"),
         type=a_data.get("type"),
@@ -637,5 +674,13 @@ def _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_crea
         is_short_count=is_metrics.get("shortCount"),
         date_created=date_created,
         date_submitted=date_submitted,
-        metrics=is_metrics,
+        factor_tier=factor_tier,
+        can_submit=can_sub,
+        metrics_snapshot_at=datetime.now(timezone.utc),
+        metrics={
+            **(is_metrics or {}),
+            "_brain_can_submit": can_sub,
+            "_brain_failed_checks": failed,
+            "_brain_pending_checks": pending,
+        },
     )
