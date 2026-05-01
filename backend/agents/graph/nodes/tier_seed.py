@@ -350,6 +350,12 @@ async def node_tier_wrap_one(
             explanation=f"T{state.factor_tier} wrap of seed alpha_id={seed.get('alpha_id')}",
             parent_alpha_id=seed.get("alpha_id"),
             wrapper_kind=v.get("wrapper_kind"),
+            # PR6 fix — variants are already validated by _dedup_and_validate
+            # (semantic + tier roundtrip checks). Mark them is_valid=True so
+            # node_simulate doesn't skip them. Without this the T2/T3 path
+            # short-circuits (simulate sees no valid alphas) and every variant
+            # ends up FAILed with empty metrics → evaluate's sharpe gate trips.
+            is_valid=True,
             metadata={
                 "tier": state.factor_tier,
                 "seed_brain_alpha_id": seed.get("brain_alpha_id"),
