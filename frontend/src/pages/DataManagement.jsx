@@ -277,14 +277,19 @@ const OperatorsTab = () => {
             />
             <Select
               placeholder="类别筛选"
-              style={{ width: 150 }}
+              style={{ width: 170 }}
               allowClear
               onChange={val => setCategory(val)}
             >
-              <Option value="math">Math</Option>
-              <Option value="time_series">Time Series</Option>
-              <Option value="cross_section">Cross Section</Option>
-              <Option value="logical">Logical</Option>
+              {/* Values must match operators.category in DB exactly
+                  (case + space). Counts shown are current distribution. */}
+              <Option value="Time Series">Time Series (24)</Option>
+              <Option value="Arithmetic">Arithmetic 算术 (15)</Option>
+              <Option value="Logical">Logical 逻辑 (11)</Option>
+              <Option value="Cross Sectional">Cross Sectional (6)</Option>
+              <Option value="Group">Group (6)</Option>
+              <Option value="Transformational">Transformational (2)</Option>
+              <Option value="Vector">Vector (2)</Option>
             </Select>
           </Space>
         </Col>
