@@ -404,6 +404,15 @@ class MiningWorkflow:
                     # P0-fix-2: Compute expression hash for DB-level deduplication
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
 
+                    # PR4 fix — flatten the metrics JSONB into the dedicated
+                    # is_sharpe / is_fitness / is_turnover / is_returns /
+                    # is_drawdown columns. The factor_library stats endpoints
+                    # and FactorLibrary.jsx KPI cards query these columns
+                    # directly; without this flattening they all read NULL
+                    # for newly-mined alphas, breaking the avg/median/max
+                    # sharpe display.
+                    metrics_dict = alpha_result.metrics if isinstance(alpha_result.metrics, dict) else {}
+
                     alpha = Alpha(
                         task_id=task.id,
                         run_id=run_id,
@@ -417,6 +426,15 @@ class MiningWorkflow:
                         dataset_id=dataset_id,
                         quality_status=alpha_result.quality_status,
                         metrics=alpha_result.metrics,
+                        # Flattened IS metrics — keep in sync with metrics JSONB.
+                        is_sharpe=metrics_dict.get("sharpe"),
+                        is_fitness=metrics_dict.get("fitness"),
+                        is_turnover=metrics_dict.get("turnover"),
+                        is_returns=metrics_dict.get("returns"),
+                        is_drawdown=metrics_dict.get("drawdown"),
+                        is_margin=metrics_dict.get("margin"),
+                        is_long_count=metrics_dict.get("longCount"),
+                        is_short_count=metrics_dict.get("shortCount"),
                         # Tier system: per-task factor_tier + per-alpha lineage.
                         factor_tier=task_factor_tier,
                         parent_alpha_id=getattr(alpha_result, "parent_alpha_id", None),
