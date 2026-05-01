@@ -101,6 +101,18 @@ class Settings(BaseSettings):
     ENABLE_FACTOR_TIERING: bool = True  # 总开关；False 时 router 拒收 AUTONOMOUS_TIER* mode
     T1_USE_LLM_GUIDED_STRATEGY: bool = True  # False 时 T1 task 回退 W0 ALPHA_GENERATION_SYSTEM
     MIN_TIER_SEED_COUNT: int = 5  # T2/T3 task 启动门槛 + node_tier_seed_load 早停门槛共用
+
+    # PR5 — T1 sign-flip retry. When a T1 candidate FAILs but |sharpe| ≥
+    # T1_FLIP_RETRY_SHARPE (default 0.5), evaluation re-simulates the negated
+    # expression (`multiply(-1, expr)`) and re-evaluates against the same
+    # gate. This catches alphas where the LLM picked the right field/op
+    # but the wrong sign convention (e.g. quality factors that should be
+    # ranked descending). Bounded by T1_FLIP_RETRY_CAP per round to keep
+    # BRAIN budget under control. Set ENABLE_T1_SIGN_FLIP_RETRY=False to
+    # disable globally.
+    ENABLE_T1_SIGN_FLIP_RETRY: bool = True
+    T1_FLIP_RETRY_SHARPE: float = 0.5  # min |sharpe| to trigger flip; below = noise
+    T1_FLIP_RETRY_CAP: int = 5  # max flips per round
     # PR4 — P0 实验结论：BRAIN GET /alphas/{id} 返回冻结的 sim 时 snapshot，不是
     # rolling 重算。所以 node_tier_seed_load 调 BRAIN refresh metrics 是 no-op，
     # 浪费配额。默认关闭；只有当 BRAIN 行为改变（比如未来开放 rolling endpoint）

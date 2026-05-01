@@ -617,7 +617,129 @@ async def node_evaluate(
         })
         
         updated_alphas[i] = alpha
-    
+
+    # PR5 — T1 sign-flip retry. For each FAIL alpha whose |sharpe| ≥
+    # T1_FLIP_RETRY_SHARPE (i.e. a real signal pointing the wrong direction,
+    # not just statistical noise), simulate the negated expression and
+    # re-evaluate. Bounded by T1_FLIP_RETRY_CAP. Only enabled at T1 because
+    # T2/T3 already operate on direction-stable seeds.
+    flip_retry_count = 0
+    flip_retry_pass = 0
+    flip_retry_prov = 0
+    if (
+        tier_cfg["tier"] == 1
+        and brain is not None
+        and getattr(settings, "ENABLE_T1_SIGN_FLIP_RETRY", True)
+    ):
+        flip_threshold = getattr(settings, "T1_FLIP_RETRY_SHARPE", 0.5)
+        flip_cap = getattr(settings, "T1_FLIP_RETRY_CAP", 5)
+
+        flip_candidates = sorted(
+            [
+                a for a in updated_alphas
+                if a.quality_status == "FAIL"
+                and a.is_simulated and a.simulation_success
+                and isinstance(a.metrics, dict)
+                and a.metrics.get("sharpe") is not None
+                and a.metrics["sharpe"] <= -flip_threshold
+                and not (a.metadata or {}).get("flipped")
+            ],
+            key=lambda a: a.metrics["sharpe"],  # most-negative first
+        )[:flip_cap]
+
+        if flip_candidates:
+            logger.info(
+                f"[{node_name}] T1 flip-retry: {len(flip_candidates)} candidates "
+                f"with sharpe ≤ -{flip_threshold}"
+            )
+
+        from backend.agents.graph.state import AlphaCandidate
+
+        for orig in flip_candidates:
+            flipped_expr = f"multiply(-1, {orig.expression})"
+            try:
+                sim_result = await brain.simulate_alpha(
+                    expression=flipped_expr,
+                    region=state.region,
+                    universe=state.universe,
+                )
+            except Exception as e:
+                logger.warning(f"[{node_name}] flip-retry sim failed: {e}")
+                continue
+
+            if not sim_result.get("success"):
+                logger.debug(f"[{node_name}] flip sim returned failure for {flipped_expr[:80]}")
+                continue
+
+            flip_metrics = sim_result.get("metrics") or {}
+            new_sharpe = flip_metrics.get("sharpe") or 0
+            new_fitness = flip_metrics.get("fitness") or 0
+            new_turnover = flip_metrics.get("turnover") or 0
+
+            new_alpha = AlphaCandidate(
+                expression=flipped_expr,
+                hypothesis=(orig.hypothesis or "") + " (sign-flipped)",
+                explanation=(
+                    f"sign-flip retry — original {orig.expression[:60]} "
+                    f"had sharpe={orig.metrics.get('sharpe'):.3f}"
+                ),
+                is_valid=True,
+                is_simulated=True,
+                simulation_success=True,
+                alpha_id=sim_result.get("alpha_id"),
+                metrics=flip_metrics,
+                metadata={
+                    "flipped": True,
+                    "original_expression": orig.expression,
+                    "original_sharpe": orig.metrics.get("sharpe"),
+                    "round": getattr(orig.metadata, "get", lambda k: None)("round")
+                            if not isinstance(orig.metadata, dict)
+                            else (orig.metadata or {}).get("round"),
+                },
+            )
+
+            # Re-eval with the same tier-aware gate. Reuse the per-tier thresholds
+            # (sharpe_min / fitness_min / turnover_min/max) computed at top of
+            # this function. T1 doesn't gate on concentrated / self_corr so the
+            # flip-retry path mirrors that.
+            sub_universe_check = next(
+                (c for c in flip_metrics.get("checks", [])
+                 if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
+                None,
+            )
+            sub_universe_ok = (
+                sub_universe_check is None
+                or sub_universe_check.get("result") != "FAIL"
+            )
+
+            pass_sharpe = new_sharpe >= sharpe_min
+            pass_fitness = new_fitness >= fitness_min
+            pass_turnover = turnover_min <= new_turnover <= turnover_max
+
+            if pass_sharpe and pass_fitness and pass_turnover and sub_universe_ok:
+                new_alpha.quality_status = "PASS"
+                pass_count += 1
+                flip_retry_pass += 1
+            elif (
+                new_sharpe >= prov_sharpe_min
+                and new_fitness >= prov_fitness_min
+                and turnover_min <= new_turnover <= prov_turnover_max
+                and sub_universe_ok
+            ):
+                new_alpha.quality_status = "PASS_PROVISIONAL"
+                optimize_count += 1
+                flip_retry_prov += 1
+            else:
+                new_alpha.quality_status = "FAIL"
+                fail_count += 1
+
+            updated_alphas.append(new_alpha)
+            flip_retry_count += 1
+            logger.info(
+                f"[{node_name}] flip-retry result: orig_sharpe={orig.metrics.get('sharpe'):.2f} "
+                f"→ flipped_sharpe={new_sharpe:.2f} status={new_alpha.quality_status}"
+            )
+
     duration_ms = int((time.time() - start_time) * 1000)
     
     _debug_log("E", "nodes.py:evaluate:result", "Evaluation complete", {
@@ -718,6 +840,9 @@ async def node_evaluate(
             "fail_count": fail_count,
             "corr_checks_performed": corr_checks_performed,
             "corr_checks_skipped": corr_checks_skipped,
+            "flip_retry_count": flip_retry_count,
+            "flip_retry_pass": flip_retry_pass,
+            "flip_retry_prov": flip_retry_prov,
             "details": eval_details[:20]
         },
         duration_ms,
