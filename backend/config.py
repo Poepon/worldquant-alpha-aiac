@@ -125,15 +125,14 @@ class Settings(BaseSettings):
     # T1 tasks already persist per round.
     T2_INCREMENTAL_PERSISTENCE: bool = True
 
-    # PR7 — wrapper-aware simulation settings. When True, node_simulate
-    # consults backend.sim_settings.smart_simulation_settings to pick BRAIN
-    # delay/decay/neutralization/truncation per alpha based on expression
-    # form (e.g. group_neutralize wrapper → BRAIN neutralization=NONE to
-    # avoid double-neut). Default False — first roll out as opt-in pending
-    # data showing edge-case PROV alphas need the help. Smart settings
-    # already used in flip-retry path even when this flag is False (since
-    # flip-retry only sims one alpha at a time, no batch grouping cost).
-    ENABLE_SMART_SIM_SETTINGS: bool = False
+    # PR7 — wrapper-aware simulation settings. When True, node_simulate buckets
+    # expressions by per-alpha settings (chosen via smart_simulation_settings
+    # based on expression form + field category) and calls simulate_batch per
+    # bucket. Defaults to True after backfill found 0% of mining-produced
+    # alphas can submit — root cause is double-neutralization (group_*
+    # wrapper + BRAIN neut=SUBINDUSTRY) and decay-vs-trade_when conflicts.
+    # Toggle off if a future task shows PASS-rate regression.
+    ENABLE_SMART_SIM_SETTINGS: bool = True
     # PR4 — P0 实验结论：BRAIN GET /alphas/{id} 返回冻结的 sim 时 snapshot，不是
     # rolling 重算。所以 node_tier_seed_load 调 BRAIN refresh metrics 是 no-op，
     # 浪费配额。默认关闭；只有当 BRAIN 行为改变（比如未来开放 rolling endpoint）

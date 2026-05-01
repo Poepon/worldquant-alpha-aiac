@@ -661,6 +661,10 @@ class RAGService:
                     severity = 'medium'
                 elif error_type == 'NEGATIVE_SIGNAL':
                     severity = 'low'  # Can be fixed by sign flip
+                # P0: BRAIN-side checks 是 submit 前的硬门槛，触发即等价于"不可提交"
+                elif error_type in ['CONCENTRATED_WEIGHT', 'LOW_SUB_UNIVERSE_SHARPE',
+                                    'HIGH_PROD_CORRELATION', 'HIGH_SELF_CORRELATION']:
+                    severity = 'high'
                 
                 new_entry = KnowledgeEntry(
                     pattern=skeleton,
@@ -819,6 +823,27 @@ class RAGService:
             parts.append("高相关性 - 与现有alpha重复")
         elif error_type == 'NEGATIVE_SIGNAL':
             parts.append("负信号 - 方向相反")
+        # P0: BRAIN-side check FAIL — 专项归因带 settings/结构修法建议
+        elif error_type == 'CONCENTRATED_WEIGHT':
+            parts.append(
+                "BRAIN集中度FAIL - 单股某日仓位>10%；"
+                "修法：truncation降至0.04-0.06、改更细粒度neutralization(SUBINDUSTRY)、加winsorize/zscore截尾"
+            )
+        elif error_type == 'LOW_SUB_UNIVERSE_SHARPE':
+            parts.append(
+                "BRAIN子样本sharpe过低 - 信号在小池表现差，过拟合大池；"
+                "修法：减小窗口/降低decay、加rank/quantile让信号在小样本更稳、避免过深嵌套"
+            )
+        elif error_type == 'HIGH_PROD_CORRELATION':
+            parts.append(
+                "BRAIN与已上线alpha相关性过高(>0.7)；"
+                "修法：换字段、改算子链结构、加交互项让信号正交化"
+            )
+        elif error_type == 'HIGH_SELF_CORRELATION':
+            parts.append(
+                "BRAIN与本人已提交alpha相关性过高；"
+                "修法：换字段或加trade_when择时让 PnL 路径分化"
+            )
         else:
             parts.append(f"失败类型: {error_type}")
         

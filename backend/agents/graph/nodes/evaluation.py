@@ -120,18 +120,67 @@ async def node_simulate(
         "universe": state.universe
     })
     
-    try:
-        results = await brain.simulate_batch(
-            expressions=expressions,
-            region=state.region,
-            universe=state.universe,
-            delay=1,
-            decay=4,
-            neutralization="SUBINDUSTRY"
+    # A1: smart simulation settings — per-expression settings choice based on
+    # structural form (group_neutralize → neut=NONE, trade_when → decay=0,
+    # etc.) and field category. When enabled, bucket expressions by their
+    # chosen settings tuple and call simulate_batch per bucket; results are
+    # merged back to original index order.
+    smart_enabled = getattr(settings, "ENABLE_SMART_SIM_SETTINGS", False)
+    smart_settings_per_idx: Dict[int, Dict] = {}  # local_index → settings dict
+    smart_reasons_per_idx: Dict[int, str] = {}
+
+    if smart_enabled:
+        from backend.sim_settings import settings_reason, smart_simulation_settings
+
+        SETTINGS_KEYS = ("region", "universe", "delay", "decay", "neutralization", "truncation", "test_period")
+        buckets: Dict[Tuple, List[int]] = {}
+        for local_i, idx in enumerate(indices_to_simulate):
+            expr = state.pending_alphas[idx].expression
+            smart = smart_simulation_settings(
+                expr,
+                tier=getattr(state, "factor_tier", None),
+                region=state.region,
+                universe=state.universe,
+            )
+            smart_settings_per_idx[local_i] = smart
+            smart_reasons_per_idx[local_i] = settings_reason(
+                expr, tier=getattr(state, "factor_tier", None)
+            )
+            key = tuple(smart.get(k) for k in SETTINGS_KEYS)
+            buckets.setdefault(key, []).append(local_i)
+
+        logger.info(
+            f"[{node_name}] smart-settings: {len(buckets)} bucket(s) for "
+            f"{len(indices_to_simulate)} expressions"
         )
-    except Exception as e:
-        logger.error(f"[{node_name}] Batch Simulate Loop Error: {e}")
-        results = [{"success": False, "error": str(e)} for _ in expressions]
+
+        results = [None] * len(indices_to_simulate)
+        for settings_key, local_indices in buckets.items():
+            bucket_kwargs = dict(zip(SETTINGS_KEYS, settings_key))
+            bucket_exprs = [expressions[li] for li in local_indices]
+            try:
+                bucket_results = await brain.simulate_batch(
+                    expressions=bucket_exprs,
+                    **bucket_kwargs,
+                )
+            except Exception as e:
+                logger.error(f"[{node_name}] bucket sim error ({settings_key}): {e}")
+                bucket_results = [{"success": False, "error": str(e)} for _ in bucket_exprs]
+            for j, li in enumerate(local_indices):
+                results[li] = bucket_results[j] if j < len(bucket_results) else {"success": False, "error": "Missing"}
+    else:
+        try:
+            results = await brain.simulate_batch(
+                expressions=expressions,
+                region=state.region,
+                universe=state.universe,
+                delay=1,
+                decay=4,
+                neutralization="SUBINDUSTRY"
+            )
+        except Exception as e:
+            logger.error(f"[{node_name}] Batch Simulate Loop Error: {e}")
+            results = [{"success": False, "error": str(e)} for _ in expressions]
     
     duration_ms = int((time.time() - start_time) * 1000)
     
@@ -148,12 +197,20 @@ async def node_simulate(
         updated.is_simulated = True
         updated.simulation_success = res.get("success", False)
         updated.alpha_id = res.get("alpha_id")
-        updated.metrics = res.get("metrics", {})
+        updated.metrics = res.get("metrics", {}) or {}
         updated.simulation_error = res.get("error")
-        
+
+        # A1: stamp smart-settings metadata into metrics for audit / KB insight
+        if smart_enabled and i in smart_settings_per_idx:
+            updated.metrics = {
+                **updated.metrics,
+                "_sim_settings": smart_settings_per_idx[i],
+                "_sim_settings_reason": smart_reasons_per_idx.get(i, ""),
+            }
+
         if updated.simulation_success:
             success_count += 1
-        
+
         updated_alphas[idx] = updated
     
     failed_errors = [
@@ -554,15 +611,35 @@ async def node_evaluate(
                     )
             
             # Determine error type
+            # P0: BRAIN check FAIL 优先匹配（来自 metrics.checks），它们指向具体
+            # settings/结构修法（truncation / neutralization / sub-universe），
+            # 比 sharpe/fitness/turnover 通用归因更可操作。
             error_type = "QUALITY_FAIL"
-            if sharpe < sharpe_min:
-                error_type = "LOW_SHARPE"
-            elif fitness < fitness_min:
-                error_type = "LOW_FITNESS"
-            elif turnover > turnover_max:
-                error_type = "HIGH_TURNOVER"
-            elif sharpe < 0:
-                error_type = "NEGATIVE_SIGNAL"
+            brain_fail_priority = (
+                "CONCENTRATED_WEIGHT",
+                "LOW_SUB_UNIVERSE_SHARPE",
+                "HIGH_PROD_CORRELATION",
+                "HIGH_SELF_CORRELATION",
+            )
+            brain_fails = {
+                c.get("name"): c
+                for c in metrics.get("checks", []) or []
+                if c.get("result") == "FAIL"
+            }
+            for name in brain_fail_priority:
+                if name in brain_fails:
+                    error_type = name
+                    break
+            if error_type == "QUALITY_FAIL":
+                # Fallback: 通用 metric-band 归因
+                if sharpe < sharpe_min:
+                    error_type = "LOW_SHARPE"
+                elif fitness < fitness_min:
+                    error_type = "LOW_FITNESS"
+                elif turnover > turnover_max:
+                    error_type = "HIGH_TURNOVER"
+                elif sharpe < 0:
+                    error_type = "NEGATIVE_SIGNAL"
             
             if alpha.expression:
                 failure_feedback_queue.append({
@@ -655,14 +732,29 @@ async def node_evaluate(
 
         from backend.agents.graph.state import AlphaCandidate
 
+        # A2: flip-retry single-alpha sim → smart settings (zero bucketing cost)
+        flip_use_smart = getattr(settings, "ENABLE_SMART_SIM_SETTINGS", False)
         for orig in flip_candidates:
             flipped_expr = f"multiply(-1, {orig.expression})"
             try:
-                sim_result = await brain.simulate_alpha(
-                    expression=flipped_expr,
-                    region=state.region,
-                    universe=state.universe,
-                )
+                if flip_use_smart:
+                    from backend.sim_settings import smart_simulation_settings
+                    smart = smart_simulation_settings(
+                        flipped_expr,
+                        tier=tier_cfg["tier"],
+                        region=state.region,
+                        universe=state.universe,
+                    )
+                    sim_result = await brain.simulate_alpha(
+                        expression=flipped_expr,
+                        **smart,
+                    )
+                else:
+                    sim_result = await brain.simulate_alpha(
+                        expression=flipped_expr,
+                        region=state.region,
+                        universe=state.universe,
+                    )
             except Exception as e:
                 logger.warning(f"[{node_name}] flip-retry sim failed: {e}")
                 continue
