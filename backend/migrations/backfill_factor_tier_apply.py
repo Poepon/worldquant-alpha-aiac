@@ -122,7 +122,8 @@ async def _apply(plan_path: Path, batch_size: int = 500) -> None:
             "changes applied with audit log"
         )
 
-        # 4. KB meta_data.alpha_id_ref backfill (JSONB merge)
+        # 4. KB meta_data.alpha_id_ref backfill (JSONB merge).
+        # CAST(... AS integer) avoids :param::int ambiguity in SQLAlchemy text().
         kb_changes = plan.get("kb_alpha_id_ref", {}).get("changes", [])
         kb_applied = 0
         for ch in kb_changes:
@@ -132,7 +133,7 @@ async def _apply(plan_path: Path, batch_size: int = 500) -> None:
                 text(
                     "UPDATE knowledge_entries "
                     "SET meta_data = COALESCE(meta_data, '{}'::jsonb) || "
-                    "    jsonb_build_object('alpha_id_ref', :aid::int) "
+                    "    jsonb_build_object('alpha_id_ref', CAST(:aid AS integer)) "
                     "WHERE id = :kid"
                 ),
                 {"aid": ch["matched_alpha_id"], "kid": ch["kb_id"]},

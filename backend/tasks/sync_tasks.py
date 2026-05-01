@@ -9,6 +9,7 @@ Contains tasks for syncing data from BRAIN platform:
 """
 
 from datetime import datetime, timezone, timedelta
+from typing import Dict
 from sqlalchemy import select, func
 from loguru import logger
 
@@ -22,12 +23,18 @@ from backend.tasks import run_async
 
 @celery_app.task(name="backend.tasks.refresh_os_correlation_cache")
 def refresh_os_correlation_cache():
-    """Refresh OS-alpha PnL cache for all major regions (scheduled).
+    """Refresh OS-alpha PnL cache + metrics for all major regions (scheduled).
 
-    Runs daily at 06:30 (after sync-datasets). Powers fast local self-correlation
-    in evaluation.py, avoiding BRAIN /correlations/SELF rate-limit risk.
+    Runs daily at 06:30 (after sync-datasets). Two responsibilities:
+      1. PnL refresh — feeds fast local self-correlation in evaluation.py,
+         avoiding BRAIN /correlations/SELF rate-limit risk.
+      2. PR2 — Metrics refresh: pulls fresh is.sharpe/fitness/turnover for
+         every OS-active alpha, writes back to alphas table, triggers
+         quality_status re-eval via tier thresholds. Demoted alphas write a
+         transition audit row (source='daily_beat_os'). Without this, OS-active
+         alpha metrics drift silently and the FactorLibrary KPI gets stale.
     """
-    logger.info("Refreshing OS correlation cache...")
+    logger.info("Refreshing OS correlation cache + metrics...")
 
     async def _run():
         async with BrainAdapter() as brain:
@@ -38,15 +45,122 @@ def refresh_os_correlation_cache():
                     new_count, total = await svc.refresh_os_alpha_cache(
                         region=region, incremental=True
                     )
-                    results[region] = {"new": new_count, "total": total}
+                    results[region] = {"pnl_new": new_count, "pnl_total": total}
                 except Exception as e:
-                    logger.warning(f"[refresh_os_corr] {region} failed: {e}")
-                    results[region] = {"error": str(e)}
+                    logger.warning(f"[refresh_os_corr] {region} PnL failed: {e}")
+                    results[region] = {"pnl_error": str(e)}
+
+            # PR2 — Metrics refresh leg. Separate try/except per region so a
+            # network blip on one doesn't kill the others.
+            for region in ["USA", "CHN", "EUR", "HKG", "JPN"]:
+                try:
+                    metrics_stats = await _refresh_os_alpha_metrics(brain, region)
+                    results.setdefault(region, {}).update(metrics_stats)
+                except Exception as e:
+                    logger.warning(f"[refresh_os_metrics] {region} failed: {e}")
+                    results.setdefault(region, {})["metrics_error"] = str(e)
+
             return results
 
     results = run_async(_run())
     logger.info(f"OS correlation cache refresh: {results}")
     return results
+
+
+async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
+    """Pull fresh BRAIN metrics for every OS-active alpha in this region,
+    write back to alphas table, re-evaluate quality_status against tier
+    thresholds. Returns counters for the celery beat result.
+
+    Single failures are logged but don't abort the loop. Goes through
+    AlphaService.apply_quality_status_change so demotions are audit-logged.
+    """
+    from datetime import datetime as _dt
+
+    from sqlalchemy import select
+
+    from backend.agents.graph.tier_thresholds import get_tier_thresholds
+    from backend.database import AsyncSessionLocal
+    from backend.models import Alpha
+    from backend.services.alpha_service import AlphaService
+
+    refreshed = 0
+    demoted = 0
+    failed = 0
+
+    async with AsyncSessionLocal() as db:
+        # OS-active = stage='OS' AND quality_status in (PASS, PASS_PROVISIONAL).
+        # FAIL/PENDING alphas don't need refresh — they're not in the active pool.
+        stmt = (
+            select(Alpha)
+            .where(Alpha.region == region)
+            .where(Alpha.stage == "OS")
+            .where(Alpha.quality_status.in_(["PASS", "PASS_PROVISIONAL"]))
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        if not rows:
+            return {"metrics_refreshed": 0, "metrics_demoted": 0, "metrics_failed": 0}
+
+        alpha_service = AlphaService(db)
+        for alpha in rows:
+            if not alpha.alpha_id:
+                continue
+            try:
+                fresh = await brain.get_alpha(alpha.alpha_id)
+            except Exception as e:
+                logger.warning(f"[refresh_os_metrics] {alpha.alpha_id}: {e}")
+                failed += 1
+                continue
+
+            if not fresh:
+                failed += 1
+                continue
+
+            is_block = fresh.get("is") or {}
+            old_sharpe = alpha.is_sharpe
+            alpha.is_sharpe = is_block.get("sharpe", alpha.is_sharpe)
+            alpha.is_fitness = is_block.get("fitness", alpha.is_fitness)
+            alpha.is_turnover = is_block.get("turnover", alpha.is_turnover)
+            if "checks" in fresh:
+                merged = dict(alpha.metrics or {})
+                merged["checks"] = fresh["checks"]
+                alpha.metrics = merged
+            alpha.metrics_snapshot_at = _dt.utcnow()
+            refreshed += 1
+
+            # Re-evaluate against tier-specific thresholds; demote PASS rows
+            # whose metrics drifted below the bar so KB stays clean.
+            t = get_tier_thresholds(alpha.factor_tier)
+            sharpe_ok = (alpha.is_sharpe or 0) >= t["sharpe_min"]
+            fitness_ok = (alpha.is_fitness or 0) >= t["fitness_min"]
+            turnover_ok = (
+                t["turnover_min"] <= (alpha.is_turnover or 0) <= t["turnover_max"]
+            )
+
+            if alpha.quality_status == "PASS" and not (sharpe_ok and fitness_ok and turnover_ok):
+                try:
+                    await alpha_service.apply_quality_status_change(
+                        alpha_id=alpha.id,
+                        new_status="PASS_PROVISIONAL",
+                        reason=(
+                            f"daily_beat_os: drifted from sharpe={old_sharpe:.2f} → "
+                            f"{alpha.is_sharpe:.2f} (T{alpha.factor_tier} bar)"
+                        ),
+                        source="daily_beat_os",
+                    )
+                    demoted += 1
+                except Exception as e:
+                    logger.warning(
+                        f"[refresh_os_metrics] demote alpha={alpha.id} failed: {e}"
+                    )
+
+        await db.commit()
+
+    return {
+        "metrics_refreshed": refreshed,
+        "metrics_demoted": demoted,
+        "metrics_failed": failed,
+    }
 
 
 @celery_app.task(name="backend.tasks.sync_datasets")

@@ -101,6 +101,15 @@ class Settings(BaseSettings):
     ENABLE_FACTOR_TIERING: bool = True  # 总开关；False 时 router 拒收 AUTONOMOUS_TIER* mode
     T1_USE_LLM_GUIDED_STRATEGY: bool = True  # False 时 T1 task 回退 W0 ALPHA_GENERATION_SYSTEM
     MIN_TIER_SEED_COUNT: int = 5  # T2/T3 task 启动门槛 + node_tier_seed_load 早停门槛共用
+    # PR4 — P0 实验结论：BRAIN GET /alphas/{id} 返回冻结的 sim 时 snapshot，不是
+    # rolling 重算。所以 node_tier_seed_load 调 BRAIN refresh metrics 是 no-op，
+    # 浪费配额。默认关闭；只有当 BRAIN 行为改变（比如未来开放 rolling endpoint）
+    # 或想 detect "alpha 被删除"等副作用时才开启。OS-active alpha 的 metrics
+    # 累加是另一回事，不在这个 flag 控制范围。
+    TIER_SEED_LOAD_REFRESH_VIA_BRAIN: bool = False
+    # 同理 — 历史 KB-referenced alpha 的 metrics 不会随时间变化（IS 冻结），
+    # daily refresh 仅在你想监测 alpha-deletion 等边界行为时才开。
+    REFRESH_KB_VIA_BRAIN: bool = False
 
     # 各 region 可用 group 列表（T2 wrapping 时用，过滤 group_neutralize/group_rank 等的 group 取值）
     # 默认值；可在 .env 用 JSON 字符串覆盖（例：REGION_GROUPS='{"USA":["industry","subindustry","sector","market"]}'）

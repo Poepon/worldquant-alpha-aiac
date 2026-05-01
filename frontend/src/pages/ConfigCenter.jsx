@@ -591,30 +591,35 @@ function KnowledgeLibraryTab() {
   const { data, isLoading } = useQuery({
     queryKey: ['knowledge-library', filters],
     queryFn: async () => {
-      // /knowledge router supports basic listing; tier filter applied client-side
-      // since the existing endpoint doesn't yet expose factor_tier query.
-      const params = {
+      // PR4 (followup): /knowledge now supports factor_tier / region /
+      // created_by query params. Tier multi-select still needs client-side
+      // OR semantics (the API only accepts a single tier value), so we make
+      // one request per selected tier and concatenate. Empty selection → one
+      // request with no tier filter.
+      const baseParams = {
         entry_type: 'SUCCESS_PATTERN',
         limit: 200,
       }
-      if (filters.only_active) params.is_active = true
-      const resp = await api.getKnowledgeEntries(params)
-      return Array.isArray(resp) ? resp : resp.items || []
+      if (filters.only_active) baseParams.is_active = true
+      if (filters.source) baseParams.created_by = filters.source
+      if (filters.region) baseParams.region = filters.region
+
+      const tierValues = filters.tiers.length > 0 ? filters.tiers : [undefined]
+      const responses = await Promise.all(
+        tierValues.map(async (t) => {
+          const params = { ...baseParams }
+          if (t !== undefined) {
+            params.factor_tier = t === 'null' ? 0 : t
+          }
+          const resp = await api.getKnowledgeEntries(params)
+          return Array.isArray(resp) ? resp : resp.items || []
+        })
+      )
+      return responses.flat()
     },
   })
 
-  const filtered = (data || []).filter((row) => {
-    if (filters.tiers.length > 0) {
-      const t = row.factor_tier ?? null
-      if (!filters.tiers.includes(t === null ? 'null' : t)) return false
-    }
-    if (filters.source && row.created_by !== filters.source) return false
-    if (filters.region) {
-      const meta = row.meta_data || {}
-      if (meta.region !== filters.region) return false
-    }
-    return true
-  })
+  const filtered = data || []
 
   const updateMutation = useMutation({
     mutationFn: ({ id, updates }) => api.updateKnowledgeEntry(id, updates),

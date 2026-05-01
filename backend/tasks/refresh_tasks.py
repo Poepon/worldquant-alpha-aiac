@@ -37,9 +37,19 @@ def refresh_kb_referenced_alphas() -> Dict:
 async def _refresh_kb_referenced_alphas_async() -> Dict:
     from backend.adapters.brain_adapter import BrainAdapter
     from backend.agents.graph.tier_thresholds import get_tier_thresholds
+    from backend.config import settings
     from backend.database import AsyncSessionLocal
     from backend.models import Alpha, KnowledgeEntry
     from backend.services.alpha_service import AlphaService
+
+    # PR4 — P0 experiment found BRAIN returns frozen IS metrics snapshots, so
+    # this beat is a no-op when re-fetching cached PASS alphas. Default-off.
+    if not getattr(settings, "REFRESH_KB_VIA_BRAIN", False):
+        logger.info(
+            "[refresh_kb] skipped (REFRESH_KB_VIA_BRAIN=False; "
+            "BRAIN returns frozen IS snapshots — refresh is no-op for cached alphas)"
+        )
+        return {"skipped": True, "refreshed": 0, "demoted": 0, "failed": 0, "kb_deactivated": 0}
 
     refreshed = 0
     demoted = 0

@@ -44,12 +44,13 @@ class KnowledgeEntryResponse(BaseModel):
     pattern: Optional[str] = None
     description: Optional[str] = None
     meta_data: dict = {}
+    factor_tier: Optional[int] = None  # PR3: tier system
     usage_count: int
     is_active: bool
     created_by: str
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
+
     class Config:
         from_attributes = True
 
@@ -76,20 +77,36 @@ class KnowledgeUpdateRequest(BaseModel):
 async def list_knowledge(
     entry_type: Optional[str] = Query(None, description="Filter by type"),
     is_active: Optional[bool] = Query(None, description="Filter by active status"),
+    factor_tier: Optional[int] = Query(
+        None,
+        ge=0,
+        le=3,
+        description="PR3: tier filter. 1/2/3 for tier rows, 0 for NULL (not in hierarchy).",
+    ),
+    region: Optional[str] = Query(None, description="PR3: filter by meta_data.region"),
+    created_by: Optional[str] = Query(None, description="PR3: SYSTEM/HITL/USER"),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
     service: KnowledgeService = Depends(get_knowledge_service),
 ):
-    """List knowledge base entries with optional filters."""
+    """List knowledge base entries with optional filters.
+
+    PR3 — added factor_tier/region/created_by query params so the
+    ConfigCenter Knowledge Library tab can server-side filter instead of
+    pulling everything and filtering in the browser.
+    """
     filters = KnowledgeListFilters(
         entry_type=entry_type,
         is_active=is_active,
+        factor_tier=factor_tier,
+        region=region,
+        created_by=created_by,
         limit=limit,
         offset=offset,
     )
-    
+
     entries = await service.list_entries(filters)
-    
+
     return [
         KnowledgeEntryResponse(
             id=e.id,
@@ -97,6 +114,7 @@ async def list_knowledge(
             pattern=e.pattern,
             description=e.description,
             meta_data=e.meta_data,
+            factor_tier=e.factor_tier,
             usage_count=e.usage_count,
             is_active=e.is_active,
             created_by=e.created_by,

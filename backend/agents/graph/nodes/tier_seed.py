@@ -114,9 +114,14 @@ async def node_tier_seed_load(
             ),
         }
 
-    # 2. Refresh metrics via BRAIN (best-effort — single failures don't kill batch)
+    # 2. Refresh metrics via BRAIN (best-effort — single failures don't kill batch).
+    # PR4 — P0 experiment found BRAIN GET /alphas/{id} returns frozen sim-time
+    # snapshots not rolling metrics, so the refresh is a no-op for IS metrics.
+    # Gated by settings.TIER_SEED_LOAD_REFRESH_VIA_BRAIN (default False) to save
+    # BRAIN budget. Re-enable if you want to detect deleted-alpha edge cases.
+    from backend.config import settings as _settings
     refresh_failed = 0
-    if brain_adapter is not None:
+    if brain_adapter is not None and getattr(_settings, "TIER_SEED_LOAD_REFRESH_VIA_BRAIN", False):
         for alpha in rows:
             if not alpha.alpha_id:
                 continue
