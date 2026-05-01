@@ -84,12 +84,24 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                             logger.info(f"Task {task_id} reached goal")
                             break
                         
-                        # Get fields
+                        # Get fields — main dataset + universal PV supplement
+                        # (D1: cross-dataset alpha support).
                         fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe)
-                        
+
                         if not fields:
                             logger.warning(f"No fields found for dataset {dataset_id}, skipping")
                             continue
+
+                        if dataset_id != "pv1":
+                            pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe)
+                            n_before = len(fields)
+                            fields = _merge_field_pools(fields, pv_supplement)
+                            n_added = len(fields) - n_before
+                            if n_added:
+                                logger.info(
+                                    f"[mining] dataset={dataset_id} merged {n_added} universal-PV fields "
+                                    f"(total fields={len(fields)})"
+                                )
                         
                         # Calculate remaining alphas needed
                         remaining_goal = task.daily_goal - task.progress_current
@@ -295,14 +307,14 @@ async def _get_dataset_fields(db, dataset_id, region, universe):
     )
     ds_meta_res = await db.execute(ds_meta_stmt)
     ds_meta = ds_meta_res.scalar_one_or_none()
-    
+
     if not ds_meta:
         return []
-    
+
     fields_stmt = select(DataField).where(DataField.dataset_id == ds_meta.id)
     fields_res = await db.execute(fields_stmt)
     fields_objs = fields_res.scalars().all()
-    
+
     return [
         {
             "id": f.field_id,
@@ -312,3 +324,66 @@ async def _get_dataset_fields(db, dataset_id, region, universe):
         }
         for f in fields_objs
     ]
+
+
+# D1 — Universal price-volume field whitelist. Every mining round adds these
+# alongside the main dataset's fields, so LLM can produce cross-dataset
+# alphas (e.g. fundamental signal × returns) — verified pattern in BRAIN
+# user gold alphas (top-3 sharpe>2.3 all use fundamental6 + returns).
+# Hard-coded list rather than top-N by coverage to keep behavior stable
+# even if BRAIN's pv field roster changes.
+_UNIVERSAL_PV_FIELDS = (
+    "close", "open", "high", "low",
+    "volume", "vwap",
+    "returns",
+    "cap", "sharesout",
+    "adv5", "adv20",
+    "amount",
+)
+
+
+async def _get_universal_pv_fields(db, region, universe):
+    """Pull the canonical PV fields (price-volume) regardless of which
+    dataset is being mined. Returns at most |_UNIVERSAL_PV_FIELDS| entries
+    that exist in the datafields table for this region/universe.
+    """
+    pv_meta_stmt = select(DatasetMetadata).where(
+        DatasetMetadata.dataset_id == "pv1",
+        DatasetMetadata.region == region,
+        DatasetMetadata.universe == universe,
+    )
+    pv_meta = (await db.execute(pv_meta_stmt)).scalar_one_or_none()
+    if not pv_meta:
+        return []
+    fields_stmt = (
+        select(DataField)
+        .where(DataField.dataset_id == pv_meta.id)
+        .where(DataField.field_id.in_(_UNIVERSAL_PV_FIELDS))
+    )
+    rows = (await db.execute(fields_stmt)).scalars().all()
+    return [
+        {
+            "id": f.field_id,
+            "name": f.field_name,
+            "description": f.description,
+            "type": f.field_type,
+        }
+        for f in rows
+    ]
+
+
+def _merge_field_pools(primary, supplement):
+    """Place supplement fields at the *front* of the merged list, then primary.
+    Reason: build_t1_strategy_user_prompt truncates available_fields to the
+    first 80 entries; if supplement (typically ~10 universal PV fields) is
+    appended at the tail it gets dropped for primary datasets with >70
+    fields (e.g. fundamental6 has 886). Putting supplement first guarantees
+    cross-dataset signal candidates are always visible to the LLM.
+    """
+    sup_ids = {f["id"] for f in supplement if f.get("id")}
+    out = list(supplement)
+    for f in primary:
+        fid = f.get("id")
+        if fid and fid not in sup_ids:
+            out.append(f)
+    return out
