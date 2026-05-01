@@ -166,11 +166,19 @@ def _allowed_groups(region: str) -> set:
     return set(region_groups.get(region, ["industry", "subindustry", "sector", "market"]))
 
 
-# group_mean(x, weight, group) is BRAIN's only 3-arg group_* operator.
-# We default the weight to a market-cap field so the result is a
-# cap-weighted within-group mean — the canonical "industry/sector residualize"
-# financial construct. If a region lacks `cap` we skip group_mean expansion
-# rather than producing an invalid 2-arg call.
+# group_mean(x, weight, group) returns BRAIN's harmonic cap-weighted
+# within-group mean — i.e. the same value for every stock in the group.
+# Used raw it collapses cross-sectional dispersion to zero (every name in
+# an industry gets the same signal value) and PASS rate is ~0%.
+#
+# To turn this into real residualize-against-cap-weighted-group-mean,
+# we wrap it in subtract(x, group_mean(x, w, g)) — each stock's signal
+# minus its group's cap-weighted mean. This is the canonical financial
+# residualize construct (industry-neutralize a factor by cap weights).
+#
+# T2Strategy.use_group_mean field name is kept for backward compat /
+# stable LLM prompt vocab; its semantic in code is now "use cap-weighted
+# group residualize" — a more useful operation than naive group_mean.
 GROUP_MEAN_WEIGHT_BY_REGION: Dict[str, str] = {
     "USA": "cap",
     "CHN": "cap",
@@ -250,22 +258,24 @@ def expand_t2_strategy(
             if g not in allowed:
                 logger.debug(f"[factor_wrapping] T2 skip {op_name}_{g} (region={region})")
                 continue
-            # group_mean is the only 3-arg group_* op — needs a weight field.
-            # See GROUP_MEAN_WEIGHT_BY_REGION; skip the variant if no weight
-            # mapping exists for this region (rather than emit an invalid
-            # 2-arg `group_mean(x, group)` that BRAIN rejects with
-            # "Invalid number of inputs : 2, should be exactly 3").
+            # group_mean is the only 3-arg group_* op (signature: x, weight,
+            # group). Used raw it collapses cross-sectional dispersion (same
+            # value for every stock in the group), so we wrap it in subtract
+            # to do real cap-weighted residualize: each stock's signal minus
+            # its group's cap-weighted mean. Skip when the region has no
+            # weight field configured (no canonical cap field) rather than
+            # emit broken expressions.
             if op_name == "group_mean":
                 weight = GROUP_MEAN_WEIGHT_BY_REGION.get(region)
                 if weight is None:
                     logger.debug(
-                        f"[factor_wrapping] T2 skip group_mean_{g} "
+                        f"[factor_wrapping] T2 skip group_residualize_{g} "
                         f"(no weight field for region={region})"
                     )
                     continue
                 out.append({
-                    "expression": f"group_mean({seed}, {weight}, {g})",
-                    "wrapper_kind": f"group_mean_{weight}_{g}",
+                    "expression": f"subtract({seed}, group_mean({seed}, {weight}, {g}))",
+                    "wrapper_kind": f"group_residualize_{weight}_{g}",
                 })
                 continue
             out.append({
