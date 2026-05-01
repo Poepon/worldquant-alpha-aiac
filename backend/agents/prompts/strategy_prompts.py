@@ -52,11 +52,14 @@ Output a JSON object matching the T1Strategy schema:
    - Avoid categorical / ID / group fields (industry, sector codes, exchange).
    - Prefer fields with coverage >= 0.7 when available.
    - Spread across sub-themes (don't pick 12 variants of the same balance sheet line).
-5. preferred_ts_ops: 5-8 operators from {ts_rank, ts_zscore, ts_mean, ts_std_dev,
-   ts_delta, ts_delay, ts_decay_linear, ts_arg_max, ts_arg_min, ts_quantile,
-   ts_sum, ts_max, ts_min, ts_corr}. Match them to the velocity:
-   - SLOW: ts_rank / ts_zscore / ts_mean preferred
-   - FAST: ts_delta / ts_decay_linear / ts_arg_max preferred
+5. preferred_ts_ops: 5-8 operators from this exact set (every name must
+   exist in BRAIN — these were reconciled with DB):
+   {ts_rank, ts_zscore, ts_mean, ts_std_dev, ts_delta, ts_delay,
+    ts_decay_linear, ts_arg_max, ts_arg_min, ts_quantile, ts_sum, ts_corr,
+    ts_av_diff, ts_count_nans, ts_product, ts_scale, ts_step,
+    ts_regression, ts_covariance, ts_backfill}. Match them to the velocity:
+   - SLOW: ts_rank / ts_zscore / ts_mean / ts_regression preferred
+   - FAST: ts_delta / ts_decay_linear / ts_arg_max / ts_av_diff preferred
 6. rationale: 2-3 sentences explaining the choice — what economic intuition
    ties the fields, ops, and window scale together.
 
@@ -154,24 +157,30 @@ Output a JSON object matching the T2Strategy schema:
 
 3. is_normalized: TRUE if the seed already contains zscore/rank/normalize at
    any level. When TRUE, skip pure cross-sectional rank/zscore/normalize
-   wrappers (they'd be no-ops) and prefer group_demean / group_neutralize.
+   wrappers (they'd be no-ops) and prefer group_neutralize / group_mean.
 
-4. use_group_neutralize / use_group_rank / use_group_zscore / use_group_normalize
-   / use_group_demean: each is a list of group choices to apply.
+4. Group wrappers (every op verified against BRAIN DB):
+   use_group_neutralize / use_group_rank / use_group_zscore / use_group_mean /
+   use_group_scale: each is a list of group choices to apply.
    Allowed groups: industry, subindustry, sector, market.
    Pick 0-3 group choices per wrapper. Prefer industry/subindustry over sector
    for stocks. Skip the entire wrapper by passing []
    if it doesn't fit the signal economics.
+   - group_neutralize: residualize against group mean (most common)
+   - group_rank: cross-sectional rank within group
+   - group_zscore: standardize within group
+   - group_mean: pure group-average residual
+   - group_scale: size-normalize within group
 
 5. use_pure_xs: list of pure cross-sectional ops to try.
-   Allowed: rank, zscore, normalize, quantile, winsorize, signed_power.
+   Allowed: rank, zscore, normalize, quantile, winsorize, signed_power, scale.
    Skip if is_normalized=True (the seed already does this kind of work).
 
 6. use_smoothing: list of time-series smoothing wrappers in the form
    "{op}@{window}", e.g. "ts_decay_linear@10". Allowed combinations:
-   ts_decay_linear@5/@10/@20, ts_mean@5/@10/@20, ts_std_dev@10/@20,
-   ts_max@10, ts_min@10. Use for FAST signals to reduce noise; skip for
-   SLOW fundamentals (already smooth).
+   ts_decay_linear@5/@10/@20, ts_mean@5/@10/@20, ts_std_dev@10/@20.
+   Use for FAST signals to reduce noise; skip for SLOW fundamentals
+   (already smooth).
 
 7. skip_reasons: dict mapping wrapper kind → ONE-line reason for skipping.
    Helps post-task analytics understand why certain branches weren't tried.

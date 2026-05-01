@@ -60,6 +60,12 @@ class T1Strategy(BaseModel):
     )
     preferred_ts_ops: List[
         Literal[
+            # Reconciled with DB Operator table (Time Series category) — every
+            # value here MUST exist in BRAIN. ts_max / ts_min were removed
+            # because they're not BRAIN ops; ts_av_diff / ts_count_nans /
+            # ts_product / ts_scale / ts_step / ts_regression / ts_covariance /
+            # ts_backfill added because they ARE in BRAIN and are useful T1
+            # building blocks the LLM should be able to choose.
             "ts_rank",
             "ts_zscore",
             "ts_mean",
@@ -71,9 +77,15 @@ class T1Strategy(BaseModel):
             "ts_arg_min",
             "ts_quantile",
             "ts_sum",
-            "ts_max",
-            "ts_min",
             "ts_corr",
+            "ts_av_diff",        # 平均差 — anomaly detection
+            "ts_count_nans",     # 缺失计数 — data quality signals
+            "ts_product",        # 累乘 — compound effects
+            "ts_scale",          # window scale — alt to zscore
+            "ts_step",           # step indicator
+            "ts_regression",     # 回归 — high-value for residualization
+            "ts_covariance",     # 协方差 — alt to corr
+            "ts_backfill",       # backfill — pre-process step
         ]
     ] = Field(default_factory=list, description="5-8 ts_* operators matching velocity")
 

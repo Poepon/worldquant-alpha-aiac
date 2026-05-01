@@ -51,16 +51,25 @@ class T2Strategy(BaseModel):
     ] = "other"
     is_normalized: bool = False  # seed already contains zscore/rank?
 
+    # Reconciled with DB Operator table (Group category):
+    #   group_demean / group_normalize REMOVED — not in BRAIN
+    #   group_mean / group_scale ADDED — exist in BRAIN, useful for residualize
     use_group_neutralize: List[GroupChoice] = Field(default_factory=list)
     use_group_rank: List[GroupChoice] = Field(default_factory=list)
     use_group_zscore: List[GroupChoice] = Field(default_factory=list)
-    use_group_normalize: List[GroupChoice] = Field(default_factory=list)
-    use_group_demean: List[GroupChoice] = Field(default_factory=list)
+    use_group_mean: List[GroupChoice] = Field(default_factory=list)   # residualize
+    use_group_scale: List[GroupChoice] = Field(default_factory=list)  # size-norm
 
+    # Reconciled with DB: rank / zscore / normalize / quantile / scale /
+    # winsorize live in Cross Sectional; signed_power lives in Arithmetic.
+    # All exist in BRAIN.
     use_pure_xs: List[
-        Literal["rank", "zscore", "normalize", "quantile", "winsorize", "signed_power"]
+        Literal["rank", "zscore", "normalize", "quantile", "winsorize",
+                "signed_power", "scale"]
     ] = Field(default_factory=list)
 
+    # Smoothing — ts_max@* / ts_min@* removed (not in BRAIN). All other
+    # entries verified against DB.
     use_smoothing: List[
         Literal[
             "ts_decay_linear@5",
@@ -71,8 +80,6 @@ class T2Strategy(BaseModel):
             "ts_mean@20",
             "ts_std_dev@10",
             "ts_std_dev@20",
-            "ts_max@10",
-            "ts_min@10",
         ]
     ] = Field(default_factory=list)
 
@@ -205,7 +212,7 @@ async def select_t2_strategy_via_llm(
 
     logger.info(
         f"[factor_wrapping] T2Strategy chosen | velocity={parsed.signal_velocity} "
-        f"groups={sum(len(v) for v in [parsed.use_group_neutralize, parsed.use_group_rank, parsed.use_group_zscore, parsed.use_group_normalize, parsed.use_group_demean])} "
+        f"groups={sum(len(v) for v in [parsed.use_group_neutralize, parsed.use_group_rank, parsed.use_group_zscore, parsed.use_group_mean, parsed.use_group_scale])} "
         f"pure_xs={len(parsed.use_pure_xs)} smoothing={len(parsed.use_smoothing)}"
     )
     return parsed
@@ -232,8 +239,8 @@ def expand_t2_strategy(
     _add_group("group_neutralize", strategy.use_group_neutralize)
     _add_group("group_rank", strategy.use_group_rank)
     _add_group("group_zscore", strategy.use_group_zscore)
-    _add_group("group_normalize", strategy.use_group_normalize)
-    _add_group("group_demean", strategy.use_group_demean)
+    _add_group("group_mean", strategy.use_group_mean)
+    _add_group("group_scale", strategy.use_group_scale)
 
     for op in strategy.use_pure_xs:
         if op == "winsorize":
