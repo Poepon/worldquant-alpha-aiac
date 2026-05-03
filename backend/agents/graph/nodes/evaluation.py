@@ -69,6 +69,178 @@ def _check_is_os_consistency(metrics: Dict) -> bool:
 
 
 # =============================================================================
+# V-16: Suspicion mode for sharpe > 3.0 alphas
+# =============================================================================
+# Triggered when is_sharpe > V16_SUSPICION_THRESHOLD. Six static + dynamic
+# checks against well-known quant risks. Hard flags downgrade PASS →
+# PASS_PROVISIONAL; soft + info flags only annotate trace_steps for review.
+#
+# This is NOT a substitute for V-12 (IS/OS consistency). V-12 catches
+# train→test sharpe collapse; V-16 catches "too good to be true" patterns
+# that survive V-12 because train AND test both look strong (e.g., perfect
+# divide-by-something-tiny throughout the test window).
+
+import re as _re_v16
+
+V16_SUSPICION_THRESHOLD: float = 3.0
+
+# Fields that can be 0 (returns on no-trade days, volume on halts, etc.)
+_V16_DIVIDE_RISKY_DENOMS: set = {
+    "returns", "volume", "amount",
+    # Fundamental fields can be 0 / negative for distressed firms
+    "net_income", "fnd6_newa2v1300_ni",
+    "ebit", "fnd6_newa2v1300_oiadp",
+    "total_equity", "fnd6_newa1v1300_ceq",
+    # Synthetic-zero risks
+    "high", "low",  # rare but high==low on illiquid
+}
+
+# Fields that arrive at announcement boundary; need ts_delay wrapping
+_V16_LOOKAHEAD_FIELDS: tuple = (
+    "actual_eps_value", "actual_sales_value",
+    "actual_cashflow_per_share_value",
+    "actual_dividend_value",
+    # Earnings-event fields
+    "fam_earn_date", "fam_earn_announce",
+)
+
+# Standard rolling-window sizes — anything outside is suspicious of
+# parameter mining
+_V16_STANDARD_WINDOWS: set = {1, 2, 3, 5, 10, 15, 20, 30, 60, 90, 120, 240, 480, 1200}
+
+_V16_DIVIDE_RE = _re_v16.compile(r"divide\s*\(\s*[^,()]+,\s*([a-zA-Z_][\w]*)\s*\)")
+_V16_TS_WINDOW_RE = _re_v16.compile(r"\bts_\w+\s*\([^,()]+,\s*(\d+)\b")
+
+
+def _v16_check_divide_by_zero(expression: str) -> str | None:
+    """Risk 1: divide() with denominator that may be 0 on some dates."""
+    if not expression:
+        return None
+    for m in _V16_DIVIDE_RE.finditer(expression):
+        denom = m.group(1).lower()
+        if denom in _V16_DIVIDE_RISKY_DENOMS:
+            return f"divide(_, {denom}) — denominator can be 0"
+    return None
+
+
+def _v16_check_lookahead(expression: str) -> str | None:
+    """Risk 2: announcement-type fields must be ts_delay-wrapped."""
+    if not expression:
+        return None
+    el = expression.lower()
+    for field in _V16_LOOKAHEAD_FIELDS:
+        if field not in el:
+            continue
+        # ts_delay must wrap the field. Heuristic: ts_delay( appears at
+        # smaller index than the field's first occurrence in same nesting.
+        idx_field = el.find(field)
+        idx_delay = el.rfind("ts_delay", 0, idx_field)
+        if idx_delay == -1:
+            return f"announcement field '{field}' used without ts_delay wrapping"
+    return None
+
+
+def _v16_check_overfit_window(expression: str) -> str | None:
+    """Risk 5: ts_op uses non-standard window size suggesting parameter mining."""
+    if not expression:
+        return None
+    weird = []
+    for m in _V16_TS_WINDOW_RE.finditer(expression):
+        n = int(m.group(1))
+        if n > 1 and n not in _V16_STANDARD_WINDOWS:
+            weird.append(n)
+    if weird:
+        return f"ts_op uses non-standard windows {weird} (standard: 5/10/20/60/120/240)"
+    return None
+
+
+def _v16_check_outliers(metrics: Dict) -> list:
+    """Risk 6: data-anomaly metrics."""
+    flags = []
+    if not isinstance(metrics, dict):
+        return flags
+    returns = metrics.get("returns") or 0
+    drawdown = metrics.get("drawdown") or 0
+    fitness = metrics.get("fitness") or 0
+    sharpe = metrics.get("sharpe") or 0
+    if returns > 1.0:  # >100% annual return
+        flags.append(f"returns={returns:.2%} unrealistic for diversified portfolio")
+    if drawdown == 0 and abs(sharpe) > 0.5:
+        flags.append("drawdown=0 with non-trivial sharpe — simulation anomaly likely")
+    if fitness > 10 and sharpe < 5:
+        flags.append(f"fitness={fitness:.1f} but sharpe={sharpe:.1f} — fitness/sharpe inconsistency")
+    return flags
+
+
+def _v16_check_cost_vacuum(metrics: Dict) -> str | None:
+    """Risk 4: high turnover + extreme sharpe = cost-model insensitive alpha."""
+    if not isinstance(metrics, dict):
+        return None
+    turnover = metrics.get("turnover") or 0
+    sharpe = metrics.get("sharpe") or 0
+    # >50% turnover + sharpe>5 means the alpha trades aggressively yet still
+    # claims abnormal returns. BRAIN cost-models, but the alpha may exploit
+    # specific cost-model gaps (e.g., unrealistic instant fills).
+    if turnover > 0.50 and sharpe > 5:
+        return f"turnover={turnover:.2f} + sharpe={sharpe:.2f} — cost-model insensitivity risk"
+    return None
+
+
+def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
+    """V-16: full 6-risk audit when is_sharpe > V16_SUSPICION_THRESHOLD.
+
+    Returns list[dict] with shape:
+      {"check": str, "severity": "hard" | "soft" | "info", "evidence": str}
+
+    Severity semantics:
+      hard — downgrade PASS → PASS_PROVISIONAL (alpha needs review)
+      soft — annotate metrics, keep status
+      info — manual-only, e.g. survivorship bias
+
+    Returns [] when sharpe ≤ threshold.
+    """
+    flags: list = []
+    if not isinstance(metrics, dict):
+        return flags
+    sharpe = metrics.get("sharpe") or 0
+    if sharpe <= V16_SUSPICION_THRESHOLD:
+        return flags
+
+    # Risk 1: divide by zero
+    flag = _v16_check_divide_by_zero(expression)
+    if flag:
+        flags.append({"check": "divide_by_zero", "severity": "soft", "evidence": flag})
+
+    # Risk 2: lookahead bias
+    flag = _v16_check_lookahead(expression)
+    if flag:
+        flags.append({"check": "lookahead_bias", "severity": "hard", "evidence": flag})
+
+    # Risk 3: survivorship bias — system-level, manual review only
+    flags.append({
+        "check": "survivorship_bias",
+        "severity": "info",
+        "evidence": "BRAIN universe selection inherits survivorship; review at portfolio construction.",
+    })
+
+    # Risk 4: cost vacuum
+    flag = _v16_check_cost_vacuum(metrics)
+    if flag:
+        flags.append({"check": "cost_vacuum", "severity": "hard", "evidence": flag})
+
+    # Risk 5: overfit window
+    flag = _v16_check_overfit_window(expression)
+    if flag:
+        flags.append({"check": "overfit_window", "severity": "soft", "evidence": flag})
+
+    # Risk 6: data-anomaly outliers
+    for outlier_msg in _v16_check_outliers(metrics):
+        flags.append({"check": "outlier_metric", "severity": "hard", "evidence": outlier_msg})
+
+    return flags
+
+
+# =============================================================================
 # NODE: Simulate
 # =============================================================================
 
@@ -609,8 +781,27 @@ async def node_evaluate(
 
         # Determine quality status
         if hard_gate_pass and (meets_thresholds or score >= score_pass_threshold):
-            alpha.quality_status = "PASS"
-            pass_count += 1
+            # V-16 (2026-05-03): suspicion mode for sharpe > 3.0. Hard flags
+            # downgrade PASS → PASS_PROVISIONAL so the alpha is held for
+            # review rather than entering KB / submission queue. Soft / info
+            # flags only annotate metrics for trace_steps.
+            v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
+            hard_flags = [f for f in v16_flags if f.get("severity") == "hard"]
+            if v16_flags:
+                # Persist annotations on the alpha's metrics (preserved through
+                # _incremental_save_alphas / workflow.run_with_persistence)
+                if isinstance(alpha.metrics, dict):
+                    alpha.metrics["_v16_suspicion_flags"] = v16_flags
+                logger.warning(
+                    f"[{node_name}] V-16 suspicion mode (sharpe={sharpe:.2f}) | "
+                    f"flags={[f['check'] for f in v16_flags]}"
+                )
+            if hard_flags:
+                alpha.quality_status = "PASS_PROVISIONAL"
+                optimize_count += 1
+            else:
+                alpha.quality_status = "PASS"
+                pass_count += 1
         elif near_pass:
             alpha.quality_status = "PASS_PROVISIONAL"
             optimize_count += 1
@@ -863,9 +1054,25 @@ async def node_evaluate(
             is_overfit_safe = _check_is_os_consistency(flip_metrics)
 
             if pass_sharpe and pass_fitness and pass_turnover and sub_universe_ok and is_overfit_safe:
-                new_alpha.quality_status = "PASS"
-                pass_count += 1
-                flip_retry_pass += 1
+                # V-16 (2026-05-03): apply same suspicion-mode checks on the
+                # flipped expression — flip-retry inherits the same overfit
+                # surface as the main hard_gate path.
+                v16_flags = _run_suspicion_checks(flip_metrics, flipped_expr or "")
+                hard_flags = [f for f in v16_flags if f.get("severity") == "hard"]
+                if v16_flags and isinstance(new_alpha.metrics, dict):
+                    new_alpha.metrics["_v16_suspicion_flags"] = v16_flags
+                if hard_flags:
+                    new_alpha.quality_status = "PASS_PROVISIONAL"
+                    optimize_count += 1
+                    flip_retry_prov += 1
+                    logger.warning(
+                        f"[{node_name}] V-16 downgrades flip-retry PASS → PROV | "
+                        f"sharpe={new_sharpe:.2f} flags={[f['check'] for f in hard_flags]}"
+                    )
+                else:
+                    new_alpha.quality_status = "PASS"
+                    pass_count += 1
+                    flip_retry_pass += 1
             elif (
                 new_sharpe >= prov_sharpe_min
                 and new_fitness >= prov_fitness_min
