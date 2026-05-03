@@ -5,7 +5,7 @@ Contains the main mining task execution logic.
 """
 
 from datetime import datetime
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from loguru import logger
 
 from backend.celery_app import celery_app
@@ -40,7 +40,15 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             if not task:
                 logger.error(f"Task {task_id} not found")
                 return {"error": "Task not found"}
-            
+
+            # Idempotency check (2026-05-03): skip if already in terminal state.
+            # Required after the seed-loop bug fix because Celery may redeliver
+            # unack'd tasks after worker restart, and we don't want a previously
+            # COMPLETED / EARLY_STOPPED task to be re-run.
+            if task.status in ("COMPLETED", "FAILED"):
+                logger.info(f"Task {task_id} already in terminal state {task.status}, skipping")
+                return {"skipped": True, "status": task.status}
+
             # Update status to RUNNING
             await db.execute(
                 update(MiningTask)
@@ -74,10 +82,19 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                     # Mine each dataset
                     total_alphas = 0
                     for dataset_id in datasets:
-                        # Check if task should continue
+                        # Check if task should continue.
+                        # Bug fix (2026-05-03): include EARLY_STOPPED in the
+                        # halt list. Previously when mining_agent's W1 round-
+                        # level early-stop fired and set task.status =
+                        # EARLY_STOPPED, this dataset loop ignored it and
+                        # marched into the next dataset, re-entering
+                        # run_evolution_loop and running another full
+                        # max_iterations × seed-pool cycle. T2/T3 spike tasks
+                        # accumulated 31 evolution_loop entries over 10+ hrs
+                        # before finally exhausting the dataset list.
                         await db.refresh(task)
-                        if task.status in ["STOPPED", "PAUSED"]:
-                            logger.info(f"Task {task_id} {task.status}, stopping")
+                        if task.status in ["STOPPED", "PAUSED", "EARLY_STOPPED"]:
+                            logger.info(f"Task {task_id} {task.status}, stopping dataset loop")
                             break
                         
                         if task.progress_current >= task.daily_goal:
@@ -250,18 +267,27 @@ def _create_config_snapshot(task):
 
 
 async def _get_datasets_to_mine(db, task):
-    """Get list of dataset IDs to mine."""
+    """Get list of dataset IDs to mine.
+
+    V-13 fix (2026-05-03): when mining_weight ties (currently all=1 across
+    USA/TOP3000), Postgres ORDER BY DESC returns implicit ctid order, which
+    pinned model16 to position 0 forever. T1's daily_goal=4 then broke out
+    of the dataset loop on first dataset, so model51..fundamental6..others
+    were never explored. Adding func.random() as secondary sort distributes
+    starting dataset uniformly across runs while still honoring real
+    mining_weight differences when they exist.
+    """
     if task.dataset_strategy == "SPECIFIC" and task.target_datasets:
         return task.target_datasets
-    
-    # Auto-explore: get top datasets by weight
+
+    # Auto-explore: get top datasets by weight, randomize ties.
     ds_query = (
         select(DatasetMetadata)
         .where(
             DatasetMetadata.region == task.region,
             DatasetMetadata.universe == task.universe
         )
-        .order_by(DatasetMetadata.mining_weight.desc())
+        .order_by(DatasetMetadata.mining_weight.desc(), func.random())
         .limit(10)
     )
     ds_result = await db.execute(ds_query)

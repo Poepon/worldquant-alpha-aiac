@@ -70,8 +70,17 @@ def _route_after_seed_load(state: MiningState) -> str:
 
 def _route_after_save_results(state: MiningState) -> str:
     """T1 → END (mining_agent's outer loop handles multi-round).
-    T2/T3 → loop to next seed if any remain, else END."""
+    T2/T3 → loop to next seed if any remain, else END.
+
+    Bug fix (2026-05-03): respect state.early_stopped flag set by
+    node_save_results. Without this, T2/T3 graph kept advancing through
+    seeds even after W1 round-level early-stop fired, causing one task to
+    run 31 outer iterations × 12 seeds = 400+ rounds over 13 hours and
+    pinning a worker indefinitely. See spike task 34/37/38 incident.
+    """
     if state.factor_tier and state.factor_tier > 1:
+        if state.early_stopped:
+            return "END"
         next_idx = state.current_seed_index + 1
         if next_idx < len(state.tier_seeds):
             return "tier_strategy_select"
