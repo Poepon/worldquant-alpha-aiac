@@ -102,6 +102,21 @@ class Settings(BaseSettings):
     T1_USE_LLM_GUIDED_STRATEGY: bool = True  # False 时 T1 task 回退 W0 ALPHA_GENERATION_SYSTEM
     MIN_TIER_SEED_COUNT: int = 5  # T2/T3 task 启动门槛 + node_tier_seed_load 早停门槛共用
 
+    # Plan v5+ §Phase 1 — Hypothesis-Guided Exploration (HGE) staging flag.
+    # 0 = current dataset-centric (pre-Phase 1, default until Phase 1 verified)
+    # 1 = cross-dataset hypothesis: LLM picks 1-3 datasets per hypothesis from
+    #     available_dataset_pool; code_gen uses union of selected_datasets'
+    #     fields. Enables the per-task config["hypothesis_centric_variant"]
+    #     A/B path via task_service.assign_variant.
+    # 2 = typed Hypothesis + lifecycle (Phase 2, 9-12 day)
+    # 3 = main-loop invert (Phase 3, deferred to Q3 re-evaluation)
+    HYPOTHESIS_CENTRIC_LEVEL: int = 0
+    HYPOTHESIS_CENTRIC_CANDIDATE: int = 0   # 50/50 A/B candidate level (>= LEVEL)
+    # Phase 1 cross-dataset hypothesis: how many complementary datasets the
+    # LLM is offered alongside the anchor dataset. 0 = single anchor only
+    # (legacy behavior). 3 = anchor + 3 others (plan default).
+    PHASE1_COMPLEMENTARY_DATASET_K: int = 3
+
     # PR5 — T1 sign-flip retry. When a T1 candidate FAILs but |sharpe| ≥
     # T1_FLIP_RETRY_SHARPE (default 0.5), evaluation re-simulates the negated
     # expression (`multiply(-1, expr)`) and re-evaluates against the same

@@ -129,6 +129,20 @@ class MiningState(BaseModel):
     focused_fields: List[Dict] = Field(default_factory=list)
 
     hypotheses: List[Dict] = Field(default_factory=list)
+
+    # -------------------------------------------------------------------------
+    # Plan v5+ §Phase 1 cross-dataset hypothesis (HGE Level 1+)
+    # -------------------------------------------------------------------------
+    # available_dataset_pool: dataset_ids the LLM may choose from when forming
+    #   a hypothesis. mining_tasks._get_datasets_to_mine populates this with
+    #   [anchor, top-K complementary] before each evolution_loop call. Empty
+    #   list = legacy single-anchor behavior (pre-Phase 1).
+    # current_hypothesis_datasets: dataset_ids the LLM picked for THIS round's
+    #   hypothesis. node_code_gen unions their field pools when generating
+    #   candidate expressions. When empty, code_gen falls back to state.fields
+    #   (anchor-only, legacy path).
+    available_dataset_pool: List[str] = Field(default_factory=list)
+    current_hypothesis_datasets: List[str] = Field(default_factory=list)
     
     # -------------------------------------------------------------------------
     # Alpha Processing Queue
