@@ -126,8 +126,19 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                         if sem_result.warnings:
                             warnings.extend(sem_result.warnings)
                             type_warnings.extend(sem_result.warnings[:2])
-                        
+
                         if sem_result.errors:
+                            # V-15 (2026-05-03 spike 2.0 finding): semantic
+                            # errors must invalidate the expression so
+                            # SELF_CORRECT can rewrite it. Previously these
+                            # errors were appended to the warnings list and
+                            # is_valid stayed True, letting VECTOR-on-ts_op
+                            # mismatches through to SIMULATE where BRAIN
+                            # rejected with "does not support event inputs"
+                            # — wasting ~50% of T2 BRAIN sim budget on task
+                            # 45/46 (333+233 SIMULATION_ERROR).
+                            is_valid = False
+                            error = "; ".join(sem_result.errors[:2])
                             warnings.extend(sem_result.errors)
                             semantic_errors.extend(sem_result.errors[:2])
                             
