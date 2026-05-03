@@ -229,7 +229,7 @@
       "taxonomy": "sentiment",
       "signal_velocity": "FAST",
       "suggested_tier": 3,
-      "expression_template": "trade_when(greater(news_sentiment_score, ts_quantile(news_sentiment_score, 60, 0.9)), -ts_rank(returns, 3), -1)",
+      "expression_template": "trade_when(greater(snt_news_sentiment_index, ts_quantile(snt_news_sentiment_index, 60, 0.9)), -ts_rank(returns, 3), -1)",
       "suggested_datasets": ["news18", "sentiment1"],
       "suggested_operators": ["trade_when", "greater", "ts_quantile", "ts_rank"],
       "source_paper": "Tetlock, Paul C. (2007). Giving Content to Investor Sentiment: The Role of Media in the Stock Market. Journal of Finance, 62(3), 1139-1168.",
