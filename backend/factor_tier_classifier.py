@@ -88,6 +88,94 @@ _T2_SMOOTHING_OPS: Set[str] = {
 }
 
 
+# =============================================================================
+# Quasi-T1 whitelist — Plan v5+ §"Quasi-T1 准一阶白名单 v1.0"
+# =============================================================================
+# Quasi-T1 captures finance-classical two-field arithmetic constructs that
+# strict T1 (single ts_op over one field) excludes. The whitelist is explicit,
+# size-bounded (≤15), and matched via mini-AST not string canonicalization
+# (per Plan v5+ §V-7 — robust to whitespace/ordering surface variants).
+#
+# Pattern grammar (recursive tuple form):
+#   ("op_name", [arg, ...])  where arg is one of:
+#     - str literal of a field name → matched against is_known_field()
+#     - str "<int>"                  → any integer literal
+#     - str "<num>"                  → any numeric literal (int or float)
+#     - str "1" / "0" / etc.         → exact numeric match
+#     - nested tuple                 → recursive pattern
+#
+# Constraints (enforced by _is_quasi_t1):
+#   - No statistical ts_op (ts_mean/std/rank/zscore/corr/arg_max/...) — listed
+#     in _QUASI_T1_FORBIDDEN_OPS
+#   - Only allowed ops: add/subtract/multiply/divide/signed_power + ts_delay
+#     (ts_delay is pointer-type, not statistical aggregation)
+#   - No group_op / rank / zscore / quantile / scale / trade_when
+#
+# Lifecycle (Plan v5+ §V-4): whitelist starts at 15 v1.0 entries; monthly
+# scripts/quasi_t1_candidates_audit.py mines alpha table for new patterns.
+
+_QUASI_T1_ALLOWED_OPS: Set[str] = {
+    "add", "subtract", "multiply", "divide", "signed_power", "ts_delay",
+}
+
+_QUASI_T1_FORBIDDEN_OPS: Set[str] = {
+    # statistical ts_op (any aggregation over a window)
+    "ts_mean", "ts_std_dev", "ts_rank", "ts_zscore", "ts_corr", "ts_arg_max",
+    "ts_arg_min", "ts_quantile", "ts_sum", "ts_decay_linear", "ts_av_diff",
+    "ts_count_nans", "ts_product", "ts_scale", "ts_step", "ts_regression",
+    "ts_covariance", "ts_backfill", "ts_max", "ts_min", "ts_delta",
+    "ts_skewness", "ts_kurtosis", "ts_median", "ts_returns",
+    # group ops
+    "group_neutralize", "group_rank", "group_zscore", "group_mean",
+    "group_scale", "group_normalize", "group_demean",
+    # cross-sectional ops
+    "rank", "zscore", "normalize", "quantile", "winsorize", "scale",
+    "regression_neut", "vector_neut",
+    # event ops
+    "trade_when",
+}
+
+# v1.0 — 15 finance-classical patterns (Plan §"Quasi-T1 准一阶白名单 v1.0").
+_QUASI_T1_PATTERNS: tuple = (
+    # Q-PR-01: synthetic returns — subtract(divide(close, ts_delay(close, d)), 1)
+    ("subtract", [("divide", ["close", ("ts_delay", ["close", "<int>"])]), "1"]),
+    # Q-ID-01: intraday range / close
+    ("divide", [("subtract", ["high", "low"]), "close"]),
+    # Q-ID-02: close position within range
+    ("divide", [("subtract", ["close", "low"]), ("subtract", ["high", "low"])]),
+    # Q-ID-03: intraday close-open return
+    ("divide", [("subtract", ["close", "open"]), "open"]),
+    # Q-VL-01: PE proxy
+    ("divide", ["close", "eps"]),
+    # Q-VL-02: PB proxy
+    ("divide", ["close", "book_value_per_share"]),
+    # Q-VL-03: earnings yield (EBIT/EV)
+    ("divide", ["ebit", "ev"]),
+    # Q-PV-01: liquidity ratio
+    ("divide", ["close", "volume"]),
+    # Q-PV-02: turnover proxy
+    ("divide", ["amount", "cap"]),
+    # Q-FN-01: accrual quality
+    ("divide", ["cfo", "net_income"]),
+    # Q-FN-02: cash flow yield
+    ("divide", ["cfo", "cap"]),
+    # Q-FN-03: asset turnover
+    ("divide", ["sales", "total_assets"]),
+    # Q-FN-04: debt-to-equity
+    ("divide", ["total_debt", "total_equity"]),
+    # Q-GP-01: overnight gap
+    (
+        "divide",
+        [
+            ("subtract", ["open", ("ts_delay", ["close", "<int>"])]),
+            ("ts_delay", ["close", "<int>"]),
+        ],
+    ),
+    # Q-CR-01: close-vwap deviation
+    ("subtract", ["close", "vwap"]),
+)
+
+
 def _ts_ops() -> Set[str]:
     reg = OperatorRegistry.get_instance()
     return reg.ts_operators or _BUILTIN_TS_OPS
@@ -330,6 +418,83 @@ def _is_t1(expr: str) -> bool:
     return True
 
 
+def _match_atom(arg_str: str, atom) -> bool:
+    """Match a single arg string against a pattern atom.
+
+    Atom kinds:
+      "<int>"  — any integer literal
+      "<num>"  — any int or float literal
+      "field_name" — literal field name (case-insensitive); matched as a
+                     bare token equal to that field
+      "1" / "0" / numeric str — exact numeric match (after stripping)
+      tuple    — nested call pattern (handled by _match_pattern)
+    """
+    if isinstance(atom, tuple):
+        return _match_pattern(arg_str, atom)
+    s = _strip_outer_parens(arg_str.strip())
+    if atom == "<int>":
+        return bool(re.fullmatch(r"-?\d+", s))
+    if atom == "<num>":
+        return bool(re.fullmatch(r"-?\d+(\.\d+)?", s))
+    # Numeric literal exact match
+    if re.fullmatch(r"-?\d+(\.\d+)?", atom):
+        return s == atom
+    # Field name: case-insensitive bare token comparison
+    if not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", s):
+        return False
+    return s.lower() == atom.lower()
+
+
+def _match_pattern(expr_str: str, pattern: tuple) -> bool:
+    """Recursively match expr against (op_name, [arg_pattern, ...])."""
+    parsed = _top_level_call(expr_str)
+    if not parsed:
+        return False
+    op, args = parsed
+    pat_op, pat_args = pattern
+    if op != pat_op:
+        return False
+    if len(args) != len(pat_args):
+        return False
+    return all(_match_atom(a, p) for a, p in zip(args, pat_args))
+
+
+def _expression_uses_only_allowed_ops(expr: str) -> bool:
+    """True iff every operator token in expr is in _QUASI_T1_ALLOWED_OPS.
+
+    Defense-in-depth check: even if a pattern accidentally matched, reject
+    the expression if any forbidden op (statistical ts_op / group_op / etc.)
+    appears anywhere in the tree.
+    """
+    # Find every `ident(` in the expression — these are operator calls
+    for m in re.finditer(r"([a-zA-Z_][a-zA-Z0-9_]*)\s*\(", expr):
+        op = m.group(1).lower()
+        if op in _QUASI_T1_FORBIDDEN_OPS:
+            return False
+        if op not in _QUASI_T1_ALLOWED_OPS:
+            # Unknown op — reject. Whitelist is closed-set by design.
+            return False
+    return True
+
+
+def _is_quasi_t1(expr: str) -> bool:
+    """Whitelist match: expression must structurally equal one of the
+    pre-approved Quasi-T1 patterns. No fuzzy match — mini-AST comparison
+    handles whitespace/ordering surface variants robustly.
+    """
+    s = _strip_outer_parens(expr.strip())
+    if not _expression_uses_only_allowed_ops(s):
+        return False
+    return any(_match_pattern(s, p) for p in _QUASI_T1_PATTERNS)
+
+
+def _is_t1_or_quasi_t1(expr: str) -> bool:
+    """Gate used by classify_tier and downstream T2 wrapping — strict T1
+    and Quasi-T1 are treated identically for mining-pipeline purposes.
+    """
+    return _is_t1(expr) or _is_quasi_t1(expr)
+
+
 def _is_t2_via_wrapper(expr: str) -> bool:
     """T2: top-level is a T2-eligible wrapper (group_* / pure_xs / vec_* / smoothing ts) AND first arg is T1.
 
@@ -417,8 +582,10 @@ def classify_tier(expression: str) -> Optional[int]:
                 return 3
         return None  # malformed trade_when
 
-    # T1 takes priority over T2 since T2 requires T1 inner — checking T1 first short-circuits cleanly
-    if _is_t1(s):
+    # T1 takes priority over T2 since T2 requires T1 inner — checking T1 first short-circuits cleanly.
+    # _is_t1_or_quasi_t1 admits the strict T1 form plus the 15 Quasi-T1 finance-classical
+    # two-field arithmetic patterns (Plan v5+ §"Quasi-T1 准一阶白名单 v1.0").
+    if _is_t1_or_quasi_t1(s):
         return 1
     if _is_t2_via_wrapper(s):
         return 2

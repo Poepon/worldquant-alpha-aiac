@@ -288,10 +288,20 @@ class TestNegationWrapperTransparency:
         assert classify_tier("multiply(-1, multiply(-1, ts_rank(close, 20)))") == 1
 
     def test_negation_around_unclassifiable_stays_none(self):
-        # If inner is not classifiable, negation stays None
-        assert classify_tier("multiply(-1, divide(close, volume))") is None
+        # If inner is not classifiable, negation stays None.
+        # Note: divide(close, volume) is Quasi-T1 Q-PV-01 (Plan v5+), so we use
+        # an off-whitelist arithmetic form to keep this test about the negation
+        # wrapper's None-passthrough behavior.
+        assert classify_tier("multiply(-1, divide(close, returns))") is None
         # Non-zero subtract is real arithmetic, not negation
         assert classify_tier("subtract(close, open)") is None
+
+    def test_negation_around_quasi_t1_recurses_to_t1(self):
+        # Quasi-T1 patterns are tier=1 (Plan v5+ §"Quasi-T1 准一阶白名单 v1.0"),
+        # so negation around them is transparent and yields T1.
+        assert classify_tier("multiply(-1, divide(close, volume))") == 1
+        assert classify_tier("multiply(-1, subtract(close, vwap))") == 1
+        assert classify_tier("subtract(0, divide(close, eps))") == 1
 
     def test_extract_tier1_seed_handles_negation(self):
         # multiply(-1, T2) → strip negation → strip T2 wrapper → T1 kernel
@@ -340,6 +350,175 @@ def brain_alpha_expressions() -> list[str]:
         )
     data = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
     return [d["expression"] for d in data if d.get("expression")]
+
+
+class TestQuasiT1:
+    """Quasi-T1 whitelist (Plan v5+ §"Quasi-T1 准一阶白名单 v1.0") — 15 finance-classical
+    two-field arithmetic patterns admitted as tier-1 for mining-pipeline purposes.
+
+    Coverage targets:
+    - All 15 v1.0 patterns classify as T1
+    - Surface variants (whitespace, case, redundant parens) still match
+    - Off-whitelist patterns reject (None)
+    - Adding any forbidden op (statistical ts_op / group_op) rejects
+    - Quasi-T1 wrapped in T2 wrapper (group_neutralize / rank / etc.) → T2
+    - Strict T1 behavior unchanged
+    """
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # Q-PR-01 synthetic returns
+            "subtract(divide(close, ts_delay(close, 1)), 1)",
+            "subtract(divide(close, ts_delay(close, 5)), 1)",  # any int for d
+            # Q-ID-01/02/03 intraday
+            "divide(subtract(high, low), close)",
+            "divide(subtract(close, low), subtract(high, low))",
+            "divide(subtract(close, open), open)",
+            # Q-VL valuation ratios
+            "divide(close, eps)",
+            "divide(close, book_value_per_share)",
+            "divide(ebit, ev)",
+            # Q-PV price-volume
+            "divide(close, volume)",
+            "divide(amount, cap)",
+            # Q-FN financial ratios
+            "divide(cfo, net_income)",
+            "divide(cfo, cap)",
+            "divide(sales, total_assets)",
+            "divide(total_debt, total_equity)",
+            # Q-GP overnight gap
+            "divide(subtract(open, ts_delay(close, 1)), ts_delay(close, 1))",
+            # Q-CR close-vwap deviation
+            "subtract(close, vwap)",
+        ],
+    )
+    def test_all_15_patterns_classify_as_t1(self, expr: str):
+        assert classify_tier(expr) == 1, f"expected T1 (quasi): {expr}"
+        assert is_t1_expression(expr)
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # whitespace variants
+            "divide( close , eps )",
+            "divide(close,eps)",
+            "  divide(close, eps)  ",
+            # redundant outer parens
+            "(divide(close, eps))",
+            "((divide(close, eps)))",
+            # case-insensitive op
+            "DIVIDE(close, eps)",
+            "Divide(close, eps)",
+            # case-insensitive field
+            "divide(CLOSE, EPS)",
+            # nested whitespace
+            "subtract( divide( close , ts_delay( close , 1 ) ) , 1 )",
+        ],
+    )
+    def test_surface_variants_still_match(self, expr: str):
+        assert classify_tier(expr) == 1, f"surface variant should still classify as T1: {expr!r}"
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # off-whitelist double-field arithmetic
+            "divide(close, returns)",
+            "multiply(eps, sales)",
+            "subtract(volume, vwap)",  # subtract is allowed, but (volume, vwap) is not Q-CR-01
+            "add(close, eps)",
+            # off-whitelist with allowed op signatures
+            "divide(close, low)",  # not in whitelist (Q-VL/Q-PV don't include this)
+        ],
+    )
+    def test_off_whitelist_arithmetic_not_quasi(self, expr: str):
+        assert classify_tier(expr) is None, f"off-whitelist must be None: {expr}"
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # adding statistical ts_op anywhere disqualifies
+            "divide(ts_mean(close, 5), eps)",
+            "divide(close, ts_zscore(eps, 20))",
+            # group op
+            "group_neutralize(divide(close, eps), industry)",  # this is T2 not quasi T1
+            # cross-sectional op nested
+            "divide(rank(close), eps)",
+            # trade_when nested
+            "divide(close, trade_when(volume > 0, eps, -1))",
+        ],
+    )
+    def test_forbidden_ops_in_tree_disqualify_quasi(self, expr: str):
+        # group_neutralize(quasi_t1_inner, industry) is T2, not None
+        if expr.startswith("group_neutralize"):
+            assert classify_tier(expr) == 2, f"quasi-T1 wrapped in group_op should be T2: {expr}"
+        else:
+            assert classify_tier(expr) is None, f"forbidden op must reject: {expr}"
+
+    @pytest.mark.parametrize(
+        "wrapper_form",
+        [
+            # group_*-style T2 wrappers around quasi T1 → T2
+            "group_neutralize({inner}, industry)",
+            "group_rank({inner}, sector)",
+            "group_zscore({inner}, market)",
+            # pure cross-sectional T2 wrappers
+            "rank({inner})",
+            "zscore({inner})",
+            "winsorize({inner}, std=4)",
+            "signed_power({inner}, 0.5)",
+            # smoothing ts T2 wrappers
+            "ts_decay_linear({inner}, 10)",
+            "ts_mean({inner}, 20)",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "inner",
+        [
+            "divide(close, eps)",
+            "divide(subtract(high, low), close)",
+            "subtract(close, vwap)",
+        ],
+    )
+    def test_quasi_t1_wrapped_in_t2_classifies_as_2(self, wrapper_form: str, inner: str):
+        expr = wrapper_form.format(inner=inner)
+        assert classify_tier(expr) == 2, f"expected T2 (quasi-T1 + wrapper): {expr}"
+
+    def test_quasi_t1_in_residualize_form_classifies_as_2(self):
+        """subtract(quasi_T1, group_mean(quasi_T1, weight, group)) — cap-weighted
+        residualize over a quasi-T1 kernel. Treated as a single T2 wrapper layer.
+        """
+        expr = "subtract(divide(close, eps), group_mean(divide(close, eps), cap, industry))"
+        assert classify_tier(expr) == 2, f"residualize over quasi-T1 must be T2: {expr}"
+
+    def test_quasi_t1_in_t3_trade_when_classifies_as_3(self):
+        expr = "trade_when(volume > ts_mean(volume, 240), divide(close, eps), -1)"
+        assert classify_tier(expr) == 3
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # strict T1 behavior unchanged
+            "ts_rank(close, 20)",
+            "ts_zscore(returns, 5)",
+            "ts_decay_linear(volume, 10)",
+            "ts_mean(vwap, 60)",
+        ],
+    )
+    def test_strict_t1_unaffected(self, expr: str):
+        assert classify_tier(expr) == 1
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # tier=None still works for these
+            "rank(close)",
+            "zscore(returns)",
+            "subtract(ts_av_diff(close, 30), ts_av_diff(open, 30))",
+        ],
+    )
+    def test_existing_none_behavior_unaffected(self, expr: str):
+        assert classify_tier(expr) is None
 
 
 class TestRealDataFixture:
