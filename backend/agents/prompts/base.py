@@ -37,6 +37,11 @@ class PromptContext:
     num_alphas: int = 5
     exploration_weight: float = 0.5  # 0=pure exploitation, 1=pure exploration
 
+    # Plan v5+ §Phase 1 cross-dataset hypothesis. Empty list = legacy
+    # single-anchor mode; populated = LLM may pick 1-3 datasets in
+    # `selected_datasets` to combine fields across domains.
+    available_dataset_pool: List[str] = field(default_factory=list)
+
 
 def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     """Build concise field reference with type info."""

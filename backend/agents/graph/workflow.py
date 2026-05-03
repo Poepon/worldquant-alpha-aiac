@@ -315,6 +315,8 @@ class MiningWorkflow:
         )
 
         # Initialize state
+        configurable = (config or {}).get("configurable", {}) if config else {}
+        available_dataset_pool = configurable.get("available_dataset_pool", []) or []
         initial_state = MiningState(
             task_id=task.id,
             region=task.region,
@@ -324,6 +326,7 @@ class MiningWorkflow:
             operators=operators,
             num_alphas_target=num_alphas,
             factor_tier=factor_tier,
+            available_dataset_pool=available_dataset_pool,
         )
         
         # Compile and run

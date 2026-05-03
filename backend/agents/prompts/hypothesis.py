@@ -116,13 +116,33 @@ The balance depends on current progress:
     # Build field categories overview
     field_overview = build_fields_context(ctx.fields, max_fields=20)
     
+    # Plan v5+ §Phase 1: cross-dataset hypothesis section.
+    # Pool empty = legacy single-anchor; populated = LLM may pick 1-3.
+    pool = list(ctx.available_dataset_pool or [])
+    if pool and len(pool) > 1:
+        cross_dataset_section = f"""
+
+## Cross-dataset Pool (Phase 1)
+
+**Anchor dataset**: {ctx.dataset_id}
+**Available pool** (you may pick 1-3 of these in `selected_datasets`):
+{', '.join(f'`{d}`' for d in pool)}
+
+When proposing each hypothesis, decide whether to combine multiple datasets.
+Set `selected_datasets` to a subset (1-3 ids from the pool) and ensure all
+`key_fields` come from those datasets. Single-domain hypotheses set
+`selected_datasets = ["{ctx.dataset_id}"]`.
+"""
+    else:
+        cross_dataset_section = ""
+
     return f"""## Research Context
 
 **Dataset**: {ctx.dataset_id}
 **Category**: {ctx.dataset_category or 'General'}
 **Description**: {ctx.dataset_description or 'Not provided'}
 **Region**: {ctx.region} | **Universe**: {ctx.universe}
-
+{cross_dataset_section}
 ## Available Data Fields (Sample)
 
 {field_overview}

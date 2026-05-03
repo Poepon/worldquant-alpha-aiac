@@ -295,7 +295,9 @@ async def node_hypothesis(
     
     target_fields = state.focused_fields if state.focused_fields else state.fields[:20]
     
-    # Build prompt context
+    # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
+    # through MiningState.available_dataset_pool (populated by mining_tasks
+    # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
     prompt_context = PromptContext(
         dataset_id=state.dataset_id,
         dataset_description=state.dataset_description or "",
@@ -307,6 +309,7 @@ async def node_hypothesis(
         success_patterns=state.patterns[:5],
         failure_pitfalls=state.pitfalls[:5],
         exploration_weight=exploration_weight,
+        available_dataset_pool=getattr(state, "available_dataset_pool", []) or [],
     )
     
     # Use new hypothesis builder with experiment trace
@@ -329,12 +332,37 @@ async def node_hypothesis(
     knowledge_transfer = {}
     analysis = {}
     
+    # Plan v5+ Phase 1: aggregate selected_datasets across all hypotheses
+    # for code_gen field-pool union. Each hypothesis may pick its own subset;
+    # the round's effective dataset set is the union (capped at the available pool).
+    chosen_datasets: List[str] = []
+    pool_set = set(prompt_context.available_dataset_pool)
+    legacy_anchor = state.dataset_id
+
     if response.success and response.parsed:
         parsed = response.parsed
         hypotheses = parsed.get("hypotheses", [])
         knowledge_transfer = parsed.get("knowledge_transfer", {})
         analysis = parsed.get("analysis", {})
-        
+
+        # Phase 1 selected_datasets parsing:
+        #   - Each hypothesis may include "selected_datasets": [...] (1-3 ids)
+        #   - Validate against available_dataset_pool (drop any rogue ids)
+        #   - Fall back to [anchor] when missing/empty (preserves legacy)
+        union_set = set()
+        for h in hypotheses:
+            sel = h.get("selected_datasets") or []
+            if not isinstance(sel, list):
+                sel = []
+            if pool_set:
+                # Pool offered → keep only valid ids; require at least one
+                sel = [d for d in sel if d in pool_set]
+            if not sel:
+                sel = [legacy_anchor]
+            h["selected_datasets"] = sel  # write-back normalized
+            union_set.update(sel)
+        chosen_datasets = sorted(union_set) if union_set else [legacy_anchor]
+
         # Log extracted knowledge for future reference
         if knowledge_transfer:
             rules = knowledge_transfer.get("if_then_rules", [])
@@ -342,8 +370,11 @@ async def node_hypothesis(
                 logger.info(f"[{node_name}] Extracted {len(rules)} knowledge rules")
                 for rule in rules[:3]:
                     logger.debug(f"[{node_name}] Rule: {rule}")
-    
-    logger.info(f"[{node_name}] Complete | hypotheses={len(hypotheses)}")
+
+    logger.info(
+        f"[{node_name}] Complete | hypotheses={len(hypotheses)} "
+        f"selected_datasets={chosen_datasets} (pool_size={len(pool_set)})"
+    )
     
     trace_update = await record_trace(
         state, trace_service, node_name,
@@ -367,6 +398,9 @@ async def node_hypothesis(
     return {
         "hypotheses": hypotheses,
         "knowledge_transfer": knowledge_transfer,
+        # Phase 1: union of selected_datasets across hypotheses; node_code_gen
+        # will use this to compose the effective field pool for this round.
+        "current_hypothesis_datasets": chosen_datasets,
         **trace_update
     }
 
@@ -472,13 +506,48 @@ async def node_code_gen(
         if not any(p.get("pattern") == ex.get("pattern") for ex in merged_patterns):
             merged_patterns.append(p)
 
+    # Plan v5+ §Phase 1 (A4): cross-dataset field union for code generation.
+    # When current_hypothesis_datasets is set (multi-dataset hypothesis), pull
+    # fields from all selected datasets and union them. Fall back to the
+    # anchor's state.fields when empty (legacy single-anchor path).
+    chosen_dsets = list(getattr(state, "current_hypothesis_datasets", []) or [])
+    code_gen_fields = state.focused_fields if state.focused_fields else state.fields[:30]
+    if chosen_dsets and (len(chosen_dsets) > 1 or chosen_dsets[0] != state.dataset_id):
+        try:
+            from backend.tasks.mining_tasks import _get_dataset_fields
+            from backend.database import AsyncSessionLocal
+            unioned: list[dict] = []
+            seen_ids: set[str] = set()
+            async with AsyncSessionLocal() as _db:
+                for ds in chosen_dsets:
+                    try:
+                        ds_fields = await _get_dataset_fields(_db, ds, state.region, state.universe)
+                    except Exception as _e:
+                        logger.warning(f"[{node_name}] union: fetch fields for {ds} failed: {_e}")
+                        continue
+                    for f in ds_fields or []:
+                        fid = f.get("field_id") or f.get("id")
+                        if not fid or fid in seen_ids:
+                            continue
+                        seen_ids.add(fid)
+                        unioned.append(f)
+            if unioned:
+                # Cap at 60 fields total to keep prompt manageable
+                code_gen_fields = unioned[:60]
+                logger.info(
+                    f"[{node_name}] Phase 1 union fields | datasets={chosen_dsets} "
+                    f"unique_fields={len(unioned)} (capped to {len(code_gen_fields)})"
+                )
+        except Exception as _ex:
+            logger.warning(f"[{node_name}] union-field path failed (non-fatal): {_ex}")
+
     prompt_context = PromptContext(
         dataset_id=state.dataset_id,
         dataset_description=state.dataset_description or "",
         dataset_category=state.dataset_category or "",
         region=state.region,
         universe=state.universe,
-        fields=state.focused_fields if state.focused_fields else state.fields[:30],
+        fields=code_gen_fields,
         operators=state.operators[:50],
         success_patterns=merged_patterns[:8],
         failure_pitfalls=state.pitfalls[:5],
@@ -491,6 +560,7 @@ async def node_code_gen(
         avoid_patterns=avoid_patterns,
         num_alphas=state.num_alphas_target,
         exploration_weight=exploration_weight,
+        available_dataset_pool=getattr(state, "available_dataset_pool", []) or [],
     )
 
     # Use enhanced prompt builder with hypothesis and feedback context

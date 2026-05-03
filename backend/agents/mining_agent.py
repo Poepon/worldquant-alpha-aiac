@@ -103,6 +103,7 @@ class MiningAgent:
         iteration: int = 1,
         strategy: Optional[EvolutionStrategy] = None,
         run_id: Optional[int] = None,
+        available_dataset_pool: Optional[List[str]] = None,
     ) -> List[Alpha]:
         """
         Run a single mining iteration with strategy application.
@@ -162,6 +163,10 @@ class MiningAgent:
                         "db_session": self.db,
                         "brain_adapter": self.brain,
                         "alpha_service": alpha_service,
+                        # Phase 1 (A2): cross-dataset hypothesis pool. Empty
+                        # list = legacy single-anchor; populated = LLM may
+                        # pick selected_datasets from this pool.
+                        "available_dataset_pool": available_dataset_pool or [],
                     }
                 },
                 factor_tier=factor_tier,
@@ -259,6 +264,7 @@ class MiningAgent:
         num_alphas_per_round: int = 4,
         initial_strategy: Optional[EvolutionStrategy] = None,
         run_id: Optional[int] = None,
+        available_dataset_pool: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Run multi-round evolution loop for alpha mining.
@@ -329,6 +335,7 @@ class MiningAgent:
                         iteration=iteration,
                         strategy=current_strategy,
                         run_id=run_id,
+                        available_dataset_pool=available_dataset_pool,
                     )
                     
                     # Analyze round results

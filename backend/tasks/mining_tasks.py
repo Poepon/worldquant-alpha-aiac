@@ -125,7 +125,31 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                         if remaining_goal <= 0:
                             logger.info(f"Task {task_id} already reached goal, stopping")
                             break
-                        
+
+                        # Plan v5+ §Phase 1 (A2): build available_dataset_pool
+                        # for cross-dataset hypothesis. When HYPOTHESIS_CENTRIC_LEVEL
+                        # is 0 the pool stays empty and node_hypothesis falls back
+                        # to single-anchor behavior. Once enabled the LLM picks
+                        # 1-3 datasets in the pool and node_code_gen unions
+                        # those datasets' field pools.
+                        from backend.config import settings as _hge_settings
+                        active_level = (task.config or {}).get(
+                            "hypothesis_centric_variant",
+                            _hge_settings.HYPOTHESIS_CENTRIC_LEVEL,
+                        )
+                        if active_level >= 1:
+                            complementary = await _get_complementary_datasets(
+                                db, task, dataset_id,
+                                k=_hge_settings.PHASE1_COMPLEMENTARY_DATASET_K,
+                            )
+                            available_dataset_pool = [dataset_id] + complementary
+                            logger.info(
+                                f"[mining] Phase 1 active (level={active_level}) "
+                                f"dataset_pool={available_dataset_pool}"
+                            )
+                        else:
+                            available_dataset_pool = []
+
                         # Run evolution loop
                         try:
                             # PR4 fix — honor the task's configured daily_goal as
@@ -142,7 +166,8 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                                 max_iterations=task.max_iterations or 10,
                                 target_alphas=remaining_goal,
                                 num_alphas_per_round=num_per_round,
-                                run_id=run.id
+                                run_id=run.id,
+                                available_dataset_pool=available_dataset_pool,
                             )
                             
                             # Update progress
@@ -293,6 +318,38 @@ async def _get_datasets_to_mine(db, task):
     ds_result = await db.execute(ds_query)
     datasets_objs = ds_result.scalars().all()
     return [d.dataset_id for d in datasets_objs]
+
+
+async def _get_complementary_datasets(
+    db, task, anchor_dataset_id: str, k: int = 3
+) -> list[str]:
+    """Plan v5+ §Phase 1 (A2): pick K complementary dataset_ids alongside
+    the anchor, to form the available_dataset_pool the LLM hypothesis
+    node may pick from.
+
+    Strategy: same region/universe, mining_weight DESC, exclude the anchor,
+    randomized ties. K defaults to settings.PHASE1_COMPLEMENTARY_DATASET_K
+    when positive; 0 returns empty list (legacy single-anchor behavior).
+
+    Why a separate query (not just slicing _get_datasets_to_mine output):
+    that function already trims to top-10 globally, and we want the anchor
+    to always lead. Per-anchor query keeps the pool deterministic w.r.t.
+    the anchor while still random across ties.
+    """
+    if k <= 0:
+        return []
+    ds_query = (
+        select(DatasetMetadata)
+        .where(
+            DatasetMetadata.region == task.region,
+            DatasetMetadata.universe == task.universe,
+            DatasetMetadata.dataset_id != anchor_dataset_id,
+        )
+        .order_by(DatasetMetadata.mining_weight.desc(), func.random())
+        .limit(k)
+    )
+    rows = (await db.execute(ds_query)).scalars().all()
+    return [d.dataset_id for d in rows]
 
 
 async def _get_operators(db):
