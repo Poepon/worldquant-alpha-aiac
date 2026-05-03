@@ -137,7 +137,39 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
                 t["turnover_min"] <= (alpha.is_turnover or 0) <= t["turnover_max"]
             )
 
-            if alpha.quality_status == "PASS" and not (sharpe_ok and fitness_ok and turnover_ok):
+            # User decision (2026-05-02): CONCENTRATED_WEIGHT and
+            # LOW_SUB_UNIVERSE_SHARPE FAIL must NOT keep PASS — alpha must
+            # enter optimization iteration. evaluation.py:hard_gate already
+            # enforces this at creation time, but BRAIN checks often arrive
+            # PENDING when a fresh alpha is evaluated, then flip to FAIL on
+            # the next BRAIN sync. This block catches the post-sync FAIL
+            # and demotes PASS → OPTIMIZE so the alpha re-enters mining
+            # candidate pool (mining_agent.py:622 picks up OPTIMIZE rows).
+            checks = (alpha.metrics or {}).get("checks") or []
+            HARD_DEMOTE_CHECKS = ("CONCENTRATED_WEIGHT", "LOW_SUB_UNIVERSE_SHARPE")
+            brain_check_fails = [
+                c.get("name")
+                for c in checks
+                if c.get("result") == "FAIL" and c.get("name") in HARD_DEMOTE_CHECKS
+            ]
+
+            if alpha.quality_status in ("PASS", "PASS_PROVISIONAL") and brain_check_fails:
+                try:
+                    await alpha_service.apply_quality_status_change(
+                        alpha_id=alpha.id,
+                        new_status="OPTIMIZE",
+                        reason=(
+                            f"daily_beat_os: BRAIN check FAIL after sync — "
+                            f"{','.join(brain_check_fails)} (T{alpha.factor_tier})"
+                        ),
+                        source="daily_beat_os",
+                    )
+                    demoted += 1
+                except Exception as e:
+                    logger.warning(
+                        f"[refresh_os_metrics] checks-fail demote alpha={alpha.id} failed: {e}"
+                    )
+            elif alpha.quality_status == "PASS" and not (sharpe_ok and fitness_ok and turnover_ok):
                 try:
                     await alpha_service.apply_quality_status_change(
                         alpha_id=alpha.id,
