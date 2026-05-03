@@ -853,8 +853,16 @@ async def node_evaluate(
             pass_sharpe = new_sharpe >= sharpe_min
             pass_fitness = new_fitness >= fitness_min
             pass_turnover = turnover_min <= new_turnover <= turnover_max
+            # V-12 (2026-05-03 spike-discovered gap): the main hard_gate path
+            # already includes is_overfit_safe, but the sign-flip retry path
+            # bypassed it. Spike 2.0 alpha YP2QnnVW (multiply(-1, ts_zscore(
+            # analyst_revision_rank_derivative, 5))) hit train=8.37 / test=0
+            # via flip-retry and was wrongly tagged PASS. Apply the same OS-
+            # consistency gate here so flip-retry can't smuggle IS-overfit
+            # PASSes through.
+            is_overfit_safe = _check_is_os_consistency(flip_metrics)
 
-            if pass_sharpe and pass_fitness and pass_turnover and sub_universe_ok:
+            if pass_sharpe and pass_fitness and pass_turnover and sub_universe_ok and is_overfit_safe:
                 new_alpha.quality_status = "PASS"
                 pass_count += 1
                 flip_retry_pass += 1
