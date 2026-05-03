@@ -33,6 +33,42 @@ from backend.agents.prompts import (
 
 
 # =============================================================================
+# Helpers
+# =============================================================================
+
+def _check_is_os_consistency(metrics: Dict) -> bool:
+    """V-12: reject alphas whose IS sharpe far exceeds OS sharpe.
+
+    Spike (2026-05-02 → 03) revealed train_sharpe values up to 16.2 paired
+    with test_sharpe=0 — pure IS overfit. PASS gate must require OS
+    consistency for elevated IS sharpe.
+
+    Tiered rules (calibrated against Spike T1 healthy ratio 76% / T2 35%):
+      - is_sharpe < 2:    no OS check (conservative IS already)
+      - 2 <= is_sharpe < 5: require os_sharpe > 0 AND os/is >= 0.3
+      - is_sharpe >= 5:   require os_sharpe > 0 AND os/is >= 0.4
+
+    OS sharpe sources, in priority order:
+      1. metrics["os_sharpe"]           (BRAIN OS-evaluated sharpe)
+      2. metrics["test_sharpe"]         (BRAIN test-period split)
+      Both null/zero → reject (no OS evidence).
+
+    Returns True if the alpha is safe (i.e., not over-fit by this rule).
+    """
+    is_sh = (metrics.get("sharpe") if isinstance(metrics, dict) else None) or 0
+    if is_sh < 2:
+        return True
+    os_sh = 0.0
+    if isinstance(metrics, dict):
+        os_sh = metrics.get("os_sharpe") or metrics.get("test_sharpe") or 0
+    if os_sh is None or os_sh <= 0:
+        return False
+    ratio = os_sh / is_sh if is_sh > 0 else 0
+    threshold = 0.4 if is_sh >= 5 else 0.3
+    return ratio >= threshold
+
+
+# =============================================================================
 # NODE: Simulate
 # =============================================================================
 
@@ -524,6 +560,15 @@ async def node_evaluate(
             self_corr_ok = True
             self_corr_verified = True  # tier_skipped, not unknown
 
+        # V-12 (2026-05-03): IS-only PASS bar lets train_sharpe >> test_sharpe
+        # alphas through. Spike data showed T2 train_avg=3.94 / test_avg=0.40
+        # (90% decay), with top alphas like sharpe=16.2/test=0.0 — pure IS
+        # overfit. Require OS consistency for high-IS-sharpe alphas: above
+        # sharpe=2 we need a positive os_sharpe with retention >= 0.3 (or 0.4
+        # if sharpe>5). Lower-IS alphas pass without OS check (their own bar
+        # is conservative enough).
+        is_overfit_safe = _check_is_os_consistency(metrics)
+
         hard_gate_pass = (
             sharpe >= sharpe_min
             and fitness >= fitness_min
@@ -532,6 +577,7 @@ async def node_evaluate(
             and concentrated_ok
             and self_corr_ok
             and self_corr_verified
+            and is_overfit_safe
         )
 
         # PASS_PROVISIONAL: 近成功池 (sharpe + fitness>=0.6 + turnover [0.01,0.85])
