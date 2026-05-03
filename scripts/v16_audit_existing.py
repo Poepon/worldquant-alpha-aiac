@@ -36,11 +36,19 @@ from backend.agents.graph.nodes.evaluation import (
 )
 
 
-def find_audit_targets(conn, task_min, task_max, force):
+def find_audit_targets(conn, task_min, task_max, force, include_pending):
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    where = ["quality_status IN ('PASS', 'PASS_PROVISIONAL')",
-             "(metrics->>'sharpe')::float > %s"]
-    params = [V16_SUSPICION_THRESHOLD]
+    statuses = ["PASS", "PASS_PROVISIONAL"]
+    if include_pending:
+        # PENDING covers BRAIN-synced orphan alphas (no task_id) that
+        # never went through evaluation.py — V-16 annotates them so
+        # downstream audits / submission flows can read the flags.
+        statuses += ["PENDING"]
+    where = [
+        f"quality_status = ANY(%s)",
+        "(metrics->>'sharpe')::float > %s",
+    ]
+    params = [statuses, V16_SUSPICION_THRESHOLD]
     if task_min is not None:
         where.append("task_id >= %s")
         params.append(task_min)
@@ -106,13 +114,18 @@ def main() -> int:
     ap.add_argument("--task-max", type=int, default=None)
     ap.add_argument("--force", action="store_true",
                     help="re-scan even already-annotated rows")
+    ap.add_argument("--include-pending", action="store_true",
+                    help="also audit PENDING alphas (BRAIN-synced orphans). "
+                         "Annotate only — never downgrades PENDING.")
     args = ap.parse_args()
 
     conn = psycopg2.connect(
         host="localhost", port=5433,
         user="postgres", password="postgres", dbname="alpha_gpt",
     )
-    rows = find_audit_targets(conn, args.task_min, args.task_max, args.force)
+    rows = find_audit_targets(
+        conn, args.task_min, args.task_max, args.force, args.include_pending,
+    )
 
     if not rows:
         print("No alphas above V-16 threshold to audit.")
@@ -130,6 +143,8 @@ def main() -> int:
             continue
         annotate_count += 1
         hard = [f for f in flags if f.get("severity") == "hard"]
+        # PENDING is never downgraded — it's a BRAIN-sync residue, not a
+        # mining-pipeline state. Only PASS rows fall to PASS_PROVISIONAL.
         will_downgrade = bool(hard) and r["quality_status"] == "PASS"
         if will_downgrade:
             downgrade_count += 1
