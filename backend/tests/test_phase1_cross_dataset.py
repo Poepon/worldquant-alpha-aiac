@@ -180,6 +180,7 @@ class TestMiningStateFields:
         s = MiningState(task_id=1, region="USA", universe="TOP3000", dataset_id="x")
         assert s.available_dataset_pool == []
         assert s.current_hypothesis_datasets == []
+        assert s.current_hypothesis_fields == []
 
     def test_state_accepts_pool_population(self):
         from backend.agents.graph.state import MiningState
@@ -188,3 +189,57 @@ class TestMiningStateFields:
             available_dataset_pool=["x", "y", "z"],
         )
         assert s.available_dataset_pool == ["x", "y", "z"]
+
+
+class TestCArchitectureRouting:
+    """Plan v5+ §Phase 1 C-architecture: routing logic between distill →
+    hypothesis → t1_strategy_select / code_gen depends on Phase 1 active."""
+
+    def test_route_after_distill_phase1_takes_hypothesis(self):
+        from backend.agents.graph.workflow import _route_after_distill
+        from backend.agents.graph.state import MiningState
+        s = MiningState(
+            task_id=1, region="USA", universe="TOP3000", dataset_id="x",
+            available_dataset_pool=["x", "y", "z"],
+        )
+        # Pool > 1 → hypothesis (Phase 1)
+        assert _route_after_distill(s) == "hypothesis"
+
+    def test_route_after_distill_legacy_with_pool_size_1(self):
+        from backend.agents.graph.workflow import _route_after_distill
+        from backend.agents.graph.state import MiningState
+        from backend.config import settings
+        s = MiningState(
+            task_id=1, region="USA", universe="TOP3000", dataset_id="x",
+            available_dataset_pool=["x"],  # only anchor
+        )
+        # Pool size == 1 → legacy routing (depends on T1_USE_LLM_GUIDED_STRATEGY)
+        if getattr(settings, "T1_USE_LLM_GUIDED_STRATEGY", True):
+            assert _route_after_distill(s) == "t1_strategy_select"
+        else:
+            assert _route_after_distill(s) == "hypothesis"
+
+    def test_route_after_distill_no_pool(self):
+        from backend.agents.graph.workflow import _route_after_distill
+        from backend.agents.graph.state import MiningState
+        from backend.config import settings
+        s = MiningState(task_id=1, region="USA", universe="TOP3000", dataset_id="x")
+        # Empty pool → legacy
+        expected = "t1_strategy_select" if getattr(settings, "T1_USE_LLM_GUIDED_STRATEGY", True) else "hypothesis"
+        assert _route_after_distill(s) == expected
+
+    def test_route_after_hypothesis_phase1_to_strategy(self):
+        from backend.agents.graph.workflow import _route_after_hypothesis
+        from backend.agents.graph.state import MiningState
+        s = MiningState(
+            task_id=1, region="USA", universe="TOP3000", dataset_id="x",
+            available_dataset_pool=["x", "y"],
+        )
+        assert _route_after_hypothesis(s) == "t1_strategy_select"
+
+    def test_route_after_hypothesis_legacy_to_codegen(self):
+        from backend.agents.graph.workflow import _route_after_hypothesis
+        from backend.agents.graph.state import MiningState
+        s = MiningState(task_id=1, region="USA", universe="TOP3000", dataset_id="x")
+        # No pool → legacy hypothesis path
+        assert _route_after_hypothesis(s) == "code_gen"

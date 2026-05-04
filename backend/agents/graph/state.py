@@ -143,6 +143,11 @@ class MiningState(BaseModel):
     #   (anchor-only, legacy path).
     available_dataset_pool: List[str] = Field(default_factory=list)
     current_hypothesis_datasets: List[str] = Field(default_factory=list)
+    # current_hypothesis_fields: union of fields across current_hypothesis_datasets
+    # populated by node_hypothesis when Phase 1 active. Downstream nodes
+    # (t1_strategy_select / code_gen) prefer this over state.fields when
+    # non-empty, so the LLM strategy / code-gen sees the union pool.
+    current_hypothesis_fields: List[Dict] = Field(default_factory=list)
     
     # -------------------------------------------------------------------------
     # Alpha Processing Queue

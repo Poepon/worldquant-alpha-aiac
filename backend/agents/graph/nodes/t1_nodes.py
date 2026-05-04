@@ -46,11 +46,23 @@ async def node_t1_strategy_select(
     start = time.time()
     last_round = state.round_history[-1] if state.round_history else None
 
+    # Plan v5+ §Phase 1 C-architecture: when hypothesis node populated
+    # current_hypothesis_fields (union of selected_datasets), prefer that
+    # over the anchor-only state.fields. Empty list → legacy single-anchor.
+    hypothesis_fields = getattr(state, "current_hypothesis_fields", []) or []
+    effective_fields = hypothesis_fields if hypothesis_fields else state.fields
+    if hypothesis_fields:
+        logger.info(
+            f"[STRATEGY_SELECT] Phase 1 union fields | "
+            f"datasets={state.current_hypothesis_datasets} "
+            f"effective_fields={len(effective_fields)} (vs anchor {len(state.fields)})"
+        )
+
     llm_service = get_llm_service()
     strategy = await select_t1_strategy_via_llm(
         dataset_id=state.dataset_id,
         region=state.region,
-        available_fields=state.fields,
+        available_fields=effective_fields,
         success_patterns=state.patterns,
         llm_service=llm_service,
         last_round_feedback=last_round,

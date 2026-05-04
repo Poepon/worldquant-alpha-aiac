@@ -395,12 +395,49 @@ async def node_hypothesis(
         response.error if hasattr(response, 'error') else None
     )
     
+    # Phase 1 (C-architecture): when Phase 1 active and chosen_datasets exceed
+    # the legacy anchor, fetch the union field pool now and persist it on
+    # state. Downstream t1_strategy_select / node_code_gen read this as
+    # effective_fields, which threads cross-dataset awareness through the
+    # entire T1 LLM-guided pipeline.
+    union_fields: List[Dict] = []
+    if chosen_datasets and (len(chosen_datasets) > 1 or chosen_datasets[0] != legacy_anchor):
+        try:
+            from backend.tasks.mining_tasks import _get_dataset_fields
+            from backend.database import AsyncSessionLocal
+            seen_ids: set = set()
+            async with AsyncSessionLocal() as _db:
+                for ds in chosen_datasets:
+                    try:
+                        ds_fields = await _get_dataset_fields(_db, ds, state.region, state.universe)
+                    except Exception as _e:
+                        logger.warning(f"[{node_name}] union fetch {ds} failed: {_e}")
+                        continue
+                    for f in ds_fields or []:
+                        fid = f.get("field_id") or f.get("id")
+                        if fid and fid not in seen_ids:
+                            seen_ids.add(fid)
+                            union_fields.append(f)
+            # Cap at 80 (slightly larger than code_gen's 60 — t1_strategy_select
+            # picks 8-12 promising_fields from this pool, so giving it a bit
+            # more breadth helps cross-dataset combinations surface).
+            union_fields = union_fields[:80]
+            logger.info(
+                f"[{node_name}] Phase 1 union fields cached | "
+                f"datasets={chosen_datasets} unique_fields={len(union_fields)}"
+            )
+        except Exception as _ex:
+            logger.warning(f"[{node_name}] union-field cache failed (non-fatal): {_ex}")
+            union_fields = []
+
     return {
         "hypotheses": hypotheses,
         "knowledge_transfer": knowledge_transfer,
-        # Phase 1: union of selected_datasets across hypotheses; node_code_gen
-        # will use this to compose the effective field pool for this round.
+        # Phase 1: union of selected_datasets across hypotheses; downstream
+        # nodes (t1_strategy_select / code_gen) read state.current_hypothesis_fields
+        # as effective_fields when non-empty.
         "current_hypothesis_datasets": chosen_datasets,
+        "current_hypothesis_fields": union_fields,
         **trace_update
     }
 
@@ -506,40 +543,22 @@ async def node_code_gen(
         if not any(p.get("pattern") == ex.get("pattern") for ex in merged_patterns):
             merged_patterns.append(p)
 
-    # Plan v5+ §Phase 1 (A4): cross-dataset field union for code generation.
-    # When current_hypothesis_datasets is set (multi-dataset hypothesis), pull
-    # fields from all selected datasets and union them. Fall back to the
-    # anchor's state.fields when empty (legacy single-anchor path).
-    chosen_dsets = list(getattr(state, "current_hypothesis_datasets", []) or [])
-    code_gen_fields = state.focused_fields if state.focused_fields else state.fields[:30]
-    if chosen_dsets and (len(chosen_dsets) > 1 or chosen_dsets[0] != state.dataset_id):
-        try:
-            from backend.tasks.mining_tasks import _get_dataset_fields
-            from backend.database import AsyncSessionLocal
-            unioned: list[dict] = []
-            seen_ids: set[str] = set()
-            async with AsyncSessionLocal() as _db:
-                for ds in chosen_dsets:
-                    try:
-                        ds_fields = await _get_dataset_fields(_db, ds, state.region, state.universe)
-                    except Exception as _e:
-                        logger.warning(f"[{node_name}] union: fetch fields for {ds} failed: {_e}")
-                        continue
-                    for f in ds_fields or []:
-                        fid = f.get("field_id") or f.get("id")
-                        if not fid or fid in seen_ids:
-                            continue
-                        seen_ids.add(fid)
-                        unioned.append(f)
-            if unioned:
-                # Cap at 60 fields total to keep prompt manageable
-                code_gen_fields = unioned[:60]
-                logger.info(
-                    f"[{node_name}] Phase 1 union fields | datasets={chosen_dsets} "
-                    f"unique_fields={len(unioned)} (capped to {len(code_gen_fields)})"
-                )
-        except Exception as _ex:
-            logger.warning(f"[{node_name}] union-field path failed (non-fatal): {_ex}")
+    # Plan v5+ §Phase 1 (A4 → C-architecture): cross-dataset field union for
+    # code generation. node_hypothesis caches the union into
+    # state.current_hypothesis_fields when Phase 1 active; here we just
+    # consume it. Fall back to state.fields for legacy single-anchor.
+    hypothesis_fields = list(getattr(state, "current_hypothesis_fields", []) or [])
+    if hypothesis_fields:
+        # Cap at 60 to keep prompt manageable; hypothesis node already
+        # capped at 80 so this is a soft trim.
+        code_gen_fields = hypothesis_fields[:60]
+        logger.info(
+            f"[{node_name}] Phase 1 effective fields | "
+            f"datasets={getattr(state, 'current_hypothesis_datasets', [])} "
+            f"effective_fields={len(code_gen_fields)} (vs anchor {len(state.fields)})"
+        )
+    else:
+        code_gen_fields = state.focused_fields if state.focused_fields else state.fields[:30]
 
     prompt_context = PromptContext(
         dataset_id=state.dataset_id,

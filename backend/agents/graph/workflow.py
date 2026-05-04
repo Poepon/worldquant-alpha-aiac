@@ -53,10 +53,33 @@ def _route_at_start(state: MiningState) -> str:
 
 
 def _route_after_distill(state: MiningState) -> str:
-    """T1 task: feature flag picks LLM-guided vs legacy hypothesis path."""
+    """T1 task: routing after distill_context.
+
+    Plan v5+ §Phase 1 C-architecture (2026-05-04):
+      - Phase 1 (available_dataset_pool > 1): hypothesis 节点先选 dataset,
+        然后 → t1_strategy_select(可见 union fields)→ t1_expand
+      - T1_USE_LLM_GUIDED_STRATEGY=True (legacy default): t1_strategy_select
+      - T1_USE_LLM_GUIDED_STRATEGY=False: hypothesis → code_gen (legacy)
+    """
+    pool = getattr(state, "available_dataset_pool", []) or []
+    if len(pool) > 1:
+        return "hypothesis"  # Phase 1
     if getattr(settings, "T1_USE_LLM_GUIDED_STRATEGY", True):
         return "t1_strategy_select"
-    return "hypothesis"
+    return "hypothesis"  # legacy hypothesis path
+
+
+def _route_after_hypothesis(state: MiningState) -> str:
+    """After hypothesis node: Phase 1 → t1_strategy_select; legacy → code_gen.
+
+    Phase 1 active means hypothesis has populated current_hypothesis_datasets +
+    current_hypothesis_fields, and we want t1_strategy_select to consume them.
+    Legacy (T1_USE_LLM_GUIDED_STRATEGY=False) keeps hypothesis → code_gen.
+    """
+    pool = getattr(state, "available_dataset_pool", []) or []
+    if len(pool) > 1:
+        return "t1_strategy_select"
+    return "code_gen"
 
 
 def _route_after_seed_load(state: MiningState) -> str:
@@ -229,8 +252,17 @@ class MiningWorkflow:
         workflow.add_edge("t1_strategy_select", "t1_expand")
         workflow.add_edge("t1_expand", "validate")
 
-        # T1 legacy arm (original)
-        workflow.add_edge("hypothesis", "code_gen")
+        # Phase 1 (C-architecture): hypothesis → t1_strategy_select when
+        # cross-dataset pool active; otherwise legacy hypothesis → code_gen.
+        # _route_after_hypothesis decides per-state.
+        workflow.add_conditional_edges(
+            "hypothesis",
+            _route_after_hypothesis,
+            {
+                "t1_strategy_select": "t1_strategy_select",
+                "code_gen": "code_gen",
+            },
+        )
         workflow.add_edge("code_gen", "validate")
 
         # After validate: existing self-correct vs simulate routing (shared by

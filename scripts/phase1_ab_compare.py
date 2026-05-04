@@ -86,9 +86,9 @@ def agg_for(conn, ids: List[int]) -> dict:
     s["cross_dataset_total"] = cd["total"]
 
     cur.execute("""
-        SELECT COUNT(DISTINCT task_id) FROM mining_tasks WHERE id = ANY(%s)
+        SELECT COUNT(*) AS cnt FROM mining_tasks WHERE id = ANY(%s)
     """, (ids,))
-    s["n_tasks"] = cur.fetchone()["count"]
+    s["n_tasks"] = cur.fetchone()["cnt"]
 
     cur.close()
     return s
