@@ -100,6 +100,9 @@ async def node_t1_strategy_select(
         success_patterns=state.patterns,
         llm_service=llm_service,
         last_round_feedback=last_round,
+        # D2: pass chosen_datasets so the prompt's "MUST sample from EACH"
+        # rule has named targets. Empty when not Phase 1 → legacy behavior.
+        selected_datasets=chosen_dsets if (chosen_dsets and len(chosen_dsets) > 1) else None,
     )
 
     duration_ms = int((time.time() - start) * 1000)

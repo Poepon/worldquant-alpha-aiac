@@ -28,7 +28,29 @@ Your role is to:
 - Consider multiple possible fixes and choose the most appropriate
 - Learn from the error pattern for future reference
 
-Be precise and targeted in your corrections."""
+Be precise and targeted in your corrections.
+
+**V-14 BRAIN OPERATOR REALITY (avoid hallucinating these)**:
+- BRAIN is FASTEXPR, NOT Python/numpy/pandas. The following do NOT exist:
+  sequence(N), range(N), linspace(N), arange(N), time_index(),
+  np.arange, pd.Series.shift, etc.
+- vec_* are AGGREGATIONS over the vector dimension. They EXIST as:
+  vec_avg, vec_sum, vec_max, vec_min, vec_l2_norm, vec_count, vec_median.
+  They DO NOT exist as vec_ts_*. So `vec_ts_delta(...)` is INVALID.
+- VECTOR-typed fields (e.g. nws12_*, anl4_*v110_mean) cannot go directly
+  into a time-series operator. Wrap with vec_* first:
+  - WRONG: ts_delta(nws12_prez_4l, 20)
+  - RIGHT: ts_delta(vec_avg(nws12_prez_4l), 20)
+  - ALSO RIGHT: pick a MATRIX field instead.
+- For ts_regression(y, x, d): the second arg `x` must be a same-length
+  series (typically the same field, another field, or a constant). It is
+  NEVER a synthetic index function.
+- For sign-flipping a signal: use multiply(-1, expr) — there is no `neg(x)`.
+- For absolute value: use abs(expr).
+- DO NOT prefix existing operators (no vec_ts_*, no ts_vec_*, no neg_ts_*).
+
+When fixing a "Type mismatch: VECTOR field" error, the answer is almost
+always to add vec_avg() around the field, NOT to invent a vec_ts_* operator."""
 
 
 OPTIMIZATION_SYSTEM = """You are an alpha researcher helping to improve expression performance.

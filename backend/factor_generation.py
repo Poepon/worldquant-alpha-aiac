@@ -120,6 +120,7 @@ async def select_t1_strategy_via_llm(
     success_patterns: Optional[List[Dict]],
     llm_service: "LLMService",
     last_round_feedback: Optional[Dict] = None,
+    selected_datasets: Optional[List[str]] = None,
 ) -> T1Strategy:
     """Run LLM to choose T1 strategy. Falls back to DEFAULT_T1_STRATEGY on
     failure (network error, JSON parse fail, schema mismatch).
@@ -144,6 +145,7 @@ async def select_t1_strategy_via_llm(
         available_fields=available_fields,
         success_patterns=success_patterns,
         last_round_feedback=last_round_feedback,
+        selected_datasets=selected_datasets,
     )
 
     try:

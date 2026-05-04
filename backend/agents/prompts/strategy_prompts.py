@@ -34,6 +34,10 @@ Given:
 - Dataset & region context
 - A list of available fields with types and coverage
 - (Optional) recent T1 success patterns from the knowledge base
+- (Optional) Phase 1 multi-dataset context: when the user prompt names
+  selected_datasets with 2+ entries, the available_fields list is the
+  UNION of fields from those datasets. You MUST sample promising_fields
+  from EACH selected_dataset.
 
 Output a JSON object matching the T1Strategy schema:
 1. economic_hypothesis: ONE sentence describing the economic story behind the
@@ -52,6 +56,10 @@ Output a JSON object matching the T1Strategy schema:
    - Avoid categorical / ID / group fields (industry, sector codes, exchange).
    - Prefer fields with coverage >= 0.7 when available.
    - Spread across sub-themes (don't pick 12 variants of the same balance sheet line).
+   - **PHASE 1 MANDATORY** (when selected_datasets has 2+ entries):
+     promising_fields MUST include AT LEAST 2 fields from EACH listed
+     dataset. Do not concentrate all picks on the anchor — that defeats
+     the cross-dataset goal.
 5. preferred_ts_ops: 5-8 operators from this exact set (every name must
    exist in BRAIN — these were reconciled with DB):
    {ts_rank, ts_zscore, ts_mean, ts_std_dev, ts_delta, ts_delay,
@@ -60,8 +68,22 @@ Output a JSON object matching the T1Strategy schema:
     ts_regression, ts_covariance, ts_backfill}. Match them to the velocity:
    - SLOW: ts_rank / ts_zscore / ts_mean / ts_regression preferred
    - FAST: ts_delta / ts_decay_linear / ts_arg_max / ts_av_diff preferred
+
+   **V-14 BRAIN OPERATOR CHEAT SHEET — DO NOT INVENT OPERATORS**:
+   - vec_* operators are AGGREGATIONS over vector dimensions. They EXIST:
+     vec_avg, vec_sum, vec_max, vec_min, vec_l2_norm, vec_count, vec_median.
+     They DO NOT exist as vec_ts_*. To time-series a VECTOR field:
+     `ts_zscore(vec_avg(VECTOR_field), 20)` — aggregate first, then ts_op.
+   - DO NOT use sequence(N), range(N), linspace(N), arange(N), time_index() —
+     these are numpy/pandas, NOT BRAIN. For ts_regression(y, x, d) the
+     second arg must be a same-length series — typically the same field
+     or another time series, not a synthetic index.
+   - DO NOT prefix ts_* with vec_ (no vec_ts_delta, vec_ts_zscore etc.)
+   - VECTOR field type means cross-sectional/static-per-row data. To use
+     in time-series operators, wrap with vec_avg / vec_sum first.
 6. rationale: 2-3 sentences explaining the choice — what economic intuition
-   ties the fields, ops, and window scale together.
+   ties the fields, ops, and window scale together. When selected_datasets
+   has 2+ entries, EXPLICITLY name how each dataset contributes.
 
 Return ONLY the JSON object. No prose. No markdown fence. No commentary.
 """
@@ -73,6 +95,7 @@ def build_t1_strategy_user_prompt(
     available_fields: List[Dict],
     success_patterns: Optional[List[Dict]] = None,
     last_round_feedback: Optional[Dict] = None,
+    selected_datasets: Optional[List[str]] = None,
 ) -> str:
     """Compose the T1 user prompt.
 
@@ -115,9 +138,21 @@ def build_t1_strategy_user_prompt(
             f"if some passed, double down on what worked.\n"
         )
 
-    return f"""Dataset: {dataset_id}
-Region: {region}
+    # Plan v5+ §Phase 1 D2: surface multi-dataset context to the LLM so
+    # the "MUST sample from EACH selected_dataset" rule has named targets.
+    cross_block = ""
+    if selected_datasets and len(selected_datasets) > 1:
+        cross_block = (
+            f"\n**Phase 1 cross-dataset mode** — selected_datasets="
+            f"{selected_datasets}\n"
+            f"  available_fields below is the UNION of fields from these datasets.\n"
+            f"  Pick AT LEAST 2 promising_fields from EACH dataset (not just anchor).\n"
+            f"  rationale must explicitly explain how each dataset contributes.\n"
+        )
 
+    return f"""Dataset (anchor): {dataset_id}
+Region: {region}
+{cross_block}
 Available fields (first 80):
 {fields_block}
 
