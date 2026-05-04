@@ -436,7 +436,27 @@ class MiningWorkflow:
         try:
             # Persist alphas
             # P0-fix-2: Import hash function for deduplication
-            from backend.alpha_semantic_validator import compute_expression_hash
+            from backend.alpha_semantic_validator import (
+                compute_expression_hash,
+                AlphaSemanticValidator,
+            )
+
+            # Plan v5+ §Phase 1 fix (2026-05-04): extract fields used in each
+            # expression so cross-dataset analytics work. Previously the
+            # mining pipeline never set Alpha.fields_used, leaving it as
+            # default `[]`; cross-dataset rate metrics silently relied on
+            # BRAIN-synced rows (task_id=1 only).
+            def _extract_used_fields(expr: str) -> list:
+                if not expr:
+                    return []
+                try:
+                    v = AlphaSemanticValidator(
+                        fields=[], operators=None,
+                        strict_field_check=False, strict_type_check=False,
+                    )
+                    return list(v.validate(expr).used_fields)
+                except Exception:
+                    return []
 
             # PR2: tier from result (state.factor_tier, propagated through run()).
             task_factor_tier = result.get("factor_tier", factor_tier)
@@ -480,6 +500,10 @@ class MiningWorkflow:
                         dataset_id=dataset_id,
                         quality_status=alpha_result.quality_status,
                         metrics=alpha_result.metrics,
+                        # V-17 (2026-05-04): populate fields_used so cross-dataset
+                        # analytics actually reflect mining output, not just
+                        # BRAIN-synced historical alphas.
+                        fields_used=_extract_used_fields(alpha_result.expression),
                         # Flattened IS metrics — keep in sync with metrics JSONB.
                         is_sharpe=metrics_dict.get("sharpe"),
                         is_fitness=metrics_dict.get("fitness"),

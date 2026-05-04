@@ -39,8 +39,25 @@ async def _incremental_save_alphas(
     Returns AlphaResult list with persisted=True + db_id set, so
     workflow.run_with_persistence's batch path skips them.
     """
-    from backend.alpha_semantic_validator import compute_expression_hash
+    from backend.alpha_semantic_validator import (
+        compute_expression_hash,
+        AlphaSemanticValidator,
+    )
     from backend.models import Alpha
+
+    # V-17 (2026-05-04): mirrors workflow.run_with_persistence — populate
+    # fields_used so cross-dataset analytics work for T2/T3 incremental saves.
+    def _extract_used_fields(expr: str) -> list:
+        if not expr:
+            return []
+        try:
+            v = AlphaSemanticValidator(
+                fields=[], operators=None,
+                strict_field_check=False, strict_type_check=False,
+            )
+            return list(v.validate(expr).used_fields)
+        except Exception:
+            return []
 
     snapshot_at = datetime.utcnow()
     out: List[AlphaResult] = []
@@ -63,6 +80,7 @@ async def _incremental_save_alphas(
             dataset_id=dataset_id,
             quality_status=alpha.quality_status,
             metrics=alpha.metrics,
+            fields_used=_extract_used_fields(alpha.expression),
             is_sharpe=metrics_dict.get("sharpe"),
             is_fitness=metrics_dict.get("fitness"),
             is_turnover=metrics_dict.get("turnover"),

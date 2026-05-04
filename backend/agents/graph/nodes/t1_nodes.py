@@ -46,16 +46,50 @@ async def node_t1_strategy_select(
     start = time.time()
     last_round = state.round_history[-1] if state.round_history else None
 
-    # Plan v5+ §Phase 1 C-architecture: when hypothesis node populated
-    # current_hypothesis_fields (union of selected_datasets), prefer that
-    # over the anchor-only state.fields. Empty list → legacy single-anchor.
-    hypothesis_fields = getattr(state, "current_hypothesis_fields", []) or []
+    # Plan v5+ §Phase 1 C-architecture v2 (2026-05-04): instead of relying
+    # on hypothesis node having pre-cached current_hypothesis_fields into
+    # state (LangGraph state merge for List[Dict] proved unreliable in
+    # spike v3 — strategy_select kept seeing anchor-only 30 fields even
+    # after hypothesis chose ["option8", "pv13"]), fetch union here from
+    # current_hypothesis_datasets directly.
+    chosen_dsets = list(getattr(state, "current_hypothesis_datasets", []) or [])
+    hypothesis_fields = list(getattr(state, "current_hypothesis_fields", []) or [])
+
+    if (not hypothesis_fields) and chosen_dsets and (
+        len(chosen_dsets) > 1 or chosen_dsets[0] != state.dataset_id
+    ):
+        # Pre-cache miss → fetch union ourselves
+        try:
+            from backend.tasks.mining_tasks import _get_dataset_fields
+            from backend.database import AsyncSessionLocal
+            seen_ids: set = set()
+            unioned: list = []
+            async with AsyncSessionLocal() as _db:
+                for ds in chosen_dsets:
+                    try:
+                        ds_fields = await _get_dataset_fields(_db, ds, state.region, state.universe)
+                    except Exception as _e:
+                        logger.warning(f"[STRATEGY_SELECT] union fetch {ds} failed: {_e}")
+                        continue
+                    for f in ds_fields or []:
+                        fid = f.get("field_id") or f.get("id")
+                        if fid and fid not in seen_ids:
+                            seen_ids.add(fid)
+                            unioned.append(f)
+            hypothesis_fields = unioned[:80]
+            logger.info(
+                f"[STRATEGY_SELECT] Phase 1 union (fetched here) | "
+                f"datasets={chosen_dsets} unique_fields={len(hypothesis_fields)}"
+            )
+        except Exception as _ex:
+            logger.warning(f"[STRATEGY_SELECT] union fetch failed (non-fatal): {_ex}")
+
     effective_fields = hypothesis_fields if hypothesis_fields else state.fields
     if hypothesis_fields:
         logger.info(
-            f"[STRATEGY_SELECT] Phase 1 union fields | "
-            f"datasets={state.current_hypothesis_datasets} "
-            f"effective_fields={len(effective_fields)} (vs anchor {len(state.fields)})"
+            f"[STRATEGY_SELECT] Phase 1 effective fields | "
+            f"datasets={chosen_dsets} effective={len(effective_fields)} "
+            f"(vs anchor {len(state.fields)})"
         )
 
     llm_service = get_llm_service()
