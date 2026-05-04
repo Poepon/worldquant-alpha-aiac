@@ -120,18 +120,30 @@ The balance depends on current progress:
     # Pool empty = legacy single-anchor; populated = LLM may pick 1-3.
     pool = list(ctx.available_dataset_pool or [])
     if pool and len(pool) > 1:
+        complementary = [d for d in pool if d != ctx.dataset_id]
         cross_dataset_section = f"""
 
-## Cross-dataset Pool (Phase 1)
+## Cross-dataset Pool (Phase 1) — MANDATORY combination
 
-**Anchor dataset**: {ctx.dataset_id}
-**Available pool** (you may pick 1-3 of these in `selected_datasets`):
-{', '.join(f'`{d}`' for d in pool)}
+**Anchor dataset**: `{ctx.dataset_id}`
+**Complementary datasets**: {', '.join(f'`{d}`' for d in complementary) or '(none)'}
 
-When proposing each hypothesis, decide whether to combine multiple datasets.
-Set `selected_datasets` to a subset (1-3 ids from the pool) and ensure all
-`key_fields` come from those datasets. Single-domain hypotheses set
-`selected_datasets = ["{ctx.dataset_id}"]`.
+⚠️ At least ONE of your hypotheses MUST have `len(selected_datasets) >= 2`.
+Returning all hypotheses with `selected_datasets = ["{ctx.dataset_id}"]`
+defeats this round's exploration goal. Pick the complementary dataset
+with the strongest economic linkage to the anchor.
+
+Quick pairing reference (anchor → likely complementary):
+  fundamental* → pv1 (quality × momentum) or analyst4 (revision × value)
+  pv1 → fundamental* (price-fundamental interaction) or sentiment1 (news momentum)
+  analyst4 → fundamental* (earnings × revisions) or pv1 (revision × drift)
+  sentiment* / news* → pv1 (sentiment × price) or option* (sentiment × vol)
+  option* → pv1 (implied vs realized momentum)
+  model* → fundamental* (composite score × earnings) or pv1 (score × momentum)
+
+Set `selected_datasets` to a 1-3 element list from the pool. All
+`key_fields` MUST come from the chosen datasets. At least one hypothesis
+MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 """
     else:
         cross_dataset_section = ""

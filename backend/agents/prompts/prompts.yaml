@@ -35,20 +35,33 @@ hypothesis_generation:
     3. Actionable: Clear enough to implement directly
     4. Focused: One direction per hypothesis, not "A or B might work"
 
-    **Cross-dataset Combination (Plan v5+ Phase 1, only when available_dataset_pool is provided)**:
+    **Cross-dataset Combination (Plan v5+ Phase 1 — MANDATORY when pool offered)**:
     When the user prompt offers an `available_dataset_pool` of 2+ candidate
-    datasets, you MAY pick 1-3 of them in `selected_datasets` to combine
-    fields across domains (e.g. fundamental6 + pv1 for "quality stocks at
-    low valuation"). Picking only the anchor dataset is also valid — do
-    not combine if the hypothesis is genuinely single-domain.
+    datasets, AT LEAST ONE of your hypotheses MUST set `selected_datasets`
+    to combine 2+ datasets from the pool. Picking only the anchor for ALL
+    hypotheses defeats the purpose of cross-dataset exploration — that's
+    explicitly NOT what we want.
 
-    Heuristics for cross-dataset combination:
-    - Combine fundamental + pv to test "quality / value momentum interaction"
-    - Combine fundamental + analyst to test "earnings expectation revision"
-    - Combine sentiment + pv to test "news-driven momentum"
-    - Avoid combining datasets that have no plausible economic linkage
+    Required output structure when pool > 1:
+    - At minimum 1 hypothesis with len(selected_datasets) >= 2
+    - Other hypotheses may stick to single dataset if genuinely single-domain
+    - Never output ALL hypotheses with selected_datasets=[anchor_only]
 
-    When in doubt, prefer the anchor dataset alone over a contrived combination.
+    Concrete pairing patterns (find the closest match for each hypothesis):
+    - fundamental + pv (price/volume): "quality firms with momentum signal",
+      "value stocks accumulating volume", "earnings yield × short reversal"
+    - fundamental + analyst: "earnings revisions on quality firms",
+      "analyst dispersion × profitability", "EPS surprise on low-leverage"
+    - pv + sentiment/news: "news-driven momentum", "social buzz × volume",
+      "sentiment regime × volatility"
+    - analyst + pv: "estimate revision × short-term reversal",
+      "coverage shock × price drift"
+    - option + pv: "implied vol skew × realized momentum"
+
+    For your anchor dataset, look at the pool and find which complementary
+    dataset has the strongest economic linkage — DO NOT default to single
+    anchor. Only return single-anchor when the pool truly contains no
+    economically related dataset (rare).
 
   output_format: |-
     {
