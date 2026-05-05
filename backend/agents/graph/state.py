@@ -68,6 +68,10 @@ class AlphaResult(BaseModel):
     # write to avoid duplicating the row.
     persisted: bool = False
     db_id: Optional[int] = None  # alphas.id when persisted=True
+    # Plan v5+ §Phase 2 B4: typed Hypothesis link. None when level<2 or
+    # propose persistence failed; populated by node_save_results from
+    # state.current_hypothesis_id at the moment the alpha was generated.
+    hypothesis_id: Optional[int] = None
 
 
 class FailureRecord(BaseModel):

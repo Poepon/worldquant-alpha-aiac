@@ -559,6 +559,10 @@ class MiningWorkflow:
                         factor_tier=task_factor_tier,
                         parent_alpha_id=getattr(alpha_result, "parent_alpha_id", None),
                         metrics_snapshot_at=task_metrics_snapshot_at,
+                        # Phase 2 B4: typed Hypothesis link from
+                        # AlphaResult.hypothesis_id (set by node_save_results
+                        # from state.current_hypothesis_id)
+                        hypothesis_id=getattr(alpha_result, "hypothesis_id", None),
                     )
                     # V-19.2: SAVEPOINT per row. flush() inside the nested
                     # transaction surfaces IntegrityError immediately so the

@@ -28,6 +28,7 @@ async def _incremental_save_alphas(
     dataset_id: str,
     factor_tier: int,
     pending_alphas: List,
+    hypothesis_id: Optional[int] = None,
 ) -> List["AlphaResult"]:
     """For T2/T3: write Alpha rows directly to DB at save_results time
     rather than buffering in state.generated_alphas until workflow returns.
@@ -129,6 +130,8 @@ async def _incremental_save_alphas(
             factor_tier=factor_tier,
             parent_alpha_id=alpha.parent_alpha_id,
             metrics_snapshot_at=snapshot_at,
+            # Phase 2 B4: typed Hypothesis link
+            hypothesis_id=hypothesis_id,
         )
         try:
             async with db_session.begin_nested():
@@ -246,6 +249,7 @@ async def _incremental_save_alphas(
             wrapper_kind=alpha.wrapper_kind,
             persisted=landed,
             db_id=db_id,
+            hypothesis_id=hypothesis_id,
         ))
         if db_id is not None and alpha.alpha_id:
             from backend.tasks.refresh_tasks import enqueue_can_submit_refresh
@@ -291,6 +295,13 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
         and configurable.get("db_session") is not None
     )
 
+    # Plan v5+ §Phase 2 B4: typed Hypothesis link. Captured from state at the
+    # moment alphas are saved so each AlphaResult / Alpha row knows which
+    # hypothesis it derived from. None when level<2 / propose persistence
+    # failed — workflow's INSERT path writes alpha.hypothesis_id=NULL in
+    # that case (legacy compat).
+    current_hypothesis_id = getattr(state, "current_hypothesis_id", None)
+
     if use_incremental:
         try:
             success_batch = await _incremental_save_alphas(
@@ -302,12 +313,14 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                 dataset_id=state.dataset_id,
                 factor_tier=state.factor_tier,
                 pending_alphas=state.pending_alphas,
+                hypothesis_id=current_hypothesis_id,
             )
             for alpha in state.pending_alphas:
                 if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
                     logger.info(
                         f"[{node_name}] Alpha Saved (incremental) | id={alpha.alpha_id} "
-                        f"status={alpha.quality_status} tier=T{state.factor_tier}"
+                        f"status={alpha.quality_status} tier=T{state.factor_tier} "
+                        f"hypothesis_id={current_hypothesis_id}"
                     )
         except Exception as e:
             logger.error(f"[{node_name}] incremental persistence failed: {e}; "
@@ -329,11 +342,12 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                     quality_status=alpha.quality_status,
                     parent_alpha_id=alpha.parent_alpha_id,
                     wrapper_kind=alpha.wrapper_kind,
+                    hypothesis_id=current_hypothesis_id,
                 )
                 success_batch.append(res)
                 logger.info(
                     f"[{node_name}] Alpha Saved (buffered) | id={alpha.alpha_id} "
-                    f"status={alpha.quality_status}"
+                    f"status={alpha.quality_status} hypothesis_id={current_hypothesis_id}"
                 )
 
     # Failure path — buffered the same way regardless of incremental /
