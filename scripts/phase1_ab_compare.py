@@ -65,25 +65,54 @@ def agg_for(conn, ids: List[int]) -> dict:
     """, (ids,))
     s["distinct_anchor_datasets"] = cur.fetchone()["n_distinct_dsets"]
 
+    # V-18 metric definition fix (Plan v5+ §"Cross_dataset metric 失真"):
+    #   OLD: fields_used contains fields from >= 2 datasets → cross-dataset
+    #        Misses the common case where alpha uses anchor + universal_pv
+    #        supplement (close/returns from pv1 on an option8 anchor).
+    #   NEW: fields_used contains ANY non-anchor dataset field → cross-dataset
+    #        Captures the actual semantic of "alpha pulls signal from outside
+    #        its declared anchor dataset" — which is what Phase 1 was
+    #        designed to enable.
     cur.execute("""
-        WITH a AS (
-          SELECT a.id,
-                 COUNT(DISTINCT df.dataset_id) AS nd
-          FROM alphas a
-          LEFT JOIN LATERAL jsonb_array_elements_text(a.fields_used) AS f(field_id) ON TRUE
-          LEFT JOIN datafields df ON df.field_id = f.field_id AND df.region = a.region
-          WHERE a.task_id = ANY(%s)
-            AND a.fields_used IS NOT NULL
-            AND jsonb_typeof(a.fields_used) = 'array'
-            AND jsonb_array_length(a.fields_used) > 0
-          GROUP BY a.id
+        WITH alpha_anchor AS (
+            SELECT a.id, a.region,
+                   d_anchor.id AS anchor_ds_id
+            FROM alphas a
+            LEFT JOIN datasets d_anchor
+              ON d_anchor.dataset_id = a.dataset_id
+             AND d_anchor.region = a.region
+            WHERE a.task_id = ANY(%s)
+              AND a.fields_used IS NOT NULL
+              AND jsonb_typeof(a.fields_used) = 'array'
+              AND jsonb_array_length(a.fields_used) > 0
+        ),
+        alpha_field_dsets AS (
+            SELECT
+                a.id,
+                a.anchor_ds_id,
+                COUNT(DISTINCT df.dataset_id) FILTER (WHERE df.dataset_id IS NOT NULL) AS nd_total,
+                COUNT(DISTINCT df.dataset_id) FILTER (
+                    WHERE df.dataset_id IS NOT NULL AND df.dataset_id <> a.anchor_ds_id
+                ) AS nd_non_anchor
+            FROM alpha_anchor a
+            LEFT JOIN alphas a2 ON a2.id = a.id
+            LEFT JOIN LATERAL jsonb_array_elements_text(a2.fields_used) AS f(field_id) ON TRUE
+            LEFT JOIN datafields df
+              ON df.field_id = f.field_id AND df.region = a.region
+            GROUP BY a.id, a.anchor_ds_id
         )
-        SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE nd >= 2) AS cross
-        FROM a
+        SELECT
+            COUNT(*) AS total,
+            COUNT(*) FILTER (WHERE nd_total >= 2) AS cross_strict,
+            COUNT(*) FILTER (WHERE nd_non_anchor >= 1) AS cross_anchor_aware
+        FROM alpha_field_dsets
     """, (ids,))
     cd = cur.fetchone()
-    s["cross_dataset_alphas"] = cd["cross"]
     s["cross_dataset_total"] = cd["total"]
+    # New default: anchor-aware definition
+    s["cross_dataset_alphas"] = cd["cross_anchor_aware"]
+    # Keep strict for reference
+    s["cross_dataset_strict"] = cd["cross_strict"]
 
     cur.execute("""
         SELECT COUNT(*) AS cnt FROM mining_tasks WHERE id = ANY(%s)
