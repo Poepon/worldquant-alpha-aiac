@@ -407,6 +407,27 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
             f"{round_summary['round_index']}: {early_stop_reason}"
         )
 
+    # ------------------------------------------------------------------
+    # Plan v5+ §Phase 2 B5/B6 — typed Hypothesis feedback + abandon
+    # ------------------------------------------------------------------
+    # When state.current_hypothesis_ids is populated (level≥2), classify
+    # each hypothesis's round outcome by attribution and update lifecycle.
+    # Triggers mark_active / mark_promoted / mark_abandoned via service.
+    new_hypothesis_round_history = dict(state.hypothesis_round_history or {})
+    if state.current_hypothesis_ids:
+        try:
+            new_hypothesis_round_history = await _process_hypothesis_feedback(
+                state=state,
+                round_index=round_summary["round_index"],
+                pending_alphas=state.pending_alphas,
+                history_so_far=new_hypothesis_round_history,
+                trace_service=trace_service,
+            )
+        except Exception as _ex:
+            logger.warning(
+                f"[{node_name}] B5 hypothesis feedback failed (non-fatal): {_ex}"
+            )
+
     # Record trace
     if trace_service:
         await record_trace(
@@ -433,4 +454,172 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
         "current_round": state.current_round + 1,
         "early_stopped": early_stop,
         "early_stop_reason": early_stop_reason,
+        "hypothesis_round_history": new_hypothesis_round_history,
     }
+
+
+# =============================================================================
+# Plan v5+ §Phase 2 B5 — Hypothesis feedback helper
+# =============================================================================
+
+async def _process_hypothesis_feedback(
+    *,
+    state,
+    round_index: int,
+    pending_alphas: List,
+    history_so_far: Dict[int, List[Dict]],
+    trace_service=None,
+) -> Dict[int, List[Dict]]:
+    """Round-level lifecycle update for every hypothesis proposed this round.
+
+    Per Plan v5+ §B5 the long-term goal is to call Experiment2Feedback (LLM-
+    based attribution). For now we use a heuristic classifier
+    (early_stop.classify_attribution) which is cheaper and sufficient for
+    the abandon trigger — LLM upgrade is backlog (B5 v2).
+
+    For each hypothesis_id in state.current_hypothesis_ids:
+      1. Compute round counts: alpha_count, pass_count, syntax_fail,
+         simulate_fail, quality_fail, best_sharpe
+      2. Classify attribution via heuristic
+      3. Append entry to history_so_far[hid]
+      4. Call lifecycle transitions:
+           - alpha_count > 0  → mark_active (idempotent: PROPOSED→ACTIVE)
+           - pass_count > 0   → mark_promoted (PROPOSED|ACTIVE→PROMOTED)
+           - should_abandon_hypothesis(history) → mark_abandoned
+    """
+    from backend.agents.graph.early_stop import (
+        classify_attribution,
+        should_abandon_hypothesis,
+    )
+    from backend.database import AsyncSessionLocal
+    from backend.services.hypothesis_service import HypothesisService
+
+    hids = list(state.current_hypothesis_ids or [])
+    if not hids:
+        return history_so_far
+
+    # Map hypothesis_id → list of pending_alphas linked to it. The LLM
+    # writes h["hypothesis_id"] back into each parsed dict (B3); the alpha
+    # candidates carry alpha.hypothesis text but not the id, so for now we
+    # attribute ALL alphas in this round to the PRIMARY hypothesis_id.
+    # When B3 evolves to per-alpha hypothesis tracking this becomes a
+    # filter; until then it's "primary gets the round's outcome".
+    primary_hid = state.current_hypothesis_id or hids[0]
+
+    # Aggregate counts across this round's alphas
+    alpha_count = len(pending_alphas)
+    pass_count = sum(
+        1 for a in pending_alphas
+        if a.quality_status in ("PASS", "PASS_PROVISIONAL")
+    )
+    syntax_fail = sum(1 for a in pending_alphas if a.is_valid is False)
+    simulate_fail = sum(
+        1 for a in pending_alphas
+        if a.is_valid is not False and a.is_simulated and not a.simulation_success
+    )
+    quality_fail = sum(
+        1 for a in pending_alphas
+        if a.is_valid is not False
+        and (a.is_simulated and a.simulation_success)
+        and a.quality_status in ("FAIL", "REJECT")
+    )
+    best_sharpe = 0.0
+    for a in pending_alphas:
+        m = getattr(a, "metrics", None) or {}
+        sh = m.get("sharpe")
+        if sh is not None:
+            try:
+                best_sharpe = max(best_sharpe, float(sh))
+            except Exception:
+                pass
+
+    attribution = classify_attribution(
+        alpha_count=alpha_count,
+        pass_count=pass_count,
+        syntax_fail_count=syntax_fail,
+        simulate_fail_count=simulate_fail,
+        quality_fail_count=quality_fail,
+    )
+    entry = {
+        "round_index": round_index,
+        "alpha_count": alpha_count,
+        "pass_count": pass_count,
+        "syntax_fail_count": syntax_fail,
+        "simulate_fail_count": simulate_fail,
+        "quality_fail_count": quality_fail,
+        "attribution": attribution,
+        "best_sharpe": best_sharpe,
+    }
+
+    # Append to all hids proposed this round (every emitted hypothesis
+    # gets the same attribution since they shared a code_gen pass)
+    history_out = dict(history_so_far)
+    for hid in hids:
+        history_out[hid] = list(history_out.get(hid, [])) + [entry]
+
+    # Lifecycle DB updates — fresh session so we don't conflict with the
+    # incremental persistence path's session transaction state.
+    abandoned: List[int] = []
+    promoted: List[int] = []
+    activated: List[int] = []
+    try:
+        async with AsyncSessionLocal() as _hdb:
+            svc = HypothesisService(_hdb)
+            for hid in hids:
+                if alpha_count > 0:
+                    if await svc.mark_active(hid):
+                        activated.append(hid)
+                if pass_count > 0:
+                    if await svc.mark_promoted(hid):
+                        promoted.append(hid)
+                # Abandonment: only check the primary's history (all hids
+                # share the same entry, so any one's history is identical
+                # in this round, but using primary is the canonical choice).
+                should_abandon, abandon_reason = should_abandon_hypothesis(
+                    history_out.get(hid, [])
+                )
+                if should_abandon:
+                    if await svc.mark_abandoned(hid, reason=abandon_reason):
+                        abandoned.append(hid)
+                # Refresh stats after lifecycle updates so the row reflects
+                # the latest aggregate (alpha_count / pass_count / sharpe).
+                await svc.refresh_stats(hid)
+            await _hdb.commit()
+    except Exception as _ex:
+        logger.warning(
+            f"[B5] hypothesis lifecycle DB update failed (non-fatal): {_ex}"
+        )
+
+    logger.info(
+        f"[B5] hypothesis feedback round={round_index} primary={primary_hid} "
+        f"attribution={attribution} alphas={alpha_count} pass={pass_count} "
+        f"activated={activated} promoted={promoted} abandoned={abandoned}"
+    )
+
+    # Trace step (HYPOTHESIS_FEEDBACK) — use the same record_trace helper as
+    # the rest of the workflow nodes so step_order / persistence stays
+    # consistent.
+    if trace_service:
+        try:
+            await record_trace(
+                state, trace_service, "HYPOTHESIS_FEEDBACK",
+                {
+                    "primary_hypothesis_id": primary_hid,
+                    "all_hypothesis_ids": hids,
+                    "round_index": round_index,
+                },
+                {
+                    "attribution": attribution,
+                    "round_summary": entry,
+                    "activated": activated,
+                    "promoted": promoted,
+                    "abandoned": abandoned,
+                },
+                0,
+                "SUCCESS",
+                None,
+            )
+        except Exception as _ex:
+            logger.warning(f"[B5] record_trace failed: {_ex}")
+
+    return history_out

@@ -167,6 +167,15 @@ class MiningState(BaseModel):
     #   B5 feedback iterates the list to update lifecycle on all of them.
     current_hypothesis_id: Optional[int] = None
     current_hypothesis_ids: List[int] = Field(default_factory=list)
+
+    # Plan v5+ §Phase 2 B5/B6: per-hypothesis round history. Key = hypothesis_id.
+    # Each entry: {round_index, alpha_count, pass_count, fail_count,
+    #              syntax_fail_count, simulate_fail_count, attribution,
+    #              best_sharpe}
+    # Used by should_abandon_hypothesis (B6) to detect N-rounds-of-HYPOTHESIS-fail.
+    # Persists across rounds within a single workflow.run() invocation; reset
+    # to empty when a new task starts.
+    hypothesis_round_history: Dict[int, List[Dict]] = Field(default_factory=dict)
     
     # -------------------------------------------------------------------------
     # Alpha Processing Queue
