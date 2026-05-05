@@ -44,7 +44,7 @@ class AgentMode(str, enum.Enum):
 class TraceStepType(str, enum.Enum):
     """Type of trace step in mining workflow."""
     RAG_QUERY = "RAG_QUERY"
-    HYPOTHESIS = "HYPOTHESIS"
+    HYPOTHESIS = "HYPOTHESIS"  # legacy dict-based hypothesis (Phase 1 path)
     CODE_GEN = "CODE_GEN"
     VALIDATE = "VALIDATE"
     SIMULATE = "SIMULATE"
@@ -53,6 +53,9 @@ class TraceStepType(str, enum.Enum):
     TIER_SEED_LOAD = "TIER_SEED_LOAD"  # T2/T3: load + refresh seed pool from prior tier's PASS alphas
     STRATEGY_SELECT = "STRATEGY_SELECT"  # All tiers: LLM strategy decision (T1 fields/ops, T2/T3 wrappers)
     TIER_WRAP = "TIER_WRAP"  # All tiers: programmatic expansion (T1 enumerate, T2/T3 wrap)
+    # Plan v5+ §Phase 2 B1 — typed Hypothesis lifecycle steps (HYPOTHESIS_CENTRIC_LEVEL≥2)
+    HYPOTHESIS_PROPOSE = "HYPOTHESIS_PROPOSE"   # B3: persist Hypothesis row, emit hypothesis_id
+    HYPOTHESIS_FEEDBACK = "HYPOTHESIS_FEEDBACK"  # B5: round-end attribution + lifecycle transition
 
 
 class QualityStatus(str, enum.Enum):
@@ -86,3 +89,21 @@ class JobStatus(str, enum.Enum):
     RUNNING = "RUNNING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
+
+
+# Plan v5+ §Phase 2 B1 — Hypothesis lifecycle / kind enums
+class HypothesisStatus(str, enum.Enum):
+    """Lifecycle of a typed Hypothesis row."""
+    PROPOSED = "PROPOSED"      # just inserted, no alphas generated yet
+    ACTIVE = "ACTIVE"          # has ≥1 alpha (any quality_status)
+    PROMOTED = "PROMOTED"      # has ≥1 PASS alpha; kept long-term for KB
+    ABANDONED = "ABANDONED"    # should_abandon_hypothesis triggered
+    SUPERSEDED = "SUPERSEDED"  # replaced by child hypothesis
+
+
+class HypothesisKind(str, enum.Enum):
+    """Plan v5+ §决策 3: T1 = primarily InvestmentThesis (what to mine);
+    T2/T3 = primarily ImprovementRule (how to wrap a parent PASS alpha).
+    Both kinds may appear at any tier — kind is decoupled from target_tier."""
+    INVESTMENT_THESIS = "INVESTMENT_THESIS"
+    IMPROVEMENT_RULE = "IMPROVEMENT_RULE"

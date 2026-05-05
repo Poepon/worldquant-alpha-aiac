@@ -19,6 +19,8 @@ from backend.models.base import (
     HumanFeedback,
     KnowledgeEntryType,
     JobStatus,
+    HypothesisStatus,
+    HypothesisKind,
 )
 
 # Task models
@@ -38,6 +40,9 @@ from backend.models.alpha import (
 
 # Status transition audit
 from backend.models.transition import AlphaStatusTransition
+
+# Hypothesis (Phase 2 B1)
+from backend.models.hypothesis import Hypothesis
 
 # Knowledge models
 from backend.models.knowledge import (
@@ -81,6 +86,8 @@ __all__ = [
     "HumanFeedback",
     "KnowledgeEntryType",
     "JobStatus",
+    "HypothesisStatus",
+    "HypothesisKind",
     # Task
     "MiningTask",
     "ExperimentRun",
@@ -91,6 +98,8 @@ __all__ = [
     "AlphaFailure",
     "AlphaPnl",
     "AlphaStatusTransition",
+    # Hypothesis (Phase 2)
+    "Hypothesis",
     # Knowledge
     "KnowledgeEntry",
     "OperatorPreference",

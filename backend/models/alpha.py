@@ -99,6 +99,16 @@ class Alpha(SQLAlchemyBase):
     # True = is.checks 全无 FAIL；False = 至少 1 个 FAIL
     can_submit = Column(Boolean, nullable=True)
 
+    # Plan v5+ §Phase 2 B1 — hypothesis link. NULL for legacy / Phase 1 alphas
+    # generated before HYPOTHESIS_CENTRIC_LEVEL=2 wired up. ON DELETE SET NULL
+    # so hypothesis cleanup never cascades into alpha rows.
+    hypothesis_id = Column(
+        Integer,
+        ForeignKey("hypotheses.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
@@ -106,6 +116,14 @@ class Alpha(SQLAlchemyBase):
     task = relationship("MiningTask", back_populates="alphas")
     trace_step = relationship("TraceStep", back_populates="alpha")
     parent = relationship("Alpha", remote_side=[id], backref="children")
+    # Phase 2: typed hypothesis link. The Text `hypothesis` column above is
+    # kept for legacy compat (LLM-emitted summary text); hypothesis_obj is
+    # the structured row.
+    hypothesis_obj = relationship(
+        "Hypothesis",
+        back_populates="alphas",
+        foreign_keys=[hypothesis_id],
+    )
 
 
 class AlphaFailure(SQLAlchemyBase):
