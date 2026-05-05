@@ -522,7 +522,18 @@ class MiningWorkflow:
                     if alpha_result.quality_status in ("PASS", "PASS_PROVISIONAL") and alpha_result.alpha_id:
                         can_submit_refresh_targets.append(alpha)
                 except Exception as e:
-                    logger.warning(f"[MiningWorkflow] Failed to add alpha: {e}")
+                    # V-19 diagnostic (2026-05-05): full traceback + alpha_result
+                    # snapshot, since silent rollback in B5 batch lost ~50% of
+                    # Phase 1 alphas and we couldn't reproduce statically.
+                    import traceback as _tb
+                    logger.error(
+                        f"[MiningWorkflow] Failed to add alpha: {type(e).__name__}: {e}\n"
+                        f"  alpha_id={getattr(alpha_result, 'alpha_id', None)}\n"
+                        f"  expression={(getattr(alpha_result, 'expression', '') or '')[:200]}\n"
+                        f"  status={getattr(alpha_result, 'quality_status', None)}\n"
+                        f"  metrics_keys={list((alpha_result.metrics or {}).keys()) if isinstance(getattr(alpha_result, 'metrics', None), dict) else 'non-dict'}\n"
+                        f"  traceback:\n{_tb.format_exc()}"
+                    )
             
             # Persist failures
             for failure in result.get("failures", []):
@@ -536,7 +547,14 @@ class MiningWorkflow:
                     )
                     self.db.add(fail_record)
                 except Exception as e:
-                    logger.warning(f"[MiningWorkflow] Failed to add failure record: {e}")
+                    import traceback as _tb
+                    logger.error(
+                        f"[MiningWorkflow] Failed to add failure record: "
+                        f"{type(e).__name__}: {e}\n"
+                        f"  expression={(getattr(failure, 'expression', '') or '')[:200]}\n"
+                        f"  error_type={getattr(failure, 'error_type', None)}\n"
+                        f"  traceback:\n{_tb.format_exc()}"
+                    )
             
             # Persist trace steps (ONLY if TraceService was NOT used)
             # If TraceService is in config, we assume it handled real-time persistence
@@ -575,7 +593,20 @@ class MiningWorkflow:
                 )
             
         except Exception as e:
-            logger.error(f"[MiningWorkflow] Persistence failed: {e}")
+            # V-19 diagnostic (2026-05-05): outer rollback was silent — we only
+            # got "Persistence failed: <msg>" without origin. Adding full
+            # traceback + result snapshot.
+            import traceback as _tb
+            n_alphas = len(result.get("generated_alphas", []) or [])
+            n_failures = len(result.get("failures", []) or [])
+            logger.error(
+                f"[MiningWorkflow] Persistence FAILED (outer): "
+                f"{type(e).__name__}: {e}\n"
+                f"  task_id={getattr(task, 'id', None)}\n"
+                f"  generated_alphas={n_alphas}, failures={n_failures}\n"
+                f"  factor_tier={factor_tier}, dataset={dataset_id}\n"
+                f"  traceback:\n{_tb.format_exc()}"
+            )
             # Rollback failed transaction to allow subsequent operations
             try:
                 await self.db.rollback()
