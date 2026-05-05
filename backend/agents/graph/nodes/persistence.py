@@ -59,17 +59,19 @@ async def _incremental_save_alphas(
         except Exception:
             return []
 
+    # V-19.2 (2026-05-05): per-row SAVEPOINT — see workflow.run_with_persistence
+    # for full rationale. One bad row no longer rolls back the whole seed batch.
+    from backend.agents.graph.persistence_errors import log_persistence_error
+
     snapshot_at = datetime.utcnow()
     out: List[AlphaResult] = []
+    inserted_alpha_ids: List[str] = []  # alpha_ids that successfully landed
     for alpha in pending_alphas:
         if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
             continue
         metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
         expr_hash = compute_expression_hash(alpha.expression) if alpha.expression else None
 
-        # V-17 → V-19.1: fields_used populated post-flush, see comment in
-        # workflow.run_with_persistence. Inline write coincided with batch
-        # silent rollbacks (spike B5/B6).
         row = Alpha(
             task_id=task_id,
             run_id=run_id,
@@ -95,21 +97,73 @@ async def _incremental_save_alphas(
             parent_alpha_id=alpha.parent_alpha_id,
             metrics_snapshot_at=snapshot_at,
         )
-        db_session.add(row)
-    # Flush + commit per seed batch so frontend sees them immediately and a
-    # crash mid-task only loses subsequent seeds, not committed PASSes.
-    await db_session.flush()
-    await db_session.commit()
+        try:
+            async with db_session.begin_nested():
+                db_session.add(row)
+                await db_session.flush()
+            if alpha.alpha_id:
+                inserted_alpha_ids.append(alpha.alpha_id)
+        except Exception as e:
+            import traceback as _tb
+            logger.error(
+                f"[_incremental_save_alphas] V-19.2 alpha INSERT savepoint rolled back: "
+                f"{type(e).__name__}: {e} | alpha_id={alpha.alpha_id}"
+            )
+            log_persistence_error(
+                task_id=task_id,
+                phase="incremental_alpha_insert",
+                exc=e,
+                alpha_id=alpha.alpha_id,
+                expression=alpha.expression,
+                quality_status=alpha.quality_status,
+                extra={
+                    "factor_tier": factor_tier,
+                    "dataset_id": dataset_id,
+                    "traceback_inline": _tb.format_exc(),
+                },
+            )
+
+    # Outer commit releases all successful savepoints. Pre-V-19.2 a single
+    # failed row aborted everything; now only the failed savepoint is gone.
+    try:
+        await db_session.commit()
+    except Exception as e:
+        import traceback as _tb
+        logger.error(
+            f"[_incremental_save_alphas] V-19.2 outer commit failed: "
+            f"{type(e).__name__}: {e}"
+        )
+        log_persistence_error(
+            task_id=task_id,
+            phase="incremental_outer_commit",
+            exc=e,
+            extra={
+                "factor_tier": factor_tier,
+                "dataset_id": dataset_id,
+                "n_pending": len(pending_alphas),
+                "traceback_inline": _tb.format_exc(),
+            },
+        )
+        try:
+            await db_session.rollback()
+        except Exception:
+            pass
+        # Empty out — no rows landed. Caller falls back to buffered path.
+        return []
 
     # V-19.1 (2026-05-05): post-commit fields_used population for T2/T3
-    # incremental path. Each row updated independently — failure here
-    # only loses fields_used for that alpha, never the batch.
+    # incremental path. V-19.2: scope to only those that actually inserted —
+    # alpha_ids whose savepoint rolled back are not in DB so the UPDATE would
+    # be a no-op anyway, but skipping them keeps the log tidy.
     from sqlalchemy import update as _sa_update, select
+    inserted_set = set(inserted_alpha_ids)
     fields_used_updated = 0
     for alpha in pending_alphas:
         if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
             continue
         if not alpha.alpha_id or not alpha.expression:
+            continue
+        if alpha.alpha_id not in inserted_set:
             continue
         try:
             fids = _extract_used_fields(alpha.expression)
@@ -132,21 +186,22 @@ async def _incremental_save_alphas(
         except Exception as _e:
             logger.warning(f"[_incremental_save_alphas] V-19.1 commit failed: {_e}")
 
-    # Re-iterate to build the AlphaResult list with the now-assigned ids.
-    # We need to query rows back since we don't keep references after flush.
-    # Simpler: query by task_id + alpha_id (BRAIN id, unique).
+    # Build AlphaResult list. V-19.2: persisted=True only for rows that
+    # actually inserted; failed savepoints come back persisted=False so the
+    # workflow's batch path (also savepoint-protected now) gets a retry —
+    # at worst it logs the same error twice, never silently drops.
     for alpha in pending_alphas:
         if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
             continue
-        if alpha.alpha_id:
+        landed = bool(alpha.alpha_id and alpha.alpha_id in inserted_set)
+        db_id = None
+        if landed:
             stmt = select(Alpha).where(
                 Alpha.task_id == task_id, Alpha.alpha_id == alpha.alpha_id
             ).limit(1)
             result = await db_session.execute(stmt)
             row = result.scalar_one_or_none()
             db_id = row.id if row else None
-        else:
-            db_id = None
         out.append(AlphaResult(
             expression=alpha.expression,
             hypothesis=alpha.hypothesis,
@@ -156,11 +211,9 @@ async def _incremental_save_alphas(
             quality_status=alpha.quality_status,
             parent_alpha_id=alpha.parent_alpha_id,
             wrapper_kind=alpha.wrapper_kind,
-            persisted=True,
+            persisted=landed,
             db_id=db_id,
         ))
-        # B7: schedule can_submit refresh ~30s out so BRAIN has time to finish
-        # async checks (CONCENTRATED_WEIGHT, LOW_SUB_UNIVERSE_SHARPE).
         if db_id is not None and alpha.alpha_id:
             from backend.tasks.refresh_tasks import enqueue_can_submit_refresh
             enqueue_can_submit_refresh(db_id, alpha.alpha_id, countdown=30)

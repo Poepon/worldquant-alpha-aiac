@@ -467,40 +467,39 @@ class MiningWorkflow:
             # (need .id which is only populated post-flush).
             can_submit_refresh_targets: list = []
 
+            # V-19.2 (2026-05-05): per-row SAVEPOINT persistence. Pre-V-19.2
+            # used a single batch commit so one row's IntegrityError rolled
+            # back the entire batch (spike B5/B6 + B7 lost 7/8 tasks of
+            # alphas). Now each row is wrapped in self.db.begin_nested(),
+            # which issues a SAVEPOINT; on exception only that savepoint
+            # rolls back, leaving siblings + outer transaction intact.
+            # Errors are also written to logs/persistence_errors.log to
+            # bypass the loguru→stderr→Celery-logfile truncation that hid
+            # the original silent rollbacks.
+            from backend.agents.graph.persistence_errors import (
+                log_persistence_error,
+            )
+
+            alpha_inserted = 0
+            alpha_skipped = 0
             for alpha_result in result.get("generated_alphas", []):
                 # PR7 — skip rows already INSERTed by node_save_results in
                 # incremental mode. AlphaResult.persisted is set True only
                 # by _incremental_save_alphas; legacy buffered path leaves
                 # it False, so this gate is a no-op for T1 / disabled-flag.
                 if getattr(alpha_result, "persisted", False):
+                    alpha_skipped += 1
                     continue
                 try:
-                    # P0-fix-2: Compute expression hash for DB-level deduplication
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
-
-                    # PR4 fix — flatten the metrics JSONB into the dedicated
-                    # is_sharpe / is_fitness / is_turnover / is_returns /
-                    # is_drawdown columns. The factor_library stats endpoints
-                    # and FactorLibrary.jsx KPI cards query these columns
-                    # directly; without this flattening they all read NULL
-                    # for newly-mined alphas, breaking the avg/median/max
-                    # sharpe display.
                     metrics_dict = alpha_result.metrics if isinstance(alpha_result.metrics, dict) else {}
 
-                    # V-17 → V-19.1 (2026-05-05): write fields_used in a
-                    # SEPARATE step after Alpha INSERT succeeds. Earlier
-                    # inline `fields_used=_extract_used_fields(...)` in the
-                    # Alpha() constructor coincided with batch-level
-                    # silent rollback in spike B5/B6 (50% task losing all
-                    # alphas, both legacy and Phase 1). Decoupling keeps
-                    # the INSERT path identical to pre-V-17, while still
-                    # populating fields_used post-flush.
                     alpha = Alpha(
                         task_id=task.id,
                         run_id=run_id,
                         alpha_id=alpha_result.alpha_id,
                         expression=alpha_result.expression,
-                        expression_hash=expr_hash,  # P0-fix-2: Enable DB deduplication
+                        expression_hash=expr_hash,
                         hypothesis=alpha_result.hypothesis,
                         logic_explanation=alpha_result.explanation,
                         region=task.region,
@@ -508,7 +507,6 @@ class MiningWorkflow:
                         dataset_id=dataset_id,
                         quality_status=alpha_result.quality_status,
                         metrics=alpha_result.metrics,
-                        # Flattened IS metrics — keep in sync with metrics JSONB.
                         is_sharpe=metrics_dict.get("sharpe"),
                         is_fitness=metrics_dict.get("fitness"),
                         is_turnover=metrics_dict.get("turnover"),
@@ -517,53 +515,76 @@ class MiningWorkflow:
                         is_margin=metrics_dict.get("margin"),
                         is_long_count=metrics_dict.get("longCount"),
                         is_short_count=metrics_dict.get("shortCount"),
-                        # Tier system: per-task factor_tier + per-alpha lineage.
                         factor_tier=task_factor_tier,
                         parent_alpha_id=getattr(alpha_result, "parent_alpha_id", None),
                         metrics_snapshot_at=task_metrics_snapshot_at,
                     )
-                    self.db.add(alpha)
+                    # V-19.2: SAVEPOINT per row. flush() inside the nested
+                    # transaction surfaces IntegrityError immediately so the
+                    # savepoint rolls back this row only.
+                    async with self.db.begin_nested():
+                        self.db.add(alpha)
+                        await self.db.flush()
+                    alpha_inserted += 1
                     if alpha_result.quality_status in ("PASS", "PASS_PROVISIONAL") and alpha_result.alpha_id:
                         can_submit_refresh_targets.append(alpha)
                 except Exception as e:
-                    # V-19 diagnostic (2026-05-05): full traceback + alpha_result
-                    # snapshot, since silent rollback in B5 batch lost ~50% of
-                    # Phase 1 alphas and we couldn't reproduce statically.
                     import traceback as _tb
                     logger.error(
-                        f"[MiningWorkflow] Failed to add alpha: {type(e).__name__}: {e}\n"
-                        f"  alpha_id={getattr(alpha_result, 'alpha_id', None)}\n"
-                        f"  expression={(getattr(alpha_result, 'expression', '') or '')[:200]}\n"
-                        f"  status={getattr(alpha_result, 'quality_status', None)}\n"
-                        f"  metrics_keys={list((alpha_result.metrics or {}).keys()) if isinstance(getattr(alpha_result, 'metrics', None), dict) else 'non-dict'}\n"
-                        f"  traceback:\n{_tb.format_exc()}"
+                        f"[MiningWorkflow] V-19.2 alpha INSERT savepoint rolled back: "
+                        f"{type(e).__name__}: {e} | alpha_id={getattr(alpha_result, 'alpha_id', None)}"
                     )
-            
-            # Persist failures
+                    log_persistence_error(
+                        task_id=task.id,
+                        phase="alpha_insert",
+                        exc=e,
+                        alpha_id=getattr(alpha_result, "alpha_id", None),
+                        expression=getattr(alpha_result, "expression", None),
+                        quality_status=getattr(alpha_result, "quality_status", None),
+                        extra={
+                            "metrics_keys": list((alpha_result.metrics or {}).keys()) if isinstance(getattr(alpha_result, "metrics", None), dict) else "non-dict",
+                            "factor_tier": task_factor_tier,
+                            "dataset_id": dataset_id,
+                            "traceback_inline": _tb.format_exc(),
+                        },
+                    )
+
+            # Persist failures (per-row savepoint same as alphas)
+            failure_inserted = 0
             for failure in result.get("failures", []):
                 try:
                     fail_record = AlphaFailure(
                         task_id=task.id,
                         run_id=run_id,
-                        expression=failure.expression[:2000] if failure.expression else None,  # Limit length
+                        expression=failure.expression[:2000] if failure.expression else None,
                         error_type=failure.error_type,
-                        error_message=failure.error_message[:500] if failure.error_message else None  # Limit length
+                        error_message=failure.error_message[:500] if failure.error_message else None,
                     )
-                    self.db.add(fail_record)
+                    async with self.db.begin_nested():
+                        self.db.add(fail_record)
+                        await self.db.flush()
+                    failure_inserted += 1
                 except Exception as e:
                     import traceback as _tb
                     logger.error(
-                        f"[MiningWorkflow] Failed to add failure record: "
-                        f"{type(e).__name__}: {e}\n"
-                        f"  expression={(getattr(failure, 'expression', '') or '')[:200]}\n"
-                        f"  error_type={getattr(failure, 'error_type', None)}\n"
-                        f"  traceback:\n{_tb.format_exc()}"
+                        f"[MiningWorkflow] V-19.2 failure INSERT savepoint rolled back: "
+                        f"{type(e).__name__}: {e}"
+                    )
+                    log_persistence_error(
+                        task_id=task.id,
+                        phase="failure_insert",
+                        exc=e,
+                        expression=getattr(failure, "expression", None),
+                        extra={
+                            "error_type": getattr(failure, "error_type", None),
+                            "traceback_inline": _tb.format_exc(),
+                        },
                     )
             
             # Persist trace steps (ONLY if TraceService was NOT used)
             # If TraceService is in config, we assume it handled real-time persistence
             has_realtime_trace = config and config.get("configurable", {}).get("trace_service")
-            
+
             if not has_realtime_trace:
                 for trace in result.get("trace_steps", []):
                     try:
@@ -578,12 +599,24 @@ class MiningWorkflow:
                             status=trace.status,
                             error_message=trace.error_message
                         )
-                        self.db.add(step)
+                        async with self.db.begin_nested():
+                            self.db.add(step)
+                            await self.db.flush()
                     except Exception as e:
-                        logger.warning(f"[MiningWorkflow] Failed to add trace step: {e}")
-            
+                        logger.warning(f"[MiningWorkflow] V-19.2 trace step savepoint rolled back: {e}")
+                        log_persistence_error(
+                            task_id=task.id,
+                            phase="trace_step_insert",
+                            exc=e,
+                            extra={"step_type": getattr(trace, "step_type", None)},
+                        )
+
             await self.db.commit()
-            logger.info(f"[MiningWorkflow] 持久化完成 | task={task.id}")
+            logger.info(
+                f"[MiningWorkflow] V-19.2 persistence done | task={task.id} "
+                f"alpha_inserted={alpha_inserted} alpha_skipped_persisted={alpha_skipped} "
+                f"failure_inserted={failure_inserted}"
+            )
 
             # V-19.1 (2026-05-05): post-commit fields_used population.
             # Decoupled from Alpha INSERT to dodge the silent-rollback that
@@ -636,27 +669,44 @@ class MiningWorkflow:
                 )
             
         except Exception as e:
-            # V-19 diagnostic (2026-05-05): outer rollback was silent — we only
-            # got "Persistence failed: <msg>" without origin. Adding full
-            # traceback + result snapshot.
+            # V-19.2 (2026-05-05): with per-row savepoints this outer except
+            # should now only fire for catastrophic issues (session crashed,
+            # connection lost, etc.) — per-row IntegrityError is handled in
+            # the savepoint blocks above. We still log defensively.
             import traceback as _tb
             n_alphas = len(result.get("generated_alphas", []) or [])
             n_failures = len(result.get("failures", []) or [])
             logger.error(
-                f"[MiningWorkflow] Persistence FAILED (outer): "
+                f"[MiningWorkflow] V-19.2 outer persistence FAILED: "
                 f"{type(e).__name__}: {e}\n"
                 f"  task_id={getattr(task, 'id', None)}\n"
                 f"  generated_alphas={n_alphas}, failures={n_failures}\n"
                 f"  factor_tier={factor_tier}, dataset={dataset_id}\n"
                 f"  traceback:\n{_tb.format_exc()}"
             )
-            # Rollback failed transaction to allow subsequent operations
+            try:
+                from backend.agents.graph.persistence_errors import (
+                    log_persistence_error,
+                )
+                log_persistence_error(
+                    task_id=getattr(task, "id", None),
+                    phase="outer_commit",
+                    exc=e,
+                    extra={
+                        "n_alphas": n_alphas,
+                        "n_failures": n_failures,
+                        "factor_tier": factor_tier,
+                        "dataset_id": dataset_id,
+                        "traceback_inline": _tb.format_exc(),
+                    },
+                )
+            except Exception:
+                pass
             try:
                 await self.db.rollback()
             except Exception:
                 pass
-            # Don't raise - return result anyway so mining continues
-        
+
         return result
 
 
