@@ -67,6 +67,9 @@ async def _incremental_save_alphas(
         metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
         expr_hash = compute_expression_hash(alpha.expression) if alpha.expression else None
 
+        # V-17 → V-19.1: fields_used populated post-flush, see comment in
+        # workflow.run_with_persistence. Inline write coincided with batch
+        # silent rollbacks (spike B5/B6).
         row = Alpha(
             task_id=task_id,
             run_id=run_id,
@@ -80,7 +83,6 @@ async def _incremental_save_alphas(
             dataset_id=dataset_id,
             quality_status=alpha.quality_status,
             metrics=alpha.metrics,
-            fields_used=_extract_used_fields(alpha.expression),
             is_sharpe=metrics_dict.get("sharpe"),
             is_fitness=metrics_dict.get("fitness"),
             is_turnover=metrics_dict.get("turnover"),
@@ -99,10 +101,40 @@ async def _incremental_save_alphas(
     await db_session.flush()
     await db_session.commit()
 
+    # V-19.1 (2026-05-05): post-commit fields_used population for T2/T3
+    # incremental path. Each row updated independently — failure here
+    # only loses fields_used for that alpha, never the batch.
+    from sqlalchemy import update as _sa_update, select
+    fields_used_updated = 0
+    for alpha in pending_alphas:
+        if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+            continue
+        if not alpha.alpha_id or not alpha.expression:
+            continue
+        try:
+            fids = _extract_used_fields(alpha.expression)
+            if not fids:
+                continue
+            await db_session.execute(
+                _sa_update(Alpha)
+                .where(Alpha.task_id == task_id, Alpha.alpha_id == alpha.alpha_id)
+                .values(fields_used=fids)
+            )
+            fields_used_updated += 1
+        except Exception as _e:
+            logger.warning(
+                f"[_incremental_save_alphas] V-19.1 fields_used update failed for "
+                f"alpha_id={alpha.alpha_id}: {_e}"
+            )
+    if fields_used_updated:
+        try:
+            await db_session.commit()
+        except Exception as _e:
+            logger.warning(f"[_incremental_save_alphas] V-19.1 commit failed: {_e}")
+
     # Re-iterate to build the AlphaResult list with the now-assigned ids.
     # We need to query rows back since we don't keep references after flush.
     # Simpler: query by task_id + alpha_id (BRAIN id, unique).
-    from sqlalchemy import select
     for alpha in pending_alphas:
         if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
             continue

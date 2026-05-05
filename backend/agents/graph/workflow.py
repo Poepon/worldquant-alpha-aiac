@@ -487,6 +487,14 @@ class MiningWorkflow:
                     # sharpe display.
                     metrics_dict = alpha_result.metrics if isinstance(alpha_result.metrics, dict) else {}
 
+                    # V-17 → V-19.1 (2026-05-05): write fields_used in a
+                    # SEPARATE step after Alpha INSERT succeeds. Earlier
+                    # inline `fields_used=_extract_used_fields(...)` in the
+                    # Alpha() constructor coincided with batch-level
+                    # silent rollback in spike B5/B6 (50% task losing all
+                    # alphas, both legacy and Phase 1). Decoupling keeps
+                    # the INSERT path identical to pre-V-17, while still
+                    # populating fields_used post-flush.
                     alpha = Alpha(
                         task_id=task.id,
                         run_id=run_id,
@@ -500,10 +508,6 @@ class MiningWorkflow:
                         dataset_id=dataset_id,
                         quality_status=alpha_result.quality_status,
                         metrics=alpha_result.metrics,
-                        # V-17 (2026-05-04): populate fields_used so cross-dataset
-                        # analytics actually reflect mining output, not just
-                        # BRAIN-synced historical alphas.
-                        fields_used=_extract_used_fields(alpha_result.expression),
                         # Flattened IS metrics — keep in sync with metrics JSONB.
                         is_sharpe=metrics_dict.get("sharpe"),
                         is_fitness=metrics_dict.get("fitness"),
@@ -580,6 +584,45 @@ class MiningWorkflow:
             
             await self.db.commit()
             logger.info(f"[MiningWorkflow] 持久化完成 | task={task.id}")
+
+            # V-19.1 (2026-05-05): post-commit fields_used population.
+            # Decoupled from Alpha INSERT to dodge the silent-rollback that
+            # affected B5/B6 batches. Each row is updated in its own try
+            # block — failure here only loses fields_used for THAT alpha,
+            # never the entire batch.
+            try:
+                fields_used_updated = 0
+                for alpha_result in result.get("generated_alphas", []):
+                    if getattr(alpha_result, "persisted", False):
+                        continue
+                    aid = getattr(alpha_result, "alpha_id", None)
+                    expr = getattr(alpha_result, "expression", None)
+                    if not aid or not expr:
+                        continue
+                    try:
+                        from sqlalchemy import update as _sa_update
+                        fids = _extract_used_fields(expr)
+                        if not fids:
+                            continue
+                        await self.db.execute(
+                            _sa_update(Alpha)
+                            .where(Alpha.task_id == task.id, Alpha.alpha_id == aid)
+                            .values(fields_used=fids)
+                        )
+                        fields_used_updated += 1
+                    except Exception as _e:
+                        logger.warning(
+                            f"[MiningWorkflow] V-19.1 fields_used update failed for "
+                            f"alpha_id={aid}: {_e}"
+                        )
+                if fields_used_updated:
+                    await self.db.commit()
+                    logger.info(
+                        f"[MiningWorkflow] V-19.1 fields_used populated for "
+                        f"{fields_used_updated} alphas"
+                    )
+            except Exception as _ex:
+                logger.warning(f"[MiningWorkflow] V-19.1 fields_used loop failed: {_ex}")
 
             # B7: post-commit, alpha.id is populated — enqueue async can_submit
             # refresh for each new PASS/PROV alpha. 30s countdown lets BRAIN
