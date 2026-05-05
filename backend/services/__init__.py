@@ -56,6 +56,11 @@ from backend.services.config_service import (
     DiversityConfig,
     OperatorPrefInfo,
 )
+from backend.services.hypothesis_service import (
+    HypothesisService,
+    HypothesisCreateData,
+    HypothesisStats,
+)
 
 __all__ = [
     # Base
@@ -95,4 +100,8 @@ __all__ = [
     "ThresholdsConfig",
     "DiversityConfig",
     "OperatorPrefInfo",
+    # Hypothesis Service (Phase 2 B7)
+    "HypothesisService",
+    "HypothesisCreateData",
+    "HypothesisStats",
 ]
