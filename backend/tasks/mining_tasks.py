@@ -168,6 +168,13 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                                 num_alphas_per_round=num_per_round,
                                 run_id=run.id,
                                 available_dataset_pool=available_dataset_pool,
+                                # Plan v5+ §Phase 2 (B3): typed Hypothesis
+                                # persistence triggers when level>=2. Variant
+                                # tags rows for F-5 KB isolation.
+                                hypothesis_centric_level=int(active_level or 0),
+                                experiment_variant=str(
+                                    (task.config or {}).get("hypothesis_centric_variant", active_level)
+                                ),
                             )
                             
                             # Update progress

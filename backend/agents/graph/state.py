@@ -148,6 +148,21 @@ class MiningState(BaseModel):
     # (t1_strategy_select / code_gen) prefer this over state.fields when
     # non-empty, so the LLM strategy / code-gen sees the union pool.
     current_hypothesis_fields: List[Dict] = Field(default_factory=list)
+
+    # -------------------------------------------------------------------------
+    # Plan v5+ §Phase 2 typed hypothesis (HGE Level 2+)
+    # -------------------------------------------------------------------------
+    # current_hypothesis_id: PK of the Hypothesis row INSERT-ed by
+    #   node_hypothesis_propose (Phase 2 B3). Downstream Alpha rows carry
+    #   this in their hypothesis_id FK so cross-round accumulation +
+    #   lifecycle / KB attribution become possible. None = legacy / Phase 1
+    #   path didn't persist a typed Hypothesis.
+    # current_hypothesis_ids: full list of hypothesis IDs proposed THIS round
+    #   (B3 may persist 1-3 hypotheses per round, one per LLM-emitted item).
+    #   alphas downstream link to current_hypothesis_id (the primary), but
+    #   B5 feedback iterates the list to update lifecycle on all of them.
+    current_hypothesis_id: Optional[int] = None
+    current_hypothesis_ids: List[int] = Field(default_factory=list)
     
     # -------------------------------------------------------------------------
     # Alpha Processing Queue

@@ -104,6 +104,8 @@ class MiningAgent:
         strategy: Optional[EvolutionStrategy] = None,
         run_id: Optional[int] = None,
         available_dataset_pool: Optional[List[str]] = None,
+        hypothesis_centric_level: int = 0,
+        experiment_variant: Optional[str] = None,
     ) -> List[Alpha]:
         """
         Run a single mining iteration with strategy application.
@@ -167,6 +169,11 @@ class MiningAgent:
                         # list = legacy single-anchor; populated = LLM may
                         # pick selected_datasets from this pool.
                         "available_dataset_pool": available_dataset_pool or [],
+                        # Phase 2 (B3): typed Hypothesis persistence triggers
+                        # at level >= 2. experiment_variant tags persisted rows
+                        # for the F-5 variant isolation invariant.
+                        "hypothesis_centric_level": int(hypothesis_centric_level or 0),
+                        "experiment_variant": str(experiment_variant) if experiment_variant is not None else None,
                     }
                 },
                 factor_tier=factor_tier,
@@ -265,6 +272,8 @@ class MiningAgent:
         initial_strategy: Optional[EvolutionStrategy] = None,
         run_id: Optional[int] = None,
         available_dataset_pool: Optional[List[str]] = None,
+        hypothesis_centric_level: int = 0,
+        experiment_variant: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Run multi-round evolution loop for alpha mining.
@@ -336,6 +345,8 @@ class MiningAgent:
                         strategy=current_strategy,
                         run_id=run_id,
                         available_dataset_pool=available_dataset_pool,
+                        hypothesis_centric_level=hypothesis_centric_level,
+                        experiment_variant=experiment_variant,
                     )
                     
                     # Analyze round results

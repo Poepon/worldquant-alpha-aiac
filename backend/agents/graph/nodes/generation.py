@@ -430,6 +430,69 @@ async def node_hypothesis(
             logger.warning(f"[{node_name}] union-field cache failed (non-fatal): {_ex}")
             union_fields = []
 
+    # ------------------------------------------------------------------
+    # Phase 2 (B3): typed Hypothesis persistence
+    # ------------------------------------------------------------------
+    # When hypothesis_centric_level >= 2, persist each LLM-emitted hypothesis
+    # as a Hypothesis ORM row BEFORE downstream code_gen runs. This satisfies
+    # the time-ordering hard constraint (Plan §A 4 道 post-hoc 防御):
+    # hypothesis.created_at < alpha.created_at, audited by
+    # scripts/audit_temporal_consistency.py.
+    #
+    # state.current_hypothesis_id = primary (first) hypothesis row id; alphas
+    # downstream link to this. state.current_hypothesis_ids = full list so
+    # B5 feedback can update lifecycle on every proposed hypothesis when
+    # multiple were emitted in one round.
+    current_hypothesis_id: Optional[int] = None
+    current_hypothesis_ids: List[int] = []
+    cfg = (config.get("configurable", {}) if config else {}) or {}
+    hge_level = int(cfg.get("hypothesis_centric_level", 0) or 0)
+    if hge_level >= 2 and hypotheses:
+        try:
+            from backend.database import AsyncSessionLocal
+            from backend.services.hypothesis_service import (
+                HypothesisService, HypothesisCreateData,
+            )
+            from backend.models import HypothesisKind
+            experiment_variant = cfg.get("experiment_variant")
+            async with AsyncSessionLocal() as _hdb:
+                svc = HypothesisService(_hdb)
+                for h in hypotheses:
+                    statement = (h.get("idea") or h.get("statement") or "").strip()
+                    if not statement:
+                        continue
+                    data = HypothesisCreateData(
+                        statement=statement,
+                        rationale=h.get("rationale") or h.get("reason") or "",
+                        region=state.region,
+                        universe=state.universe,
+                        kind=HypothesisKind.INVESTMENT_THESIS.value,
+                        target_tier=int(getattr(state, "factor_tier", 1) or 1),
+                        expected_signal=h.get("expected_signal", "unknown"),
+                        confidence=h.get("confidence", "medium"),
+                        novelty=h.get("novelty", "established"),
+                        key_fields=h.get("key_fields") or [],
+                        suggested_operators=h.get("suggested_operators") or [],
+                        dataset_pool=h.get("selected_datasets") or [],
+                        experiment_variant=str(experiment_variant)
+                            if experiment_variant is not None else None,
+                    )
+                    row = await svc.create_hypothesis(data)
+                    current_hypothesis_ids.append(row.id)
+                    # write back so downstream code_gen logging can show id
+                    h["hypothesis_id"] = row.id
+                await _hdb.commit()
+            if current_hypothesis_ids:
+                current_hypothesis_id = current_hypothesis_ids[0]
+                logger.info(
+                    f"[{node_name}] Phase 2 persisted hypotheses="
+                    f"{current_hypothesis_ids} primary={current_hypothesis_id}"
+                )
+        except Exception as _ex:
+            logger.warning(
+                f"[{node_name}] Phase 2 hypothesis persist failed (non-fatal): {_ex}"
+            )
+
     return {
         "hypotheses": hypotheses,
         "knowledge_transfer": knowledge_transfer,
@@ -438,6 +501,9 @@ async def node_hypothesis(
         # as effective_fields when non-empty.
         "current_hypothesis_datasets": chosen_datasets,
         "current_hypothesis_fields": union_fields,
+        # Phase 2: typed Hypothesis link IDs. None when level<2 / no hypotheses.
+        "current_hypothesis_id": current_hypothesis_id,
+        "current_hypothesis_ids": current_hypothesis_ids,
         **trace_update
     }
 
