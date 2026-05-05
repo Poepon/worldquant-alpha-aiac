@@ -971,6 +971,46 @@ async def node_evaluate(
 
         # A2: flip-retry single-alpha sim → smart settings (zero bucketing cost)
         flip_use_smart = getattr(settings, "ENABLE_SMART_SIM_SETTINGS", False)
+
+        # V-19.3 (2026-05-06): pre-dedup flipped expressions across the WHOLE
+        # alphas table. Sign-flip historically bypassed node_simulate's
+        # filter_unsimulated_expressions, so BRAIN was repeatedly handed
+        # already-known expressions and returned existing alpha_ids that
+        # collided on uq_alpha_id at INSERT (spike → task=115 dup ZY2K0nwn /
+        # GrMeLOg3 with task 81/83). Now we pre-filter to save BRAIN quota
+        # AND avoid the doomed INSERT.
+        flip_dedup_skipped = 0
+        try:
+            from backend.database import AsyncSessionLocal as _ASL
+            from backend.selection_strategy import filter_unsimulated_expressions as _flt
+            flipped_exprs = [f"multiply(-1, {o.expression})" for o in flip_candidates]
+            async with _ASL() as _ds:
+                _new_flipped, _dup_flipped = await _flt(
+                    _ds, flipped_exprs, state.region, state.universe,
+                )
+            _new_flipped_set = set(_new_flipped)
+            kept_candidates = []
+            for o in flip_candidates:
+                fexpr = f"multiply(-1, {o.expression})"
+                if fexpr in _new_flipped_set:
+                    kept_candidates.append(o)
+                else:
+                    flip_dedup_skipped += 1
+                    logger.info(
+                        f"[{node_name}] V-19.3 flip-retry skip — flipped expr already "
+                        f"in DB: {fexpr[:100]!r}"
+                    )
+            flip_candidates = kept_candidates
+            if flip_dedup_skipped:
+                logger.info(
+                    f"[{node_name}] V-19.3 flip-retry: {flip_dedup_skipped} candidates "
+                    f"pre-deduped, {len(flip_candidates)} will simulate"
+                )
+        except Exception as _e:
+            logger.warning(
+                f"[{node_name}] V-19.3 flip-retry dedup query failed, proceeding: {_e}"
+            )
+
         for orig in flip_candidates:
             flipped_expr = f"multiply(-1, {orig.expression})"
             try:

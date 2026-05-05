@@ -480,8 +480,39 @@ class MiningWorkflow:
                 log_persistence_error,
             )
 
+            # V-19.3 (2026-05-06): pre-batch SELECT existing alpha_ids to
+            # short-circuit known cross-task duplicates. The PR5 sign-flip
+            # retry path bypasses node_simulate's filter_unsimulated_expressions
+            # check, so when BRAIN normalizes a flipped expression to one
+            # already in our alphas table (e.g. task=115 flipping to
+            # multiply(-1, ts_rank(returns, 20)) → BRAIN reuses ZY2K0nwn
+            # owned by task=83), the INSERT would hit uq_alpha_id. V-19.2
+            # caught these via savepoint and logged them, but the new alpha
+            # row was still lost. V-19.3 detects them BEFORE INSERT and skips
+            # cleanly with an INFO log — no error, no data loss illusion.
+            from sqlalchemy import select as _sa_select
+            candidate_alpha_ids = [
+                ar.alpha_id for ar in result.get("generated_alphas", [])
+                if ar.alpha_id and not getattr(ar, "persisted", False)
+            ]
+            cross_task_dup_ids: set = set()
+            if candidate_alpha_ids:
+                try:
+                    r = await self.db.execute(
+                        _sa_select(Alpha.alpha_id).where(
+                            Alpha.alpha_id.in_(candidate_alpha_ids)
+                        )
+                    )
+                    cross_task_dup_ids = {row[0] for row in r.fetchall()}
+                except Exception as _e:
+                    logger.warning(
+                        f"[MiningWorkflow] V-19.3 cross-task dedup query failed: {_e} "
+                        f"— falling back to per-row savepoint catch"
+                    )
+
             alpha_inserted = 0
             alpha_skipped = 0
+            alpha_skipped_dup = 0
             for alpha_result in result.get("generated_alphas", []):
                 # PR7 — skip rows already INSERTed by node_save_results in
                 # incremental mode. AlphaResult.persisted is set True only
@@ -489,6 +520,16 @@ class MiningWorkflow:
                 # it False, so this gate is a no-op for T1 / disabled-flag.
                 if getattr(alpha_result, "persisted", False):
                     alpha_skipped += 1
+                    continue
+                # V-19.3: cross-task alpha_id collision — BRAIN dedup gave us
+                # an alpha_id that another task already owns. Skip cleanly.
+                if alpha_result.alpha_id and alpha_result.alpha_id in cross_task_dup_ids:
+                    alpha_skipped_dup += 1
+                    logger.info(
+                        f"[MiningWorkflow] V-19.3 skip cross-task duplicate "
+                        f"alpha_id={alpha_result.alpha_id} (already owned by another task) "
+                        f"expr={(alpha_result.expression or '')[:100]!r}"
+                    )
                     continue
                 try:
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
@@ -613,8 +654,9 @@ class MiningWorkflow:
 
             await self.db.commit()
             logger.info(
-                f"[MiningWorkflow] V-19.2 persistence done | task={task.id} "
+                f"[MiningWorkflow] V-19.3 persistence done | task={task.id} "
                 f"alpha_inserted={alpha_inserted} alpha_skipped_persisted={alpha_skipped} "
+                f"alpha_skipped_cross_task_dup={alpha_skipped_dup} "
                 f"failure_inserted={failure_inserted}"
             )
 

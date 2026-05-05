@@ -63,11 +63,44 @@ async def _incremental_save_alphas(
     # for full rationale. One bad row no longer rolls back the whole seed batch.
     from backend.agents.graph.persistence_errors import log_persistence_error
 
+    # V-19.3 (2026-05-06): pre-batch SELECT existing alpha_ids to short-circuit
+    # cross-task duplicates BEFORE the savepoint INSERT. Same rationale as
+    # workflow.run_with_persistence — sign-flip retry can produce expressions
+    # that BRAIN normalizes to an alpha_id another task already owns.
+    from sqlalchemy import select as _sa_select
+    candidate_alpha_ids = [
+        a.alpha_id for a in pending_alphas
+        if a.alpha_id and a.quality_status in ("PASS", "PASS_PROVISIONAL")
+    ]
+    cross_task_dup_ids: set = set()
+    if candidate_alpha_ids:
+        try:
+            r = await db_session.execute(
+                _sa_select(Alpha.alpha_id).where(
+                    Alpha.alpha_id.in_(candidate_alpha_ids)
+                )
+            )
+            cross_task_dup_ids = {row[0] for row in r.fetchall()}
+        except Exception as _e:
+            logger.warning(
+                f"[_incremental_save_alphas] V-19.3 cross-task dedup query failed: {_e}"
+            )
+
     snapshot_at = datetime.utcnow()
     out: List[AlphaResult] = []
     inserted_alpha_ids: List[str] = []  # alpha_ids that successfully landed
+    cross_task_skipped: List[str] = []  # alpha_ids skipped as cross-task dups
     for alpha in pending_alphas:
         if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+            continue
+        # V-19.3: cross-task duplicate skip
+        if alpha.alpha_id and alpha.alpha_id in cross_task_dup_ids:
+            cross_task_skipped.append(alpha.alpha_id)
+            logger.info(
+                f"[_incremental_save_alphas] V-19.3 skip cross-task duplicate "
+                f"alpha_id={alpha.alpha_id} (already owned by another task) "
+                f"expr={(alpha.expression or '')[:100]!r}"
+            )
             continue
         metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
         expr_hash = compute_expression_hash(alpha.expression) if alpha.expression else None
