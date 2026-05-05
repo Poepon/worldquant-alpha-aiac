@@ -1182,8 +1182,18 @@ async def node_evaluate(
             # Plan v5+ §B8: tag every recorded pitfall with the active typed
             # Hypothesis + experiment_variant so the KB learning unit becomes
             # (alpha, hypothesis_id, dataset_pool) instead of (alpha, dataset).
+            #
+            # Smoke-test (2026-05-06) revealed that LangGraph scalar field
+            # propagation is unreliable across nodes — state.current_hypothesis_id
+            # was None at evaluation time even though the list field
+            # state.current_hypothesis_ids was populated correctly. Fallback
+            # to list[0] keeps the KB tagging working under that regime.
             cfg = config.get("configurable", {}) if config else {}
             current_hypothesis_id = getattr(state, "current_hypothesis_id", None)
+            if current_hypothesis_id is None:
+                _hids = getattr(state, "current_hypothesis_ids", None) or []
+                if _hids:
+                    current_hypothesis_id = _hids[0]
             experiment_variant = cfg.get("experiment_variant")
 
             for feedback in sampled_failures:

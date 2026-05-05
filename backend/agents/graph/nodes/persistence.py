@@ -300,7 +300,15 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
     # hypothesis it derived from. None when level<2 / propose persistence
     # failed — workflow's INSERT path writes alpha.hypothesis_id=NULL in
     # that case (legacy compat).
+    #
+    # Smoke-test (2026-05-06) revealed LangGraph scalar field propagation
+    # can drop current_hypothesis_id while the list current_hypothesis_ids
+    # still propagates. Fallback to list[0] for B4 robustness.
     current_hypothesis_id = getattr(state, "current_hypothesis_id", None)
+    if current_hypothesis_id is None:
+        _hids = getattr(state, "current_hypothesis_ids", None) or []
+        if _hids:
+            current_hypothesis_id = _hids[0]
 
     if use_incremental:
         try:
