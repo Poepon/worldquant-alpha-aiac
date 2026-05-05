@@ -425,6 +425,8 @@ class RAGService:
         prefer_hitl: bool = True,
         hitl_min_count: int = 5,
         factor_tier: Optional[int] = None,
+        hypothesis_id: Optional[int] = None,
+        experiment_variant: Optional[str] = None,
     ) -> List[Dict]:
         """W6 (revised post-T9): rolling few-shot pool with dataset HARD filter.
 
@@ -496,6 +498,50 @@ class RAGService:
                 logger.info(
                     f"[RAGService] few-shot dataset filter | dropped={dropped} "
                     f"(target={dataset_id})"
+                )
+
+        # Plan v5+ §B8 — hypothesis-keyed retrieval. When the caller knows the
+        # active hypothesis_id, prefer patterns that were produced by that
+        # hypothesis (or its lineage) over generic ones. Soft filter: matching
+        # entries are kept first; non-matching entries pass only if matching
+        # set is empty (avoids starvation in the early lifecycle when KB is
+        # cold).
+        if hypothesis_id is not None:
+            matching = []
+            others = []
+            for e in rows:
+                md = e.meta_data or {}
+                hids = md.get("hypothesis_ids") or []
+                primary_hid = md.get("hypothesis_id")
+                if hypothesis_id in hids or hypothesis_id == primary_hid:
+                    matching.append(e)
+                else:
+                    others.append(e)
+            rows = matching if matching else others
+            if matching:
+                logger.info(
+                    f"[RAGService] few-shot hypothesis filter | matched={len(matching)} "
+                    f"others_dropped={len(others)} (hypothesis_id={hypothesis_id})"
+                )
+
+        # Plan v5+ §F-5 — variant isolation. During Phase gate灰度 we want
+        # hypotheses + their KB entries kept apart between variants so the
+        # legacy / Phase 2 comparison stays clean.
+        if experiment_variant is not None:
+            filtered = []
+            for e in rows:
+                md = e.meta_data or {}
+                entry_variant = md.get("experiment_variant")
+                # Allow entries with no variant (cold-start / migration) and
+                # entries that match the request.
+                if entry_variant is None or str(entry_variant) == str(experiment_variant):
+                    filtered.append(e)
+            dropped = len(rows) - len(filtered)
+            rows = filtered
+            if dropped:
+                logger.info(
+                    f"[RAGService] few-shot variant filter | dropped={dropped} "
+                    f"(variant={experiment_variant})"
                 )
 
         if not rows:
@@ -620,7 +666,9 @@ class RAGService:
         error_type: str,
         metrics: Dict = None,
         region: str = None,
-        dataset_id: str = None
+        dataset_id: str = None,
+        hypothesis_id: Optional[int] = None,
+        experiment_variant: Optional[str] = None,
     ) -> bool:
         """
         Record a failure pattern to the knowledge base.
@@ -648,6 +696,19 @@ class RAGService:
                 existing.meta_data['last_failure'] = datetime.now().isoformat()
                 if metrics:
                     existing.meta_data['avg_sharpe'] = metrics.get('sharpe', 0)
+                # Plan v5+ §B8: track every hypothesis that hit this pattern.
+                # Use a deduped list so RAG retrieval can do "patterns this
+                # hypothesis family has tripped" queries.
+                if hypothesis_id is not None:
+                    hids = list(existing.meta_data.get('hypothesis_ids') or [])
+                    if hypothesis_id not in hids:
+                        hids.append(hypothesis_id)
+                    existing.meta_data['hypothesis_ids'] = hids
+                # F-5: variant tag preserved as-is on first record (don't
+                # overwrite — different variants get different KB entries
+                # via _find_similar_pitfall already returning per-skeleton).
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(existing, 'meta_data')
                 logger.debug(f"[RAGService] Updated existing pitfall | skeleton={skeleton[:50]}")
             else:
                 # Create new pitfall entry
@@ -685,7 +746,13 @@ class RAGService:
                         'sharpe': metrics.get('sharpe', 0) if metrics else 0,
                         'fitness': metrics.get('fitness', 0) if metrics else 0,
                         'turnover': metrics.get('turnover', 0) if metrics else 0,
-                        'created_at': datetime.now().isoformat()
+                        'created_at': datetime.now().isoformat(),
+                        # Plan v5+ §B8: typed Hypothesis reference for KB
+                        # learning unit upgrade (alpha,hypothesis,...) instead
+                        # of (alpha,dataset,...).
+                        'hypothesis_id': hypothesis_id,
+                        'hypothesis_ids': [hypothesis_id] if hypothesis_id is not None else [],
+                        'experiment_variant': experiment_variant,
                     }
                 )
                 self.db.add(new_entry)
@@ -705,7 +772,9 @@ class RAGService:
         metrics: Dict,
         region: str = None,
         dataset_id: str = None,
-        alpha_id: str = None
+        alpha_id: str = None,
+        hypothesis_id: Optional[int] = None,
+        experiment_variant: Optional[str] = None,
     ) -> bool:
         """
         Record a success pattern to the knowledge base.
@@ -734,6 +803,14 @@ class RAGService:
                 n = existing.meta_data.get('success_count', 1)
                 old_sharpe = existing.meta_data.get('avg_sharpe', 0)
                 existing.meta_data['avg_sharpe'] = (old_sharpe * (n-1) + metrics.get('sharpe', 0)) / n
+                # Plan v5+ §B8: append every hypothesis that produced this pattern
+                if hypothesis_id is not None:
+                    hids = list(existing.meta_data.get('hypothesis_ids') or [])
+                    if hypothesis_id not in hids:
+                        hids.append(hypothesis_id)
+                    existing.meta_data['hypothesis_ids'] = hids
+                from sqlalchemy.orm.attributes import flag_modified
+                flag_modified(existing, 'meta_data')
                 logger.info(f"[RAGService] Updated success pattern | skeleton={skeleton[:50]}")
             else:
                 # Create new success pattern with full category info
@@ -768,7 +845,12 @@ class RAGService:
                         'avg_turnover': turnover,
                         'expected_sharpe': sharpe,
                         'score': score,
-                        'created_at': datetime.now().isoformat()
+                        'created_at': datetime.now().isoformat(),
+                        # Plan v5+ §B8: typed Hypothesis reference + variant
+                        # tag for KB learning unit upgrade.
+                        'hypothesis_id': hypothesis_id,
+                        'hypothesis_ids': [hypothesis_id] if hypothesis_id is not None else [],
+                        'experiment_variant': experiment_variant,
                     }
                 )
                 self.db.add(new_entry)

@@ -808,7 +808,21 @@ class MiningAgent:
         """Run feedback learning to accumulate knowledge."""
         try:
             failures = await self._query_recent_failures(task.id)
-            
+
+            # Plan v5+ §B8: thread typed Hypothesis lineage + variant tag
+            # into KB writes. hypothesis_ids come from the alphas themselves
+            # (B4 populates Alpha.hypothesis_id when level>=2). variant comes
+            # from task config (set at task launch in mining_tasks.py).
+            hypothesis_ids = sorted({
+                a.hypothesis_id for a in alphas
+                if getattr(a, "hypothesis_id", None) is not None
+            })
+            experiment_variant = (task.config or {}).get(
+                "hypothesis_centric_variant"
+            )
+            if experiment_variant is not None:
+                experiment_variant = str(experiment_variant)
+
             await self._feedback_agent.learn_from_round(
                 successes=alphas,
                 failures=failures,
@@ -818,6 +832,8 @@ class MiningAgent:
                 cumulative_success=cumulative_success,
                 target_goal=target_alphas,
                 max_iterations=max_iterations,
+                hypothesis_ids=hypothesis_ids,
+                experiment_variant=experiment_variant,
             )
             
             # Mark failures as analyzed

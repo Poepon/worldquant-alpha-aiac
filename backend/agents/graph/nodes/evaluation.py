@@ -1175,31 +1175,40 @@ async def node_evaluate(
             feedback_recorded = 0
             hypothesis_failures = 0
             implementation_failures = 0
-            
+
             sample_size = min(3, len(failure_feedback_queue))
             sampled_failures = random.sample(failure_feedback_queue, sample_size)
-            
+
+            # Plan v5+ §B8: tag every recorded pitfall with the active typed
+            # Hypothesis + experiment_variant so the KB learning unit becomes
+            # (alpha, hypothesis_id, dataset_pool) instead of (alpha, dataset).
+            cfg = config.get("configurable", {}) if config else {}
+            current_hypothesis_id = getattr(state, "current_hypothesis_id", None)
+            experiment_variant = cfg.get("experiment_variant")
+
             for feedback in sampled_failures:
                 attribution = feedback.get("attribution", "unknown")
-                
+
                 # Track attribution stats
                 if attribution == "hypothesis":
                     hypothesis_failures += 1
                 elif attribution == "implementation":
                     implementation_failures += 1
-                
+
                 try:
                     # Only record to knowledge base if attribution is confident
                     # Implementation failures shouldn't teach us about hypotheses
                     should_record = attribution != "implementation"
-                    
+
                     if should_record:
                         await rag_service.record_failure_pattern(
                             expression=feedback["expression"],
                             error_type=feedback["error_type"],
                             metrics=feedback["metrics"],
                             region=feedback["region"],
-                            dataset_id=feedback["dataset_id"]
+                            dataset_id=feedback["dataset_id"],
+                            hypothesis_id=current_hypothesis_id,
+                            experiment_variant=experiment_variant,
                         )
                         feedback_recorded += 1
                     else:

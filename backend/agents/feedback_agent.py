@@ -778,6 +778,8 @@ class FeedbackAgent:
         cumulative_success: int = 0,
         target_goal: int = 4,
         max_iterations: int = 10,
+        hypothesis_ids: Optional[List[int]] = None,
+        experiment_variant: Optional[str] = None,
     ) -> Dict:
         """
         Learn from a complete mining round (Successes & Failures).
@@ -865,6 +867,13 @@ class FeedbackAgent:
             # similarity matching.
             representative_alpha_id = successes[0].id if successes else None
 
+            # Plan v5+ §B8: derive primary hypothesis_id (first non-None) for
+            # KB lineage. Each persisted Hypothesis from this round contributed
+            # to whichever pattern the LLM aggregator extracted, so we tag with
+            # the full ids list AND the primary.
+            hids_clean = [h for h in (hypothesis_ids or []) if h is not None]
+            primary_hid = hids_clean[0] if hids_clean else None
+
             for p in analysis.get("new_patterns", []):
                 pattern_str = p.get("pattern", "")
                 if pattern_str and not await self._pattern_exists(pattern_str):
@@ -882,6 +891,10 @@ class FeedbackAgent:
                             'variants': p.get("variants", []),
                             'source': 'evolution_loop',
                             'alpha_id_ref': representative_alpha_id,
+                            # Plan v5+ §B8: typed Hypothesis lineage
+                            'hypothesis_id': primary_hid,
+                            'hypothesis_ids': hids_clean,
+                            'experiment_variant': experiment_variant,
                         },
                         factor_tier=classify_tier(pattern_str),
                     )
@@ -903,7 +916,11 @@ class FeedbackAgent:
                             'error_type': p.get("error_type"),
                             'recommendation': p.get("recommendation"),
                             'severity': p.get("severity", "medium"),
-                            'source': 'evolution_loop'
+                            'source': 'evolution_loop',
+                            # Plan v5+ §B8: typed Hypothesis lineage
+                            'hypothesis_id': primary_hid,
+                            'hypothesis_ids': hids_clean,
+                            'experiment_variant': experiment_variant,
                         }
                     )
                     self.db.add(entry)
