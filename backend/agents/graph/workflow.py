@@ -703,6 +703,43 @@ class MiningWorkflow:
             except Exception as _ex:
                 logger.warning(f"[MiningWorkflow] V-19.1 fields_used loop failed: {_ex}")
 
+            # Plan v5+ §B7 post-fix (2026-05-06): refresh hypothesis denormalized
+            # stats AFTER outer commit. Pre-V-19.5 the refresh ran inside
+            # _process_hypothesis_feedback (called from node_save_results, BEFORE
+            # outer commit) so the JOIN against alphas saw 0 rows for the round
+            # that just landed — Hypothesis row stayed alpha_count=0 / pass_count=0
+            # even when PROMOTED. Doing it here means committed alpha rows are
+            # visible.
+            try:
+                touched_hids = set()
+                for alpha_result in result.get("generated_alphas", []):
+                    hid = getattr(alpha_result, "hypothesis_id", None)
+                    if hid is not None:
+                        touched_hids.add(hid)
+                if touched_hids:
+                    from backend.services.hypothesis_service import HypothesisService
+                    svc = HypothesisService(self.db)
+                    refreshed = 0
+                    for hid in touched_hids:
+                        try:
+                            await svc.refresh_stats(hid)
+                            refreshed += 1
+                        except Exception as _e:
+                            logger.warning(
+                                f"[MiningWorkflow] V-19.5 refresh_stats failed for "
+                                f"hypothesis_id={hid}: {_e}"
+                            )
+                    if refreshed:
+                        await self.db.commit()
+                        logger.info(
+                            f"[MiningWorkflow] V-19.5 refreshed stats for "
+                            f"{refreshed} hypotheses"
+                        )
+            except Exception as _ex:
+                logger.warning(
+                    f"[MiningWorkflow] V-19.5 hypothesis stats refresh loop failed: {_ex}"
+                )
+
             # B7: post-commit, alpha.id is populated — enqueue async can_submit
             # refresh for each new PASS/PROV alpha. 30s countdown lets BRAIN
             # finish async checks before we re-fetch.

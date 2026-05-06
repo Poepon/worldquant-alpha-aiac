@@ -589,9 +589,13 @@ async def _process_hypothesis_feedback(
                 if should_abandon:
                     if await svc.mark_abandoned(hid, reason=abandon_reason):
                         abandoned.append(hid)
-                # Refresh stats after lifecycle updates so the row reflects
-                # the latest aggregate (alpha_count / pass_count / sharpe).
-                await svc.refresh_stats(hid)
+                # V-19.5 (2026-05-06): NO refresh_stats here. This helper runs
+                # inside node_save_results, BEFORE workflow.run_with_persistence's
+                # outer commit. Querying alphas at this point sees 0 rows for
+                # the current round (uncommitted), so refresh_stats would
+                # incorrectly write 0 to alpha_count/pass_count/sharpe_max.
+                # The authoritative refresh now happens post-commit in
+                # workflow.run_with_persistence.
             await _hdb.commit()
     except Exception as _ex:
         logger.warning(
