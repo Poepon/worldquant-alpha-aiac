@@ -145,15 +145,23 @@ def kb_hypothesis_tagged(conn, ids: List[int], variant_str: str) -> dict:
         return {"success_total": 0, "success_with_hid": 0,
                 "failure_total": 0, "failure_with_hid": 0}
 
+    # T03 fix (2026-05-06): scope `with_hid` to entries from THIS variant
+    # only. Pre-fix used a time-window query that overlapped between v=1
+    # and v=2 (interleaved A/B batch) so both variants saw identical
+    # with_hid counts — misleading because Phase 1 (v=1) shouldn't tag any
+    # KB entry with hypothesis_id (LEVEL=1 doesn't populate it).
     cur.execute("""
         SELECT entry_type, COUNT(*) AS n,
-               COUNT(*) FILTER (WHERE meta_data->>'hypothesis_id' IS NOT NULL) AS with_hid,
+               COUNT(*) FILTER (
+                   WHERE meta_data->>'hypothesis_id' IS NOT NULL
+                     AND meta_data->>'experiment_variant' = %s
+               ) AS with_hid,
                COUNT(*) FILTER (WHERE meta_data->>'experiment_variant' = %s) AS with_variant
         FROM knowledge_entries
         WHERE created_at >= %s AND created_at <= %s
           AND entry_type IN ('SUCCESS_PATTERN', 'FAILURE_PITFALL')
         GROUP BY entry_type
-    """, (variant_str, times["min_t"], times["max_t"]))
+    """, (variant_str, variant_str, times["min_t"], times["max_t"]))
     out = {"success_total": 0, "success_with_hid": 0, "success_with_variant": 0,
            "failure_total": 0, "failure_with_hid": 0, "failure_with_variant": 0}
     for row in cur.fetchall():

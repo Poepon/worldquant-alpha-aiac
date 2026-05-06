@@ -58,4 +58,11 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.refresh_kb_referenced_alphas",
         "schedule": crontab(hour=6, minute=15),
     },
+    # Plan v5+ §Phase 3 prep T02: weekly readiness check at Mon 04:00.
+    # Output written to docs/phase3_readiness/<date>.json so the trajectory
+    # of GO/NO-GO is visible over the May→July observation period.
+    "phase3-readiness-check": {
+        "task": "backend.tasks.run_phase3_readiness_check",
+        "schedule": crontab(day_of_week="mon", hour=4, minute=0),
+    },
 }

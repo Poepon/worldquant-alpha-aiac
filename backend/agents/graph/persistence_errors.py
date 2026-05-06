@@ -16,6 +16,39 @@ from typing import Any, Optional
 
 _LOG_PATH = Path(__file__).resolve().parents[3] / "logs" / "persistence_errors.log"
 
+# T04 (2026-05-06): in-process logrotate. Avoids unbounded growth without
+# requiring an external logrotate cron / Windows Task Scheduler dependency.
+# When the log exceeds _ROTATE_THRESHOLD_BYTES we move it to .1 (and .1 → .2
+# etc up to _ROTATE_KEEP files). Cheap: only checks size on the same write
+# that crosses the threshold.
+_ROTATE_THRESHOLD_BYTES = 5 * 1024 * 1024  # 5 MB per file
+_ROTATE_KEEP = 5  # keep .log + .1 .. .5 = ~30MB max
+
+
+def _rotate_if_needed(log_path: Path) -> None:
+    """Best-effort rotation. Silent on any error so caller's persistence
+    error log path is never broken by rotation issues."""
+    try:
+        if not log_path.exists():
+            return
+        if log_path.stat().st_size < _ROTATE_THRESHOLD_BYTES:
+            return
+        # Rotate .{N-1} → .{N}, ... .1 → .2, current .log → .1
+        for i in range(_ROTATE_KEEP - 1, 0, -1):
+            old = log_path.with_suffix(log_path.suffix + f".{i}")
+            new = log_path.with_suffix(log_path.suffix + f".{i + 1}")
+            if old.exists():
+                if new.exists():
+                    new.unlink()
+                old.rename(new)
+        first = log_path.with_suffix(log_path.suffix + ".1")
+        if first.exists():
+            first.unlink()
+        log_path.rename(first)
+    except Exception:
+        # Never let rotation failure mask the actual write
+        pass
+
 
 def log_persistence_error(
     *,
@@ -34,6 +67,8 @@ def log_persistence_error(
     """
     try:
         _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # T04: rotate if file too big
+        _rotate_if_needed(_LOG_PATH)
         ts = datetime.utcnow().isoformat() + "Z"
         lines = [
             "=" * 80,

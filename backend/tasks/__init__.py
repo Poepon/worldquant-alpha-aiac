@@ -40,6 +40,8 @@ from backend.tasks.sync_tasks import (
 )
 # PR2: tier-system refresh beat
 from backend.tasks.refresh_tasks import refresh_kb_referenced_alphas
+# Phase 3 prep T02: weekly readiness check
+from backend.tasks.phase3_tasks import run_phase3_readiness_check
 
 __all__ = [
     # Utilities

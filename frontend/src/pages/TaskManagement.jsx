@@ -427,7 +427,11 @@ export default function TaskManagement() {
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="max_iterations" label="最大迭代次数">
+              <Form.Item
+                name="max_iterations"
+                label="最大迭代次数"
+                tooltip="≥5 让 typed Hypothesis 跨 round 累积 lifecycle 数据 (Plan v5+ Phase 2)"
+              >
                 <InputNumber min={1} max={100} style={{ width: '100%' }} />
               </Form.Item>
             </Col>
