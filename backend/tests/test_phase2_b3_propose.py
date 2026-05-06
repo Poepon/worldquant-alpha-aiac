@@ -209,9 +209,14 @@ async def test_level_2_persists_one_hypothesis():
 
 
 @pytest.mark.asyncio
-async def test_level_2_persists_multiple_hypotheses():
-    """LLM may emit 2-3 hypotheses per round; all should persist, primary
-    is the first."""
+async def test_level_2_persists_only_primary_hypothesis():
+    """V-19.7 zombie-prevention: even when LLM emits 2-3 hypotheses per
+    round, only the FIRST viable one (primary) is persisted to the
+    hypotheses table. Sibling candidates remain in result["hypotheses"]
+    list (for trace step output) but don't get DB rows.
+
+    Pre-V-19.7 this stuck non-primary siblings in zombie ACTIVE state
+    forever (alpha_count=0, no lifecycle progression possible)."""
     from backend.agents.graph.nodes.generation import node_hypothesis
 
     llm = _mock_llm_response([
@@ -224,10 +229,13 @@ async def test_level_2_persists_multiple_hypotheses():
 
     result = await node_hypothesis(state, llm, config)
     ids = result["current_hypothesis_ids"]
-    assert len(ids) == 3
+    # V-19.7: only PRIMARY is DB-persisted; the other 2 are dropped
+    assert len(ids) == 1, f"V-19.7: expected 1 persisted (primary), got {len(ids)}"
     assert result["current_hypothesis_id"] == ids[0]
+    # All 3 hypothesis dicts still in trace (not lost)
+    assert len(result["hypotheses"]) == 3
 
-    # All 3 rows present
+    # Only 1 row in DB (the primary one)
     engine = create_async_engine(
         "postgresql+asyncpg://postgres:postgres@localhost:5433/alpha_gpt",
         echo=False,
@@ -237,7 +245,15 @@ async def test_level_2_persists_multiple_hypotheses():
             text("SELECT COUNT(*) FROM hypotheses WHERE statement LIKE :s"),
             {"s": f"{_TAG}multi-%"},
         )
-        assert r.scalar() == 3
+        assert r.scalar() == 1, "V-19.7: only primary should be DB-persisted"
+        # And it should be the FIRST one (multi-A)
+        r = await c.execute(
+            text("SELECT statement FROM hypotheses WHERE statement LIKE :s"),
+            {"s": f"{_TAG}multi-%"},
+        )
+        landed = r.fetchone()
+        assert landed[0] == f"{_TAG}multi-A", \
+            f"V-19.7: primary should be first (multi-A), got {landed[0]}"
     await engine.dispose()
 
 

@@ -448,6 +448,16 @@ async def node_hypothesis(
     cfg = (config.get("configurable", {}) if config else {}) or {}
     hge_level = int(cfg.get("hypothesis_centric_level", 0) or 0)
     if hge_level >= 2 and hypotheses:
+        # V-19.7 (2026-05-06) zombie-ACTIVE prevention: persist ONLY the
+        # FIRST viable hypothesis (the "primary") instead of N siblings.
+        # B4 links every alpha in the round to current_hypothesis_id (the
+        # primary), so non-primary siblings would never receive alphas and
+        # would stuck in ACTIVE forever (V-19.6 stopped them being falsely
+        # PROMOTED but they remained zombie rows). Plan v5 Final §三轮精简
+        # cut multi-hypothesis-per-round Layer pool design, so 1-per-round
+        # is the cleanest semantic match. Sibling candidates remain in the
+        # `hypotheses` list (returned to state for trace step output) so the
+        # LLM exploration is not lost — they're just not DB-persisted.
         try:
             from backend.database import AsyncSessionLocal
             from backend.services.hypothesis_service import (
@@ -457,36 +467,40 @@ async def node_hypothesis(
             experiment_variant = cfg.get("experiment_variant")
             async with AsyncSessionLocal() as _hdb:
                 svc = HypothesisService(_hdb)
+                primary_h = None
                 for h in hypotheses:
                     statement = (h.get("idea") or h.get("statement") or "").strip()
-                    if not statement:
-                        continue
+                    if statement:
+                        primary_h = h
+                        break
+                if primary_h is not None:
+                    statement = (primary_h.get("idea") or primary_h.get("statement") or "").strip()
                     data = HypothesisCreateData(
                         statement=statement,
-                        rationale=h.get("rationale") or h.get("reason") or "",
+                        rationale=primary_h.get("rationale") or primary_h.get("reason") or "",
                         region=state.region,
                         universe=state.universe,
                         kind=HypothesisKind.INVESTMENT_THESIS.value,
                         target_tier=int(getattr(state, "factor_tier", 1) or 1),
-                        expected_signal=h.get("expected_signal", "unknown"),
-                        confidence=h.get("confidence", "medium"),
-                        novelty=h.get("novelty", "established"),
-                        key_fields=h.get("key_fields") or [],
-                        suggested_operators=h.get("suggested_operators") or [],
-                        dataset_pool=h.get("selected_datasets") or [],
+                        expected_signal=primary_h.get("expected_signal", "unknown"),
+                        confidence=primary_h.get("confidence", "medium"),
+                        novelty=primary_h.get("novelty", "established"),
+                        key_fields=primary_h.get("key_fields") or [],
+                        suggested_operators=primary_h.get("suggested_operators") or [],
+                        dataset_pool=primary_h.get("selected_datasets") or [],
                         experiment_variant=str(experiment_variant)
                             if experiment_variant is not None else None,
                     )
                     row = await svc.create_hypothesis(data)
                     current_hypothesis_ids.append(row.id)
-                    # write back so downstream code_gen logging can show id
-                    h["hypothesis_id"] = row.id
-                await _hdb.commit()
+                    primary_h["hypothesis_id"] = row.id
+                    await _hdb.commit()
             if current_hypothesis_ids:
                 current_hypothesis_id = current_hypothesis_ids[0]
                 logger.info(
-                    f"[{node_name}] Phase 2 persisted hypotheses="
-                    f"{current_hypothesis_ids} primary={current_hypothesis_id}"
+                    f"[{node_name}] Phase 2 persisted primary hypothesis="
+                    f"{current_hypothesis_id} (sibling candidates retained "
+                    f"in trace, not DB-persisted; V-19.7)"
                 )
         except Exception as _ex:
             logger.warning(
