@@ -316,7 +316,52 @@ async def node_simulate(
     if not indices_to_simulate:
         logger.warning(f"[{node_name}] All expressions already in DB")
         return {"pending_alphas": state.pending_alphas}
-    
+
+    # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier filter.
+    # When ENABLE_PRE_SIMULATE_FILTER=True, predict P(PASS) per candidate
+    # and skip very-likely-fails BEFORE sending to BRAIN simulate. Default
+    # OFF; opt-in via .env. Conservative threshold 0.05 keeps 99% PASS
+    # recall on the training-set CV (AUC=0.813).
+    if getattr(settings, "ENABLE_PRE_SIMULATE_FILTER", False):
+        try:
+            from backend.agents.services.pre_simulate_filter import filter_candidates
+            threshold = float(getattr(settings, "PRE_SIMULATE_FILTER_THRESHOLD", 0.05))
+            cand_exprs = [state.pending_alphas[i].expression for i in indices_to_simulate]
+            keep_local, skip_local, probas = filter_candidates(
+                cand_exprs, threshold=threshold,
+            )
+            if skip_local:
+                # Translate skip_local positions back to original indices_to_simulate
+                pre_sim_skipped: list = []
+                for local_idx in skip_local:
+                    orig_idx = indices_to_simulate[local_idx]
+                    p_pass = probas[local_idx]
+                    pre_sim_skipped.append(orig_idx)
+                    a = state.pending_alphas[orig_idx]
+                    a.simulation_error = (
+                        f"pre-simulate filter skip: P(PASS)={p_pass:.3f} < {threshold}"
+                    )
+                    a.is_simulated = True
+                    a.simulation_success = False
+                # Reduce indices_to_simulate to keepers only
+                indices_to_simulate = [
+                    indices_to_simulate[i] for i in keep_local
+                ]
+                logger.info(
+                    f"[{node_name}] pre-simulate filter: skipped={len(pre_sim_skipped)} "
+                    f"keep={len(indices_to_simulate)} threshold={threshold}"
+                )
+        except Exception as _filter_e:
+            logger.warning(
+                f"[{node_name}] pre-simulate filter failed (proceed with all): {_filter_e}"
+            )
+
+    if not indices_to_simulate:
+        logger.warning(
+            f"[{node_name}] All expressions filtered by pre-simulate classifier"
+        )
+        return {"pending_alphas": state.pending_alphas}
+
     logger.info(f"[{node_name}] Starting batch simulation | count={len(indices_to_simulate)} region={state.region}")
     
     expressions = [state.pending_alphas[i].expression for i in indices_to_simulate]

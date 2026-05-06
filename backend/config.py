@@ -148,6 +148,17 @@ class Settings(BaseSettings):
     # wrapper + BRAIN neut=SUBINDUSTRY) and decay-vs-trade_when conflicts.
     # Toggle off if a future task shows PASS-rate regression.
     ENABLE_SMART_SIM_SETTINGS: bool = True
+
+    # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier toggle.
+    # When True, node_simulate runs each candidate through the trained
+    # sklearn LogisticRegression and skips alphas with P(PASS) < threshold
+    # BEFORE BRAIN simulate. Saves BRAIN concurrent-slot time on
+    # likely-fails. Default OFF (opt-in via .env after model is trained
+    # and reviewed). Threshold 0.05 → keep 99% PASS, skip 2% FAIL (very
+    # conservative). 0.10 → keep 98% PASS, skip 7% FAIL (sweet spot per
+    # AUC=0.813 training run on 2737 historical alphas).
+    ENABLE_PRE_SIMULATE_FILTER: bool = False
+    PRE_SIMULATE_FILTER_THRESHOLD: float = 0.05
     # PR4 — P0 实验结论：BRAIN GET /alphas/{id} 返回冻结的 sim 时 snapshot，不是
     # rolling 重算。所以 node_tier_seed_load 调 BRAIN refresh metrics 是 no-op，
     # 浪费配额。默认关闭；只有当 BRAIN 行为改变（比如未来开放 rolling endpoint）

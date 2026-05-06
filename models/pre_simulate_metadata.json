@@ -1,0 +1,123 @@
+{
+  "trained_at": "2026-05-06T16:09:03.117733Z",
+  "n_train": 2737,
+  "n_pos": 451,
+  "n_neg": 2286,
+  "auc_cv": 0.8131827202309246,
+  "feature_keys": [
+    "skeleton_hash",
+    "nesting_depth",
+    "num_operators",
+    "num_fields",
+    "num_negation",
+    "max_window",
+    "min_window",
+    "mean_window",
+    "has_cat_arith",
+    "has_cat_event",
+    "has_cat_group",
+    "has_cat_ts",
+    "has_cat_xs",
+    "has_op_ts_rank",
+    "has_op_ts_zscore",
+    "has_op_ts_mean",
+    "has_op_ts_std_dev",
+    "has_op_ts_delta",
+    "has_op_ts_decay_linear",
+    "has_op_ts_arg_max",
+    "has_op_ts_arg_min",
+    "has_op_rank",
+    "has_op_zscore",
+    "has_op_scale",
+    "has_op_group_neutralize",
+    "has_op_group_rank",
+    "has_op_group_zscore",
+    "has_op_group_mean",
+    "has_op_trade_when"
+  ],
+  "recommended_threshold": 0.15,
+  "threshold_table": [
+    {
+      "threshold": 0.02,
+      "pass_recall": 0.9977827050997783,
+      "pass_lost": 1,
+      "pass_lost_pct": 0.0022172949002217295,
+      "fail_skipped": 15,
+      "fail_skipped_pct": 0.006561679790026247,
+      "total_skipped": 16,
+      "total_kept": 2721
+    },
+    {
+      "threshold": 0.05,
+      "pass_recall": 0.9889135254988913,
+      "pass_lost": 5,
+      "pass_lost_pct": 0.011086474501108648,
+      "fail_skipped": 51,
+      "fail_skipped_pct": 0.02230971128608924,
+      "total_skipped": 56,
+      "total_kept": 2681
+    },
+    {
+      "threshold": 0.08,
+      "pass_recall": 0.9844789356984479,
+      "pass_lost": 7,
+      "pass_lost_pct": 0.015521064301552107,
+      "fail_skipped": 124,
+      "fail_skipped_pct": 0.0542432195975503,
+      "total_skipped": 131,
+      "total_kept": 2606
+    },
+    {
+      "threshold": 0.1,
+      "pass_recall": 0.9800443458980045,
+      "pass_lost": 9,
+      "pass_lost_pct": 0.019955654101995565,
+      "fail_skipped": 163,
+      "fail_skipped_pct": 0.07130358705161854,
+      "total_skipped": 172,
+      "total_kept": 2565
+    },
+    {
+      "threshold": 0.15,
+      "pass_recall": 0.9645232815964523,
+      "pass_lost": 16,
+      "pass_lost_pct": 0.03547671840354767,
+      "fail_skipped": 388,
+      "fail_skipped_pct": 0.16972878390201224,
+      "total_skipped": 404,
+      "total_kept": 2333
+    },
+    {
+      "threshold": 0.2,
+      "pass_recall": 0.9334811529933481,
+      "pass_lost": 30,
+      "pass_lost_pct": 0.06651884700665188,
+      "fail_skipped": 839,
+      "fail_skipped_pct": 0.3670166229221347,
+      "total_skipped": 869,
+      "total_kept": 1868
+    },
+    {
+      "threshold": 0.3,
+      "pass_recall": 0.88470066518847,
+      "pass_lost": 52,
+      "pass_lost_pct": 0.11529933481152993,
+      "fail_skipped": 1227,
+      "fail_skipped_pct": 0.536745406824147,
+      "total_skipped": 1279,
+      "total_kept": 1458
+    },
+    {
+      "threshold": 0.5,
+      "pass_recall": 0.7516629711751663,
+      "pass_lost": 112,
+      "pass_lost_pct": 0.24833702882483372,
+      "fail_skipped": 1800,
+      "fail_skipped_pct": 0.7874015748031497,
+      "total_skipped": 1912,
+      "total_kept": 825
+    }
+  ],
+  "model_class": "sklearn.linear_model.LogisticRegression",
+  "preprocessing": "StandardScaler"
+}
