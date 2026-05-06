@@ -318,6 +318,146 @@ async def test_b6_abandons_after_3_hypothesis_fail_rounds():
 
 @pytest.mark.skipif(not _pg_reachable(), reason="PG not reachable")
 @pytest.mark.asyncio
+async def test_v19_6_no_ghost_promotion_for_non_primary():
+    """V-19.6 ghost-promotion fix: when LLM emits multiple hypotheses per
+    round, only the PRIMARY (state.current_hypothesis_id) gets mark_promoted
+    on PASS. Non-primary hypotheses stay ACTIVE (they got tried via shared
+    code_gen) but don't falsely advance to PROMOTED — alphas are linked only
+    to primary, so promoting non-primary creates ghost rows with
+    alpha_count=0."""
+    from backend.models import Hypothesis, HypothesisStatus
+    from backend.services.hypothesis_service import HypothesisService, HypothesisCreateData
+    from backend.agents.graph.nodes.persistence import _process_hypothesis_feedback
+    from backend.agents.graph.state import MiningState, AlphaCandidate
+
+    engine = create_async_engine(
+        "postgresql+asyncpg://postgres:postgres@localhost:5433/alpha_gpt",
+        echo=False,
+    )
+    maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with maker() as s:
+        svc = HypothesisService(s)
+        primary = await svc.create_hypothesis(HypothesisCreateData(
+            statement=f"{_TAG}primary", region="USA", target_tier=1,
+        ))
+        sibling_a = await svc.create_hypothesis(HypothesisCreateData(
+            statement=f"{_TAG}sibling-a", region="USA", target_tier=1,
+        ))
+        sibling_b = await svc.create_hypothesis(HypothesisCreateData(
+            statement=f"{_TAG}sibling-b", region="USA", target_tier=1,
+        ))
+        await s.commit()
+
+        try:
+            state = MiningState(
+                task_id=999_006, region="USA", universe="TOP3000",
+                dataset_id="pv1", fields=[], operators=[],
+                current_hypothesis_id=primary.id,
+                current_hypothesis_ids=[primary.id, sibling_a.id, sibling_b.id],
+            )
+            # Round with PASS alpha — alphas are conceptually linked to primary
+            pending = [
+                AlphaCandidate(
+                    expression="rank(close)", is_valid=True,
+                    is_simulated=True, simulation_success=True,
+                    quality_status="PASS",
+                    metrics={"sharpe": 2.0},
+                ),
+            ]
+            await _process_hypothesis_feedback(
+                state=state,
+                round_index=1,
+                pending_alphas=pending,
+                history_so_far={},
+                trace_service=None,
+            )
+
+            # All 3 transitioned PROPOSED → ACTIVE (shared code_gen)
+            await s.refresh(primary)
+            await s.refresh(sibling_a)
+            await s.refresh(sibling_b)
+            # Only primary is PROMOTED
+            assert primary.status == HypothesisStatus.PROMOTED.value, \
+                f"primary expected PROMOTED, got {primary.status}"
+            assert sibling_a.status == HypothesisStatus.ACTIVE.value, \
+                f"sibling_a expected ACTIVE (no ghost-promotion), got {sibling_a.status}"
+            assert sibling_b.status == HypothesisStatus.ACTIVE.value, \
+                f"sibling_b expected ACTIVE (no ghost-promotion), got {sibling_b.status}"
+        finally:
+            from sqlalchemy import delete
+            await s.execute(delete(Hypothesis).where(
+                Hypothesis.id.in_([primary.id, sibling_a.id, sibling_b.id])
+            ))
+            await s.commit()
+    await engine.dispose()
+
+
+@pytest.mark.skipif(not _pg_reachable(), reason="PG not reachable")
+@pytest.mark.asyncio
+async def test_v19_6_abandon_only_primary_in_multi_hypothesis_round():
+    """V-19.6: when 3 hypotheses share rounds and abandon criterion fires,
+    only PRIMARY transitions to ABANDONED. Non-primary stay ACTIVE — they
+    didn't actually own the alphas that failed."""
+    from backend.models import Hypothesis, HypothesisStatus
+    from backend.services.hypothesis_service import HypothesisService, HypothesisCreateData
+    from backend.agents.graph.nodes.persistence import _process_hypothesis_feedback
+    from backend.agents.graph.state import MiningState, AlphaCandidate
+
+    engine = create_async_engine(
+        "postgresql+asyncpg://postgres:postgres@localhost:5433/alpha_gpt",
+        echo=False,
+    )
+    maker = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with maker() as s:
+        svc = HypothesisService(s)
+        primary = await svc.create_hypothesis(HypothesisCreateData(
+            statement=f"{_TAG}aban-primary", region="USA", target_tier=1,
+        ))
+        sibling = await svc.create_hypothesis(HypothesisCreateData(
+            statement=f"{_TAG}aban-sibling", region="USA", target_tier=1,
+        ))
+        await s.commit()
+
+        try:
+            history: dict = {}
+            for round_idx in (1, 2, 3):
+                state = MiningState(
+                    task_id=999_007, region="USA", universe="TOP3000",
+                    dataset_id="pv1", fields=[], operators=[],
+                    current_hypothesis_id=primary.id,
+                    current_hypothesis_ids=[primary.id, sibling.id],
+                    hypothesis_round_history=history,
+                )
+                pending = [
+                    AlphaCandidate(
+                        expression=f"rank(x{round_idx}.{i})", is_valid=True,
+                        is_simulated=True, simulation_success=True,
+                        quality_status="FAIL", metrics={"sharpe": -0.4},
+                    ) for i in range(4)
+                ]
+                history = await _process_hypothesis_feedback(
+                    state=state, round_index=round_idx, pending_alphas=pending,
+                    history_so_far=history, trace_service=None,
+                )
+
+            await s.refresh(primary)
+            await s.refresh(sibling)
+            # Primary abandoned (3 rounds 0 PASS + attribution=hypothesis)
+            assert primary.status == HypothesisStatus.ABANDONED.value
+            # Sibling still ACTIVE — the round-attribution applies to the
+            # primary's alpha lineage. Sibling didn't own any alphas.
+            assert sibling.status == HypothesisStatus.ACTIVE.value
+        finally:
+            from sqlalchemy import delete
+            await s.execute(delete(Hypothesis).where(
+                Hypothesis.id.in_([primary.id, sibling.id])
+            ))
+            await s.commit()
+    await engine.dispose()
+
+
+@pytest.mark.skipif(not _pg_reachable(), reason="PG not reachable")
+@pytest.mark.asyncio
 async def test_b6_does_not_abandon_for_3_implementation_fails():
     """Critical invariant: 3 rounds of LLM-emit-bad-code does NOT trigger
     abandon. Hypothesis stays ACTIVE so the system keeps trying."""

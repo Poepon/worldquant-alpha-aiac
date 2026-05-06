@@ -567,6 +567,16 @@ async def _process_hypothesis_feedback(
 
     # Lifecycle DB updates — fresh session so we don't conflict with the
     # incremental persistence path's session transaction state.
+    #
+    # V-19.6 (2026-05-06) ghost-promotion fix: B4 links every alpha in the
+    # round to the PRIMARY hypothesis (state.current_hypothesis_id). Non-
+    # primary hypotheses in current_hypothesis_ids share the round's
+    # code_gen pass but never have alphas linked to them. Pre-fix every hid
+    # got mark_promoted on any round PASS — producing "ghost PROMOTED" rows
+    # with alpha_count=0 (e.g. task 143's hids 210/211/212). Post-fix:
+    #   - mark_active: all hids (they all got tried via shared code_gen)
+    #   - mark_promoted: ONLY primary (only primary owns the PASS alphas)
+    #   - mark_abandoned: ONLY primary (consistent with promotion ownership)
     abandoned: List[int] = []
     promoted: List[int] = []
     activated: List[int] = []
@@ -577,25 +587,32 @@ async def _process_hypothesis_feedback(
                 if alpha_count > 0:
                     if await svc.mark_active(hid):
                         activated.append(hid)
-                if pass_count > 0:
-                    if await svc.mark_promoted(hid):
-                        promoted.append(hid)
-                # Abandonment: only check the primary's history (all hids
-                # share the same entry, so any one's history is identical
-                # in this round, but using primary is the canonical choice).
+            # Promote / abandon only the primary — non-primary hypotheses
+            # don't have alpha rows attributed to them, so promoting them
+            # would be semantically wrong (PROMOTED with alpha_count=0).
+            if pass_count > 0 and primary_hid is not None:
+                if await svc.mark_promoted(primary_hid):
+                    promoted.append(primary_hid)
+            # Abandonment: only the primary's history is authoritative since
+            # all hids share the same round entry (same code_gen pass). And
+            # only primary owns alphas, so only primary should ever be
+            # ABANDONED. abandon fires when last N rounds had 0 PASS +
+            # attribution=hypothesis (pass_count for THIS round can be
+            # anything — should_abandon checks the cumulative history).
+            if primary_hid is not None:
                 should_abandon, abandon_reason = should_abandon_hypothesis(
-                    history_out.get(hid, [])
+                    history_out.get(primary_hid, [])
                 )
                 if should_abandon:
-                    if await svc.mark_abandoned(hid, reason=abandon_reason):
-                        abandoned.append(hid)
-                # V-19.5 (2026-05-06): NO refresh_stats here. This helper runs
-                # inside node_save_results, BEFORE workflow.run_with_persistence's
-                # outer commit. Querying alphas at this point sees 0 rows for
-                # the current round (uncommitted), so refresh_stats would
-                # incorrectly write 0 to alpha_count/pass_count/sharpe_max.
-                # The authoritative refresh now happens post-commit in
-                # workflow.run_with_persistence.
+                    if await svc.mark_abandoned(primary_hid, reason=abandon_reason):
+                        abandoned.append(primary_hid)
+            # V-19.5 (2026-05-06): NO refresh_stats here. This helper runs
+            # inside node_save_results, BEFORE workflow.run_with_persistence's
+            # outer commit. Querying alphas at this point sees 0 rows for
+            # the current round (uncommitted), so refresh_stats would
+            # incorrectly write 0 to alpha_count/pass_count/sharpe_max.
+            # The authoritative refresh now happens post-commit in
+            # workflow.run_with_persistence.
             await _hdb.commit()
     except Exception as _ex:
         logger.warning(
