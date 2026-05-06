@@ -362,6 +362,32 @@ class HypothesisService(BaseService):
     # Helper queries
     # ------------------------------------------------------------------
 
+    async def rounds_active(self, hypothesis_id: int) -> int:
+        """Plan v5+ §Phase 3 prep — count rounds this hypothesis has been
+        evaluated in. Computed from alpha rows (alpha created_at deltas).
+
+        Used by Phase 3 readiness analysis to answer:
+        "Do older hypotheses (more rounds_active) PASS more reliably?"
+
+        Returns the number of distinct mining rounds where alphas were
+        produced under this hypothesis. A hypothesis without any alphas
+        returns 0.
+
+        Implementation: groups alpha created_at by 60-second buckets — each
+        bucket counts as a round. This is approximate (relies on rounds
+        being separated by simulate latency) but doesn't require a separate
+        round_index column on alphas.
+        """
+        from sqlalchemy import select as _sel, func as _f, distinct as _d, cast, Numeric
+        from backend.models import Alpha
+
+        stmt = (
+            _sel(_f.count(_d(_f.date_trunc("minute", Alpha.created_at))))
+            .where(Alpha.hypothesis_id == hypothesis_id)
+        )
+        result = await self.db.execute(stmt)
+        return int(result.scalar() or 0)
+
     async def pass_rate(self, hypothesis_id: int) -> Optional[float]:
         """alpha_count == 0 ? None : pass_count / alpha_count. None means
         'no alphas yet' — callers must distinguish that from 0.0 rate."""

@@ -47,7 +47,7 @@ async def main(n: int, daily_goal: int, dry_run: bool) -> int:
     print(f"Phase 2 A/B launcher — n={n} (LEVEL=1 vs LEVEL=2 50/50)")
     print("=" * 70)
     print(f"  Region: USA, Universe: TOP3000, Tier: T1")
-    print(f"  Daily goal: {daily_goal}, Max iterations: 2")
+    print(f"  Daily goal: {daily_goal}, Max iterations: 5")
     print(f"  Variant 1 (Phase 1 baseline): {sum(1 for _, v in plan if v == 1)} tasks")
     print(f"  Variant 2 (Phase 2 typed Hypothesis): {sum(1 for _, v in plan if v == 2)} tasks")
     print()
@@ -74,7 +74,10 @@ async def main(n: int, daily_goal: int, dry_run: bool) -> int:
                 agent_mode="AUTONOMOUS_TIER1",
                 status="PENDING",
                 daily_goal=daily_goal,
-                max_iterations=2,
+                # Plan v5+ §Phase 3 prep: 5 iterations let hypothesis lifecycle
+                # truly cross rounds (vs 2 = barely 1 lifecycle transition).
+                # B11-style A/B + Phase 3 readiness data both need this.
+                max_iterations=5,
                 config={
                     "phase2_ab": True,
                     "hypothesis_centric_variant": variant,

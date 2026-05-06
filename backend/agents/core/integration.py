@@ -275,9 +275,18 @@ async def run_enhanced_mining(
 ) -> EnhancedMiningResult:
     """
     Run enhanced mining with new architecture.
-    
-    This is the main entry point for using the new pipeline.
-    
+
+    Status (2026-05-06): DORMANT — designated as the Plan v5+ §C-Phase 3
+    main-loop inversion entry point (hypothesis-as-driver instead of
+    dataset-as-driver), but not wired into Celery / mining_tasks. Plan
+    v5 Final §三轮精简 pushed Phase 3 to Q3 (2026-07-09); see
+    docs/phase3_evaluation_2026-05-06.md for the launch gates.
+
+    When Phase 3 is greenlit, this function becomes the production entry
+    via mining_tasks.py routing on `task.config.hypothesis_centric_variant=3`.
+    Until then it remains importable for ad-hoc experiments / R&D scripts
+    only — not safe for Celery worker threads (no DB session injected).
+
     Args:
         llm_service: LLM service
         brain_adapter: BRAIN adapter
@@ -288,7 +297,7 @@ async def run_enhanced_mining(
         universe: Stock universe
         num_experiments: Number of experiments to run
         existing_trace: Optional existing trace to continue
-        
+
     Returns:
         EnhancedMiningResult with experiments and feedback
     """
