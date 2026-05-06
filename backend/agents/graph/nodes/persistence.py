@@ -626,13 +626,78 @@ async def _process_hypothesis_feedback(
             # ABANDONED. abandon fires when last N rounds had 0 PASS +
             # attribution=hypothesis (pass_count for THIS round can be
             # anything — should_abandon checks the cumulative history).
+            #
+            # G — Hypothesis Refinement Loop (2026-05-06): when abandon
+            # would fire, attempt LLM refinement first. If LLM returns a
+            # refined child statement → create new Hypothesis with
+            # parent_hypothesis_id=primary, mark parent SUPERSEDED instead
+            # of ABANDONED. node_hypothesis (next round) detects unused
+            # refined children and reuses them, closing the feedback loop.
+            superseded_via_refine: List[int] = []
             if primary_hid is not None:
                 should_abandon, abandon_reason = should_abandon_hypothesis(
                     history_out.get(primary_hid, [])
                 )
                 if should_abandon:
-                    if await svc.mark_abandoned(primary_hid, reason=abandon_reason):
-                        abandoned.append(primary_hid)
+                    refined_child_id = None
+                    if llm_service is not None:
+                        from backend.agents.graph.hypothesis_refine import (
+                            refine_hypothesis_llm, find_chain_depth,
+                        )
+                        from backend.services.hypothesis_service import (
+                            HypothesisCreateData,
+                        )
+                        from backend.models import HypothesisKind
+                        try:
+                            chain_depth = await find_chain_depth(primary_hid, _hdb)
+                            parent_h = await svc.get_by_id(primary_hid)
+                            if parent_h is not None:
+                                # Sample fail expressions from this round
+                                sample_fails = []
+                                for a in pending_alphas:
+                                    if a.quality_status in ("FAIL", "REJECT"):
+                                        expr = (a.expression or "")[:100]
+                                        sample_fails.append(expr)
+                                refined = await refine_hypothesis_llm(
+                                    parent_statement=parent_h.statement,
+                                    parent_rationale=parent_h.rationale or "",
+                                    history=history_out.get(primary_hid, []),
+                                    sample_fail_exprs=sample_fails,
+                                    llm_service=llm_service,
+                                    current_chain_depth=chain_depth,
+                                )
+                                if refined is not None:
+                                    child_data = HypothesisCreateData(
+                                        statement=refined.statement,
+                                        rationale=refined.rationale,
+                                        region=parent_h.region,
+                                        universe=parent_h.universe,
+                                        kind=HypothesisKind.INVESTMENT_THESIS.value,
+                                        target_tier=parent_h.target_tier,
+                                        confidence=refined.confidence,
+                                        novelty=refined.novelty,
+                                        dataset_pool=parent_h.dataset_pool or [],
+                                        parent_hypothesis_id=primary_hid,
+                                        experiment_variant=parent_h.experiment_variant,
+                                    )
+                                    child_row = await svc.create_hypothesis(child_data)
+                                    refined_child_id = child_row.id
+                                    if await svc.mark_superseded(primary_hid, refined_child_id):
+                                        superseded_via_refine.append(primary_hid)
+                                        logger.info(
+                                            f"[G refine] parent={primary_hid} → child={refined_child_id} "
+                                            f"reason={refined.refinement_reason[:80]!r} "
+                                            f"chain_depth={chain_depth + 1}"
+                                        )
+                        except Exception as _re:
+                            logger.warning(
+                                f"[G refine] failed (will fall through to abandon): {_re}"
+                            )
+
+                    # Fall back to abandon if refinement didn't happen
+                    if refined_child_id is None:
+                        if await svc.mark_abandoned(primary_hid, reason=abandon_reason):
+                            abandoned.append(primary_hid)
             # V-19.5 (2026-05-06): NO refresh_stats here. This helper runs
             # inside node_save_results, BEFORE workflow.run_with_persistence's
             # outer commit. Querying alphas at this point sees 0 rows for
