@@ -338,7 +338,29 @@ async def node_tier_wrap_one(
         except Exception as e:
             logger.warning(f"[{node_name}] T3Strategy deser failed: {e}; using DEFAULT")
             strategy = DEFAULT_T3_STRATEGY
-        variants = expand_t3_strategy(seed["expression"], strategy, region=state.region)
+        # Plan v5+ §决策 3 (2026-05-06): pull hypothesis_signal from seed's
+        # ancestor hypothesis (B4 link). When present, expand_t3_strategy
+        # uses theme-matched trade_when conditions instead of generic
+        # 6-template fallback. seed dict carries alpha row metadata
+        # including hypothesis_id (set by node_tier_seed_load); we look up
+        # expected_signal one extra hop.
+        hypothesis_signal = None
+        seed_hid = seed.get("hypothesis_id")
+        if seed_hid is not None:
+            try:
+                from backend.database import AsyncSessionLocal as _ASL
+                from backend.models import Hypothesis as _H
+                async with _ASL() as _hdb:
+                    _h = await _hdb.get(_H, seed_hid)
+                    if _h is not None:
+                        hypothesis_signal = _h.expected_signal
+            except Exception as _e:
+                logger.debug(f"[{node_name}] hypothesis lookup failed (ok): {_e}")
+        variants = expand_t3_strategy(
+            seed["expression"], strategy,
+            region=state.region,
+            hypothesis_signal=hypothesis_signal,
+        )
     else:
         logger.error(f"[{node_name}] tier {state.factor_tier} not supported")
         return {"pending_alphas": [], "current_alpha_index": 0}

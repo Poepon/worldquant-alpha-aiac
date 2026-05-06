@@ -362,21 +362,74 @@ async def select_t3_strategy_via_llm(
 
 
 def expand_t3_strategy(
-    seed_t2: str, strategy: T3Strategy, region: str
+    seed_t2: str,
+    strategy: T3Strategy,
+    region: str,
+    hypothesis_signal: Optional[str] = None,
 ) -> List[Dict]:
     """Materialize T3 expressions by substituting seed into trade_when templates.
-    Filters templates unavailable for the region."""
+
+    Plan v5+ §决策 3 (2026-05-06): if hypothesis_signal is provided, prefer
+    theme-matched conditions from trade_when_themes.yaml over the 6
+    hardcoded TRADE_WHEN_TEMPLATES. Theme-matched conditions are
+    semantically aligned with the hypothesis (e.g. momentum hypothesis →
+    trend_strong / near_high entry filters, instead of arbitrary
+    high_volume_entry).
+
+    The legacy TRADE_WHEN_TEMPLATES path remains the fallback when:
+      - hypothesis_signal is None (legacy callers / no Phase 2 link)
+      - theme library returns 0 conditions (region field guards filter
+        everything)
+      - theme="default" (no match) — uses 6-template fallback
+
+    Filters templates / conditions unavailable for the region.
+    """
     out: List[Dict] = []
-    for tpl_name in strategy.use_templates:
-        if not template_available(region, tpl_name):
-            logger.debug(
-                f"[factor_wrapping] T3 skip template {tpl_name} (region={region})"
+
+    # Plan §决策 3: theme-matched conditions take precedence
+    used_theme_conditions = False
+    if hypothesis_signal:
+        try:
+            from backend.agents.seed_pool.trade_when_themes import (
+                get_theme_conditions, resolve_signal_to_theme,
             )
-            continue
-        tpl = TRADE_WHEN_TEMPLATES[tpl_name]
-        out.append({
-            "expression": tpl.format(expr=seed_t2),
-            "wrapper_kind": f"trade_when_{tpl_name}",
-        })
+            theme_key = resolve_signal_to_theme(hypothesis_signal)
+            if theme_key != "default":
+                conditions = get_theme_conditions(hypothesis_signal, region=region)
+                # Cap at strategy.use_templates length to keep output size predictable
+                cap = max(2, len(strategy.use_templates) or 3)
+                for c in conditions[:cap]:
+                    expr = (
+                        f"trade_when({c['expression']}, {seed_t2}, -1)"
+                    )
+                    out.append({
+                        "expression": expr,
+                        "wrapper_kind": f"trade_when_theme_{theme_key}_{c['name']}",
+                    })
+                if out:
+                    used_theme_conditions = True
+                    logger.info(
+                        f"[factor_wrapping] T3 theme-matched conditions: "
+                        f"signal={hypothesis_signal!r} theme={theme_key!r} "
+                        f"emitted={len(out)} variants"
+                    )
+        except Exception as e:
+            logger.warning(
+                f"[factor_wrapping] T3 theme lookup failed (will fall back): {e}"
+            )
+
+    # Legacy 6-template path (fallback OR signal=None / default)
+    if not used_theme_conditions:
+        for tpl_name in strategy.use_templates:
+            if not template_available(region, tpl_name):
+                logger.debug(
+                    f"[factor_wrapping] T3 skip template {tpl_name} (region={region})"
+                )
+                continue
+            tpl = TRADE_WHEN_TEMPLATES[tpl_name]
+            out.append({
+                "expression": tpl.format(expr=seed_t2),
+                "wrapper_kind": f"trade_when_{tpl_name}",
+            })
 
     return _dedup_and_validate(out, target_tier=3, region=region)
