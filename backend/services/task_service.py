@@ -348,6 +348,28 @@ class TaskService(BaseService):
         """
         await self._validate_tier_eligibility(data)
 
+        # Plan v5+ §F-5 50/50 A/B variant assignment. Pre-2026-05-06 the
+        # config slot existed but no code consumed CANDIDATE — tasks always
+        # used LEVEL. Now: if CANDIDATE > LEVEL, every new task gets a
+        # random.choice([LEVEL, CANDIDATE]) injected into config[
+        # "hypothesis_centric_variant"]. mining_tasks.run_mining_task reads
+        # this per-task value at execution time. Caller-supplied
+        # hypothesis_centric_variant in data.config takes precedence (lets
+        # ad-hoc scripts pin a variant for targeted runs).
+        config = dict(data.config or {})
+        if "hypothesis_centric_variant" not in config:
+            from backend.config import settings as _hge
+            level = int(_hge.HYPOTHESIS_CENTRIC_LEVEL or 0)
+            candidate = int(_hge.HYPOTHESIS_CENTRIC_CANDIDATE or 0)
+            if candidate > level:
+                import random
+                assigned = random.choice([level, candidate])
+                config["hypothesis_centric_variant"] = assigned
+                logger.info(
+                    f"[task_service] F-5 A/B variant assigned: {assigned} "
+                    f"(level={level} candidate={candidate})"
+                )
+
         task = MiningTask(
             task_name=data.name,
             region=data.region,
@@ -356,7 +378,7 @@ class TaskService(BaseService):
             target_datasets=data.target_datasets,
             agent_mode=data.agent_mode,
             daily_goal=data.daily_goal,
-            config=data.config,
+            config=config,
             status="PENDING",
         )
 
