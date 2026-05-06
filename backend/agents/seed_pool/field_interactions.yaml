@@ -1,0 +1,302 @@
+# Plan v5+ #2 — Field interaction graph (role-based templates)
+#
+# Two-pass architecture:
+#   Pass 1: classify each field_id → semantic role via patterns (deterministic)
+#   Pass 2: enumerate role-pair templates that turn into Quasi-T1 candidates
+#
+# This avoids the O(N²) LLM call across thousands of fields by encoding
+# the financial knowledge as role × role → template rules. New fields
+# auto-get classified; new templates only require YAML edit.
+#
+# Role classification is in field_classifier.py (matches field_id prefix
+# / regex against `roles.patterns` here).
+
+roles:
+  # Price roles
+  price:
+    description: "Stock price (close)"
+    patterns:
+      - "^close$"
+    sample_fields: ["close"]
+
+  price_high:
+    description: "Daily high"
+    patterns:
+      - "^high$"
+    sample_fields: ["high"]
+
+  price_low:
+    description: "Daily low"
+    patterns:
+      - "^low$"
+    sample_fields: ["low"]
+
+  price_open:
+    description: "Daily open"
+    patterns:
+      - "^open$"
+    sample_fields: ["open"]
+
+  price_vwap:
+    description: "Volume-weighted average price"
+    patterns:
+      - "^vwap$"
+    sample_fields: ["vwap"]
+
+  # Volume roles
+  volume:
+    description: "Trading volume (shares)"
+    patterns:
+      - "^volume$"
+    sample_fields: ["volume"]
+
+  amount:
+    description: "Trading amount (notional turnover)"
+    patterns:
+      - "^amount$"
+    sample_fields: ["amount"]
+
+  # Market-cap / size
+  market_cap:
+    description: "Market cap"
+    patterns:
+      - "^cap$"
+      - "^mkt_cap$"
+    sample_fields: ["cap"]
+
+  # Returns
+  returns:
+    description: "Daily returns"
+    patterns:
+      - "^returns$"
+    sample_fields: ["returns"]
+
+  # Fundamentals — earnings
+  earnings_per_share:
+    description: "EPS / earnings per share"
+    patterns:
+      - "fnd6.*eps.*"
+      - "^eps$"
+      - "^actual_eps_value.*"
+    sample_fields: ["fnd6_newa2v1300_eps_per_share"]
+
+  net_income:
+    description: "Net income"
+    patterns:
+      - "fnd6.*net_inc.*"
+      - "^net_income$"
+    sample_fields: ["fnd6_newa2v1300_net_income"]
+
+  # Fundamentals — book value
+  book_per_share:
+    description: "Book value per share"
+    patterns:
+      - "fnd6.*book.*per_share"
+      - "^book_value_per_share$"
+    sample_fields: ["fnd6_newa1v1300_book_per_share"]
+
+  total_assets:
+    description: "Total assets"
+    patterns:
+      - "fnd6.*total_assets.*"
+      - "^total_assets$"
+    sample_fields: ["fnd6_newa1v1300_total_assets"]
+
+  # Cash flow
+  cfo_per_share:
+    description: "Cash flow from operations / share"
+    patterns:
+      - "fnd6.*cfo.*"
+      - "^cfo_per_share$"
+    sample_fields: ["fnd6_newa3v1300_cfo_per_share"]
+
+  # EBIT / EV
+  ebit:
+    description: "Earnings before interest & tax"
+    patterns:
+      - "fnd6.*ebit$"
+      - "^ebit$"
+    sample_fields: ["fnd6_newa2v1300_ebit"]
+
+  enterprise_value:
+    description: "Enterprise value"
+    patterns:
+      - "^ev$"
+      - "fnd6.*ev$"
+    sample_fields: ["ev"]
+
+  # Sales / revenue
+  sales_per_share:
+    description: "Sales / revenue per share"
+    patterns:
+      - "fnd6.*sales.*"
+      - "^sales_per_share$"
+    sample_fields: ["fnd6_newa2v1300_sales_per_share"]
+
+  # Debt / equity
+  total_debt:
+    description: "Total debt"
+    patterns:
+      - "fnd6.*total_debt$"
+      - "^total_debt$"
+    sample_fields: ["fnd6_newa1v1300_total_debt"]
+
+  total_equity:
+    description: "Total stockholder equity"
+    patterns:
+      - "fnd6.*total_equity$"
+      - "^total_equity$"
+    sample_fields: ["fnd6_newa1v1300_total_equity"]
+
+# =============================================================================
+# Interaction templates — role pair → expression template
+# =============================================================================
+# template uses {f1} / {f2} / {ts_delay_f1} placeholders. The interactions
+# generator substitutes actual field_ids at runtime.
+#
+# Each template has:
+#   - id (unique name, used for tracking)
+#   - role_pair (ordered)
+#   - expression (Python format string)
+#   - operator (the BRAIN operator at the root)
+#   - rationale (why this combination is meaningful)
+#
+# Constraint: every template must produce a Quasi-T1-like expression
+# (ie. classifies as T1 by factor_tier_classifier — single non-statistical
+# arithmetic combination of 2 fields, no ts_op aggregation).
+
+interactions:
+  # Synthetic returns (for regions without `returns` field)
+  - id: synthetic_returns
+    role_pair: [price, price]   # uses ts_delay(price, 1)
+    expression: "subtract(divide({f1}, ts_delay({f1}, 1)), 1)"
+    operator: subtract
+    rationale: "Synthesize daily returns from close price"
+    constraint: "f1 must be price role (close)"
+
+  # Intraday signals
+  - id: intraday_range
+    role_pair: [price_high, price_low]
+    expression: "subtract({f1}, {f2})"
+    operator: subtract
+    rationale: "Intraday range (high - low)"
+
+  - id: intraday_range_relative
+    role_pair: [price_high, price_low]
+    expression: "divide(subtract({f1}, {f2}), close)"
+    operator: divide
+    rationale: "Intraday range relative to close (volatility proxy)"
+    constraint: "uses close as denominator"
+
+  - id: close_in_range
+    role_pair: [price, price_high]
+    expression: "divide(subtract({f1}, low), subtract({f2}, low))"
+    operator: divide
+    rationale: "Close position within day's high-low range"
+    constraint: "uses low field"
+
+  - id: close_open_return
+    role_pair: [price, price_open]
+    expression: "divide(subtract({f1}, {f2}), {f2})"
+    operator: divide
+    rationale: "Intraday close-open return"
+
+  - id: close_vwap_deviation
+    role_pair: [price, price_vwap]
+    expression: "subtract({f1}, {f2})"
+    operator: subtract
+    rationale: "Close - VWAP (institutional flow proxy)"
+
+  # Valuation ratios
+  - id: pe_synthetic
+    role_pair: [price, earnings_per_share]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Synthesized PE ratio (close / EPS)"
+
+  - id: earnings_yield
+    role_pair: [earnings_per_share, price]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Earnings yield (inverse PE — top 20% = cheap value)"
+
+  - id: pb_synthetic
+    role_pair: [price, book_per_share]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Price / book ratio"
+
+  - id: book_yield
+    role_pair: [book_per_share, price]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Book / price (book yield — top = cheap)"
+
+  - id: ev_to_ebit
+    role_pair: [enterprise_value, ebit]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "EV/EBIT (enterprise value to EBIT)"
+
+  - id: ebit_yield
+    role_pair: [ebit, enterprise_value]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "EBIT yield (Greenblatt magic formula component)"
+
+  - id: ps_ratio
+    role_pair: [price, sales_per_share]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Price / sales ratio"
+
+  # Liquidity ratios
+  - id: price_volume
+    role_pair: [price, volume]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Price / volume (illiquidity proxy)"
+
+  - id: turnover_proxy
+    role_pair: [amount, market_cap]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Turnover (amount / cap)"
+
+  - id: dollar_volume
+    role_pair: [price, volume]
+    expression: "multiply({f1}, {f2})"
+    operator: multiply
+    rationale: "Dollar volume (price × volume)"
+
+  # Quality ratios
+  - id: accruals_quality
+    role_pair: [cfo_per_share, earnings_per_share]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Accruals quality (CFO / earnings — Sloan 1996)"
+
+  - id: cash_yield
+    role_pair: [cfo_per_share, market_cap]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Cash flow yield (CFO / cap)"
+
+  - id: asset_turnover
+    role_pair: [sales_per_share, total_assets]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Asset turnover (sales / total assets)"
+
+  - id: debt_to_equity
+    role_pair: [total_debt, total_equity]
+    expression: "divide({f1}, {f2})"
+    operator: divide
+    rationale: "Debt-to-equity ratio"
+
+  # Gap / overnight signals
+  - id: overnight_gap
+    role_pair: [price_open, price]
+    expression: "divide(subtract({f1}, ts_delay({f2}, 1)), ts_delay({f2}, 1))"
+    operator: divide
+    rationale: "Overnight gap (open - prev close) / prev close"

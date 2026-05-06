@@ -173,6 +173,32 @@ _QUASI_T1_PATTERNS: tuple = (
     ),
     # Q-CR-01: close-vwap deviation
     ("subtract", ["close", "vwap"]),
+
+    # Plan v5+ #2 (2026-05-07) — STRUCTURAL patterns matching field_interactions.yaml
+    # templates. Each accepts ANY pair of bare-identifier fields (via <field>
+    # wildcard). Together with classify_field_role, these expand the white-list
+    # from 15 → effectively unlimited (constrained by financial-meaningful
+    # role pairs in YAML), without requiring per-region pattern duplication.
+    #
+    # SAFETY: <field> only matches bare identifiers (not numerics, not nested
+    # calls), so structural patterns only catch "field × field" combinations.
+    # Financially meaningless combinations (e.g. divide(close, returns)) will
+    # type-check as T1 but rarely PASS quality eval — same as today's behavior
+    # for hand-typed expressions.
+
+    # Generic ratio / spread / product (covers PE / PB / EV-EBIT / accruals /
+    # debt-to-equity / dollar-volume / etc. once role-classified)
+    ("divide", ["<field>", "<field>"]),
+    ("subtract", ["<field>", "<field>"]),
+    ("multiply", ["<field>", "<field>"]),
+
+    # 3-leg structures used by intraday_range / close_in_range / overnight_gap
+    ("divide", [("subtract", ["<field>", "<field>"]), "<field>"]),
+    ("divide", [("subtract", ["<field>", "<field>"]), ("subtract", ["<field>", "<field>"])]),
+
+    # Synthetic returns / leading-vs-lagging
+    ("subtract", [("divide", ["<field>", ("ts_delay", ["<field>", "<int>"])]), "<num>"]),
+    ("divide", [("subtract", ["<field>", ("ts_delay", ["<field>", "<int>"])]), ("ts_delay", ["<field>", "<int>"])]),
 )
 
 
@@ -436,6 +462,18 @@ def _match_atom(arg_str: str, atom) -> bool:
         return bool(re.fullmatch(r"-?\d+", s))
     if atom == "<num>":
         return bool(re.fullmatch(r"-?\d+(\.\d+)?", s))
+    # Plan v5+ #2 (2026-05-07) — <field> wildcard for structural Quasi-T1
+    # patterns. Matches any bare identifier that is NOT a number AND NOT
+    # an operator-call expression (ie. it's a leaf field reference).
+    if atom == "<field>":
+        # Reject if it's a numeric literal
+        if re.fullmatch(r"-?\d+(\.\d+)?", s):
+            return False
+        # Reject if it's a function call (operator)
+        if "(" in s:
+            return False
+        # Accept bare identifiers
+        return bool(re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", s))
     # Numeric literal exact match
     if re.fullmatch(r"-?\d+(\.\d+)?", atom):
         return s == atom

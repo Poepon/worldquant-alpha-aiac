@@ -247,6 +247,42 @@ def expand_t1_strategy(
                     }
                 )
 
+    # Plan v5+ #2 (2026-05-07) — append field-pair candidates from the
+    # interaction graph. These are role-classified two-field combinations
+    # (PE / PB / accruals / intraday range / synthetic returns / etc.)
+    # that expand the static 15-pattern Quasi-T1 white-list to whatever
+    # financially-meaningful pairs the current region's fields support.
+    # Each generated expression must independently classify as Quasi-T1
+    # via the new structural patterns added to _QUASI_T1_PATTERNS.
+    try:
+        from backend.agents.seed_pool.field_interactions import (
+            generate_pair_candidates,
+        )
+        pairs = generate_pair_candidates(
+            available_fields=strategy.promising_fields,
+            region=region,
+            max_per_template=1,
+        )
+        for p in pairs:
+            candidates.append({
+                "expression": p["expression"],
+                # Encoded for stratified sample diversity (treat each
+                # template as its own "op" bucket so single-field ts_op
+                # candidates don't crowd them out)
+                "field": "_pair_" + ",".join(p["field_pair"]),
+                "op": f"pair_{p['template_id']}",
+                "window": 0,
+            })
+        if pairs:
+            logger.info(
+                f"[factor_generation] #2 field-pair candidates appended: "
+                f"{len(pairs)} from {len(strategy.promising_fields)} fields"
+            )
+    except Exception as _pair_e:
+        logger.warning(
+            f"[factor_generation] #2 pair generation failed (non-fatal): {_pair_e}"
+        )
+
     target_n = max(1, math.ceil(daily_goal * target_multiplier))
     if len(candidates) > target_n:
         candidates = stratified_sample(candidates, by="op", n=target_n)

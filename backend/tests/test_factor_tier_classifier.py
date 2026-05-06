@@ -289,12 +289,14 @@ class TestNegationWrapperTransparency:
 
     def test_negation_around_unclassifiable_stays_none(self):
         # If inner is not classifiable, negation stays None.
-        # Note: divide(close, volume) is Quasi-T1 Q-PV-01 (Plan v5+), so we use
-        # an off-whitelist arithmetic form to keep this test about the negation
-        # wrapper's None-passthrough behavior.
-        assert classify_tier("multiply(-1, divide(close, returns))") is None
-        # Non-zero subtract is real arithmetic, not negation
-        assert classify_tier("subtract(close, open)") is None
+        # Plan v5+ #2 (2026-05-07): divide(<field>, <field>) and
+        # subtract(<field>, <field>) are now Quasi-T1 via structural
+        # patterns. Use add(...) for an inner that REALLY is unclassifiable
+        # (add not in structural patterns). multiply(-1, add(close, eps))
+        # is itself a multiply(<num>, <field-tree>) structure that *might*
+        # match — let's pick something completely off-piste.
+        # Wrap a verifiably-None inner:
+        assert classify_tier("multiply(-1, add(close, eps))") is None
 
     def test_negation_around_quasi_t1_recurses_to_t1(self):
         # Quasi-T1 patterns are tier=1 (Plan v5+ §"Quasi-T1 准一阶白名单 v1.0"),
@@ -422,17 +424,34 @@ class TestQuasiT1:
     @pytest.mark.parametrize(
         "expr",
         [
-            # off-whitelist double-field arithmetic
-            "divide(close, returns)",
-            "multiply(eps, sales)",
-            "subtract(volume, vwap)",  # subtract is allowed, but (volume, vwap) is not Q-CR-01
+            # `add(<field>, <field>)` — `add` is intentionally NOT in the
+            # structural Quasi-T1 patterns added in #2 (field_interactions),
+            # because price+price-like additions don't have clean financial
+            # semantics. Stays None.
             "add(close, eps)",
-            # off-whitelist with allowed op signatures
-            "divide(close, low)",  # not in whitelist (Q-VL/Q-PV don't include this)
         ],
     )
     def test_off_whitelist_arithmetic_not_quasi(self, expr: str):
         assert classify_tier(expr) is None, f"off-whitelist must be None: {expr}"
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # Plan v5+ #2 (2026-05-07): these were formerly None (off-whitelist)
+            # but are now Quasi-T1 via structural <field>-wildcard patterns.
+            # The classifier's job is "is this T1 by SHAPE"; financial
+            # meaningfulness comes from field_interactions.yaml curation.
+            # Quality is determined by simulation, not classifier.
+            "divide(close, returns)",   # structural divide(<field>,<field>)
+            "multiply(eps, sales)",     # structural multiply(<field>,<field>)
+            "subtract(volume, vwap)",   # structural subtract(<field>,<field>)
+            "divide(close, low)",       # structural divide(<field>,<field>)
+        ],
+    )
+    def test_structural_patterns_accept_arbitrary_pairs(self, expr: str):
+        """#2 structural patterns: any divide/subtract/multiply of two
+        bare-identifier fields → T1 by shape."""
+        assert classify_tier(expr) == 1, f"structural pair should be T1: {expr}"
 
     @pytest.mark.parametrize(
         "expr",

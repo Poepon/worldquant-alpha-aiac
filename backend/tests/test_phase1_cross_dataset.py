@@ -165,9 +165,17 @@ class TestPhase1Config:
     """HYPOTHESIS_CENTRIC_LEVEL flag governs the path."""
 
     def test_default_level_is_zero(self):
-        from backend.config import settings
-        assert settings.HYPOTHESIS_CENTRIC_LEVEL == 0
-        assert settings.HYPOTHESIS_CENTRIC_CANDIDATE == 0
+        """LEVEL stays at codebase default 0 (legacy). CANDIDATE may differ
+        because F-5 production gray-launch sets CANDIDATE=2 in .env to
+        enable 50/50 A/B variant assignment. Both Pydantic class defaults
+        are 0; the .env may override CANDIDATE for ops purposes — that's
+        not a regression."""
+        from backend.config import Settings
+        # Test the CODEBASE default, not the runtime-overridden settings
+        # (which may include .env overrides like F-5 CANDIDATE=2)
+        defaults = Settings.model_fields
+        assert defaults["HYPOTHESIS_CENTRIC_LEVEL"].default == 0
+        assert defaults["HYPOTHESIS_CENTRIC_CANDIDATE"].default == 0
 
     def test_complementary_k_default(self):
         from backend.config import settings
