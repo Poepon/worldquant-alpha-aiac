@@ -174,6 +174,12 @@ class MiningAgent:
                         # for the F-5 variant isolation invariant.
                         "hypothesis_centric_level": int(hypothesis_centric_level or 0),
                         "experiment_variant": str(experiment_variant) if experiment_variant is not None else None,
+                        # B5 v2 (2026-05-06): inject llm_service for the
+                        # round-end LLM-based attribution classifier in
+                        # _process_hypothesis_feedback. Workflow already has
+                        # self.llm_service; we re-expose it here so node_save_results
+                        # can pass it through without a partial binding.
+                        "llm_service": self._workflow.llm_service if hasattr(self, "_workflow") else None,
                     }
                 },
                 factor_tier=factor_tier,

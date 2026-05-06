@@ -430,6 +430,10 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                 pending_alphas=state.pending_alphas,
                 history_so_far=new_hypothesis_round_history,
                 trace_service=trace_service,
+                # B5 v2: LLM-based attribution if llm_service in configurable.
+                # mining_agent.run_mining_iteration injects this; legacy callers
+                # leave it None and fall back to heuristic.
+                llm_service=configurable.get("llm_service"),
             )
         except Exception as _ex:
             logger.warning(
@@ -477,28 +481,32 @@ async def _process_hypothesis_feedback(
     pending_alphas: List,
     history_so_far: Dict[int, List[Dict]],
     trace_service=None,
+    llm_service=None,
 ) -> Dict[int, List[Dict]]:
     """Round-level lifecycle update for every hypothesis proposed this round.
 
-    Per Plan v5+ §B5 the long-term goal is to call Experiment2Feedback (LLM-
-    based attribution). For now we use a heuristic classifier
-    (early_stop.classify_attribution) which is cheaper and sufficient for
-    the abandon trigger — LLM upgrade is backlog (B5 v2).
+    B5 v1: heuristic attribution via early_stop.classify_attribution
+           (75% rule on syntax+simulate vs quality fails).
+    B5 v2 (2026-05-06): when llm_service is provided, defer to
+           classify_attribution_llm which reads hypothesis statement +
+           sample alpha attempts and judges semantically. Falls back to
+           heuristic on LLM failure / empty hypothesis / cheap-skip cases.
 
     For each hypothesis_id in state.current_hypothesis_ids:
       1. Compute round counts: alpha_count, pass_count, syntax_fail,
          simulate_fail, quality_fail, best_sharpe
-      2. Classify attribution via heuristic
+      2. Classify attribution (LLM if available, heuristic fallback)
       3. Append entry to history_so_far[hid]
       4. Call lifecycle transitions:
-           - alpha_count > 0  → mark_active (idempotent: PROPOSED→ACTIVE)
-           - pass_count > 0   → mark_promoted (PROPOSED|ACTIVE→PROMOTED)
-           - should_abandon_hypothesis(history) → mark_abandoned
+           - alpha_count > 0  → mark_active (all hids — V-19.6)
+           - pass_count > 0   → mark_promoted (primary only — V-19.6)
+           - should_abandon   → mark_abandoned (primary only — V-19.6)
     """
     from backend.agents.graph.early_stop import (
         classify_attribution,
         should_abandon_hypothesis,
     )
+    from backend.agents.graph.attribution import classify_attribution_llm
     from backend.database import AsyncSessionLocal
     from backend.services.hypothesis_service import HypothesisService
 
@@ -541,12 +549,30 @@ async def _process_hypothesis_feedback(
             except Exception:
                 pass
 
-    attribution = classify_attribution(
+    # B5 v2: LLM-based attribution when llm_service available; falls back
+    # to heuristic on LLM failure / empty hypothesis / unknown shortcuts.
+    # Resolve hypothesis statement for the LLM context — read from the
+    # primary hypothesis row (just persisted by B3).
+    hypothesis_statement = None
+    if llm_service is not None and primary_hid is not None:
+        try:
+            async with AsyncSessionLocal() as _qdb:
+                from backend.models import Hypothesis as _H
+                _row = await _qdb.get(_H, primary_hid)
+                if _row is not None:
+                    hypothesis_statement = _row.statement
+        except Exception as _e:
+            logger.warning(f"[B5 v2] hypothesis statement lookup failed: {_e}")
+
+    attribution, attribution_reason = await classify_attribution_llm(
+        hypothesis_statement=hypothesis_statement,
+        pending_alphas=pending_alphas,
         alpha_count=alpha_count,
         pass_count=pass_count,
         syntax_fail_count=syntax_fail,
         simulate_fail_count=simulate_fail,
         quality_fail_count=quality_fail,
+        llm_service=llm_service,
     )
     entry = {
         "round_index": round_index,
@@ -556,6 +582,7 @@ async def _process_hypothesis_feedback(
         "simulate_fail_count": simulate_fail,
         "quality_fail_count": quality_fail,
         "attribution": attribution,
+        "attribution_reason": attribution_reason,  # B5 v2: LLM rationale
         "best_sharpe": best_sharpe,
     }
 
