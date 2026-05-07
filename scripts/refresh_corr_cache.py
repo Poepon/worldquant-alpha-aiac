@@ -62,7 +62,17 @@ async def main():
                 )
                 print(f"  → {new_n} new PnL series fetched, {total_n} total in cache")
             except Exception as e:
-                print(f"  ✗ refresh failed: {e}")
+                print(f"  ✗ PnL refresh failed: {e}")
+
+            # P2: also refresh portfolio skeletons cache (DB-only, fast).
+            try:
+                from backend.agents.seed_pool.portfolio_skeletons import (
+                    refresh_portfolio_from_db,
+                )
+                n = await refresh_portfolio_from_db(region=region)
+                print(f"  → {n} portfolio skeletons cached")
+            except Exception as e:
+                print(f"  ✗ skeletons refresh failed: {e}")
 
 
 if __name__ == "__main__":

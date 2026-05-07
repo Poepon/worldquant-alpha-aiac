@@ -186,6 +186,17 @@ def build_t1_strategy_user_prompt(
             f"  rationale must explicitly explain how each dataset contributes.\n"
         )
 
+    # P2 portfolio-aware (2026-05-08): inject submitted-alpha skeletons as
+    # soft guidance so LLM avoids re-generating shapes that are already in
+    # the user's portfolio (would fail BRAIN self-correlation at submit-time).
+    # Loads from JSON cache; refreshed by submit_alpha post-hook + standalone.
+    portfolio_block = ""
+    try:
+        from backend.agents.seed_pool.portfolio_skeletons import get_portfolio_block
+        portfolio_block = get_portfolio_block(region)
+    except Exception:
+        portfolio_block = ""
+
     return f"""Dataset (anchor): {dataset_id}
 Region: {region}
 {cross_block}
@@ -194,7 +205,7 @@ Available fields (first 80):
 
 Recent T1 success patterns:
 {patterns_block}
-{feedback_block}
+{feedback_block}{portfolio_block}
 Now produce the T1Strategy JSON for this round.
 """
 

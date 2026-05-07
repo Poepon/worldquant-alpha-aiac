@@ -189,6 +189,19 @@ async def main():
             except Exception as e:
                 print(f"  cache refresh failed (non-fatal): {e}")
 
+            # P2 portfolio skeletons cache (2026-05-08): used by T1 strategy
+            # prompt to discourage LLM from re-generating same-skeleton alpha.
+            # DB-only refresh (~10ms), no BRAIN dependency.
+            print("Refreshing portfolio skeletons cache ...")
+            try:
+                from backend.agents.seed_pool.portfolio_skeletons import (
+                    refresh_portfolio_from_db,
+                )
+                n = await refresh_portfolio_from_db(region=alpha["region"] or "USA")
+                print(f"  cache: {n} submitted alpha skeletons")
+            except Exception as e:
+                print(f"  skeleton refresh failed (non-fatal): {e}")
+
     print(f"\n=== RESULT ===")
     print(f"  status_code: {result['status_code']}")
     print(f"  polls: {result['polls']}")
