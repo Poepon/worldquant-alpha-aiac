@@ -64,9 +64,12 @@ class Settings(BaseSettings):
     MAX_CORRELATION: float = 0.7
 
     # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
-    # T1: 找到方向 — 裸 ts_op 信号；低门槛驱动 T2 种子产能
-    TIER1_SHARPE_MIN: float = 0.8
-    TIER1_FITNESS_MIN: float = 0.5
+    # T1: 裸 ts_op 信号；2026-05-07 P0 收紧到 BRAIN 提交 gate
+    # 旧值 0.8/0.5 是 探索 bar — batch 276-283 产生 8 条 PASS 全部 can_submit=False
+    # (BRAIN bar: sharpe ≥ 1.25, fitness ≥ ~1.0). T1 PASS 现在 = BRAIN-submittable
+    # 候选, 探索路径走 PROVISIONAL → optimization queue (Fix C 2026-05-07).
+    TIER1_SHARPE_MIN: float = 1.25
+    TIER1_FITNESS_MIN: float = 0.95
     TIER1_TURNOVER_MIN: float = 0.01
     TIER1_TURNOVER_MAX: float = 0.70
     TIER1_SUBUNIV_MIN: float = 0.1
@@ -84,8 +87,10 @@ class Settings(BaseSettings):
     TIER3_SELF_CORR_MAX: float = 0.7  # 仅 T3 严格判 self_corr（T1/T2 跳过）
 
     # PASS_PROVISIONAL 阈值（同梯度，各项放宽 30-40%）
-    TIER1_PROVISIONAL_SHARPE_MIN: float = 0.5
-    TIER1_PROVISIONAL_FITNESS_MIN: float = 0.3
+    # 2026-05-07 P0 同步上调 — 与 T1 PASS 1.25/0.95 配合作 探索 bar
+    # 旧 0.5/0.3 在新 PASS gate 下意义不再（远低于 PASS）
+    TIER1_PROVISIONAL_SHARPE_MIN: float = 0.8
+    TIER1_PROVISIONAL_FITNESS_MIN: float = 0.6
     TIER1_PROVISIONAL_TURNOVER_MAX: float = 0.85
     TIER1_PROVISIONAL_SUBUNIV_MIN: float = 0.0  # 仍要为正
     TIER2_PROVISIONAL_SHARPE_MIN: float = 0.8
