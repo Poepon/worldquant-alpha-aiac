@@ -54,7 +54,15 @@ Output a JSON object matching the T1Strategy schema:
    - LONG: 120-240 day windows (FUNDAMENTAL_SLOW)
 4. promising_fields: 8-15 field IDs picked from the available_fields list.
    - Avoid categorical / ID / group fields (industry, sector codes, exchange).
-   - Prefer fields with coverage >= 0.7 when available.
+   - **HARD: prefer fields with coverage >= 0.7**. Coverage < 0.5 fields almost
+     always trigger BRAIN's CONCENTRATED_WEIGHT check because only a small
+     subset of the universe has data → weight concentrates on those names.
+   - **HARD: avoid `*_derivative`, `*_rank_derivative`, `implied_volatility_*`
+     and any `bbg_*`/`pyth_*` suffix fields unless the dataset is the
+     designated low-coverage option/IV/Bloomberg dataset for which the user
+     explicitly opted in.** These are CW magnets in T1 form (their narrow
+     coverage forces concentrated positions) and historical mining shows 0%
+     of T1 alpha using them passed BRAIN's submission gate.
    - Spread across sub-themes (don't pick 12 variants of the same balance sheet line).
    - **PHASE 1 MANDATORY** (when selected_datasets has 2+ entries):
      promising_fields MUST include AT LEAST 2 fields from EACH listed
@@ -109,8 +117,36 @@ def build_t1_strategy_user_prompt(
         last_round_feedback: When called for round N (N>1), pass the last round's
             summary so the LLM can shift fields/velocity if it produced 0 PASS.
     """
+    # P0 CW防御 (2026-05-07): 硬过滤明显 CW-prone 字段。低覆盖 / IV / 衍生
+    # 后缀字段在 T1 (bare ts_op) 形态下几乎必然触发 BRAIN CONCENTRATED_WEIGHT。
+    # 历史 mining: 4 batch / 38 PROV+PASS alpha / 0 submittable, 主因即此类字段。
+    # 注: 这是 prompt 层硬截; LLM 收不到这些字段就不会选它们。如果将来 T2
+    # wrap 这些字段确认有效, 把它们留给 T2 mining seed pool 而非 T1。
+    _CW_PRONE_PATTERNS = (
+        "_derivative", "implied_volatility_", "_bbg_", "_pyth_",
+        "_dvd_cash_",  # pv96 dividend fields — account permission issue
+    )
+    def _is_cw_prone(fid: str, cov) -> bool:
+        if cov is not None and cov < 0.5:
+            return True
+        flow = (fid or "").lower()
+        return any(p in flow for p in _CW_PRONE_PATTERNS)
+
+    raw_fields = list(available_fields or [])
+    filtered = [f for f in raw_fields if not _is_cw_prone(
+        f.get("id") or f.get("name") or "",
+        f.get("coverage"),
+    )]
+    # Defense: if filter strips 90%+ of fields (e.g. all-IV dataset), keep
+    # original list to avoid empty-pool deadlock — LLM still gets the prompt
+    # warning to lean toward higher-coverage choices.
+    if len(filtered) >= max(8, int(len(raw_fields) * 0.3)):
+        usable_fields = filtered
+    else:
+        usable_fields = raw_fields
+
     field_lines = []
-    for f in (available_fields or [])[:80]:
+    for f in usable_fields[:80]:
         fid = f.get("id") or f.get("name") or "?"
         ftype = f.get("type", "MATRIX")
         cov = f.get("coverage", 1.0)
