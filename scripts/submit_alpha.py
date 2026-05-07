@@ -169,6 +169,26 @@ async def main():
         print(f"\nSubmitting alpha_id={alpha['alpha_id']} to BRAIN ...")
         result = await submit(adapter, alpha["alpha_id"])
 
+        if result["success"]:
+            # Post-submit hook (2026-05-08): refresh OS PnL cache so future
+            # precheck reflects the just-submitted alpha as a corr neighbor.
+            # Note: BRAIN's PnL recordset endpoint may take hours-1day to
+            # populate for a newly-submitted alpha, so this refresh may be
+            # a no-op now and the actual incorporation happens on the next
+            # refresh (e.g. weekly Celery beat or next submit-triggered call).
+            print("\nRefreshing OS PnL cache (incremental) ...")
+            try:
+                svc_post = CorrelationService(adapter)
+                new_n, total_n = await svc_post.refresh_os_alpha_cache(
+                    region=alpha["region"] or "USA", incremental=True,
+                )
+                print(f"  cache: {new_n} new PnL series, {total_n} total")
+                if new_n == 0 and alpha.get("alpha_id"):
+                    print(f"  (note: BRAIN PnL for {alpha['alpha_id']} not yet populated; "
+                          f"retry refresh in 24-48h)")
+            except Exception as e:
+                print(f"  cache refresh failed (non-fatal): {e}")
+
     print(f"\n=== RESULT ===")
     print(f"  status_code: {result['status_code']}")
     print(f"  polls: {result['polls']}")
