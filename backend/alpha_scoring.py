@@ -732,10 +732,19 @@ def evaluate_with_brain_checks(sim_result: Dict) -> Dict[str, Any]:
             }
     
     # 直接使用 API 返回的 can_submit 或根据检查结果推断
-    can_submit = sim_result.get('can_submit', False)
-    if not can_submit and not failed and not pending:
-        can_submit = True
-    
+    # Fix D (2026-05-07): empty checks ≠ approve. BRAIN simulate 完成时
+    # 部分 check (CONCENTRATED_WEIGHT 历史日期 / LOW_SUB_UNIVERSE_SHARPE /
+    # SELF_CORRELATION) 还未计算,is.checks 数组可能完全为空。旧逻辑在
+    # checks=[] 时返回 can_submit=True,导致 mining-time 假阳性 — refresh
+    # 30s 后再 query BRAIN 才发现真有 FAIL。与 backend.can_submit.compute_can_submit
+    # 对齐: 空 checks 视为未知 (False),而非 approve。
+    if not checks:
+        can_submit = False
+    else:
+        can_submit = sim_result.get('can_submit', False)
+        if not can_submit and not failed and not pending:
+            can_submit = True
+
     return {
         'can_submit': can_submit,
         'passed_checks': passed,
