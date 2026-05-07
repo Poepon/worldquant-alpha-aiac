@@ -107,6 +107,15 @@ class Settings(BaseSettings):
     T1_USE_LLM_GUIDED_STRATEGY: bool = True  # False 时 T1 task 回退 W0 ALPHA_GENERATION_SYSTEM
     MIN_TIER_SEED_COUNT: int = 5  # T2/T3 task 启动门槛 + node_tier_seed_load 早停门槛共用
 
+    # P1 (2026-05-07): auto ts_decay_linear(., 4) wrapper for T1 candidates.
+    # 实测验证 (docs/decay_verify_pk6606.json): decay=4 把 sh=1.58 fit=0.85
+    # to=0.81 (HIGH_TURNOVER+LOW_FITNESS) 转成 sh=1.45 fit=1.47 to=0.51
+    # (BRAIN can_submit=true,首次 PASS).启用此 flag 让 expand_t1_strategy
+    # 在每个 T1 候选旁边加一个 decay=4 包装的 T2 twin,加倍候选数但显著
+    # 提升每轮出 PASS 概率。decay=2/8/16 sweep 显示 4 是 sweet spot。
+    T1_AUTO_DECAY_WRAPPER: bool = True
+    T1_AUTO_DECAY_VALUE: int = 4  # the d in ts_decay_linear(expr, d)
+
     # Plan v5+ §Phase 1 — Hypothesis-Guided Exploration (HGE) staging flag.
     # 0 = current dataset-centric (pre-Phase 1, default until Phase 1 verified)
     # 1 = cross-dataset hypothesis: LLM picks 1-3 datasets per hypothesis from

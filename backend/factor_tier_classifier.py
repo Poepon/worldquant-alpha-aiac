@@ -685,23 +685,35 @@ def _dedup_and_validate(
     target_tier: int,
     region: str,
     validator: Optional[AlphaSemanticValidator] = None,
+    allowed_tiers: Optional[Set[int]] = None,
 ) -> List[Dict]:
     """Three-pass filter applied at the end of T1 expand and T2/T3 wrap:
        1. expression_hash dedup (drop duplicates within batch)
        2. semantic validation (drop syntactically/semantically invalid)
-       3. tier roundtrip check (classify_tier(out) must equal target_tier)
+       3. tier roundtrip check (classify_tier(out) must be in allowed_tiers)
 
     Args:
         variants: list of dicts, each containing at minimum {"expression": str, ...}
-        target_tier: the tier this batch is supposed to produce (1/2/3)
+        target_tier: the tier this batch is nominally producing (1/2/3) — used
+                     for log labels.
         region: BRAIN region — passed to validator if instantiated here
         validator: optional pre-built AlphaSemanticValidator; if None, validation
                    is reduced to "non-empty expression" (caller is expected to
                    supply a fields-loaded validator for full check)
+        allowed_tiers: optional set of tiers to keep (default = {target_tier}).
+                       P1 (2026-05-07): T1 expand passes {1, 2} when emitting
+                       both raw ts_op candidates and ts_decay_linear-wrapped
+                       smoothed twins. Decay-wrapped variants classify as T2
+                       (smoothing wrapper); both shapes get mined together.
 
     Returns:
-        Filtered list of variant dicts; logs per-drop reason at warning level.
+        Filtered list of variant dicts; each kept entry has its `factor_tier`
+        field populated with the actual classified tier so downstream
+        persistence can apply the correct tier-aware gate.
     """
+    if allowed_tiers is None:
+        allowed_tiers = {target_tier}
+
     seen_hashes: Set[str] = set()
     out: List[Dict] = []
     n_dup = 0
@@ -731,20 +743,25 @@ def _dedup_and_validate(
                 n_invalid += 1
                 continue
 
-        # 3. tier roundtrip
+        # 3. tier roundtrip — keep if classified into any allowed tier
         actual_tier = classify_tier(expr)
-        if actual_tier != target_tier:
+        if actual_tier not in allowed_tiers:
             logger.warning(
-                f"[T{target_tier} expand] tier mismatch: {expr[:80]} got_tier={actual_tier}"
+                f"[T{target_tier} expand] tier mismatch: {expr[:80]} got_tier={actual_tier} allowed={sorted(allowed_tiers)}"
             )
             n_tier_mismatch += 1
             continue
 
-        out.append(v)
+        # Tag the variant with its actual tier so caller / persistence can
+        # apply tier-aware gate logic (e.g. T2 sharpe_min=1.0 vs T1 1.25).
+        v_out = dict(v)
+        v_out["factor_tier"] = actual_tier
+        out.append(v_out)
 
     if n_dup or n_invalid or n_tier_mismatch:
         logger.info(
             f"[T{target_tier} expand] kept {len(out)}/{len(variants)} "
-            f"(dup={n_dup} invalid={n_invalid} tier_mismatch={n_tier_mismatch}) region={region}"
+            f"(dup={n_dup} invalid={n_invalid} tier_mismatch={n_tier_mismatch}) "
+            f"allowed_tiers={sorted(allowed_tiers)} region={region}"
         )
     return out

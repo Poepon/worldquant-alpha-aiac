@@ -234,18 +234,40 @@ def expand_t1_strategy(
         return []
 
     windows = WINDOW_SCALE_MAP.get(strategy.window_scale, WINDOW_SCALE_MAP["MEDIUM"])
+    # P1 (2026-05-07): auto ts_decay_linear wrapper config — decay-wrapped
+    # variants classify as T2 (smoothing). They mine alongside raw T1 ts_op
+    # candidates, with allowed_tiers={1,2} on the validate step.
+    from backend.config import settings as _settings
+    decay_enabled = bool(getattr(_settings, "T1_AUTO_DECAY_WRAPPER", False))
+    decay_d = int(getattr(_settings, "T1_AUTO_DECAY_VALUE", 4))
+
     candidates: List[Dict] = []
     for field in strategy.promising_fields:
         for op in strategy.preferred_ts_ops:
             for w in windows:
+                base_expr = f"{op}({field}, {w})"
                 candidates.append(
                     {
-                        "expression": f"{op}({field}, {w})",
+                        "expression": base_expr,
                         "field": field,
                         "op": op,
                         "window": w,
                     }
                 )
+                if decay_enabled:
+                    # ts_decay_linear smoothing usually halves turnover and
+                    # boosts fitness via noise reduction (verified on close-
+                    # open intraday return: fit 0.85 → 1.47, to 0.81 → 0.51).
+                    candidates.append(
+                        {
+                            "expression": f"ts_decay_linear({base_expr}, {decay_d})",
+                            "field": field,
+                            # Distinct op bucket for stratified sample so
+                            # decay variants don't crowd out raw ts_op.
+                            "op": f"decay{decay_d}_{op}",
+                            "window": w,
+                        }
+                    )
 
     # Plan v5+ #2 (2026-05-07) — append field-pair candidates from the
     # interaction graph. These are role-classified two-field combinations
@@ -287,7 +309,12 @@ def expand_t1_strategy(
     if len(candidates) > target_n:
         candidates = stratified_sample(candidates, by="op", n=target_n)
 
-    return _dedup_and_validate(candidates, target_tier=1, region=region)
+    # P1 (2026-05-07): when decay wrapping is enabled, T2-classified twins
+    # need to pass the validator's tier check too. allowed_tiers={1,2}.
+    allowed = {1, 2} if decay_enabled else {1}
+    return _dedup_and_validate(
+        candidates, target_tier=1, region=region, allowed_tiers=allowed,
+    )
 
 
 def stratified_sample(items: List[Dict], by: str, n: int) -> List[Dict]:

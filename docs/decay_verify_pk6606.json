@@ -1,0 +1,71 @@
+{
+  "base_expr": "multiply(-1, divide(subtract(close, open), open))",
+  "results": [
+    {
+      "decay": 2,
+      "expression": "ts_decay_linear(multiply(-1, divide(subtract(close, open), open)), 2)",
+      "alpha_id": "qMP76Zzv",
+      "status": "UNSUBMITTED",
+      "sharpe": 1.09,
+      "fitness": 0.71,
+      "turnover": 0.8957,
+      "can_submit": false,
+      "failed_check_names": [
+        "LOW_SHARPE",
+        "LOW_FITNESS",
+        "HIGH_TURNOVER"
+      ],
+      "pending_check_names": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "decay": 4,
+      "expression": "ts_decay_linear(multiply(-1, divide(subtract(close, open), open)), 4)",
+      "alpha_id": "58aJkWEz",
+      "status": "UNSUBMITTED",
+      "sharpe": 1.45,
+      "fitness": 1.47,
+      "turnover": 0.5077,
+      "can_submit": true,
+      "failed_check_names": [],
+      "pending_check_names": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "decay": 8,
+      "expression": "ts_decay_linear(multiply(-1, divide(subtract(close, open), open)), 8)",
+      "alpha_id": "Xg2a8ozx",
+      "status": "UNSUBMITTED",
+      "sharpe": 0.86,
+      "fitness": 0.91,
+      "turnover": 0.2684,
+      "can_submit": false,
+      "failed_check_names": [
+        "LOW_SHARPE",
+        "LOW_FITNESS"
+      ],
+      "pending_check_names": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "decay": 16,
+      "expression": "ts_decay_linear(multiply(-1, divide(subtract(close, open), open)), 16)",
+      "alpha_id": "O0bWxp8p",
+      "status": "UNSUBMITTED",
+      "sharpe": 0.61,
+      "fitness": 0.72,
+      "turnover": 0.1417,
+      "can_submit": false,
+      "failed_check_names": [
+        "LOW_SHARPE",
+        "LOW_FITNESS"
+      ],
+      "pending_check_names": [
+        "SELF_CORRELATION"
+      ]
+    }
+  ]
+}
