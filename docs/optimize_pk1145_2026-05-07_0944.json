@@ -1,0 +1,167 @@
+{
+  "base_pk": 1145,
+  "base_expr": "subtract(0, days_from_last_change(pcr_oi_720))",
+  "base_metrics": {
+    "sharpe": 1.34,
+    "fitness": 1.28,
+    "turnover": 0.05,
+    "can_submit": true
+  },
+  "results": [
+    {
+      "id": "A1_oi_360",
+      "expr": "subtract(0, days_from_last_change(pcr_oi_360))",
+      "neut": "NONE",
+      "rationale": "shorter window (360d) for sentiment decay",
+      "success": true,
+      "alpha_id": "xAPv7vzl",
+      "status": "UNSUBMITTED",
+      "sharpe": -0.28,
+      "fitness": -0.27,
+      "turnover": 0.058,
+      "can_submit": false,
+      "failed": [
+        "LOW_SHARPE",
+        "LOW_FITNESS"
+      ],
+      "pending": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "id": "A2_oi_180",
+      "expr": "subtract(0, days_from_last_change(pcr_oi_180))",
+      "neut": "NONE",
+      "rationale": "much shorter window (180d)",
+      "success": true,
+      "alpha_id": "mLranAbx",
+      "status": "UNSUBMITTED",
+      "sharpe": -0.24,
+      "fitness": -0.22,
+      "turnover": 0.0456,
+      "can_submit": false,
+      "failed": [
+        "LOW_SHARPE",
+        "LOW_FITNESS"
+      ],
+      "pending": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "id": "A3_vol_720",
+      "expr": "subtract(0, days_from_last_change(pcr_vol_720))",
+      "neut": "NONE",
+      "rationale": "volume PCR (vs open-interest), same 720d window",
+      "success": true,
+      "alpha_id": "2ra5Vl8b",
+      "status": "UNSUBMITTED",
+      "sharpe": -0.27,
+      "fitness": -0.26,
+      "turnover": 0.0638,
+      "can_submit": false,
+      "failed": [
+        "LOW_SHARPE",
+        "LOW_FITNESS"
+      ],
+      "pending": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "id": "B1_rank",
+      "expr": "rank(subtract(0, days_from_last_change(pcr_oi_720)))",
+      "neut": "NONE",
+      "rationale": "cross-sectional rank \u2014 spread weight via xs ranking",
+      "success": true,
+      "alpha_id": "88aNWEMm",
+      "status": "UNSUBMITTED",
+      "sharpe": 0.75,
+      "fitness": 1.0,
+      "turnover": 0.2032,
+      "can_submit": false,
+      "failed": [
+        "LOW_SHARPE"
+      ],
+      "pending": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "id": "B2_group_neut_industry",
+      "expr": "subtract(0, days_from_last_change(pcr_oi_720))",
+      "neut": "INDUSTRY",
+      "rationale": "industry residualize via BRAIN neutralization setting",
+      "success": true,
+      "alpha_id": "xAPv7Lkb",
+      "status": "UNSUBMITTED",
+      "sharpe": 1.34,
+      "fitness": 1.28,
+      "turnover": 0.0498,
+      "can_submit": true,
+      "failed": [],
+      "pending": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "id": "B3_group_neut_subindustry",
+      "expr": "subtract(0, days_from_last_change(pcr_oi_720))",
+      "neut": "SUBINDUSTRY",
+      "rationale": "tighter group residualize",
+      "success": true,
+      "alpha_id": "om3ab7Gl",
+      "status": "UNSUBMITTED",
+      "sharpe": 1.2,
+      "fitness": 1.09,
+      "turnover": 0.0539,
+      "can_submit": false,
+      "failed": [
+        "LOW_SHARPE",
+        "LOW_SUB_UNIVERSE_SHARPE"
+      ],
+      "pending": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "id": "B4_decay4",
+      "expr": "ts_decay_linear(subtract(0, days_from_last_change(pcr_oi_720)), 4)",
+      "neut": "NONE",
+      "rationale": "smooth transitions \u2014 should drop turnover further",
+      "success": true,
+      "alpha_id": "ZY2a8rk3",
+      "status": "UNSUBMITTED",
+      "sharpe": -0.27,
+      "fitness": -0.26,
+      "turnover": 0.0479,
+      "can_submit": false,
+      "failed": [
+        "LOW_SHARPE",
+        "LOW_FITNESS"
+      ],
+      "pending": [
+        "SELF_CORRELATION"
+      ]
+    },
+    {
+      "id": "C1_rank_decay4",
+      "expr": "ts_decay_linear(rank(subtract(0, days_from_last_change(pcr_oi_720))), 4)",
+      "neut": "NONE",
+      "rationale": "rank + decay \u2014 both spread + smooth",
+      "success": true,
+      "alpha_id": "78aY5078",
+      "status": "UNSUBMITTED",
+      "sharpe": 0.75,
+      "fitness": 1.28,
+      "turnover": 0.0885,
+      "can_submit": false,
+      "failed": [
+        "LOW_SHARPE"
+      ],
+      "pending": [
+        "SELF_CORRELATION"
+      ]
+    }
+  ]
+}
