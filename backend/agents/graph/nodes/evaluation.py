@@ -841,9 +841,31 @@ async def node_evaluate(
                     f"[{node_name}] V-16 suspicion mode (sharpe={sharpe:.2f}) | "
                     f"flags={[f['check'] for f in v16_flags]}"
                 )
+            # Fix C (2026-05-07): BRAIN-aware PASS downgrade.
+            # Internal hard_gate uses SHARPE_MIN=1.0 / FITNESS_MIN=0.5 (探索阈值).
+            # BRAIN submission gate uses higher bar — top-level fitness ≥ ~1.0,
+            # CONCENTRATED_WEIGHT ≤ 10%. Without this check, alpha that pass our
+            # gate but BRAIN already FAIL'd on submittable fields are labelled
+            # PASS and skip the optimization chain forever (see should_optimize
+            # "已接近/达到门槛..." skip branch). Downgrading to PASS_PROVISIONAL
+            # routes them into _collect_optimization_candidates so wrapper /
+            # window optimizations get a chance to push fitness over BRAIN's bar.
+            brain_actionable_fails = [
+                c.get("name") for c in brain_failed_checks or []
+                if c.get("name") in ("LOW_FITNESS", "LOW_SHARPE", "CONCENTRATED_WEIGHT")
+            ]
             if hard_flags:
                 alpha.quality_status = "PASS_PROVISIONAL"
                 optimize_count += 1
+            elif brain_actionable_fails and not brain_can_submit:
+                alpha.quality_status = "PASS_PROVISIONAL"
+                optimize_count += 1
+                if isinstance(alpha.metrics, dict):
+                    alpha.metrics["_brain_pass_downgrade"] = brain_actionable_fails
+                logger.info(
+                    f"[{node_name}] PASS→PROVISIONAL: BRAIN rejected on {brain_actionable_fails} | "
+                    f"sharpe={sharpe:.2f} fitness={fitness:.2f} expr={(alpha.expression or '')[:80]}"
+                )
             else:
                 alpha.quality_status = "PASS"
                 pass_count += 1

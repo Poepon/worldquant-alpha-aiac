@@ -787,6 +787,25 @@ def get_official_thresholds_from_checks(sim_result: Dict) -> Dict[str, float]:
 
 
 def should_optimize(sim_result: Dict) -> Tuple[bool, str]:
+    # Fix C (2026-05-07): BRAIN-aware override.
+    # If BRAIN's submission checks already say LOW_FITNESS / LOW_SHARPE /
+    # CONCENTRATED_WEIGHT FAIL, force optimization regardless of internal IS
+    # heuristics. Otherwise alphas with train_sharpe>=1.58 + train_fitness>=1.0
+    # but BRAIN-rejected on top-level fitness=0.80 get the "skip optimize" branch
+    # (line "已接近/达到门槛...") and never improve toward submittable.
+    # Reason string keywords ("集中" / "稳健") feed optimization_chain priorities.
+    brain_checks = _extract_brain_checks(sim_result)
+    brain_actionable_fails = [
+        c.get('name') for c in brain_checks
+        if c.get('result') == 'FAIL'
+        and c.get('name') in ('LOW_FITNESS', 'LOW_SHARPE', 'CONCENTRATED_WEIGHT')
+    ]
+    if brain_actionable_fails:
+        names = ','.join(brain_actionable_fails)
+        if 'CONCENTRATED_WEIGHT' in brain_actionable_fails:
+            return True, f"BRAIN拒收({names})：降集中度/winsorize/wrapper稳健化"
+        return True, f"BRAIN拒收({names})：提升fitness/扩窗稳健化"
+
     is_stats = _extract_is_stats(sim_result) or {}
     os_stats = _extract_os_stats(sim_result) or {}
     invest_stats = _extract_investability_stats(sim_result) or {}
