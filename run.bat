@@ -161,8 +161,13 @@ cd frontend
 start "AIAC Frontend" cmd /k "npm run dev"
 cd ..
 
-echo [INFO] Starting Celery Worker...
-start "AIAC Celery Worker" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo"
+REM Start 3 Celery workers in parallel — Windows --pool=solo means
+REM 1 task/worker, so 3 workers = 3 concurrent mining tasks. Hostnames
+REM and logfiles ensure each worker is independently inspectable.
+echo [INFO] Starting Celery Workers (3 instances)...
+start "AIAC Celery Worker 1" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -n worker1@%%h --logfile=.celery_worker1.log"
+start "AIAC Celery Worker 2" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -n worker2@%%h --logfile=.celery_worker2.log"
+start "AIAC Celery Worker 3" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -n worker3@%%h --logfile=.celery_worker3.log"
 
 echo.
 echo ==========================================
