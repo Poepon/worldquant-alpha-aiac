@@ -187,7 +187,7 @@ function TierAlphaTable({ tier }) {
       tier,
       limit: pagination.pageSize,
       offset: (pagination.current - 1) * pagination.pageSize,
-      sort_by: 'is_sharpe',
+      sort_by: 'metrics_snapshot_at',
       sort_order: 'desc',
     }
     Object.entries(filters).forEach(([k, v]) => {
