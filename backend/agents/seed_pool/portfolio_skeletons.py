@@ -161,3 +161,29 @@ def get_portfolio_block(region: str = "USA") -> str:
     """Convenience: load + format. Used by build_t1_strategy_user_prompt."""
     portfolio = load_portfolio(region)
     return format_block(portfolio)
+
+
+def get_portfolio_skeleton_set(region: str = "USA") -> set[str]:
+    """Return set of submitted-alpha skeletons for fast duplicate check.
+
+    Used by node_simulate as a pre-simulate hard gate: any candidate whose
+    skeleton matches the submitted portfolio's skeletons is structurally
+    near-duplicate of an already-submitted alpha and would fail BRAIN's
+    self-correlation gate at submission. Skip the BRAIN simulate to save
+    the API call.
+    """
+    portfolio = load_portfolio(region)
+    return {entry.get("skeleton", "") for entry in portfolio if entry.get("skeleton")}
+
+
+def is_skeleton_in_portfolio(expression: str, region: str = "USA") -> bool:
+    """True if expression's skeleton matches any submitted-portfolio
+    skeleton. Caller should treat True as "high self-corr risk, skip simulate"."""
+    if not expression:
+        return False
+    try:
+        from backend.knowledge_extraction import expression_to_skeleton
+        sk = expression_to_skeleton(expression, max_depth=3)
+    except Exception:
+        return False
+    return sk in get_portfolio_skeleton_set(region)

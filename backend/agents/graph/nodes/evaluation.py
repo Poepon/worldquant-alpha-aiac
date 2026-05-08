@@ -317,6 +317,49 @@ async def node_simulate(
         logger.warning(f"[{node_name}] All expressions already in DB")
         return {"pending_alphas": state.pending_alphas}
 
+    # Pre-simulate self-corr check (2026-05-09): drop candidates whose
+    # skeleton matches an already-submitted alpha — they would fail BRAIN's
+    # server-side self-correlation gate at submission, so simulating wastes
+    # BRAIN config quota. Cheap O(1) hashset lookup, runs before the
+    # ML-based filter below. Cache loaded from
+    # backend/data/correlation_cache/submitted_portfolio_{region}.json.
+    try:
+        from backend.agents.seed_pool.portfolio_skeletons import (
+            get_portfolio_skeleton_set,
+        )
+        from backend.knowledge_extraction import expression_to_skeleton
+        portfolio_skels = get_portfolio_skeleton_set(state.region)
+        if portfolio_skels:
+            keep_after_skel: list[int] = []
+            skel_dups = 0
+            for idx in indices_to_simulate:
+                expr = state.pending_alphas[idx].expression or ""
+                try:
+                    sk = expression_to_skeleton(expr, max_depth=3)
+                except Exception:
+                    sk = None
+                if sk and sk in portfolio_skels:
+                    skel_dups += 1
+                    state.pending_alphas[idx].simulation_error = (
+                        f"portfolio skeleton duplicate (self-corr risk): {sk[:60]}"
+                    )
+                    state.pending_alphas[idx].is_simulated = True
+                    state.pending_alphas[idx].simulation_success = False
+                else:
+                    keep_after_skel.append(idx)
+            if skel_dups:
+                logger.info(
+                    f"[{node_name}] portfolio-skel dedup: {skel_dups} candidates "
+                    f"matched submitted skeletons (saved BRAIN sims), "
+                    f"{len(keep_after_skel)} remain"
+                )
+            indices_to_simulate = keep_after_skel
+            if not indices_to_simulate:
+                logger.warning(f"[{node_name}] All candidates dropped by portfolio-skel dedup")
+                return {"pending_alphas": state.pending_alphas}
+    except Exception as e:
+        logger.warning(f"[{node_name}] portfolio-skel dedup failed, proceeding: {e}")
+
     # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier filter.
     # When ENABLE_PRE_SIMULATE_FILTER=True, predict P(PASS) per candidate
     # and skip very-likely-fails BEFORE sending to BRAIN simulate. Default
