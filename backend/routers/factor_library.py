@@ -191,7 +191,7 @@ async def list_alphas_by_tier(
     submitted: Optional[bool] = None,  # True = 已提交, False = 未提交, None = 不筛选
     can_submit: Optional[str] = None,  # 'true' | 'false' | 'null' | None (无筛选)
     sort_by: str = Query(
-        "metrics_snapshot_at",
+        "created_at",
         pattern="^(is_sharpe|is_fitness|is_turnover|created_at|metrics_snapshot_at)$",
     ),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
