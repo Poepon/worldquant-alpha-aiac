@@ -74,7 +74,12 @@ class BrainAdapter:
     # /simulations through to terminal status, mirroring BRAIN's accounting.
     _BRAIN_GLOBAL_SIM_LIMIT: int = 3
     _SLOT_COUNTER_KEY: str = "brain:concurrent_sims"
-    _SLOT_TTL_SEC: int = 1800   # safety: orphaned counter resets after 30 min
+    # 2026-05-08 fix: shorten TTL from 30 min to 10 min so that orphaned slots
+    # (worker force-killed mid-simulate, _release_sim_slot never reached) clear
+    # within ~10 min idle instead of starving the pool for half an hour. TTL
+    # is refreshed on every successful acquire so live workers never lose their
+    # slot — cleanup only triggers when ALL slots leaked AND no new acquires.
+    _SLOT_TTL_SEC: int = 600   # safety: orphaned counter resets after 10 min
     _SLOT_POLL_INTERVAL: float = 1.5
     _SLOT_ACQUIRE_TIMEOUT: float = 1800.0   # 30 min upper bound on wait
     _redis_client: Optional["redis.Redis"] = None
