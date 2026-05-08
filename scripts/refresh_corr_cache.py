@@ -74,6 +74,16 @@ async def main():
             except Exception as e:
                 print(f"  ✗ skeletons refresh failed: {e}")
 
+            # #2 field-fitness stats refresh.
+            try:
+                from backend.agents.seed_pool.field_fitness_stats import (
+                    refresh_field_fitness_cache,
+                )
+                n = await refresh_field_fitness_cache(region=region)
+                print(f"  → {n} high-fit fields cached")
+            except Exception as e:
+                print(f"  ✗ field-fitness refresh failed: {e}")
+
 
 if __name__ == "__main__":
     asyncio.run(main())

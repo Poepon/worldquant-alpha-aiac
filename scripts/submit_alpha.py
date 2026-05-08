@@ -202,6 +202,19 @@ async def main():
             except Exception as e:
                 print(f"  skeleton refresh failed (non-fatal): {e}")
 
+            # #2 field-fitness stats (2026-05-08): used by T1 strategy prompt
+            # to nudge LLM toward field families with historical fit ≥ 1.0.
+            # DB-only refresh.
+            print("Refreshing field-fitness cache ...")
+            try:
+                from backend.agents.seed_pool.field_fitness_stats import (
+                    refresh_field_fitness_cache,
+                )
+                n = await refresh_field_fitness_cache(region=alpha["region"] or "USA")
+                print(f"  cache: {n} high-fit fields")
+            except Exception as e:
+                print(f"  field-fitness refresh failed (non-fatal): {e}")
+
     print(f"\n=== RESULT ===")
     print(f"  status_code: {result['status_code']}")
     print(f"  polls: {result['polls']}")

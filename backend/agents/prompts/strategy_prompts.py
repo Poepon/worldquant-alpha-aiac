@@ -197,6 +197,17 @@ def build_t1_strategy_user_prompt(
     except Exception:
         portfolio_block = ""
 
+    # #2 fitness-aware (2026-05-08): inject empirical high-fit fields so LLM
+    # prioritizes fields that historically delivered fit ≥ 1.0. Without this
+    # nudge, LLM picks "interesting" fields that may have low fit ceiling
+    # (current bottleneck: many PROV alpha stuck at fit 0.6-0.9).
+    high_fit_block = ""
+    try:
+        from backend.agents.seed_pool.field_fitness_stats import get_high_fit_block
+        high_fit_block = get_high_fit_block(region)
+    except Exception:
+        high_fit_block = ""
+
     return f"""Dataset (anchor): {dataset_id}
 Region: {region}
 {cross_block}
@@ -205,7 +216,7 @@ Available fields (first 80):
 
 Recent T1 success patterns:
 {patterns_block}
-{feedback_block}{portfolio_block}
+{feedback_block}{portfolio_block}{high_fit_block}
 Now produce the T1Strategy JSON for this round.
 """
 
