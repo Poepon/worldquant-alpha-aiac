@@ -568,96 +568,108 @@ async def _run_cascade_phase(
 ) -> dict:
     """Run a single cascade phase for `tier`, capped at `max_rounds` rounds.
 
-    Strategy: in-memory mutate task.agent_mode so MiningAgent.run_evolution_loop
-    derives the right factor_tier without persisting. Each round inside the
-    phase checks task.status — PAUSED/STOPPED short-circuits the loop so the
-    UI Stop button responds within one round latency.
+    V-19.10 (2026-05-10) C1 fix: pass factor_tier_override into mining_agent
+    instead of mutating task.agent_mode. The mutation pattern caused agent_mode
+    to be persisted to DB by the next ORM auto-flush (e.g.
+    _incremental_save_alphas commit), polluting the task row's nominal mode.
 
     Returns: {alphas_added, rounds_run, paused}
     """
-    from backend.config import settings as _settings
-
-    original_agent_mode = task.agent_mode
-    task.agent_mode = _TIER_TO_AGENT_MODE.get(tier, "AUTONOMOUS_TIER1")
-
     alphas_added = 0
     rounds_run = 0
     paused = False
-    try:
-        # Pick datasets fresh per phase (T1's main pool may differ from T2/T3
-        # which need predecessor PASS alphas as seeds — node_tier_seed_load
-        # handles seed plumbing internally given factor_tier > 1).
-        datasets = await _get_datasets_to_mine(db, task)
-        if not datasets:
-            logger.warning(f"[cascade T{tier}] no datasets, phase skipped")
-            return {"alphas_added": 0, "rounds_run": 0, "paused": False}
+    # Pick datasets fresh per phase (T1's main pool may differ from T2/T3
+    # which need predecessor PASS alphas as seeds — node_tier_seed_load
+    # handles seed plumbing internally given factor_tier > 1).
+    datasets = await _get_datasets_to_mine(db, task)
+    if not datasets:
+        logger.warning(f"[cascade T{tier}] no datasets, phase skipped")
+        return {"alphas_added": 0, "rounds_run": 0, "paused": False}
 
-        # Round-driven: distribute max_rounds across datasets. With 10 datasets
-        # and 10 rounds → 1 round per dataset. With T3=5 rounds + 10 datasets
-        # → first 5 datasets get 1 round each.
-        rounds_remaining = max_rounds
-        for dataset_id in datasets:
-            if rounds_remaining <= 0:
-                break
+    # Round-driven: distribute max_rounds across datasets. With 10 datasets
+    # and 10 rounds → 1 round per dataset. With T3=5 rounds + 10 datasets
+    # → first 5 datasets get 1 round each.
+    rounds_remaining = max_rounds
+    for dataset_id in datasets:
+        if rounds_remaining <= 0:
+            break
 
-            # Refresh status — Stop button responsive at dataset boundary too
-            await db.refresh(task)
-            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-                paused = True
-                break
+        # Refresh status — Stop button responsive at dataset boundary too.
+        # V-19.10 (M3): refresh-after-rollback pattern handled inside the
+        # except branch below; here we refresh proactively at dataset boundary.
+        await db.refresh(task)
+        if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+            paused = True
+            break
 
-            fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe)
-            if not fields:
-                continue
-            if dataset_id != "pv1":
-                pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe)
-                fields = _merge_field_pools(fields, pv_supplement)
+        fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe)
+        if not fields:
+            continue
+        if dataset_id != "pv1":
+            pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe)
+            fields = _merge_field_pools(fields, pv_supplement)
 
-            # Cross-dataset hypothesis pool (Phase 1 / A2 same as discrete path)
-            from backend.config import settings as _hge
-            active_level = (task.config or {}).get(
-                "hypothesis_centric_variant",
-                _hge.HYPOTHESIS_CENTRIC_LEVEL,
+        # Cross-dataset hypothesis pool (Phase 1 / A2 same as discrete path)
+        from backend.config import settings as _hge
+        active_level = (task.config or {}).get(
+            "hypothesis_centric_variant",
+            _hge.HYPOTHESIS_CENTRIC_LEVEL,
+        )
+        available_dataset_pool = []
+        if active_level >= 1:
+            complementary = await _get_complementary_datasets(
+                db, task, dataset_id, k=_hge.PHASE1_COMPLEMENTARY_DATASET_K,
             )
-            available_dataset_pool = []
-            if active_level >= 1:
-                complementary = await _get_complementary_datasets(
-                    db, task, dataset_id, k=_hge.PHASE1_COMPLEMENTARY_DATASET_K,
-                )
-                available_dataset_pool = [dataset_id] + complementary
+            available_dataset_pool = [dataset_id] + complementary
 
-            # Compute rounds budget for this dataset; cap so no single dataset
-            # eats the whole phase if many datasets are configured.
-            rounds_for_ds = min(rounds_remaining, max(1, max_rounds // max(1, len(datasets))))
+        # Compute rounds budget for this dataset; cap so no single dataset
+        # eats the whole phase if many datasets are configured.
+        rounds_for_ds = min(rounds_remaining, max(1, max_rounds // max(1, len(datasets))))
 
-            try:
-                result = await mining_agent.run_evolution_loop(
-                    task=task,
-                    dataset_id=dataset_id,
-                    fields=fields,
-                    operators=operators,
-                    max_iterations=rounds_for_ds,
-                    target_alphas=999999,    # round-driven, not goal-driven (IX-2)
-                    num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
-                    run_id=run.id,
-                    available_dataset_pool=available_dataset_pool,
-                    hypothesis_centric_level=int(active_level or 0),
-                    experiment_variant=str(
-                        (task.config or {}).get("hypothesis_centric_variant", active_level)
-                    ),
-                )
-                ds_rounds = int(result.get("iterations_completed") or 0)
-                rounds_remaining -= ds_rounds
-                rounds_run += ds_rounds
-                alphas_added += len(result.get("all_alphas", []))
-            except Exception as e:
-                logger.error(f"[cascade T{tier} {dataset_id}] evolution loop failed: {e}")
-                await db.rollback()
-                continue
-    finally:
-        # Restore — agent_mode mutation was in-memory only (no commit) so DB
-        # row is unchanged, but reset for safety in case ORM autoflush ran.
-        task.agent_mode = original_agent_mode
+        try:
+            result = await mining_agent.run_evolution_loop(
+                task=task,
+                dataset_id=dataset_id,
+                fields=fields,
+                operators=operators,
+                max_iterations=rounds_for_ds,
+                target_alphas=999999,    # round-driven, not goal-driven (IX-2)
+                num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
+                run_id=run.id,
+                available_dataset_pool=available_dataset_pool,
+                hypothesis_centric_level=int(active_level or 0),
+                experiment_variant=str(
+                    (task.config or {}).get("hypothesis_centric_variant", active_level)
+                ),
+                factor_tier_override=tier,   # V-19.10 C1 fix
+            )
+            ds_rounds = int(result.get("iterations_completed") or 0)
+            rounds_remaining -= ds_rounds
+            rounds_run += ds_rounds
+            alphas_added += len(result.get("all_alphas", []))
+        except Exception as e:
+            logger.error(f"[cascade T{tier} {dataset_id}] evolution loop failed: {e}")
+            await db.rollback()
+            # V-19.10 M3: refresh task after rollback so subsequent dataset
+            # iterations see the persisted state, not stale in-memory mutations
+            # that the rollback just undid.
+            await db.refresh(task)
+            continue
+
+        # V-19.10 H1 fix: heartbeat update at dataset boundary regardless of
+        # PASS count. Pre-fix: persistence.py only stamped last_alpha_persisted_at
+        # when ≥1 row landed, so all-FAIL rounds (common at PASS rate ~5%)
+        # let the watchdog falsely flag the worker as dead within 15 min.
+        try:
+            from datetime import timezone as _tz
+            await db.execute(
+                update(MiningTask)
+                .where(MiningTask.id == task.id)
+                .values(last_alpha_persisted_at=datetime.now(_tz.utc))
+            )
+            await db.commit()
+        except Exception as _e:
+            logger.warning(f"[cascade T{tier}] heartbeat update failed: {_e}")
 
     return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
 
@@ -792,8 +804,15 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
 
     # Loop exited: PAUSED / STOPPED. Run is wrapped up but task stays in
     # PAUSED state (V-19.4 resume_session can re-dispatch a new worker).
+    # V-19.10 H2 fix: don't mark the run COMPLETED if the worker exited
+    # because the task was paused/stopped — that misrepresents the run as
+    # finished work. Mirror task.status onto the run for accurate history.
     if run is not None:
-        run.status = "COMPLETED"
+        await db.refresh(task)
+        if task.status in ("PAUSED", "STOPPED"):
+            run.status = task.status
+        else:
+            run.status = "COMPLETED"
         run.finished_at = datetime.utcnow()
     await db.commit()
 

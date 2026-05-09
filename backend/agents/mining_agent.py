@@ -106,6 +106,7 @@ class MiningAgent:
         available_dataset_pool: Optional[List[str]] = None,
         hypothesis_centric_level: int = 0,
         experiment_variant: Optional[str] = None,
+        factor_tier_override: Optional[int] = None,
     ) -> List[Alpha]:
         """
         Run a single mining iteration with strategy application.
@@ -137,8 +138,15 @@ class MiningAgent:
         
         # PR2: derive factor_tier from task.agent_mode. AUTONOMOUS_TIER1/2/3
         # → 1/2/3; everything else (legacy AUTONOMOUS, INTERACTIVE) → 1.
-        from backend.services.task_service import TaskService
-        factor_tier = TaskService.factor_tier_from_mode(task.agent_mode) or 1
+        # V-19.10 (2026-05-10): factor_tier_override takes precedence — used by
+        # CONTINUOUS_CASCADE main loop to switch tier per phase without
+        # mutating task.agent_mode (which would persist via auto-flush, see C1
+        # in V-19 code review).
+        if factor_tier_override is not None:
+            factor_tier = factor_tier_override
+        else:
+            from backend.services.task_service import TaskService
+            factor_tier = TaskService.factor_tier_from_mode(task.agent_mode) or 1
 
         # PR6 fix — inject DB session / brain adapter / alpha service into
         # configurable. T2/T3's node_tier_seed_load reads these from config
@@ -280,6 +288,7 @@ class MiningAgent:
         available_dataset_pool: Optional[List[str]] = None,
         hypothesis_centric_level: int = 0,
         experiment_variant: Optional[str] = None,
+        factor_tier_override: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Run multi-round evolution loop for alpha mining.
@@ -353,6 +362,7 @@ class MiningAgent:
                         available_dataset_pool=available_dataset_pool,
                         hypothesis_centric_level=hypothesis_centric_level,
                         experiment_variant=experiment_variant,
+                        factor_tier_override=factor_tier_override,
                     )
                     
                     # Analyze round results
