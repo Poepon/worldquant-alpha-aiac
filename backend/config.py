@@ -107,6 +107,22 @@ class Settings(BaseSettings):
     T1_USE_LLM_GUIDED_STRATEGY: bool = True  # False 时 T1 task 回退 W0 ALPHA_GENERATION_SYSTEM
     MIN_TIER_SEED_COUNT: int = 5  # T2/T3 task 启动门槛 + node_tier_seed_load 早停门槛共用
 
+    # V-19 Persistent Mining Service mode (2026-05-10) — cascade settings.
+    # Round-driven phase switching (per IX-2 decision): each phase runs a fixed
+    # round budget then transitions, regardless of PASS count. Phase skip when
+    # local + global seed pool both < MIN_TIER_SEED_COUNT (IX-1 fallback).
+    CASCADE_T1_ROUNDS: int = 10            # T1 phase 跑这么多 round 切 T2
+    CASCADE_T2_ROUNDS: int = 10
+    CASCADE_T3_ROUNDS: int = 5
+    CASCADE_ENABLE_T3: bool = False        # IX-4: T3 PASS rate=0% (V-16 拦) → 默认禁
+    CASCADE_PAUSE_POLL_SEC: float = 1.0    # 主循环每 round 末检查 PAUSED 间隔
+
+    # V-19.7 watchdog + BRAIN quota guard.
+    CASCADE_WATCHDOG_DEAD_MIN: int = 15      # last_alpha_persisted_at < NOW()-N → dead
+    CASCADE_WATCHDOG_GRACE_MIN: int = 15     # task.created_at > NOW()-N → skip (start-up grace)
+    BRAIN_DAILY_SIMULATE_LIMIT: int = 1000   # consultant 估算 — 实际由 BRAIN 决定
+    BRAIN_QUOTA_PAUSE_PCT: float = 0.9       # 达 90% 自动 pause CONTINUOUS_CASCADE
+
     # P1 (2026-05-07): auto ts_decay_linear(., 4) wrapper for T1 candidates.
     # 实测验证 (docs/decay_verify_pk6606.json): decay=4 把 sh=1.58 fit=0.85
     # to=0.81 (HIGH_TURNOVER+LOW_FITNESS) 转成 sh=1.45 fit=1.47 to=0.51

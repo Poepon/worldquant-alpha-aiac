@@ -3,6 +3,7 @@ Persistence nodes for LangGraph workflow.
 
 Contains:
 - node_save_results: Save alpha results to database
+- is_expression_persisted_in_task: V-19.8 RESUME dedup helper
 """
 
 from datetime import datetime
@@ -13,6 +14,41 @@ from langchain_core.runnables import RunnableConfig
 from backend.agents.graph.state import MiningState, AlphaResult, FailureRecord
 from backend.agents.graph.nodes.base import record_trace
 from backend.agents.graph.early_stop import should_stop_early, summarise_round
+
+
+# =============================================================================
+# V-19.8 RESUME helper — expression-hash dedup for paused-and-resumed sessions
+# =============================================================================
+
+async def is_expression_persisted_in_task(
+    db_session,
+    task_id: int,
+    expression: str,
+) -> bool:
+    """Return True if an expression with the same hash already lives in
+    `alphas` under this task_id.
+
+    V-19.4 resume_session calls this before re-submitting expressions
+    that the prior worker generated but never finished simulating.
+    Uses ix_alphas_task_expr_hash (partial index) for O(log n) lookup.
+    """
+    if not expression:
+        return False
+    from sqlalchemy import select, exists
+    from backend.alpha_semantic_validator import compute_expression_hash
+    from backend.models import Alpha
+
+    expr_hash = compute_expression_hash(expression)
+    if not expr_hash:
+        return False
+    stmt = select(
+        exists().where(
+            Alpha.task_id == task_id,
+            Alpha.expression_hash == expr_hash,
+        )
+    )
+    result = await db_session.execute(stmt)
+    return bool(result.scalar())
 
 
 # =============================================================================
@@ -87,14 +123,25 @@ async def _incremental_save_alphas(
                 f"[_incremental_save_alphas] V-19.3 cross-task dedup query failed: {_e}"
             )
 
+    # V-19.8 (2026-05-10): switch from ORM add()+flush to pg_insert with
+    # ON CONFLICT (alpha_id) DO NOTHING. SAVEPOINT add+flush (ex-V-19.2)
+    # caught IntegrityError per row but still executed an INSERT that PG
+    # rolled back — race window: worker A SELECT pre-checks, worker B
+    # inserts, worker A INSERT triggers IntegrityError. Now PG handles
+    # dedup atomically and returns the new id (or NULL on conflict) via
+    # RETURNING. SAVEPOINT still wraps each row to isolate non-conflict
+    # errors (data type / NOT NULL violations) without aborting the batch.
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
     snapshot_at = datetime.utcnow()
     out: List[AlphaResult] = []
     inserted_alpha_ids: List[str] = []  # alpha_ids that successfully landed
     cross_task_skipped: List[str] = []  # alpha_ids skipped as cross-task dups
+    on_conflict_skipped: List[str] = []  # alpha_ids skipped by ON CONFLICT (race)
     for alpha in pending_alphas:
         if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
             continue
-        # V-19.3: cross-task duplicate skip
+        # V-19.3: cross-task duplicate skip (cheap pre-check based on SELECT)
         if alpha.alpha_id and alpha.alpha_id in cross_task_dup_ids:
             cross_task_skipped.append(alpha.alpha_id)
             logger.info(
@@ -106,7 +153,7 @@ async def _incremental_save_alphas(
         metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
         expr_hash = compute_expression_hash(alpha.expression) if alpha.expression else None
 
-        row = Alpha(
+        values_dict = dict(
             task_id=task_id,
             run_id=run_id,
             alpha_id=alpha.alpha_id,
@@ -135,14 +182,29 @@ async def _incremental_save_alphas(
         )
         try:
             async with db_session.begin_nested():
-                db_session.add(row)
-                await db_session.flush()
+                stmt = (
+                    pg_insert(Alpha)
+                    .values(**values_dict)
+                    .on_conflict_do_nothing(index_elements=["alpha_id"])
+                    .returning(Alpha.id)
+                )
+                result = await db_session.execute(stmt)
+                inserted_id = result.scalar_one_or_none()
+            if inserted_id is None:
+                # ON CONFLICT skipped (alpha_id collided after SELECT pre-check)
+                if alpha.alpha_id:
+                    on_conflict_skipped.append(alpha.alpha_id)
+                logger.info(
+                    f"[_incremental_save_alphas] V-19.8 ON CONFLICT skip "
+                    f"alpha_id={alpha.alpha_id} (race-window collision)"
+                )
+                continue
             if alpha.alpha_id:
                 inserted_alpha_ids.append(alpha.alpha_id)
         except Exception as e:
             import traceback as _tb
             logger.error(
-                f"[_incremental_save_alphas] V-19.2 alpha INSERT savepoint rolled back: "
+                f"[_incremental_save_alphas] V-19.8 alpha INSERT savepoint rolled back: "
                 f"{type(e).__name__}: {e} | alpha_id={alpha.alpha_id}"
             )
             log_persistence_error(
@@ -157,6 +219,28 @@ async def _incremental_save_alphas(
                     "dataset_id": dataset_id,
                     "traceback_inline": _tb.format_exc(),
                 },
+            )
+
+    # V-19.8 (2026-05-10) watchdog liveness signal. Update task.last_alpha_persisted_at
+    # only when at least 1 row landed — empty rounds (all FAIL) shouldn't reset
+    # the dead-detection clock. Updated in same outer commit so it's atomic
+    # with the alpha INSERTs.
+    if inserted_alpha_ids:
+        try:
+            from datetime import timezone as _tz
+            from sqlalchemy import update as _sa_update
+            from backend.models import MiningTask
+            # last_alpha_persisted_at is TIMESTAMP WITH TIME ZONE; use a tz-
+            # aware UTC value to avoid asyncpg tz-subtraction errors.
+            await db_session.execute(
+                _sa_update(MiningTask)
+                .where(MiningTask.id == task_id)
+                .values(last_alpha_persisted_at=datetime.now(_tz.utc))
+            )
+        except Exception as _e:
+            logger.warning(
+                f"[_incremental_save_alphas] V-19.8 last_alpha_persisted_at "
+                f"update failed (non-fatal): {_e}"
             )
 
     # Outer commit releases all successful savepoints. Pre-V-19.2 a single

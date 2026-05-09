@@ -98,6 +98,23 @@ class TaskDetail:
 
 
 @dataclass
+class MiningSessionInfo:
+    """V-19 persistent mining service session info."""
+    task_id: int
+    task_name: str
+    region: str
+    universe: str
+    status: str           # RUNNING / PAUSED
+    mining_mode: str      # always CONTINUOUS_CASCADE
+    cascade_phase: Optional[str]   # T1 / T2 / T3 / IDLE
+    cascade_round_idx: int
+    progress_current: int
+    last_alpha_persisted_at: Optional[datetime]
+    started_at: Optional[datetime]   # task.created_at
+    paused_at: Optional[datetime]    # task.updated_at when status moved to PAUSED
+
+
+@dataclass
 class ExperimentRunInfo:
     """Experiment run information."""
     id: int
@@ -577,3 +594,231 @@ class TaskService(BaseService):
             )
             for run in result.items
         ]
+
+    # =========================================================================
+    # V-19 Persistent Mining Service
+    # =========================================================================
+    # singleton-per-region semantics enforced at schema level by partial index
+    # ix_mining_tasks_active_cascade_per_region (mining_mode='CONTINUOUS_CASCADE'
+    # AND status IN ('RUNNING','PAUSED')). The service-layer methods below
+    # navigate that constraint, with idempotent start.
+
+    SUPPORTED_REGIONS = ("USA", "CHN", "EUR", "ASI", "GLB")
+
+    async def get_active_session(self, region: str) -> Optional[MiningSessionInfo]:
+        """Return the active CONTINUOUS_CASCADE session for `region`, or None.
+
+        "active" = status IN ('RUNNING', 'PAUSED'). The unique partial index
+        guarantees at most 1 row matches.
+        """
+        q = (
+            select(MiningTask)
+            .where(MiningTask.region == region)
+            .where(MiningTask.mining_mode == "CONTINUOUS_CASCADE")
+            .where(MiningTask.status.in_(("RUNNING", "PAUSED")))
+            .limit(1)
+        )
+        result = await self.db.execute(q)
+        task = result.scalar_one_or_none()
+        return self._to_session_info(task) if task else None
+
+    async def list_active_sessions(self) -> List[MiningSessionInfo]:
+        """Return active CONTINUOUS_CASCADE sessions across all regions."""
+        q = (
+            select(MiningTask)
+            .where(MiningTask.mining_mode == "CONTINUOUS_CASCADE")
+            .where(MiningTask.status.in_(("RUNNING", "PAUSED")))
+            .order_by(MiningTask.region)
+        )
+        result = await self.db.execute(q)
+        tasks = result.scalars().all()
+        return [self._to_session_info(t) for t in tasks]
+
+    async def start_session(
+        self,
+        region: str = "USA",
+        universe: str = "TOP3000",
+    ) -> MiningSessionInfo:
+        """Start (or resume) the singleton CONTINUOUS_CASCADE session for region.
+
+        Idempotent — if a session already exists for the region:
+          - status=RUNNING: returns it as-is (no-op).
+          - status=PAUSED: flips to RUNNING and dispatches a fresh celery
+            worker. cascade_phase / cascade_round_idx are preserved so the
+            worker resumes mid-cascade.
+
+        If no session exists, creates a new CONTINUOUS_CASCADE task with
+        defaults (daily_goal=0 = unlimited, max_iterations=999999) and
+        dispatches the celery worker.
+
+        Raises ValueError on unsupported region.
+        """
+        if region not in self.SUPPORTED_REGIONS:
+            raise ValueError(
+                f"region={region!r} not supported; choose one of {self.SUPPORTED_REGIONS}"
+            )
+
+        existing = await self.get_active_session(region)
+        if existing:
+            if existing.status == "RUNNING":
+                logger.info(
+                    f"[start_session] region={region} already RUNNING "
+                    f"(task_id={existing.task_id}); idempotent no-op"
+                )
+                return existing
+            # PAUSED → RUNNING + dispatch fresh worker
+            await self.task_repo.update_status(existing.task_id, "RUNNING")
+            await self.commit()
+            await self._dispatch_session_worker(existing.task_id)
+            refreshed = await self.get_active_session(region)
+            assert refreshed is not None
+            logger.info(
+                f"[start_session] region={region} resumed PAUSED→RUNNING "
+                f"(task_id={refreshed.task_id} phase={refreshed.cascade_phase} "
+                f"round_idx={refreshed.cascade_round_idx})"
+            )
+            return refreshed
+
+        # No existing session — create a new one. The unique partial index
+        # races against concurrent start calls; on conflict we fall back to
+        # reading the winner.
+        from sqlalchemy.exc import IntegrityError
+
+        task = MiningTask(
+            task_name=f"mining-session-{region}",
+            region=region,
+            universe=universe,
+            dataset_strategy="AUTO",
+            target_datasets=[],
+            agent_mode="AUTONOMOUS",  # cascade ignores this — service self-manages tier
+            daily_goal=0,                # 0 = unlimited (CONTINUOUS_CASCADE only stops on pause)
+            max_iterations=999999,
+            config={},
+            mining_mode="CONTINUOUS_CASCADE",
+            cascade_phase="T1",
+            cascade_round_idx=0,
+            status="RUNNING",
+        )
+        try:
+            created = await self.task_repo.create(task)
+            await self.commit()
+        except IntegrityError:
+            await self.db.rollback()
+            # A concurrent caller won the race — return whatever exists.
+            winner = await self.get_active_session(region)
+            if winner is None:
+                raise RuntimeError(
+                    "race against unique partial index but no winner found"
+                )
+            logger.info(
+                f"[start_session] region={region} lost race; returning winner "
+                f"task_id={winner.task_id}"
+            )
+            return winner
+
+        await self._dispatch_session_worker(created.id)
+        logger.info(
+            f"[start_session] region={region} created new session task_id={created.id}"
+        )
+        info = await self.get_active_session(region)
+        assert info is not None
+        return info
+
+    async def stop_session(self, task_id: int) -> MiningSessionInfo:
+        """Pause the session. Worker detects PAUSED at the next round boundary
+        and exits gracefully (the IX-5 alpha-level dedup on resume covers any
+        in-flight alphas). Cascade phase / round idx are preserved.
+        """
+        task = await self.task_repo.get_by_id(task_id)
+        if not task:
+            raise ValueError(f"task_id={task_id} not found")
+        if task.mining_mode != "CONTINUOUS_CASCADE":
+            raise ValueError(
+                f"task_id={task_id} is not CONTINUOUS_CASCADE "
+                f"(mining_mode={task.mining_mode}); use intervene_task PAUSE instead"
+            )
+        if task.status not in ("RUNNING", "PAUSED"):
+            raise ValueError(
+                f"task_id={task_id} cannot be stopped from status={task.status}"
+            )
+        if task.status == "RUNNING":
+            await self.task_repo.update_status(task_id, "PAUSED")
+            await self.commit()
+        info = self._to_session_info(
+            await self.task_repo.get_by_id(task_id)
+        )
+        logger.info(
+            f"[stop_session] task_id={task_id} region={task.region} → PAUSED "
+            f"(phase={info.cascade_phase} round_idx={info.cascade_round_idx})"
+        )
+        return info
+
+    async def resume_session(self, task_id: int) -> MiningSessionInfo:
+        """Explicit RESUME from PAUSED. start_session(region) auto-resumes too;
+        this method is exposed for API parity (POST /mining-session/resume)."""
+        task = await self.task_repo.get_by_id(task_id)
+        if not task:
+            raise ValueError(f"task_id={task_id} not found")
+        if task.mining_mode != "CONTINUOUS_CASCADE":
+            raise ValueError(f"task_id={task_id} is not CONTINUOUS_CASCADE")
+        if task.status == "RUNNING":
+            return self._to_session_info(task)  # already running
+        if task.status != "PAUSED":
+            raise ValueError(
+                f"task_id={task_id} cannot resume from status={task.status}"
+            )
+        await self.task_repo.update_status(task_id, "RUNNING")
+        await self.commit()
+        await self._dispatch_session_worker(task_id)
+        info = self._to_session_info(await self.task_repo.get_by_id(task_id))
+        logger.info(
+            f"[resume_session] task_id={task_id} region={task.region} PAUSED→RUNNING"
+        )
+        return info
+
+    async def _dispatch_session_worker(self, task_id: int) -> str:
+        """Create a new ExperimentRun + dispatch celery worker for the session.
+
+        Each pause/resume cycle gets its own ExperimentRun for traceability.
+        """
+        task = await self.task_repo.get_by_id(task_id)
+        run = ExperimentRun(
+            task_id=task_id,
+            status="RUNNING",
+            trigger_source="MINING_SESSION",
+            celery_task_id=None,
+            config_snapshot={
+                "task": {
+                    "region": task.region,
+                    "universe": task.universe,
+                    "mining_mode": task.mining_mode,
+                    "cascade_phase": task.cascade_phase,
+                    "cascade_round_idx": task.cascade_round_idx,
+                },
+            },
+            strategy_snapshot={},
+        )
+        created_run = await self.run_repo.create(run)
+        await self.commit()
+
+        from backend.tasks import run_mining_task
+        celery_task = run_mining_task.delay(task_id, created_run.id)
+        created_run.celery_task_id = celery_task.id
+        await self.commit()
+        return celery_task.id
+
+    def _to_session_info(self, task: MiningTask) -> MiningSessionInfo:
+        return MiningSessionInfo(
+            task_id=task.id,
+            task_name=task.task_name,
+            region=task.region,
+            universe=task.universe,
+            status=task.status,
+            mining_mode=task.mining_mode,
+            cascade_phase=task.cascade_phase,
+            cascade_round_idx=task.cascade_round_idx,
+            progress_current=task.progress_current,
+            last_alpha_persisted_at=task.last_alpha_persisted_at,
+            started_at=task.created_at,
+            paused_at=task.updated_at if task.status == "PAUSED" else None,
+        )

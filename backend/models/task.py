@@ -39,10 +39,21 @@ class MiningTask(SQLAlchemyBase):
     max_iterations = Column(Integer, default=10)
     
     config = Column(JSONB, default={})
-    
+
+    # V-19 Persistent Mining Service mode (2026-05-10)
+    # mining_mode: 'DISCRETE' (legacy task — finishes when daily_goal met)
+    #              'CONTINUOUS_CASCADE' (service singleton — runs T1→T2→T3 loop until paused)
+    mining_mode = Column(String(30), default="DISCRETE", nullable=False)
+    # Active cascade phase for CONTINUOUS_CASCADE tasks. T1/T2/T3/IDLE.
+    cascade_phase = Column(String(10), nullable=True)
+    # Cascade round counter (each round = T1→T2→T3 sequence). Persisted across PAUSE/RESUME.
+    cascade_round_idx = Column(Integer, default=0, nullable=False)
+    # Watchdog liveness signal — updated each time _incremental_save_alphas commits.
+    last_alpha_persisted_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
-    
+
     # Relationships
     trace_steps = relationship("TraceStep", back_populates="task", order_by="TraceStep.step_order")
     alphas = relationship("Alpha", back_populates="task")

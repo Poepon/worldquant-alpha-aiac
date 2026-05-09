@@ -103,6 +103,38 @@ const api = {
     return data
   },
 
+  // V-19 Persistent Mining Service singleton-per-region
+  // Single button start/stop. Backend enforces uniqueness via partial index.
+  listMiningSessions: async () => {
+    const { data } = await client.get('/mining-session')
+    return data
+  },
+
+  getMiningSession: async (region) => {
+    try {
+      const { data } = await client.get(`/mining-session/${region}`)
+      return data
+    } catch (err) {
+      if (err?.response?.status === 404) return null
+      throw err
+    }
+  },
+
+  startMiningSession: async ({ region = 'USA', universe = 'TOP3000' } = {}) => {
+    const { data } = await client.post('/mining-session/start', { region, universe })
+    return data
+  },
+
+  stopMiningSession: async (taskId) => {
+    const { data } = await client.post('/mining-session/stop', { task_id: taskId })
+    return data
+  },
+
+  resumeMiningSession: async (taskId) => {
+    const { data } = await client.post('/mining-session/resume', { task_id: taskId })
+    return data
+  },
+
   getTaskRuns: async (taskId) => {
     const { data } = await client.get(`/tasks/${taskId}/runs`)
     return data

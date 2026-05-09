@@ -60,10 +60,38 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             # Create or attach ExperimentRun
             run = await _get_or_create_run(db, task, run_id, self.request.id)
 
+            # V-19.2 (2026-05-10): CONTINUOUS_CASCADE mining mode dispatch.
+            # When the task is created via POST /mining-session/start the
+            # mining_mode column is 'CONTINUOUS_CASCADE' — drop into the
+            # persistent service loop instead of the discrete dataset loop.
+            # Discrete tasks (mining_mode='DISCRETE', the default) keep
+            # original behavior 100%.
+            if task.mining_mode == "CONTINUOUS_CASCADE":
+                try:
+                    return await _run_continuous_cascade(db, task, run, self.request.id)
+                except Exception as e:
+                    logger.error(f"[cascade] Task {task_id} failed: {e}")
+                    await db.rollback()
+                    try:
+                        await db.execute(
+                            update(MiningTask)
+                            .where(MiningTask.id == task_id)
+                            .values(status="FAILED")
+                        )
+                        if run is not None:
+                            run.status = "FAILED"
+                            run.finished_at = datetime.utcnow()
+                            run.error_message = str(e)[:500]
+                        await db.commit()
+                    except Exception as db_err:
+                        logger.error(f"[cascade] failed to mark task FAILED: {db_err}")
+                        await db.rollback()
+                    raise
+
             try:
                 async with BrainAdapter() as brain:
                     mining_agent = MiningAgent(db, brain)
-                    
+
                     # Get datasets to mine
                     datasets = await _get_datasets_to_mine(db, task)
                     
@@ -477,3 +505,306 @@ def _merge_field_pools(primary, supplement):
         if fid and fid not in sup_ids:
             out.append(f)
     return out
+
+
+# =============================================================================
+# V-19.2 CONTINUOUS_CASCADE main loop (2026-05-10)
+# =============================================================================
+# Persistent mining service: while not paused, cycle T1 → T2 → T3 phases
+# for fixed round budgets per phase (round-driven per IX-2). Phase skip
+# when local + global seed pool both insufficient (IX-1 hybrid C). T3
+# default disabled (IX-4 — V-16 suspicion mode pre-emptively rejects
+# sharpe>3 alphas, T3 PASS rate=0% in spike).
+#
+# State persistence: cascade_phase + cascade_round_idx written after each
+# phase boundary so worker crash + watchdog restart resumes mid-cascade
+# (V-19.4 + V-19.7 collaboration).
+
+async def _count_pass_in_task(db, task_id: int, tier: int) -> int:
+    """Count PASS alphas of a given tier owned by THIS task.
+    Used by IX-1 strict closure: T2 seed = local PASS only when ≥ MIN.
+    """
+    from backend.models import Alpha
+    q = (
+        select(func.count(Alpha.id))
+        .where(Alpha.task_id == task_id)
+        .where(Alpha.factor_tier == tier)
+        .where(Alpha.quality_status == "PASS")
+    )
+    return (await db.execute(q)).scalar() or 0
+
+
+async def _count_pass_global_region(db, region: str, tier: int) -> int:
+    """Count PASS alphas of a given tier across the whole region (any task).
+    Used by IX-1 fallback: when local PASS<MIN, try the historical pool.
+    """
+    from backend.models import Alpha
+    q = (
+        select(func.count(Alpha.id))
+        .where(Alpha.region == region)
+        .where(Alpha.factor_tier == tier)
+        .where(Alpha.quality_status == "PASS")
+    )
+    return (await db.execute(q)).scalar() or 0
+
+
+_TIER_TO_AGENT_MODE = {
+    1: "AUTONOMOUS_TIER1",
+    2: "AUTONOMOUS_TIER2",
+    3: "AUTONOMOUS_TIER3",
+}
+
+
+async def _run_cascade_phase(
+    db,
+    task,
+    run,
+    brain,
+    mining_agent,
+    operators,
+    *,
+    tier: int,
+    max_rounds: int,
+) -> dict:
+    """Run a single cascade phase for `tier`, capped at `max_rounds` rounds.
+
+    Strategy: in-memory mutate task.agent_mode so MiningAgent.run_evolution_loop
+    derives the right factor_tier without persisting. Each round inside the
+    phase checks task.status — PAUSED/STOPPED short-circuits the loop so the
+    UI Stop button responds within one round latency.
+
+    Returns: {alphas_added, rounds_run, paused}
+    """
+    from backend.config import settings as _settings
+
+    original_agent_mode = task.agent_mode
+    task.agent_mode = _TIER_TO_AGENT_MODE.get(tier, "AUTONOMOUS_TIER1")
+
+    alphas_added = 0
+    rounds_run = 0
+    paused = False
+    try:
+        # Pick datasets fresh per phase (T1's main pool may differ from T2/T3
+        # which need predecessor PASS alphas as seeds — node_tier_seed_load
+        # handles seed plumbing internally given factor_tier > 1).
+        datasets = await _get_datasets_to_mine(db, task)
+        if not datasets:
+            logger.warning(f"[cascade T{tier}] no datasets, phase skipped")
+            return {"alphas_added": 0, "rounds_run": 0, "paused": False}
+
+        # Round-driven: distribute max_rounds across datasets. With 10 datasets
+        # and 10 rounds → 1 round per dataset. With T3=5 rounds + 10 datasets
+        # → first 5 datasets get 1 round each.
+        rounds_remaining = max_rounds
+        for dataset_id in datasets:
+            if rounds_remaining <= 0:
+                break
+
+            # Refresh status — Stop button responsive at dataset boundary too
+            await db.refresh(task)
+            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+                paused = True
+                break
+
+            fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe)
+            if not fields:
+                continue
+            if dataset_id != "pv1":
+                pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe)
+                fields = _merge_field_pools(fields, pv_supplement)
+
+            # Cross-dataset hypothesis pool (Phase 1 / A2 same as discrete path)
+            from backend.config import settings as _hge
+            active_level = (task.config or {}).get(
+                "hypothesis_centric_variant",
+                _hge.HYPOTHESIS_CENTRIC_LEVEL,
+            )
+            available_dataset_pool = []
+            if active_level >= 1:
+                complementary = await _get_complementary_datasets(
+                    db, task, dataset_id, k=_hge.PHASE1_COMPLEMENTARY_DATASET_K,
+                )
+                available_dataset_pool = [dataset_id] + complementary
+
+            # Compute rounds budget for this dataset; cap so no single dataset
+            # eats the whole phase if many datasets are configured.
+            rounds_for_ds = min(rounds_remaining, max(1, max_rounds // max(1, len(datasets))))
+
+            try:
+                result = await mining_agent.run_evolution_loop(
+                    task=task,
+                    dataset_id=dataset_id,
+                    fields=fields,
+                    operators=operators,
+                    max_iterations=rounds_for_ds,
+                    target_alphas=999999,    # round-driven, not goal-driven (IX-2)
+                    num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
+                    run_id=run.id,
+                    available_dataset_pool=available_dataset_pool,
+                    hypothesis_centric_level=int(active_level or 0),
+                    experiment_variant=str(
+                        (task.config or {}).get("hypothesis_centric_variant", active_level)
+                    ),
+                )
+                ds_rounds = int(result.get("iterations_completed") or 0)
+                rounds_remaining -= ds_rounds
+                rounds_run += ds_rounds
+                alphas_added += len(result.get("all_alphas", []))
+            except Exception as e:
+                logger.error(f"[cascade T{tier} {dataset_id}] evolution loop failed: {e}")
+                await db.rollback()
+                continue
+    finally:
+        # Restore — agent_mode mutation was in-memory only (no commit) so DB
+        # row is unchanged, but reset for safety in case ORM autoflush ran.
+        task.agent_mode = original_agent_mode
+
+    return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
+
+
+async def _run_continuous_cascade(db, task, run, celery_task_id):
+    """V-19 main loop — persistent mining service.
+
+    Repeats T1 → T2 → T3 cycles until the user pauses (status='PAUSED' via
+    POST /mining-session/stop) or the celery worker crashes (V-19.7 watchdog
+    restarts it; we resume from task.cascade_phase).
+
+    Phase skip rules (IX-1 hybrid C + IX-4):
+      T2: skip if local PASS T1 < MIN_TIER_SEED_COUNT AND global region T1 < MIN
+      T3: skip if CASCADE_ENABLE_T3 = False (default) OR same seed-shortage as T2
+    """
+    from backend.config import settings
+
+    logger.info(
+        f"[cascade] task={task.id} region={task.region} starting at "
+        f"phase={task.cascade_phase or 'T1'} round_idx={task.cascade_round_idx}"
+    )
+
+    total_alphas = 0
+    async with BrainAdapter() as brain:
+        mining_agent = MiningAgent(db, brain)
+        operators = await _get_operators(db)
+
+        while True:
+            # Refresh + check status before starting a new phase / round
+            await db.refresh(task)
+            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+                logger.info(
+                    f"[cascade] task={task.id} status={task.status}, exiting main loop"
+                )
+                break
+
+            # Resume: if cascade_phase is None or invalid, start at T1
+            current_phase = task.cascade_phase or "T1"
+
+            # ============================================================
+            # T1 phase
+            # ============================================================
+            if current_phase == "T1":
+                logger.info(
+                    f"[cascade] task={task.id} T1 phase begin "
+                    f"(round_idx={task.cascade_round_idx} budget={settings.CASCADE_T1_ROUNDS})"
+                )
+                phase_result = await _run_cascade_phase(
+                    db, task, run, brain, mining_agent, operators,
+                    tier=1, max_rounds=settings.CASCADE_T1_ROUNDS,
+                )
+                total_alphas += phase_result["alphas_added"]
+                if phase_result["paused"]:
+                    break
+                # Move to T2
+                task.cascade_phase = "T2"
+                await db.commit()
+                current_phase = "T2"
+
+            await db.refresh(task)
+            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+                break
+
+            # ============================================================
+            # T2 phase — IX-1 fallback hybrid C (local first, global fallback)
+            # ============================================================
+            if current_phase == "T2":
+                local_t1 = await _count_pass_in_task(db, task.id, tier=1)
+                global_t1 = await _count_pass_global_region(db, task.region, tier=1)
+                if local_t1 >= settings.MIN_TIER_SEED_COUNT or global_t1 >= settings.MIN_TIER_SEED_COUNT:
+                    logger.info(
+                        f"[cascade] task={task.id} T2 phase begin "
+                        f"(local_T1_PASS={local_t1} global_T1_PASS={global_t1})"
+                    )
+                    phase_result = await _run_cascade_phase(
+                        db, task, run, brain, mining_agent, operators,
+                        tier=2, max_rounds=settings.CASCADE_T2_ROUNDS,
+                    )
+                    total_alphas += phase_result["alphas_added"]
+                    if phase_result["paused"]:
+                        break
+                else:
+                    logger.info(
+                        f"[cascade] task={task.id} T2 phase SKIP: "
+                        f"local_T1_PASS={local_t1} global_T1_PASS={global_t1} both<{settings.MIN_TIER_SEED_COUNT}"
+                    )
+                # Move to T3
+                task.cascade_phase = "T3"
+                await db.commit()
+                current_phase = "T3"
+
+            await db.refresh(task)
+            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+                break
+
+            # ============================================================
+            # T3 phase — IX-4 default disabled
+            # ============================================================
+            if current_phase == "T3":
+                if not settings.CASCADE_ENABLE_T3:
+                    logger.info(
+                        f"[cascade] task={task.id} T3 phase SKIP: CASCADE_ENABLE_T3=False"
+                    )
+                else:
+                    local_t2 = await _count_pass_in_task(db, task.id, tier=2)
+                    global_t2 = await _count_pass_global_region(db, task.region, tier=2)
+                    if local_t2 >= settings.MIN_TIER_SEED_COUNT or global_t2 >= settings.MIN_TIER_SEED_COUNT:
+                        logger.info(
+                            f"[cascade] task={task.id} T3 phase begin "
+                            f"(local_T2_PASS={local_t2} global_T2_PASS={global_t2})"
+                        )
+                        phase_result = await _run_cascade_phase(
+                            db, task, run, brain, mining_agent, operators,
+                            tier=3, max_rounds=settings.CASCADE_T3_ROUNDS,
+                        )
+                        total_alphas += phase_result["alphas_added"]
+                        if phase_result["paused"]:
+                            break
+                    else:
+                        logger.info(
+                            f"[cascade] task={task.id} T3 phase SKIP: seed shortage"
+                        )
+
+                # Cascade round complete — increment + reset to T1
+                task.cascade_round_idx += 1
+                task.cascade_phase = "T1"
+                await db.commit()
+                logger.info(
+                    f"[cascade] task={task.id} round {task.cascade_round_idx} complete; "
+                    f"total alphas this session: {total_alphas}"
+                )
+
+    # Loop exited: PAUSED / STOPPED. Run is wrapped up but task stays in
+    # PAUSED state (V-19.4 resume_session can re-dispatch a new worker).
+    if run is not None:
+        run.status = "COMPLETED"
+        run.finished_at = datetime.utcnow()
+    await db.commit()
+
+    logger.info(
+        f"[cascade] task={task.id} worker exiting; final phase={task.cascade_phase} "
+        f"round_idx={task.cascade_round_idx} total_alphas={total_alphas}"
+    )
+    return {
+        "success": True,
+        "mode": "CONTINUOUS_CASCADE",
+        "alphas_mined": total_alphas,
+        "final_phase": task.cascade_phase,
+        "final_round_idx": task.cascade_round_idx,
+    }

@@ -65,4 +65,18 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_phase3_readiness_check",
         "schedule": crontab(day_of_week="mon", hour=4, minute=0),
     },
+    # V-19.7: revive dead CONTINUOUS_CASCADE sessions. Detects worker crash /
+    # silent stalls via task.last_alpha_persisted_at < NOW()-15min and
+    # re-dispatches a fresh celery worker. Grace period skips fresh sessions.
+    "watchdog-revive-dead-sessions": {
+        "task": "backend.tasks.watchdog_revive_dead_sessions",
+        "schedule": 300,   # every 5 minutes (in seconds)
+    },
+    # V-19.7: BRAIN daily simulate quota guard. Counts today's alpha rows;
+    # at >= 90% of BRAIN_DAILY_SIMULATE_LIMIT pauses every active
+    # CONTINUOUS_CASCADE session to avoid hitting BRAIN rate-limit walls.
+    "quota-guard-pause-at-threshold": {
+        "task": "backend.tasks.quota_guard_pause_at_threshold",
+        "schedule": 600,   # every 10 minutes
+    },
 }

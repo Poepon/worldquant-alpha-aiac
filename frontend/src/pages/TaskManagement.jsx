@@ -25,11 +25,25 @@ import {
   PlayCircleOutlined,
   PauseCircleOutlined,
   EyeOutlined,
+  RocketOutlined,
 } from '@ant-design/icons'
 import api from '../services/api'
 
-const { Title } = Typography
+const { Title, Text } = Typography
 const { Option } = Select
+
+// V-19 Persistent Mining Service: backend supports these regions
+// (TaskService.SUPPORTED_REGIONS). Single button per region; backend
+// enforces singleton via partial unique index.
+const SESSION_REGIONS = ['USA', 'CHN', 'EUR', 'ASI', 'GLB']
+
+const SESSION_REGION_UNIVERSE = {
+  USA: 'TOP3000',
+  CHN: 'TOP2000U',
+  EUR: 'TOP1200',
+  ASI: 'MINVOL1M',
+  GLB: 'TOP3000',
+}
 
 
 // Region to Universe mapping
@@ -75,10 +89,58 @@ export default function TaskManagement() {
   const [selectedRegion, setSelectedRegion] = useState('USA')
   const [agentMode, setAgentMode] = useState('AUTONOMOUS')
 
+  // V-19: persistent mining service — primary single-button surface
+  const [sessionRegion, setSessionRegion] = useState('USA')
+
   const [form] = Form.useForm()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
+
+  // V-19: poll all active mining sessions (one per region, max 5).
+  // Refresh interval = 5s so cascade_phase / round_idx / progress stay live.
+  const { data: miningSessions } = useQuery({
+    queryKey: ['mining-sessions'],
+    queryFn: api.listMiningSessions,
+    refetchInterval: 5000,
+  })
+
+  const sessionByRegion = useMemo(() => {
+    const map = {}
+    for (const s of miningSessions || []) {
+      map[s.region] = s
+    }
+    return map
+  }, [miningSessions])
+
+  const startSessionMutation = useMutation({
+    mutationFn: api.startMiningSession,
+    onSuccess: (data) => {
+      message.success(`挖掘服务已启动 (${data.region})`)
+      queryClient.invalidateQueries(['mining-sessions'])
+      queryClient.invalidateQueries(['tasks'])
+    },
+    onError: (err) => {
+      const detail = err?.response?.data?.detail || err.message
+      message.error(`启动失败: ${detail}`)
+    },
+  })
+
+  const stopSessionMutation = useMutation({
+    mutationFn: api.stopMiningSession,
+    onSuccess: () => {
+      message.success('已发送暂停信号 (worker 跑完当前 round 后退出)')
+      queryClient.invalidateQueries(['mining-sessions'])
+    },
+  })
+
+  const resumeSessionMutation = useMutation({
+    mutationFn: api.resumeMiningSession,
+    onSuccess: () => {
+      message.success('已恢复挖掘')
+      queryClient.invalidateQueries(['mining-sessions'])
+    },
+  })
 
   // Fetch tasks
   const { data: tasks, isLoading } = useQuery({
@@ -271,22 +333,164 @@ export default function TaskManagement() {
     },
   ]
 
+  // V-19: derive primary session info for the selected region
+  const primarySession = sessionByRegion[sessionRegion] || null
+  const isPrimaryRunning = primarySession?.status === 'RUNNING'
+  const isPrimaryPaused = primarySession?.status === 'PAUSED'
+
+  const handlePrimaryStart = () => {
+    if (isPrimaryRunning) {
+      // Already running — no-op, idempotent on backend
+      return
+    }
+    if (isPrimaryPaused) {
+      resumeSessionMutation.mutate(primarySession.task_id)
+      return
+    }
+    startSessionMutation.mutate({
+      region: sessionRegion,
+      universe: SESSION_REGION_UNIVERSE[sessionRegion] || 'TOP3000',
+    })
+  }
+
+  const handlePrimaryStop = () => {
+    if (!primarySession || !isPrimaryRunning) return
+    stopSessionMutation.mutate(primarySession.task_id)
+  }
+
   return (
     <div>
+      {/* V-19 Persistent Mining Service — primary single-button surface */}
+      <Card
+        className="glass-card"
+        style={{ marginBottom: 24 }}
+        title={
+          <Space>
+            <RocketOutlined style={{ color: '#00d4ff' }} />
+            <span>挖掘服务 (持续运行)</span>
+          </Space>
+        }
+        extra={
+          <Select
+            value={sessionRegion}
+            onChange={setSessionRegion}
+            style={{ width: 110 }}
+          >
+            {SESSION_REGIONS.map((r) => (
+              <Option key={r} value={r}>{r}</Option>
+            ))}
+          </Select>
+        }
+      >
+        <Row gutter={24} align="middle">
+          <Col flex="0 0 auto">
+            {!isPrimaryRunning ? (
+              <Button
+                type="primary"
+                size="large"
+                icon={<PlayCircleOutlined />}
+                onClick={handlePrimaryStart}
+                loading={
+                  startSessionMutation.isLoading || resumeSessionMutation.isLoading
+                }
+                style={{ minWidth: 140, height: 56, fontSize: 18 }}
+              >
+                {isPrimaryPaused ? '恢复' : '启动'}
+              </Button>
+            ) : (
+              <Button
+                danger
+                size="large"
+                icon={<PauseCircleOutlined />}
+                onClick={handlePrimaryStop}
+                loading={stopSessionMutation.isLoading}
+                style={{ minWidth: 140, height: 56, fontSize: 18 }}
+              >
+                暂停
+              </Button>
+            )}
+          </Col>
+          <Col flex="auto">
+            {primarySession ? (
+              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <Space>
+                  <Tag color={isPrimaryRunning ? 'processing' : 'warning'}>
+                    {primarySession.status}
+                  </Tag>
+                  <Text strong>Phase: {primarySession.cascade_phase || '—'}</Text>
+                  <Text type="secondary">
+                    Cascade round #{primarySession.cascade_round_idx}
+                  </Text>
+                </Space>
+                <Space size={16}>
+                  <Text type="secondary">
+                    Task: <a onClick={() => navigate(`/tasks/${primarySession.task_id}`)}>
+                      #{primarySession.task_id}
+                    </a>
+                  </Text>
+                  <Text type="secondary">
+                    Universe: {primarySession.universe}
+                  </Text>
+                  <Text type="secondary">
+                    Last alpha:{' '}
+                    {primarySession.last_alpha_persisted_at
+                      ? new Date(primarySession.last_alpha_persisted_at).toLocaleTimeString()
+                      : '—'}
+                  </Text>
+                </Space>
+              </Space>
+            ) : (
+              <Text type="secondary">
+                {sessionRegion} 区域暂无活动会话。点击启动开始持续挖掘 — 服务会自动循环 T1 → T2 → T3 阶段。
+              </Text>
+            )}
+          </Col>
+        </Row>
+
+        {/* Multi-region sub-row: tiny status pills for non-primary regions
+            so the user can spot if other regions also have active sessions */}
+        {(miningSessions && miningSessions.length > 0) && (
+          <Row style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid rgba(255,255,255,0.06)' }}>
+            <Col span={24}>
+              <Space wrap size={8}>
+                <Text type="secondary" style={{ fontSize: 12 }}>所有活动会话:</Text>
+                {SESSION_REGIONS.map((r) => {
+                  const s = sessionByRegion[r]
+                  if (!s) return null
+                  const tagColor =
+                    s.status === 'RUNNING' ? 'processing' :
+                    s.status === 'PAUSED' ? 'warning' : 'default'
+                  return (
+                    <Tag
+                      key={r}
+                      color={tagColor}
+                      style={{ cursor: 'pointer' }}
+                      onClick={() => setSessionRegion(r)}
+                    >
+                      {r}: {s.status} · phase {s.cascade_phase || '—'} · round {s.cascade_round_idx}
+                    </Tag>
+                  )
+                })}
+              </Space>
+            </Col>
+          </Row>
+        )}
+      </Card>
+
+      {/* Secondary: legacy discrete task surface (now collapsed to advanced) */}
       <Row justify="space-between" align="middle" style={{ marginBottom: 24 }}>
         <Col>
-          <Title level={3} style={{ margin: 0 }}>
+          <Title level={4} style={{ margin: 0 }}>
             <ThunderboltOutlined style={{ marginRight: 12, color: '#00d4ff' }} />
-            任务管理
+            离散任务（高级）
           </Title>
         </Col>
         <Col>
-          <Button 
-            type="primary" 
+          <Button
             icon={<PlusOutlined />}
             onClick={() => setIsModalOpen(true)}
           >
-            创建任务
+            创建离散任务
           </Button>
         </Col>
       </Row>

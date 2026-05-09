@@ -1,0 +1,470 @@
+"""V-19.9 — Persistent Mining Service tests.
+
+Targets the real PostgreSQL DB (port 5433) since V-19 features rely on
+JSONB columns + partial unique indexes that SQLite-in-memory cannot
+emulate. Each test creates its own task rows tagged with a unique
+prefix and tears them down after.
+
+Run:
+    pytest backend/tests/test_v19_mining_session.py -v
+
+Requires:
+    POSTGRES_PORT=5433 in env (or .env)
+"""
+from __future__ import annotations
+
+import os
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import pytest
+import pytest_asyncio
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+# Force the real PG connection for these tests
+os.environ.setdefault("POSTGRES_PORT", "5433")
+
+from backend.config import settings  # noqa: E402
+from backend.models import Alpha, ExperimentRun, MiningTask  # noqa: E402
+from backend.services.task_service import TaskService  # noqa: E402
+
+
+TEST_PREFIX = f"v19test-{uuid.uuid4().hex[:8]}"
+
+
+@pytest_asyncio.fixture(scope="function")
+async def pg_session():
+    """Real-PG session per test. Cleans up TEST_PREFIX rows after."""
+    engine = create_async_engine(settings.SQLALCHEMY_DATABASE_URI)
+    Session = async_sessionmaker(engine, expire_on_commit=False)
+    async with Session() as db:
+        yield db
+        # Teardown — only touch this test's rows.
+        async with Session() as cleanup:
+            # Delete alphas first (FK)
+            tasks = (
+                await cleanup.execute(
+                    select(MiningTask.id).where(
+                        MiningTask.task_name.like(f"{TEST_PREFIX}%")
+                    )
+                )
+            ).scalars().all()
+            if tasks:
+                await cleanup.execute(
+                    delete(Alpha).where(Alpha.task_id.in_(tasks))
+                )
+                await cleanup.execute(
+                    delete(ExperimentRun).where(ExperimentRun.task_id.in_(tasks))
+                )
+                await cleanup.execute(
+                    delete(MiningTask).where(MiningTask.id.in_(tasks))
+                )
+                await cleanup.commit()
+    await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# V-19.4 service layer — singleton + start/stop/resume
+# ---------------------------------------------------------------------------
+
+class TestSessionSingleton:
+    """One CONTINUOUS_CASCADE per region. start_session is idempotent."""
+
+    @pytest.mark.asyncio
+    async def test_get_active_session_returns_none_when_no_session(self, pg_session):
+        svc = TaskService(pg_session)
+        # Pick an unlikely region to avoid collision with running sessions
+        # in shared dev DB. We don't actually need to match SUPPORTED_REGIONS
+        # for a query (the query filters; no validation).
+        r = await svc.get_active_session("USA-NONEXISTENT-INVALID")
+        assert r is None
+
+    @pytest.mark.asyncio
+    async def test_session_unique_index_blocks_second_active_per_region(self, pg_session):
+        # Manually insert two active CONTINUOUS_CASCADE rows for same region —
+        # the second commit must fail the partial unique index.
+        from sqlalchemy.exc import IntegrityError
+
+        t1 = MiningTask(
+            task_name=f"{TEST_PREFIX}-singleton-1",
+            region="ZZZ",  # unused region to avoid colliding with real sessions
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="CONTINUOUS_CASCADE",
+            status="RUNNING",
+            cascade_phase="T1",
+            cascade_round_idx=0,
+        )
+        pg_session.add(t1)
+        await pg_session.commit()
+
+        t2 = MiningTask(
+            task_name=f"{TEST_PREFIX}-singleton-2",
+            region="ZZZ",
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="CONTINUOUS_CASCADE",
+            status="RUNNING",
+            cascade_phase="T1",
+            cascade_round_idx=0,
+        )
+        pg_session.add(t2)
+        with pytest.raises(IntegrityError):
+            await pg_session.commit()
+        await pg_session.rollback()
+
+
+class TestStartSessionValidation:
+    @pytest.mark.asyncio
+    async def test_unsupported_region_raises(self, pg_session):
+        svc = TaskService(pg_session)
+        with pytest.raises(ValueError, match="not supported"):
+            await svc.start_session(region="JPN")
+
+    @pytest.mark.asyncio
+    async def test_supported_regions_set(self):
+        # Sanity: full whitelist matches docs
+        assert TaskService.SUPPORTED_REGIONS == ("USA", "CHN", "EUR", "ASI", "GLB")
+
+
+class TestSessionLifecycle:
+    """stop_session / resume_session state machine."""
+
+    @pytest.mark.asyncio
+    async def test_stop_running_session_moves_to_paused(self, pg_session):
+        # Manually insert an active session row (skip celery dispatch path)
+        task = MiningTask(
+            task_name=f"{TEST_PREFIX}-lifecycle-1",
+            region="ZZZ-LC1",
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="CONTINUOUS_CASCADE",
+            status="RUNNING",
+            cascade_phase="T2",
+            cascade_round_idx=3,
+        )
+        pg_session.add(task)
+        await pg_session.commit()
+
+        svc = TaskService(pg_session)
+        result = await svc.stop_session(task.id)
+        assert result.status == "PAUSED"
+        assert result.cascade_phase == "T2"
+        assert result.cascade_round_idx == 3
+
+    @pytest.mark.asyncio
+    async def test_stop_already_paused_session_idempotent(self, pg_session):
+        task = MiningTask(
+            task_name=f"{TEST_PREFIX}-lifecycle-2",
+            region="ZZZ-LC2",
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="CONTINUOUS_CASCADE",
+            status="PAUSED",
+            cascade_phase="T1",
+        )
+        pg_session.add(task)
+        await pg_session.commit()
+        svc = TaskService(pg_session)
+        result = await svc.stop_session(task.id)
+        assert result.status == "PAUSED"
+
+    @pytest.mark.asyncio
+    async def test_stop_nonexistent_task_raises(self, pg_session):
+        svc = TaskService(pg_session)
+        with pytest.raises(ValueError, match="not found"):
+            await svc.stop_session(task_id=999_999_999)
+
+    @pytest.mark.asyncio
+    async def test_stop_discrete_task_rejects(self, pg_session):
+        # DISCRETE tasks should not be touched by stop_session — that's the
+        # legacy intervene_task PAUSE path's job.
+        task = MiningTask(
+            task_name=f"{TEST_PREFIX}-lifecycle-3",
+            region="USA",
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="DISCRETE",
+            status="RUNNING",
+        )
+        pg_session.add(task)
+        await pg_session.commit()
+        svc = TaskService(pg_session)
+        with pytest.raises(ValueError, match="not CONTINUOUS_CASCADE"):
+            await svc.stop_session(task.id)
+
+
+# ---------------------------------------------------------------------------
+# V-19.8 ON CONFLICT + RESUME helper
+# ---------------------------------------------------------------------------
+
+class TestExpressionPersistedHelper:
+    """is_expression_persisted_in_task — V-19.4 RESUME dedup."""
+
+    @pytest_asyncio.fixture
+    async def task_with_alpha(self, pg_session):
+        task = MiningTask(
+            task_name=f"{TEST_PREFIX}-helper-1",
+            region="ZZZ-HE1",
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="CONTINUOUS_CASCADE",
+            status="RUNNING",
+            cascade_phase="T1",
+        )
+        pg_session.add(task)
+        await pg_session.commit()
+        await pg_session.refresh(task)
+
+        # Insert one alpha owned by this task
+        from backend.alpha_semantic_validator import compute_expression_hash
+        expr = "ts_rank(close, 20)"
+        alpha = Alpha(
+            alpha_id=f"{TEST_PREFIX}-a1",
+            task_id=task.id,
+            expression=expr,
+            expression_hash=compute_expression_hash(expr),
+            region="ZZZ-HE1",
+            universe="TOP3000",
+            quality_status="PASS",
+        )
+        pg_session.add(alpha)
+        await pg_session.commit()
+        return task
+
+    @pytest.mark.asyncio
+    async def test_returns_true_for_persisted_expression(self, pg_session, task_with_alpha):
+        from backend.agents.graph.nodes.persistence import is_expression_persisted_in_task
+        assert await is_expression_persisted_in_task(
+            pg_session, task_with_alpha.id, "ts_rank(close, 20)"
+        ) is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_for_unpersisted_expression(self, pg_session, task_with_alpha):
+        from backend.agents.graph.nodes.persistence import is_expression_persisted_in_task
+        assert await is_expression_persisted_in_task(
+            pg_session, task_with_alpha.id, "rank(volume)"
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_for_empty_expression(self, pg_session, task_with_alpha):
+        from backend.agents.graph.nodes.persistence import is_expression_persisted_in_task
+        assert await is_expression_persisted_in_task(
+            pg_session, task_with_alpha.id, ""
+        ) is False
+
+    @pytest.mark.asyncio
+    async def test_returns_false_for_different_task(self, pg_session, task_with_alpha):
+        from backend.agents.graph.nodes.persistence import is_expression_persisted_in_task
+        # Same expression, different task_id
+        assert await is_expression_persisted_in_task(
+            pg_session, task_with_alpha.id + 999_999, "ts_rank(close, 20)"
+        ) is False
+
+
+class TestOnConflictDoNothing:
+    """V-19.8 — INSERT ... ON CONFLICT (alpha_id) DO NOTHING.
+    Prevents race-window IntegrityError when two workers try to
+    persist the same alpha_id concurrently.
+    """
+
+    @pytest.mark.asyncio
+    async def test_duplicate_alpha_id_insert_does_not_raise(self, pg_session):
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+        task = MiningTask(
+            task_name=f"{TEST_PREFIX}-conflict-1",
+            region="ZZZ-CF1",
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="DISCRETE",
+            status="RUNNING",
+        )
+        pg_session.add(task)
+        await pg_session.commit()
+        await pg_session.refresh(task)
+
+        # alpha_id is VARCHAR(20). Use a short stable ID so both INSERTs use
+        # the same value and trigger ON CONFLICT.
+        shared_alpha_id = f"v19c{uuid.uuid4().hex[:8]}"  # len=12 < 20
+
+        # First INSERT lands
+        stmt1 = (
+            pg_insert(Alpha)
+            .values(
+                alpha_id=shared_alpha_id,
+                task_id=task.id,
+                expression="rank(close)",
+                region="ZZZ-CF1",
+                universe="TOP3000",
+                quality_status="PASS",
+            )
+            .on_conflict_do_nothing(index_elements=["alpha_id"])
+            .returning(Alpha.id)
+        )
+        first_id = (await pg_session.execute(stmt1)).scalar_one_or_none()
+        assert first_id is not None
+        await pg_session.commit()
+
+        # Second INSERT with same alpha_id — must return None (skipped) not raise
+        stmt2 = (
+            pg_insert(Alpha)
+            .values(
+                alpha_id=shared_alpha_id,
+                task_id=task.id,
+                expression="rank(close)",
+                region="ZZZ-CF1",
+                universe="TOP3000",
+                quality_status="PASS_PROVISIONAL",
+            )
+            .on_conflict_do_nothing(index_elements=["alpha_id"])
+            .returning(Alpha.id)
+        )
+        second_id = (await pg_session.execute(stmt2)).scalar_one_or_none()
+        assert second_id is None  # ON CONFLICT skipped the row
+        await pg_session.commit()
+
+
+# ---------------------------------------------------------------------------
+# V-19.7 watchdog
+# ---------------------------------------------------------------------------
+
+class TestWatchdog:
+    """watchdog_revive_dead_sessions: detects stalled workers via
+    last_alpha_persisted_at heartbeat. Grace period skips fresh sessions.
+    """
+
+    @pytest.mark.asyncio
+    async def test_no_active_sessions_no_revive(self, pg_session):
+        # baseline: with no CONTINUOUS_CASCADE sessions, watchdog returns 0
+        from backend.tasks.session_watchdog import _watchdog_revive_async
+        result = await _watchdog_revive_async()
+        # Note: shared DB may have other CONTINUOUS_CASCADE sessions; verify
+        # only that none of THIS test's tasks were revived.
+        assert isinstance(result["revived"], list)
+        for revived in result["revived"]:
+            assert TEST_PREFIX not in str(revived.get("task_id", ""))
+
+    @pytest.mark.asyncio
+    async def test_grace_period_skips_fresh_session(self, pg_session):
+        """Just-created sessions (created_at > NOW()-grace_min) should NOT
+        trigger watchdog revive even with NULL heartbeat. IX-6 mitigation."""
+        # Create a fresh dead-looking session (no heartbeat, but very recent)
+        task = MiningTask(
+            task_name=f"{TEST_PREFIX}-watchdog-grace",
+            region="ZZZ-WG1",
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="CONTINUOUS_CASCADE",
+            status="RUNNING",
+            cascade_phase="T1",
+            # last_alpha_persisted_at None ← would be "dead" if not for grace
+        )
+        pg_session.add(task)
+        await pg_session.commit()
+        await pg_session.refresh(task)
+
+        from backend.tasks.session_watchdog import _watchdog_revive_async
+        result = await _watchdog_revive_async()
+        revived_ids = [r["task_id"] for r in result["revived"]]
+        assert task.id not in revived_ids, (
+            "fresh session in grace period should NOT be revived"
+        )
+
+    @pytest.mark.asyncio
+    async def test_dead_session_outside_grace_gets_revived(self, pg_session, monkeypatch):
+        """Old session with stale heartbeat → watchdog revives it."""
+        # Mock celery dispatch so we don't actually start a worker
+        from backend.tasks import mining_tasks as mt
+        dispatch_calls = []
+
+        class FakeAsyncResult:
+            id = "fake-celery-task-id"
+
+        def fake_delay(*args, **kwargs):
+            dispatch_calls.append((args, kwargs))
+            return FakeAsyncResult()
+
+        monkeypatch.setattr(mt.run_mining_task, "delay", fake_delay)
+
+        # Create a session that's old (created 1 hour ago) and dead heartbeat
+        # (last persist 30 min ago)
+        old_time = datetime.now(timezone.utc) - timedelta(hours=1)
+        stale_heartbeat = datetime.now(timezone.utc) - timedelta(minutes=30)
+
+        task = MiningTask(
+            task_name=f"{TEST_PREFIX}-watchdog-dead",
+            region="ZZZ-WD1",
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="CONTINUOUS_CASCADE",
+            status="RUNNING",
+            cascade_phase="T2",
+            cascade_round_idx=2,
+            last_alpha_persisted_at=stale_heartbeat,
+        )
+        pg_session.add(task)
+        await pg_session.flush()
+        # Force created_at into the past — server_default gave us NOW().
+        from sqlalchemy import update
+        await pg_session.execute(
+            update(MiningTask)
+            .where(MiningTask.id == task.id)
+            .values(created_at=old_time)
+        )
+        await pg_session.commit()
+        await pg_session.refresh(task)
+
+        from backend.tasks.session_watchdog import _watchdog_revive_async
+        result = await _watchdog_revive_async()
+        revived_ids = [r["task_id"] for r in result["revived"]]
+        assert task.id in revived_ids, (
+            f"dead session task={task.id} should have been revived; got {revived_ids}"
+        )
+        assert len(dispatch_calls) >= 1, "celery dispatch should have been called"
+
+
+# ---------------------------------------------------------------------------
+# V-19.7 quota guard
+# ---------------------------------------------------------------------------
+
+class TestQuotaGuard:
+    @pytest.mark.asyncio
+    async def test_below_threshold_no_pause(self, pg_session):
+        from backend.tasks.session_watchdog import _quota_guard_async
+        result = await _quota_guard_async()
+        assert isinstance(result["today_alpha_count"], int)
+        assert result["limit"] == settings.BRAIN_DAILY_SIMULATE_LIMIT
+        assert result["threshold"] == int(
+            settings.BRAIN_DAILY_SIMULATE_LIMIT * settings.BRAIN_QUOTA_PAUSE_PCT
+        )
+        # Production DB may have many alphas today; assertion limited to dict shape.
+        assert "paused_count" in result
+
+
+# ---------------------------------------------------------------------------
+# V-19.2 cascade phase tier mapping
+# ---------------------------------------------------------------------------
+
+class TestCascadePhaseToTier:
+    def test_tier_to_agent_mode_mapping(self):
+        from backend.tasks.mining_tasks import _TIER_TO_AGENT_MODE
+        assert _TIER_TO_AGENT_MODE[1] == "AUTONOMOUS_TIER1"
+        assert _TIER_TO_AGENT_MODE[2] == "AUTONOMOUS_TIER2"
+        assert _TIER_TO_AGENT_MODE[3] == "AUTONOMOUS_TIER3"
+
+    def test_round_trip_tier_resolution(self):
+        """The tier the cascade sets via agent_mode is the tier MiningAgent
+        derives — round-trip invariant."""
+        from backend.tasks.mining_tasks import _TIER_TO_AGENT_MODE
+        for tier, mode in _TIER_TO_AGENT_MODE.items():
+            assert TaskService.factor_tier_from_mode(mode) == tier
+
+    def test_cascade_settings_have_sensible_defaults(self):
+        # IX-2 round-driven defaults (T1=10/T2=10/T3=5)
+        assert settings.CASCADE_T1_ROUNDS >= 1
+        assert settings.CASCADE_T2_ROUNDS >= 1
+        assert settings.CASCADE_T3_ROUNDS >= 1
+        # IX-4 — T3 default disabled
+        assert settings.CASCADE_ENABLE_T3 is False

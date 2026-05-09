@@ -42,6 +42,11 @@ from backend.tasks.sync_tasks import (
 from backend.tasks.refresh_tasks import refresh_kb_referenced_alphas
 # Phase 3 prep T02: weekly readiness check
 from backend.tasks.phase3_tasks import run_phase3_readiness_check
+# V-19.7: persistent mining service watchdog + BRAIN quota guard
+from backend.tasks.session_watchdog import (
+    watchdog_revive_dead_sessions,
+    quota_guard_pause_at_threshold,
+)
 
 __all__ = [
     # Utilities
@@ -62,4 +67,7 @@ __all__ = [
     "refresh_os_correlation_cache",
     # PR2: tier system
     "refresh_kb_referenced_alphas",
+    # V-19.7: persistent mining service watchdog
+    "watchdog_revive_dead_sessions",
+    "quota_guard_pause_at_threshold",
 ]

@@ -1,13 +1,14 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { 
-  Row, 
-  Col, 
-  Card, 
-  Statistic, 
-  Progress, 
-  Typography, 
-  Tag, 
+import { useNavigate } from 'react-router-dom'
+import {
+  Row,
+  Col,
+  Card,
+  Statistic,
+  Progress,
+  Typography,
+  Tag,
   List,
   Space,
   Spin,
@@ -44,6 +45,16 @@ const mockPnLData = [
 
 export default function Dashboard() {
   const [liveFeed, setLiveFeed] = useState([])
+  const navigate = useNavigate()
+
+  // V-19.6: persistent mining sessions (1 per region max). Show as small
+  // badges next to the page title. Click a badge to jump to TaskManagement
+  // for control. Polled every 5s to stay in sync with the run loop.
+  const { data: miningSessions } = useQuery({
+    queryKey: ['mining-sessions'],
+    queryFn: api.listMiningSessions,
+    refetchInterval: 5000,
+  })
 
   // Fetch daily stats
   const { data: dailyStats, isLoading: statsLoading } = useQuery({
@@ -97,10 +108,46 @@ export default function Dashboard() {
 
   return (
     <div>
-      <Title level={3} style={{ marginBottom: 24 }}>
-        <RocketOutlined style={{ marginRight: 12, color: '#00d4ff' }} />
-        仪表盘
-      </Title>
+      <Row justify="space-between" align="middle" style={{ marginBottom: 24 }}>
+        <Col>
+          <Title level={3} style={{ margin: 0 }}>
+            <RocketOutlined style={{ marginRight: 12, color: '#00d4ff' }} />
+            仪表盘
+          </Title>
+        </Col>
+        <Col>
+          {/* V-19.6 mining session badges. Click to jump to TaskManagement
+              where the user can start/stop/resume. Empty when no region has
+              an active CONTINUOUS_CASCADE session. */}
+          <Space wrap size={8}>
+            {(miningSessions && miningSessions.length > 0) ? (
+              miningSessions.map((s) => {
+                const tagColor =
+                  s.status === 'RUNNING' ? 'processing' :
+                  s.status === 'PAUSED' ? 'warning' : 'default'
+                return (
+                  <Tag
+                    key={s.task_id}
+                    color={tagColor}
+                    icon={<ThunderboltOutlined />}
+                    style={{ cursor: 'pointer', fontSize: 13, padding: '4px 10px' }}
+                    onClick={() => navigate('/tasks')}
+                  >
+                    {s.region} · {s.status} · {s.cascade_phase || '—'} · #{s.cascade_round_idx}
+                  </Tag>
+                )
+              })
+            ) : (
+              <Tag
+                style={{ cursor: 'pointer' }}
+                onClick={() => navigate('/tasks')}
+              >
+                挖掘服务: 未启动 — 点此前往启动
+              </Tag>
+            )}
+          </Space>
+        </Col>
+      </Row>
 
       {/* Top Row: Goal + Active Task + System Health */}
       <Row gutter={[16, 16]}>
