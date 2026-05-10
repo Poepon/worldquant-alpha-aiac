@@ -556,7 +556,7 @@ class TestV1910Fixups:
         assert settings.CASCADE_PIPELINE_ENABLED is True
 
     def test_V20_helpers_present(self):
-        """V-20: per-round helpers + pipeline coordination present."""
+        """V-20 / V-20.1: per-round helpers + pipeline coordination present."""
         from backend.tasks import mining_tasks
         # Per-round helpers
         assert hasattr(mining_tasks, "_run_one_round_inline")
@@ -566,8 +566,28 @@ class TestV1910Fixups:
         src = inspect.getsource(mining_tasks._run_cascade_phase)
         assert "asyncio.create_task" in src
         assert "_prefetch_round_isolated" in src
-        # Cancel logic for pause path
-        assert "pending.cancel" in src
+        # Cancel logic for pause path (V-20.1: current/next_task instead
+        # of single pending var). Either variable being cancellable suffices.
+        assert ".cancel()" in src
+
+    def test_V201_schedules_next_before_awaiting_current(self):
+        """V-20.1: critical ordering invariant. The next-round task MUST be
+        spawned BEFORE we await the current round, else the main loop
+        blocks on prefetch and the pipeline degenerates to serial.
+        Trace_steps from V-20 production showed exactly this regression."""
+        import inspect
+        from backend.tasks import mining_tasks
+        src = inspect.getsource(mining_tasks._run_cascade_phase)
+        idx_schedule = src.find("next_task = _spawn(i + 1)")
+        idx_await = src.find("result = await current")
+        assert idx_schedule > 0 and idx_await > 0, (
+            "V-20.1 markers missing — code structure changed"
+        )
+        assert idx_schedule < idx_await, (
+            "regression: V-20.1 ordering violated. The schedule of "
+            "next_task MUST appear before the await of current; otherwise "
+            "the pipeline runs serially."
+        )
 
     def test_V20_prefetch_uses_isolated_session(self):
         """V-20: prefetch_round MUST open its own AsyncSessionLocal (not

@@ -739,8 +739,6 @@ async def _run_cascade_phase(
     alphas_added = 0
     rounds_run = 0
     paused = False
-    pending: "asyncio.Task | None" = None
-    pending_label = ""
 
     async def _stamp_heartbeat() -> None:
         # V-19.10 H1: heartbeat at every round boundary regardless of PASS count.
@@ -755,77 +753,109 @@ async def _run_cascade_phase(
         except Exception as _e:
             logger.warning(f"[cascade T{tier}] heartbeat update failed: {_e}")
 
-    async def _cancel_pending(reason: str) -> None:
-        nonlocal pending
-        if pending and not pending.done():
-            logger.info(f"[cascade T{tier}] cancelling pending {pending_label}: {reason}")
-            pending.cancel()
-            try:
-                await pending
-            except (asyncio.CancelledError, Exception):
-                pass
-        pending = None
-
-    for i, dataset_id in enumerate(round_plan):
-        # Pause check before doing new work
-        await db.refresh(task)
-        if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-            paused = True
-            await _cancel_pending("task paused")
-            break
-
-        # Get current round result
-        if pending is None:
-            # First round, or pipeline disabled — run inline
+    # V-20.1 (2026-05-10) FIX: V-20 originally scheduled the next-round
+    # prefetch AFTER awaiting the current round, which made the main loop
+    # block on the prefetch task (= effectively serial — confirmed via
+    # trace_steps showing zero overlap between round N's SAVE and round
+    # N+1's RAG). The pipeline only delivers throughput when at least
+    # 2 rounds are in-flight simultaneously. Scheduling pattern:
+    #   1. pre-schedule round 0 task before entering the loop
+    #   2. inside loop: schedule round i+1 task BEFORE awaiting round i
+    # That keeps `current` and `next` running in parallel — when current
+    # finishes (BRAIN sim done), next is already through LLM/CODE_GEN
+    # and queued at the BRAIN slot semaphore.
+    if not pipeline_enabled or len(round_plan) == 0:
+        # Serial fallback — kept for compatibility / debugging
+        for dataset_id in round_plan:
+            await db.refresh(task)
+            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+                paused = True
+                break
             result = await _run_one_round_inline(
                 db, task, run, brain, mining_agent, operators,
                 dataset_id=dataset_id, tier=tier,
             )
-        else:
-            try:
-                result = await pending
-                logger.info(
-                    f"[cascade T{tier}] consumed prefetched {pending_label} "
-                    f"alphas={len(result.get('all_alphas', []))} "
-                    f"iters={result.get('iterations_completed')}"
-                )
-            except asyncio.CancelledError:
-                result = {"all_alphas": [], "iterations_completed": 0}
-            except Exception as e:
-                logger.error(f"[cascade T{tier}] prefetched {pending_label} failed: {e}")
-                result = {"all_alphas": [], "iterations_completed": 0}
-            pending = None
+            rounds_run += int(result.get("iterations_completed") or 0)
+            alphas_added += len(result.get("all_alphas", []))
+            await _stamp_heartbeat()
+        return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
+
+    # V-20.1 pipeline path — two-deep lookahead.
+    def _spawn(idx: int) -> "asyncio.Task":
+        ds = round_plan[idx]
+        return asyncio.create_task(
+            _prefetch_round_isolated(task.id, run.id, ds, tier),
+            name=f"cascade-T{tier}-R{idx}-{ds}",
+        )
+
+    # Pre-schedule round 0
+    current: "asyncio.Task | None" = _spawn(0)
+    current_label = f"R0-{round_plan[0]}"
+    next_task: "asyncio.Task | None" = None
+    next_label = ""
+
+    for i, dataset_id in enumerate(round_plan):
+        # PAUSE check before scheduling next
+        await db.refresh(task)
+        if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+            paused = True
+            for t, label in ((current, current_label), (next_task, next_label)):
+                if t and not t.done():
+                    logger.info(f"[cascade T{tier}] cancelling {label} (paused)")
+                    t.cancel()
+                    try:
+                        await t
+                    except (asyncio.CancelledError, Exception):
+                        pass
+            break
+
+        # SCHEDULE NEXT ROUND BEFORE AWAITING CURRENT — V-20.1 key change.
+        # next_task starts running immediately; while we await current's
+        # SIMULATE step (BRAIN-IO bound), next_task progresses through
+        # LLM stage and queues at the BRAIN slot semaphore.
+        if i + 1 < len(round_plan) and next_task is None:
+            next_task = _spawn(i + 1)
+            next_label = f"R{i+1}-{round_plan[i+1]}"
+
+        # Await current round
+        try:
+            result = await current
+            logger.info(
+                f"[cascade T{tier}] consumed {current_label} "
+                f"alphas={len(result.get('all_alphas', []))} "
+                f"iters={result.get('iterations_completed')}"
+            )
+        except asyncio.CancelledError:
+            result = {"all_alphas": [], "iterations_completed": 0}
+        except Exception as e:
+            logger.error(f"[cascade T{tier}] {current_label} failed: {e}")
+            result = {"all_alphas": [], "iterations_completed": 0}
 
         rounds_run += int(result.get("iterations_completed") or 0)
         alphas_added += len(result.get("all_alphas", []))
         await _stamp_heartbeat()
 
-        # Schedule next round prefetch (if not last and pipeline on)
-        if pipeline_enabled and i + 1 < len(round_plan):
+        # Promote next → current; schedule a fresh next if budget remaining
+        current = next_task
+        current_label = next_label
+        next_task = None
+        next_label = ""
+
+        # If pipeline still has work past i+1, immediately schedule i+2 so
+        # there are always 2 rounds in flight (until budget exhausts).
+        if i + 2 < len(round_plan):
             await db.refresh(task)
             if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
                 paused = True
+                if current and not current.done():
+                    current.cancel()
+                    try:
+                        await current
+                    except (asyncio.CancelledError, Exception):
+                        pass
                 break
-            next_ds = round_plan[i + 1]
-            pending_label = f"R{i+1}-{next_ds}"
-            pending = asyncio.create_task(
-                _prefetch_round_isolated(task.id, run.id, next_ds, tier),
-                name=f"cascade-prefetch-T{tier}-{next_ds}-{i+1}",
-            )
-
-    # End of phase: drain any pending prefetch
-    if pending and not pending.done():
-        try:
-            tail = await pending
-            rounds_run += int(tail.get("iterations_completed") or 0)
-            alphas_added += len(tail.get("all_alphas", []))
-            logger.info(
-                f"[cascade T{tier}] drained final prefetch {pending_label} "
-                f"alphas={len(tail.get('all_alphas', []))}"
-            )
-            await _stamp_heartbeat()
-        except (asyncio.CancelledError, Exception) as e:
-            logger.warning(f"[cascade T{tier}] final pending drain failed: {e}")
+            next_task = _spawn(i + 2)
+            next_label = f"R{i+2}-{round_plan[i+2]}"
 
     return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
 
