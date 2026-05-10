@@ -570,6 +570,61 @@ class TestV1910Fixups:
         # of single pending var). Either variable being cancellable suffices.
         assert ".cancel()" in src
 
+    def test_V21_diversity_mandate_in_system_prompt(self):
+        """V-21: T1_STRATEGY_SYSTEM must enforce family-diversity to prevent
+        the RETURNS-monoculture observed in 1hr V-20.1 production data."""
+        from backend.agents.prompts.strategy_prompts import T1_STRATEGY_SYSTEM
+        assert "FAMILY DIVERSITY MANDATE" in T1_STRATEGY_SYSTEM
+        assert "at least 3 distinct field families" in T1_STRATEGY_SYSTEM
+        # The system prompt should enumerate family taxonomy
+        for fam in ("RETURNS", "FUNDAMENTAL", "ANALYST", "SENTIMENT",
+                    "FACTOR_COMPOSITE", "OPTION", "PRICE_PV"):
+            assert fam in T1_STRATEGY_SYSTEM, f"family {fam} missing from T1 mandate"
+
+    def test_V21_alert_fires_when_patterns_concentrated(self):
+        """V-21: when >50% of recent success_patterns are in one family,
+        the user prompt must emit a DIVERSITY ALERT block calling it out."""
+        from backend.agents.prompts.strategy_prompts import build_t1_strategy_user_prompt
+        prompt = build_t1_strategy_user_prompt(
+            dataset_id="pv1", region="USA",
+            available_fields=[{"id": "returns", "type": "MATRIX", "coverage": 1.0}],
+            success_patterns=[
+                {"pattern": "multiply(-1, ts_decay_linear(returns, 5))", "expected_sharpe": 1.5},
+                {"pattern": "multiply(-1, ts_decay_linear(returns, 10))", "expected_sharpe": 1.4},
+                {"pattern": "multiply(-1, ts_mean(returns, 5))", "expected_sharpe": 1.3},
+                {"pattern": "ts_zscore(close, 20)", "expected_sharpe": 1.0},
+            ],
+        )
+        assert "V-21 DIVERSITY ALERT" in prompt
+        assert "RETURNS" in prompt
+        # Family tag must appear before each pattern (visible to LLM)
+        assert "[RETURNS]" in prompt
+
+    def test_V21_alert_silent_when_patterns_balanced(self):
+        """V-21: balanced family distribution should NOT emit the alert
+        (otherwise LLM gets noise for healthy state)."""
+        from backend.agents.prompts.strategy_prompts import build_t1_strategy_user_prompt
+        prompt = build_t1_strategy_user_prompt(
+            dataset_id="pv1", region="USA",
+            available_fields=[{"id": "returns", "type": "MATRIX"}],
+            success_patterns=[
+                {"pattern": "ts_decay_linear(returns, 5)"},
+                {"pattern": "ts_zscore(fnd6_revenue, 20)"},
+                {"pattern": "ts_rank(snt_news_buzz, 10)"},
+            ],
+        )
+        assert "V-21 DIVERSITY ALERT" not in prompt
+
+    def test_V21_alert_silent_when_no_patterns(self):
+        """V-21: cold-start (no patterns) should not emit alert."""
+        from backend.agents.prompts.strategy_prompts import build_t1_strategy_user_prompt
+        prompt = build_t1_strategy_user_prompt(
+            dataset_id="pv1", region="USA",
+            available_fields=[{"id": "close", "type": "MATRIX", "coverage": 0.99}],
+            success_patterns=None,
+        )
+        assert "V-21 DIVERSITY ALERT" not in prompt
+
     def test_V201_schedules_next_before_awaiting_current(self):
         """V-20.1: critical ordering invariant. The next-round task MUST be
         spawned BEFORE we await the current round, else the main loop

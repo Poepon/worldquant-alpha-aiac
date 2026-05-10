@@ -64,6 +64,24 @@ Output a JSON object matching the T1Strategy schema:
      coverage forces concentrated positions) and historical mining shows 0%
      of T1 alpha using them passed BRAIN's submission gate.
    - Spread across sub-themes (don't pick 12 variants of the same balance sheet line).
+   - **V-21 FAMILY DIVERSITY MANDATE (HARD)** — promising_fields MUST span
+     **at least 3 distinct field families**. Family classification:
+       1. RETURNS family: `returns`, `ret_*` — short-term price reversal raw
+       2. PRICE_PV family: `close`, `open`, `high`, `low`, `vwap`, `volume`, `amount`, `cap`
+       3. FUNDAMENTAL family: `fnd*_*` — quarterly/annual financials
+       4. ANALYST family: `anl*_*`, `est*_*`, `fam_*` — broker / forecast
+       5. SENTIMENT family: `snt*_*`, `news_*`, `social_*`
+       6. FACTOR_COMPOSITE family: `mdl*_*`, `model_*`, `composite_*`,
+          `*_score_*`, `*_factor_*`, `fscore_*`
+       7. OPTION family: `opt*_*`, `option_*`, IV-derived (avoid in T1 — see CW rule)
+     **History shows the USA T1 PASS pool collapsed to 4/5 RETURNS-family
+     mean-reversion alpha, producing T2 monoculture that BRAIN rejected as
+     CONCENTRATED_WEIGHT / self-correlated.** Picking from ≥3 families forces
+     genuine signal exploration across orthogonal economic mechanisms.
+     If the dataset is fundamental-pure (e.g. fundamental6) or analyst-pure
+     (e.g. analyst4), the families collapse — that's expected; aim for
+     diversity within sub-themes (different fundamental concepts: profitability
+     vs leverage vs growth vs cash-flow).
    - **PHASE 1 MANDATORY** (when selected_datasets has 2+ entries):
      promising_fields MUST include AT LEAST 2 fields from EACH listed
      dataset. Do not concentrate all picks on the anchor — that defeats
@@ -154,13 +172,55 @@ def build_t1_strategy_user_prompt(
         field_lines.append(f"  - {fid}\t({ftype}, cov={cov:.2f}) {desc}")
     fields_block = "\n".join(field_lines) if field_lines else "  (no fields available)"
 
+    # V-21 (2026-05-10): augment patterns with detected family bins so the LLM
+    # sees BOTH "what worked" and "where the existing pool is concentrated"
+    # — this nudges it to explore under-represented families per the
+    # DIVERSITY MANDATE in the system prompt above.
+    def _classify_family(text: str) -> str:
+        t = (text or "").lower()
+        if "returns" in t or "ret_" in t:
+            return "RETURNS"
+        if "fnd" in t:
+            return "FUNDAMENTAL"
+        if "anl" in t or "fam_" in t or "est" in t:
+            return "ANALYST"
+        if "snt" in t or "news" in t or "social" in t:
+            return "SENTIMENT"
+        if "fscore" in t or "model_" in t or "mdl" in t or "composite" in t or "_score_" in t:
+            return "FACTOR_COMPOSITE"
+        if "opt" in t or "implied_vol" in t:
+            return "OPTION"
+        if any(w in t for w in ("close", "open", "high", "low", "vwap", "volume", "amount", "cap")):
+            return "PRICE_PV"
+        return "OTHER"
+
     pattern_lines = []
+    family_counts: Dict[str, int] = {}
     for p in (success_patterns or [])[:6]:
         synth = " (synthesized)" if p.get("is_synthesized") else ""
         sharpe = p.get("expected_sharpe")
         sharpe_str = f", expected_sharpe={sharpe:.2f}" if isinstance(sharpe, (int, float)) else ""
-        pattern_lines.append(f"  - {p.get('pattern','?')}{sharpe_str}{synth}")
+        pattern_text = p.get("pattern", "?")
+        fam = _classify_family(pattern_text)
+        family_counts[fam] = family_counts.get(fam, 0) + 1
+        pattern_lines.append(f"  - [{fam}] {pattern_text}{sharpe_str}{synth}")
     patterns_block = "\n".join(pattern_lines) if pattern_lines else "  (none — cold start)"
+
+    # V-21: emit a family-distribution callout when the patterns are
+    # concentrated. >50% of patterns in one family is a clear signal the
+    # LLM should diversify in this round.
+    diversity_callout = ""
+    if family_counts:
+        total = sum(family_counts.values())
+        top_fam, top_n = max(family_counts.items(), key=lambda kv: kv[1])
+        if total >= 3 and top_n / total > 0.5:
+            other_fams = "FUNDAMENTAL/ANALYST/SENTIMENT/FACTOR_COMPOSITE/PRICE_PV"
+            diversity_callout = (
+                f"\n**V-21 DIVERSITY ALERT** — recent patterns concentrated in "
+                f"{top_fam} ({top_n}/{total}). To break the monoculture, prefer "
+                f"fields from under-represented families this round: "
+                f"{other_fams}.\n"
+            )
 
     feedback_block = ""
     if last_round_feedback:
@@ -215,7 +275,7 @@ Available fields (first 80):
 
 Recent T1 success patterns:
 {patterns_block}
-{feedback_block}{portfolio_block}{high_fit_block}
+{diversity_callout}{feedback_block}{portfolio_block}{high_fit_block}
 Now produce the T1Strategy JSON for this round.
 """
 
