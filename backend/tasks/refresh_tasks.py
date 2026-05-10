@@ -206,13 +206,35 @@ async def _refresh_can_submit_async(alpha_pk: int) -> Dict:
 
             # P1: can_submit=False → 把每个 BRAIN FAIL 写回 RAG pitfall 池，
             # 让下一轮 LLM 能学到「避坑」。同条 alpha 多个 FAIL 各算一个 pitfall。
+            #
+            # V-22 (2026-05-10): also write the BRAIN verdict back into the
+            # SUCCESS_PATTERN entry that owns this alpha's skeleton — closes
+            # the LLM feedback loop so the next round's RAG retrieval can
+            # surface "this skeleton was IS-PASS but BRAIN rejected on
+            # FITNESS/CW/SELF_CORR". Runs for both can_submit=True and
+            # =False (True clears any stale failed_checks; False stamps them).
             kb_recorded = 0
-            if result["can_submit"] is False and result["failed_checks"]:
-                from backend.agents.services.rag_service import RAGService
+            from backend.agents.services.rag_service import RAGService
 
-                alpha = await svc.alpha_repo.get_by_id(alpha_pk)
-                if alpha and alpha.expression:
-                    rag = RAGService(db)
+            alpha = await svc.alpha_repo.get_by_id(alpha_pk)
+            if alpha and alpha.expression:
+                rag = RAGService(db)
+
+                # V-22: brain_status update on the SUCCESS_PATTERN entry
+                try:
+                    await rag.update_pattern_brain_status(
+                        expression=alpha.expression,
+                        can_submit=result["can_submit"],
+                        failed_checks=result.get("failed_checks") or [],
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[refresh_can_submit] V-22 brain_status update failed for "
+                        f"alpha_pk={alpha_pk}: {e}"
+                    )
+
+                # P1: pitfall write (only when can_submit=False)
+                if result["can_submit"] is False and result["failed_checks"]:
                     for chk in result["failed_checks"]:
                         check_name = chk.get("name")
                         if not check_name:

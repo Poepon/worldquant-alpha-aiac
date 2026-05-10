@@ -569,6 +569,11 @@ class RAGService:
                 "source": entry.created_by,
                 "usage_count": entry.usage_count,
                 "factor_tier": entry.factor_tier,
+                # V-22 (2026-05-10): surface BRAIN /check verdict so prompt
+                # can show "BRAIN rejected on X" — gives the LLM real
+                # feedback on submittability, not just IS PASS rate.
+                "brain_can_submit": md.get("brain_can_submit"),
+                "brain_failed_checks": md.get("brain_failed_checks") or [],
             })
 
         # T1 cold-start fallback (PR2): when T1 KB has < 3 entries, synthesize
@@ -640,6 +645,59 @@ class RAGService:
             'mining_weight': dataset.mining_weight
         }
     
+    async def update_pattern_brain_status(
+        self,
+        expression: str,
+        can_submit: Optional[bool],
+        failed_checks: Optional[List[Dict]] = None,
+    ) -> bool:
+        """V-22 (2026-05-10): write BRAIN /check verdict back into the
+        SUCCESS_PATTERN entry whose skeleton matches `expression`. Called by
+        refresh_can_submit_for_alpha after BRAIN sub-check completes.
+
+        This closes the LLM feedback loop: the pattern was recorded as
+        SUCCESS at IS-PASS time, now we tag it with the BRAIN-side verdict
+        so future few-shot retrieval can surface "this looked great but
+        BRAIN rejected on fitness/CW" — the LLM steers away.
+        """
+        from backend.knowledge_extraction import expression_to_skeleton
+        from sqlalchemy.orm.attributes import flag_modified
+
+        if not expression:
+            return False
+        try:
+            skeleton = expression_to_skeleton(expression)
+        except Exception:
+            return False
+
+        stmt = select(KnowledgeEntry).where(
+            KnowledgeEntry.pattern == skeleton,
+            KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
+            KnowledgeEntry.is_active == True,
+        )
+        result = await self.db.execute(stmt)
+        entry = result.scalar_one_or_none()
+        if entry is None:
+            return False
+
+        md = entry.meta_data or {}
+        md["brain_can_submit"] = can_submit
+        # Keep only check name to avoid bloating meta_data
+        md["brain_failed_checks"] = [
+            {"name": c.get("name"), "result": c.get("result")}
+            for c in (failed_checks or [])
+            if c.get("name")
+        ]
+        md["brain_check_at"] = datetime.now().isoformat()
+        entry.meta_data = md
+        flag_modified(entry, "meta_data")
+        await self.db.commit()
+        logger.info(
+            f"[RAGService] V-22 brain_status updated | skeleton={skeleton[:50]} "
+            f"can_submit={can_submit} fails={len(md['brain_failed_checks'])}"
+        )
+        return True
+
     async def increment_pattern_usage(self, pattern: str) -> bool:
         """Increment usage count for a pattern (called on successful use)."""
         query = select(KnowledgeEntry).where(
@@ -851,6 +909,16 @@ class RAGService:
                         'hypothesis_id': hypothesis_id,
                         'hypothesis_ids': [hypothesis_id] if hypothesis_id is not None else [],
                         'experiment_variant': experiment_variant,
+                        # V-22 (2026-05-10) BRAIN feedback to LLM. The pattern
+                        # is recorded at IS-PASS time; refresh_can_submit_for_
+                        # alpha (30s countdown) later updates these fields with
+                        # the BRAIN /check verdict. Retrieval surfaces them in
+                        # the prompt so the LLM can see "this skeleton looked
+                        # great on IS but BRAIN rejected it on fitness/CW/etc."
+                        # and steer away.
+                        'brain_can_submit': None,        # True / False / None (pending)
+                        'brain_failed_checks': [],       # list of {name, ...} from BRAIN
+                        'brain_check_at': None,          # ISO timestamp of last refresh
                     }
                 )
                 self.db.add(new_entry)

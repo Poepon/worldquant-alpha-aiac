@@ -615,6 +615,97 @@ class TestV1910Fixups:
         )
         assert "V-21 DIVERSITY ALERT" not in prompt
 
+    def test_V22_brain_status_in_system_prompt(self):
+        """V-22: T1_STRATEGY_SYSTEM must teach the LLM how to read BRAIN
+        verdict tags (OK/REJECTED/PENDING)."""
+        from backend.agents.prompts.strategy_prompts import T1_STRATEGY_SYSTEM
+        assert "BRAIN FEEDBACK INTERPRETATION" in T1_STRATEGY_SYSTEM
+        assert "BRAIN_OK" in T1_STRATEGY_SYSTEM
+        assert "BRAIN_REJECTED" in T1_STRATEGY_SYSTEM
+        # All 4 BRAIN check categories must be enumerated
+        for fail_kind in ("LOW_FITNESS", "CONCENTRATED_WEIGHT",
+                          "SELF_CORR", "LOW_SUB_UNIVERSE_SHARPE"):
+            assert fail_kind in T1_STRATEGY_SYSTEM
+
+    def test_V22_pattern_tags_render(self):
+        """V-22: patterns from RAG carry brain_can_submit / brain_failed_checks
+        and the prompt translates them to readable tags."""
+        from backend.agents.prompts.strategy_prompts import build_t1_strategy_user_prompt
+        prompt = build_t1_strategy_user_prompt(
+            dataset_id="pv1", region="USA",
+            available_fields=[{"id": "returns", "type": "MATRIX"}],
+            success_patterns=[
+                {"pattern": "ts_zscore(fnd6_revenue, 60)", "expected_sharpe": 1.2,
+                 "brain_can_submit": True, "brain_failed_checks": []},
+                {"pattern": "multiply(-1, ts_decay_linear(returns, 5))",
+                 "expected_sharpe": 1.5,
+                 "brain_can_submit": False,
+                 "brain_failed_checks": [{"name": "LOW_FITNESS"}]},
+                {"pattern": "rank(volume)", "expected_sharpe": 1.0},
+            ],
+        )
+        assert "[BRAIN_OK" in prompt
+        assert "[BRAIN_REJECTED: LOW_FITNESS]" in prompt
+        assert "[BRAIN_PENDING]" in prompt
+
+    def test_V22_alert_fires_when_majority_rejected(self):
+        """V-22: when ≥50% of resolved patterns are BRAIN_REJECTED, prompt
+        emits the REJECTION ALERT — major LLM signal to pivot."""
+        from backend.agents.prompts.strategy_prompts import build_t1_strategy_user_prompt
+        prompt = build_t1_strategy_user_prompt(
+            dataset_id="pv1", region="USA",
+            available_fields=[{"id": "returns", "type": "MATRIX"}],
+            success_patterns=[
+                {"pattern": "multiply(-1, ts_decay_linear(returns, 5))",
+                 "brain_can_submit": False,
+                 "brain_failed_checks": [{"name": "LOW_FITNESS"}]},
+                {"pattern": "multiply(-1, ts_decay_linear(returns, 10))",
+                 "brain_can_submit": False,
+                 "brain_failed_checks": [{"name": "SELF_CORR"}]},
+                {"pattern": "ts_zscore(fnd6_revenue, 60)",
+                 "brain_can_submit": True, "brain_failed_checks": []},
+            ],
+        )
+        assert "V-22 BRAIN-REJECTION ALERT" in prompt
+        assert "2/3" in prompt  # 2 of 3 resolved patterns rejected
+
+    def test_V22_alert_silent_when_pending_only(self):
+        """V-22: PENDING patterns alone shouldn't fire the alert (no verdicts
+        to count yet)."""
+        from backend.agents.prompts.strategy_prompts import build_t1_strategy_user_prompt
+        prompt = build_t1_strategy_user_prompt(
+            dataset_id="pv1", region="USA",
+            available_fields=[{"id": "returns", "type": "MATRIX"}],
+            success_patterns=[
+                {"pattern": "ts_rank(close, 20)"},
+                {"pattern": "ts_mean(volume, 5)"},
+            ],
+        )
+        assert "V-22 BRAIN-REJECTION ALERT" not in prompt
+        # PENDING tag still rendered for visibility
+        assert "[BRAIN_PENDING]" in prompt
+
+    def test_V22_update_pattern_brain_status_helper_exists(self):
+        """V-22: rag_service.update_pattern_brain_status is the write path
+        called by refresh_can_submit_for_alpha — must exist + be async."""
+        import inspect
+        from backend.agents.services.rag_service import RAGService
+        m = getattr(RAGService, "update_pattern_brain_status", None)
+        assert m is not None
+        assert inspect.iscoroutinefunction(m)
+
+    def test_V22_refresh_task_calls_brain_status_update(self):
+        """V-22: refresh_can_submit_for_alpha must call update_pattern_brain_
+        status (regardless of can_submit value) so True clears stale state
+        and False stamps the rejection."""
+        import inspect
+        from backend.tasks import refresh_tasks
+        src = inspect.getsource(refresh_tasks._refresh_can_submit_async)
+        assert "update_pattern_brain_status" in src, (
+            "regression: refresh_can_submit no longer calls V-22 update — "
+            "LLM feedback loop is broken"
+        )
+
     def test_V21_alert_silent_when_no_patterns(self):
         """V-21: cold-start (no patterns) should not emit alert."""
         from backend.agents.prompts.strategy_prompts import build_t1_strategy_user_prompt

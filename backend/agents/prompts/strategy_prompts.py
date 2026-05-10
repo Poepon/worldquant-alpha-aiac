@@ -111,6 +111,24 @@ Output a JSON object matching the T1Strategy schema:
    ties the fields, ops, and window scale together. When selected_datasets
    has 2+ entries, EXPLICITLY name how each dataset contributes.
 
+**V-22 BRAIN FEEDBACK INTERPRETATION (HARD)** — each Recent T1 success
+pattern below is tagged with BRAIN's verdict:
+   - `[BRAIN_OK ✓ submittable]` — passed BRAIN's /check, can actually be
+     submitted. These are the only true successes; mimic their structure
+     and field family.
+   - `[BRAIN_REJECTED: LOW_FITNESS / CONCENTRATED_WEIGHT / SELF_CORR / ...]`
+     — IS PASS was a false positive. BRAIN rejected the pattern at the
+     submission gate. **Do NOT propose fields or structures that mirror
+     [BRAIN_REJECTED] patterns** — the rejection reason tells you why:
+       · LOW_FITNESS → signal too weak even after wrappers
+       · CONCENTRATED_WEIGHT → field has narrow coverage / extreme values
+       · SELF_CORR → too similar to existing portfolio
+       · LOW_SUB_UNIVERSE_SHARPE → fails on smaller universes
+   - `[BRAIN_PENDING]` — refresh in flight; treat as unknown.
+
+If most patterns are [BRAIN_REJECTED] you'll see a V-22 BRAIN-REJECTION
+ALERT in the user prompt — heed it and pivot field selection.
+
 Return ONLY the JSON object. No prose. No markdown fence. No commentary.
 """
 
@@ -196,6 +214,7 @@ def build_t1_strategy_user_prompt(
 
     pattern_lines = []
     family_counts: Dict[str, int] = {}
+    brain_rejected_count = 0
     for p in (success_patterns or [])[:6]:
         synth = " (synthesized)" if p.get("is_synthesized") else ""
         sharpe = p.get("expected_sharpe")
@@ -203,7 +222,23 @@ def build_t1_strategy_user_prompt(
         pattern_text = p.get("pattern", "?")
         fam = _classify_family(pattern_text)
         family_counts[fam] = family_counts.get(fam, 0) + 1
-        pattern_lines.append(f"  - [{fam}] {pattern_text}{sharpe_str}{synth}")
+
+        # V-22 (2026-05-10): surface BRAIN /check verdict so the LLM sees
+        # which IS-PASS skeletons actually failed BRAIN's submission gate.
+        # The LLM's local-optimum (returns reversal) often passes IS but
+        # gets rejected by BRAIN on fitness < 1.0 / self-correlation /
+        # CONCENTRATED_WEIGHT — without this signal the LLM can't tell.
+        brain_can_submit = p.get("brain_can_submit")
+        failed_checks = p.get("brain_failed_checks") or []
+        if brain_can_submit is True:
+            brain_tag = " [BRAIN_OK ✓ submittable]"
+        elif brain_can_submit is False:
+            brain_rejected_count += 1
+            fail_names = ",".join(c.get("name", "?") for c in failed_checks[:3])
+            brain_tag = f" [BRAIN_REJECTED: {fail_names}]"
+        else:
+            brain_tag = " [BRAIN_PENDING]"
+        pattern_lines.append(f"  - [{fam}]{brain_tag} {pattern_text}{sharpe_str}{synth}")
     patterns_block = "\n".join(pattern_lines) if pattern_lines else "  (none — cold start)"
 
     # V-21: emit a family-distribution callout when the patterns are
@@ -220,6 +255,28 @@ def build_t1_strategy_user_prompt(
                 f"{top_fam} ({top_n}/{total}). To break the monoculture, prefer "
                 f"fields from under-represented families this round: "
                 f"{other_fams}.\n"
+            )
+
+    # V-22 (2026-05-10): emit a BRAIN-rejection callout when the success
+    # pool is dominated by IS-PASS-but-BRAIN-rejected patterns. Pure IS PASS
+    # without submittability is an empty victory; the LLM should pivot.
+    brain_rejected_callout = ""
+    if (success_patterns or []) and brain_rejected_count >= 2:
+        total_with_verdict = sum(
+            1 for p in (success_patterns or [])[:6]
+            if p.get("brain_can_submit") is not None
+        )
+        if total_with_verdict and brain_rejected_count / total_with_verdict >= 0.5:
+            brain_rejected_callout = (
+                f"\n**V-22 BRAIN-REJECTION ALERT** — {brain_rejected_count}/"
+                f"{total_with_verdict} of the recent IS-PASS patterns were "
+                f"REJECTED by BRAIN's submission gate (look for "
+                f"[BRAIN_REJECTED:...] tags). High IS sharpe alone doesn't "
+                f"mean submittable. To produce alpha that BRAIN actually "
+                f"accepts, watch for the rejection reasons (LOW_FITNESS / "
+                f"CONCENTRATED_WEIGHT / SELF_CORR / LOW_SUB_UNIVERSE_SHARPE) "
+                f"and prefer fields/structures that historically produced "
+                f"[BRAIN_OK] patterns.\n"
             )
 
     feedback_block = ""
@@ -275,7 +332,7 @@ Available fields (first 80):
 
 Recent T1 success patterns:
 {patterns_block}
-{diversity_callout}{feedback_block}{portfolio_block}{high_fit_block}
+{diversity_callout}{brain_rejected_callout}{feedback_block}{portfolio_block}{high_fit_block}
 Now produce the T1Strategy JSON for this round.
 """
 
