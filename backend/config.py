@@ -123,6 +123,13 @@ class Settings(BaseSettings):
     BRAIN_DAILY_SIMULATE_LIMIT: int = 1000   # consultant 估算 — 实际由 BRAIN 决定
     BRAIN_QUOTA_PAUSE_PCT: float = 0.9       # 达 90% 自动 pause CONTINUOUS_CASCADE
 
+    # V-20 (2026-05-10) round-pipeline. While round N's SIMULATE blocks on
+    # BRAIN (~5 min, IO-bound), round N+1's LLM/CODE_GEN/VALIDATE runs in an
+    # isolated DB session as a background asyncio task. BRAIN slot semaphore
+    # (redis) blocks round N+1's SIMULATE until N releases — natural overlap.
+    # Set False to revert to fully-serial cascade phases.
+    CASCADE_PIPELINE_ENABLED: bool = True
+
     # P1 (2026-05-07): auto ts_decay_linear(., 4) wrapper for T1 candidates.
     # 实测验证 (docs/decay_verify_pk6606.json): decay=4 把 sh=1.58 fit=0.85
     # to=0.81 (HIGH_TURNOVER+LOW_FITNESS) 转成 sh=1.45 fit=1.47 to=0.51

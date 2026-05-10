@@ -4,6 +4,7 @@ Mining Tasks - Background tasks for alpha mining
 Contains the main mining task execution logic.
 """
 
+import asyncio
 from datetime import datetime
 from sqlalchemy import select, update, func
 from loguru import logger
@@ -555,6 +556,134 @@ _TIER_TO_AGENT_MODE = {
 }
 
 
+def _get_active_level(task) -> int:
+    """Active hypothesis_centric level for this task (HGE Phase 1+)."""
+    from backend.config import settings as _hge
+    raw = (task.config or {}).get(
+        "hypothesis_centric_variant",
+        _hge.HYPOTHESIS_CENTRIC_LEVEL,
+    )
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _build_dataset_pool(db, task, dataset_id: str) -> list:
+    """Build available_dataset_pool for cross-dataset hypothesis (Phase 1)."""
+    from backend.config import settings as _hge
+    active_level = _get_active_level(task)
+    if active_level >= 1:
+        complementary = await _get_complementary_datasets(
+            db, task, dataset_id, k=_hge.PHASE1_COMPLEMENTARY_DATASET_K,
+        )
+        return [dataset_id] + complementary
+    return []
+
+
+async def _prepare_round_fields(db, task, dataset_id: str):
+    """Load + merge fields for a single round. Returns None if dataset has
+    no fields (caller should skip)."""
+    fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe)
+    if not fields:
+        return None
+    if dataset_id != "pv1":
+        pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe)
+        fields = _merge_field_pools(fields, pv_supplement)
+    return fields
+
+
+async def _run_one_round_inline(
+    db, task, run, brain, mining_agent, operators,
+    *, dataset_id: str, tier: int,
+) -> dict:
+    """Run one round on the foreground session. Returns mining_agent result
+    dict (or empty dict on failure)."""
+    fields = await _prepare_round_fields(db, task, dataset_id)
+    if fields is None:
+        return {"all_alphas": [], "iterations_completed": 0, "skipped": True}
+
+    available_dataset_pool = await _build_dataset_pool(db, task, dataset_id)
+    active_level = _get_active_level(task)
+
+    try:
+        return await mining_agent.run_evolution_loop(
+            task=task, dataset_id=dataset_id, fields=fields, operators=operators,
+            max_iterations=1, target_alphas=999999,
+            num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
+            run_id=run.id,
+            available_dataset_pool=available_dataset_pool,
+            hypothesis_centric_level=active_level,
+            experiment_variant=str(
+                (task.config or {}).get("hypothesis_centric_variant", active_level)
+            ),
+            factor_tier_override=tier,
+        )
+    except Exception as e:
+        logger.error(f"[cascade T{tier} {dataset_id}] inline round failed: {e}")
+        try:
+            await db.rollback()
+            await db.refresh(task)
+        except Exception:
+            pass
+        return {"all_alphas": [], "iterations_completed": 0, "error": str(e)}
+
+
+async def _prefetch_round_isolated(
+    task_id: int, run_id: int, dataset_id: str, tier: int,
+) -> dict:
+    """V-20 (2026-05-10): run one round in an isolated DB session and Brain
+    adapter. Used by cascade pipeline — while the foreground round is
+    mid-SIMULATE (BRAIN-bound, ~5 min), this prefetched round runs
+    LLM/CODE_GEN/VALIDATE concurrently and queues at SIMULATE on the redis
+    BRAIN slot semaphore. The slot wait gives near-perfect overlap of LLM-
+    CPU and BRAIN-IO, ~30% throughput boost when LLM stage <= SIMULATE.
+
+    Independent session avoids races on the foreground task's db.commit /
+    refresh; Brain adapter shares the redis slot counter so global account
+    limit (3 sims) is honored across foreground + prefetch.
+    """
+    from backend.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as iso_db:
+        task = (
+            await iso_db.execute(select(MiningTask).where(MiningTask.id == task_id))
+        ).scalar_one_or_none()
+        if task is None:
+            return {"all_alphas": [], "iterations_completed": 0, "skipped": True}
+        # Quick pause check before opening BRAIN connection
+        if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+            return {"all_alphas": [], "iterations_completed": 0, "skipped": True}
+
+        fields = await _prepare_round_fields(iso_db, task, dataset_id)
+        if fields is None:
+            return {"all_alphas": [], "iterations_completed": 0, "skipped": True}
+
+        available_dataset_pool = await _build_dataset_pool(iso_db, task, dataset_id)
+        active_level = _get_active_level(task)
+
+        async with BrainAdapter() as iso_brain:
+            iso_agent = MiningAgent(iso_db, iso_brain)
+            iso_operators = await _get_operators(iso_db)
+            try:
+                return await iso_agent.run_evolution_loop(
+                    task=task, dataset_id=dataset_id, fields=fields,
+                    operators=iso_operators,
+                    max_iterations=1, target_alphas=999999,
+                    num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
+                    run_id=run_id,
+                    available_dataset_pool=available_dataset_pool,
+                    hypothesis_centric_level=active_level,
+                    experiment_variant=str(
+                        (task.config or {}).get("hypothesis_centric_variant", active_level)
+                    ),
+                    factor_tier_override=tier,
+                )
+            except Exception as e:
+                logger.error(f"[prefetch T{tier} {dataset_id}] failed: {e}")
+                return {"all_alphas": [], "iterations_completed": 0, "error": str(e)}
+
+
 async def _run_cascade_phase(
     db,
     task,
@@ -566,18 +695,21 @@ async def _run_cascade_phase(
     tier: int,
     max_rounds: int,
 ) -> dict:
-    """Run a single cascade phase for `tier`, capped at `max_rounds` rounds.
+    """Run a cascade phase for `tier` for `max_rounds` total rounds.
 
-    V-19.10 (2026-05-10) C1 fix: pass factor_tier_override into mining_agent
-    instead of mutating task.agent_mode. The mutation pattern caused agent_mode
-    to be persisted to DB by the next ORM auto-flush (e.g.
-    _incremental_save_alphas commit), polluting the task row's nominal mode.
+    V-20 (2026-05-10) round-pipeline: when CASCADE_PIPELINE_ENABLED, round
+    N+1's LLM/CODE_GEN/VALIDATE runs in a background task with isolated DB
+    session while round N awaits BRAIN simulate. BRAIN slot semaphore (redis)
+    naturally serializes the SIMULATE step across foreground + prefetch.
+    Disable via CASCADE_PIPELINE_ENABLED=False to fall back to serial.
+
+    V-19.10 C1 fix: passes factor_tier_override into mining_agent instead
+    of mutating task.agent_mode (which would persist via auto-flush).
 
     Returns: {alphas_added, rounds_run, paused}
     """
-    alphas_added = 0
-    rounds_run = 0
-    paused = False
+    from backend.config import settings
+
     # Pick datasets fresh per phase (T1's main pool may differ from T2/T3
     # which need predecessor PASS alphas as seeds — node_tier_seed_load
     # handles seed plumbing internally given factor_tier > 1).
@@ -586,80 +718,32 @@ async def _run_cascade_phase(
         logger.warning(f"[cascade T{tier}] no datasets, phase skipped")
         return {"alphas_added": 0, "rounds_run": 0, "paused": False}
 
-    # Round-driven: distribute max_rounds across datasets. With 10 datasets
-    # and 10 rounds → 1 round per dataset. With T3=5 rounds + 10 datasets
-    # → first 5 datasets get 1 round each.
-    rounds_remaining = max_rounds
-    for dataset_id in datasets:
-        if rounds_remaining <= 0:
+    # Plan round sequence: distribute max_rounds across datasets, 1 round
+    # per call. With 10 datasets / 10 rounds: 1 round per dataset.
+    rounds_per_ds = max(1, max_rounds // len(datasets))
+    round_plan: list = []
+    for ds in datasets:
+        for _ in range(rounds_per_ds):
+            if len(round_plan) >= max_rounds:
+                break
+            round_plan.append(ds)
+        if len(round_plan) >= max_rounds:
             break
 
-        # Refresh status — Stop button responsive at dataset boundary too.
-        # V-19.10 (M3): refresh-after-rollback pattern handled inside the
-        # except branch below; here we refresh proactively at dataset boundary.
-        await db.refresh(task)
-        if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-            paused = True
-            break
+    pipeline_enabled = bool(getattr(settings, "CASCADE_PIPELINE_ENABLED", True))
+    logger.info(
+        f"[cascade T{tier}] phase begin: rounds_planned={len(round_plan)} "
+        f"datasets={len(datasets)} pipeline={pipeline_enabled}"
+    )
 
-        fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe)
-        if not fields:
-            continue
-        if dataset_id != "pv1":
-            pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe)
-            fields = _merge_field_pools(fields, pv_supplement)
+    alphas_added = 0
+    rounds_run = 0
+    paused = False
+    pending: "asyncio.Task | None" = None
+    pending_label = ""
 
-        # Cross-dataset hypothesis pool (Phase 1 / A2 same as discrete path)
-        from backend.config import settings as _hge
-        active_level = (task.config or {}).get(
-            "hypothesis_centric_variant",
-            _hge.HYPOTHESIS_CENTRIC_LEVEL,
-        )
-        available_dataset_pool = []
-        if active_level >= 1:
-            complementary = await _get_complementary_datasets(
-                db, task, dataset_id, k=_hge.PHASE1_COMPLEMENTARY_DATASET_K,
-            )
-            available_dataset_pool = [dataset_id] + complementary
-
-        # Compute rounds budget for this dataset; cap so no single dataset
-        # eats the whole phase if many datasets are configured.
-        rounds_for_ds = min(rounds_remaining, max(1, max_rounds // max(1, len(datasets))))
-
-        try:
-            result = await mining_agent.run_evolution_loop(
-                task=task,
-                dataset_id=dataset_id,
-                fields=fields,
-                operators=operators,
-                max_iterations=rounds_for_ds,
-                target_alphas=999999,    # round-driven, not goal-driven (IX-2)
-                num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
-                run_id=run.id,
-                available_dataset_pool=available_dataset_pool,
-                hypothesis_centric_level=int(active_level or 0),
-                experiment_variant=str(
-                    (task.config or {}).get("hypothesis_centric_variant", active_level)
-                ),
-                factor_tier_override=tier,   # V-19.10 C1 fix
-            )
-            ds_rounds = int(result.get("iterations_completed") or 0)
-            rounds_remaining -= ds_rounds
-            rounds_run += ds_rounds
-            alphas_added += len(result.get("all_alphas", []))
-        except Exception as e:
-            logger.error(f"[cascade T{tier} {dataset_id}] evolution loop failed: {e}")
-            await db.rollback()
-            # V-19.10 M3: refresh task after rollback so subsequent dataset
-            # iterations see the persisted state, not stale in-memory mutations
-            # that the rollback just undid.
-            await db.refresh(task)
-            continue
-
-        # V-19.10 H1 fix: heartbeat update at dataset boundary regardless of
-        # PASS count. Pre-fix: persistence.py only stamped last_alpha_persisted_at
-        # when ≥1 row landed, so all-FAIL rounds (common at PASS rate ~5%)
-        # let the watchdog falsely flag the worker as dead within 15 min.
+    async def _stamp_heartbeat() -> None:
+        # V-19.10 H1: heartbeat at every round boundary regardless of PASS count.
         try:
             from datetime import timezone as _tz
             await db.execute(
@@ -670,6 +754,78 @@ async def _run_cascade_phase(
             await db.commit()
         except Exception as _e:
             logger.warning(f"[cascade T{tier}] heartbeat update failed: {_e}")
+
+    async def _cancel_pending(reason: str) -> None:
+        nonlocal pending
+        if pending and not pending.done():
+            logger.info(f"[cascade T{tier}] cancelling pending {pending_label}: {reason}")
+            pending.cancel()
+            try:
+                await pending
+            except (asyncio.CancelledError, Exception):
+                pass
+        pending = None
+
+    for i, dataset_id in enumerate(round_plan):
+        # Pause check before doing new work
+        await db.refresh(task)
+        if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+            paused = True
+            await _cancel_pending("task paused")
+            break
+
+        # Get current round result
+        if pending is None:
+            # First round, or pipeline disabled — run inline
+            result = await _run_one_round_inline(
+                db, task, run, brain, mining_agent, operators,
+                dataset_id=dataset_id, tier=tier,
+            )
+        else:
+            try:
+                result = await pending
+                logger.info(
+                    f"[cascade T{tier}] consumed prefetched {pending_label} "
+                    f"alphas={len(result.get('all_alphas', []))} "
+                    f"iters={result.get('iterations_completed')}"
+                )
+            except asyncio.CancelledError:
+                result = {"all_alphas": [], "iterations_completed": 0}
+            except Exception as e:
+                logger.error(f"[cascade T{tier}] prefetched {pending_label} failed: {e}")
+                result = {"all_alphas": [], "iterations_completed": 0}
+            pending = None
+
+        rounds_run += int(result.get("iterations_completed") or 0)
+        alphas_added += len(result.get("all_alphas", []))
+        await _stamp_heartbeat()
+
+        # Schedule next round prefetch (if not last and pipeline on)
+        if pipeline_enabled and i + 1 < len(round_plan):
+            await db.refresh(task)
+            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+                paused = True
+                break
+            next_ds = round_plan[i + 1]
+            pending_label = f"R{i+1}-{next_ds}"
+            pending = asyncio.create_task(
+                _prefetch_round_isolated(task.id, run.id, next_ds, tier),
+                name=f"cascade-prefetch-T{tier}-{next_ds}-{i+1}",
+            )
+
+    # End of phase: drain any pending prefetch
+    if pending and not pending.done():
+        try:
+            tail = await pending
+            rounds_run += int(tail.get("iterations_completed") or 0)
+            alphas_added += len(tail.get("all_alphas", []))
+            logger.info(
+                f"[cascade T{tier}] drained final prefetch {pending_label} "
+                f"alphas={len(tail.get('all_alphas', []))}"
+            )
+            await _stamp_heartbeat()
+        except (asyncio.CancelledError, Exception) as e:
+            logger.warning(f"[cascade T{tier}] final pending drain failed: {e}")
 
     return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
 

@@ -496,20 +496,35 @@ class TestV1910Fixups:
         assert "factor_tier_override" in sig.parameters
 
     def test_C1_cascade_phase_does_not_mutate_agent_mode(self):
-        """C1: source-level guard — _run_cascade_phase must not touch
-        task.agent_mode. A grep would catch a regression that re-introduces
-        the mutation."""
+        """C1: source-level guard — cascade phase code path (incl V-20 helpers)
+        must not touch task.agent_mode. A grep catches regressions that
+        re-introduce the mutation."""
         import inspect
         from backend.tasks import mining_tasks
-        src = inspect.getsource(mining_tasks._run_cascade_phase)
-        assert "task.agent_mode =" not in src, (
-            "regression: _run_cascade_phase reintroduced task.agent_mode "
-            "mutation — C1 fix lost"
-        )
-        assert "factor_tier_override=tier" in src, (
-            "regression: _run_cascade_phase no longer passes factor_tier_override "
-            "to mining_agent — C1 fix lost"
-        )
+        # V-20 split: factor_tier_override is now passed inside the per-round
+        # helpers (_run_one_round_inline + _prefetch_round_isolated) rather
+        # than directly inside _run_cascade_phase. Check all three for mode
+        # mutation absence + factor_tier_override presence in the helpers.
+        for fn in (
+            mining_tasks._run_cascade_phase,
+            mining_tasks._run_one_round_inline,
+            mining_tasks._prefetch_round_isolated,
+        ):
+            src = inspect.getsource(fn)
+            assert "task.agent_mode =" not in src, (
+                f"regression: {fn.__name__} reintroduced task.agent_mode "
+                "mutation — C1 fix lost"
+            )
+        # The override must be wired in BOTH per-round entry points.
+        for helper in (
+            mining_tasks._run_one_round_inline,
+            mining_tasks._prefetch_round_isolated,
+        ):
+            src = inspect.getsource(helper)
+            assert "factor_tier_override=tier" in src, (
+                f"regression: {helper.__name__} no longer passes "
+                "factor_tier_override to mining_agent — C1 fix lost"
+            )
 
     def test_H1_cascade_phase_updates_heartbeat_per_dataset(self):
         """H1: cascade phase loop must update last_alpha_persisted_at after
@@ -535,6 +550,64 @@ class TestV1910Fixups:
             "regression: paused/stopped sessions are still being marked "
             "COMPLETED — H2 fix lost"
         )
+
+    def test_V20_pipeline_setting_default_on(self):
+        """V-20: pipeline is opt-out. Default ON = round N+1 prefetch active."""
+        assert settings.CASCADE_PIPELINE_ENABLED is True
+
+    def test_V20_helpers_present(self):
+        """V-20: per-round helpers + pipeline coordination present."""
+        from backend.tasks import mining_tasks
+        # Per-round helpers
+        assert hasattr(mining_tasks, "_run_one_round_inline")
+        assert hasattr(mining_tasks, "_prefetch_round_isolated")
+        # Cascade phase must use asyncio.create_task (pipeline marker)
+        import inspect
+        src = inspect.getsource(mining_tasks._run_cascade_phase)
+        assert "asyncio.create_task" in src
+        assert "_prefetch_round_isolated" in src
+        # Cancel logic for pause path
+        assert "pending.cancel" in src
+
+    def test_V20_prefetch_uses_isolated_session(self):
+        """V-20: prefetch_round MUST open its own AsyncSessionLocal (not
+        share with foreground). Otherwise a single round_N+1 commit could
+        race the round_N foreground commit."""
+        import inspect
+        from backend.tasks import mining_tasks
+        src = inspect.getsource(mining_tasks._prefetch_round_isolated)
+        assert "AsyncSessionLocal" in src, (
+            "regression: prefetch must use isolated DB session — sharing "
+            "the foreground session causes commit/refresh races"
+        )
+        assert "BrainAdapter()" in src, (
+            "regression: prefetch must construct its own BrainAdapter so "
+            "the redis sim slot semaphore can serialize foreground + prefetch"
+        )
+
+    @pytest.mark.asyncio
+    async def test_V20_prefetch_returns_skipped_when_task_paused(self, pg_session):
+        """V-20: prefetch round started AFTER task moves to PAUSED should
+        return early with skipped=True instead of opening Brain."""
+        task = MiningTask(
+            task_name=f"{TEST_PREFIX}-V20-prefetch-paused",
+            region="ZZZ-V20-PP",
+            universe="TOP3000",
+            agent_mode="AUTONOMOUS",
+            mining_mode="CONTINUOUS_CASCADE",
+            status="PAUSED",
+            cascade_phase="T1",
+        )
+        pg_session.add(task)
+        await pg_session.commit()
+        await pg_session.refresh(task)
+
+        from backend.tasks.mining_tasks import _prefetch_round_isolated
+        result = await _prefetch_round_isolated(
+            task_id=task.id, run_id=0, dataset_id="pv1", tier=1,
+        )
+        assert result.get("skipped") is True
+        assert len(result.get("all_alphas", [])) == 0
 
     @pytest.mark.asyncio
     async def test_C1_factor_tier_override_overrides_agent_mode(self, pg_session):
