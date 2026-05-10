@@ -420,6 +420,54 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
             success_batch = []
             use_incremental = False
 
+    # V-22.1 (2026-05-10): record_success_pattern per PASS alpha. The
+    # cascade execution path (_run_cascade_phase / _prefetch_round_isolated)
+    # never invokes feedback_agent.learn_from_round — that's a daily-beat
+    # task. Without per-round writes the SUCCESS_PATTERN pool stays
+    # frozen at whatever the daily feedback last produced, and V-22's
+    # brain_status feedback loop has nothing to update. Writing here
+    # closes the loop: record SUCCESS_PATTERN with placeholder brain_*
+    # fields → 30s later refresh_can_submit_for_alpha back-fills the
+    # verdict → next round's RAG retrieval surfaces it to the LLM.
+    if state.pending_alphas:
+        try:
+            from backend.agents.services.rag_service import RAGService
+            db_session = configurable.get("db_session")
+            if db_session is not None:
+                rag = RAGService(db_session)
+                kb_written = 0
+                for alpha in state.pending_alphas:
+                    if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+                        continue
+                    if not alpha.expression:
+                        continue
+                    metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
+                    try:
+                        await rag.record_success_pattern(
+                            expression=alpha.expression,
+                            metrics=metrics_dict,
+                            region=state.region,
+                            dataset_id=state.dataset_id,
+                            alpha_id=alpha.alpha_id,
+                            hypothesis_id=current_hypothesis_id,
+                            experiment_variant=str(
+                                configurable.get("experiment_variant")
+                            ) if configurable.get("experiment_variant") else None,
+                        )
+                        kb_written += 1
+                    except Exception as _e:
+                        logger.warning(
+                            f"[{node_name}] V-22.1 record_success_pattern failed for "
+                            f"{alpha.alpha_id}: {_e}"
+                        )
+                if kb_written:
+                    logger.info(
+                        f"[{node_name}] V-22.1 wrote {kb_written} SUCCESS_PATTERN "
+                        f"entries (brain_status placeholders pending refresh)"
+                    )
+        except Exception as _e:
+            logger.warning(f"[{node_name}] V-22.1 SUCCESS_PATTERN write skipped: {_e}")
+
     if not use_incremental:
         # Original behavior — buffer in state.generated_alphas; workflow
         # writes to DB after returning.
