@@ -332,6 +332,9 @@ def expand_t1_strategy(
                 max_per_composite=int(
                     getattr(_settings, "COMPOSITE_T1_MAX_PER_COMPOSITE", 2)
                 ),
+                apply_preprocess=bool(
+                    getattr(_settings, "COMPOSITE_T1_APPLY_PREPROCESS", False)
+                ),
                 backfill_window=int(
                     getattr(_settings, "COMPOSITE_T1_BACKFILL_WINDOW", 120)
                 ),

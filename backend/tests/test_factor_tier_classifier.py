@@ -674,6 +674,7 @@ class TestCompositeFieldsLoader:
             ],
             region="USA",
             max_per_composite=2,
+            apply_preprocess=True,  # legacy V-22.6 wrap form
         )
         assert cands, "expected at least one composite candidate"
         mismatched = [c for c in cands if classify_tier(c["expression"]) != 2]
@@ -681,6 +682,35 @@ class TestCompositeFieldsLoader:
             f"composites must classify as T2; "
             f"{len(mismatched)} failed: {[c['expression'][:100] for c in mismatched[:3]]}"
         )
+
+    def test_bare_form_default_no_preprocess(self):
+        """V-22.6.1 default: bare `ts_op(<composite>, w)` without winsorize/
+        ts_backfill wrap, to stay under BRAIN's 8-operator complexity limit.
+        Bare composites must still classify as T2 via the classifier's
+        _peel_composite_preprocess transparent layer."""
+        from backend.agents.seed_pool.composite_fields import (
+            generate_composite_t1_candidates,
+        )
+        cands = generate_composite_t1_candidates(
+            ts_ops=["ts_rank"],
+            windows=[20],
+            available_fields=["eps", "ebit", "enterprise_value"],
+            region="USA",
+            max_per_composite=2,
+            # apply_preprocess=False is the new default
+        )
+        assert cands, "expected at least one bare composite candidate"
+        # Sanity: no preprocess wrap in the emitted expressions
+        for c in cands:
+            assert "winsorize" not in c["expression"], (
+                f"bare form must not include winsorize: {c['expression']}"
+            )
+            assert "ts_backfill" not in c["expression"], (
+                f"bare form must not include ts_backfill: {c['expression']}"
+            )
+            assert classify_tier(c["expression"]) == 2, (
+                f"bare composite must classify as T2: {c['expression']}"
+            )
 
 
 class TestRealDataFixture:

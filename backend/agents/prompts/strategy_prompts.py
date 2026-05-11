@@ -134,8 +134,9 @@ ALERT in the user prompt — heed it and pivot field selection.
 **V-22.6 COMPOSITE-FIELD AUTO-ENUMERATION** — The downstream expander
 automatically synthesizes multi-field arithmetic composites (PE = close/eps,
 accrual = cfo/ni, intraday range = (high-low)/close, overnight gap, etc.)
-and runs your preferred_ts_ops over them, pre-wrapped with
-`winsorize(ts_backfill(...))` for sparse-NaN fundamentals. **You do not
+and runs your preferred_ts_ops over them as `ts_op(<composite>, window)`.
+(The winsorize/ts_backfill preprocess wrap is disabled by default per
+V-22.6.1 to stay under BRAIN's 8-operator complexity limit.) **You do not
 need to encode composite expressions in promising_fields** — only ensure
 the raw ingredient fields are present:
   - Value composites need: eps / ebit / enterprise_value / book_value_per_share_2

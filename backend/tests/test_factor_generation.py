@@ -98,9 +98,17 @@ class TestExpandT1Strategy:
             preferred_ts_ops=["ts_delta"],
         )
         result = expand_t1_strategy(strat, daily_goal=2, region="USA")
-        # ts_delta(close, 5) and ts_delta(close, 10) — both windows from SHORT map
+        # ts_delta(close, 5) and ts_delta(close, 10) — both windows from SHORT map.
+        # Filter out field-pair (#2) and composite (V-22.6) candidates which
+        # encode synthetic window=0; only single-field ts_op candidates respect
+        # the window_scale → windows mapping.
         assert len(result) >= 1
-        windows_used = {r.get("window") for r in result}
+        raw_t1 = [
+            r for r in result
+            if not r.get("field", "").startswith(("_composite_", "_pair_"))
+        ]
+        assert raw_t1, "expected at least one raw ts_op candidate"
+        windows_used = {r.get("window") for r in raw_t1}
         assert windows_used.issubset({5, 10})
 
 

@@ -167,6 +167,14 @@ class Settings(BaseSettings):
     #     near-zero denominators.
     COMPOSITE_T1_ENABLED: bool = True
     COMPOSITE_T1_MAX_PER_COMPOSITE: int = 2
+    # V-22.6.1 (2026-05-12): default OFF after spike showed BRAIN's 8-operator
+    # complexity limit rejects the full preprocess wrap on multi-leg composites
+    # (e.g. overnight_gap counts as 13 ops). The bare form `ts_op(<composite>, w)`
+    # still classifies as T2 via _peel_composite_preprocess in the classifier,
+    # so wrap-less composites still flow through the T1 pipeline correctly.
+    # Re-enable per-family or globally once BRAIN raises the limit OR for
+    # sparse-fundamental composites where backfill is strictly needed.
+    COMPOSITE_T1_APPLY_PREPROCESS: bool = False
     COMPOSITE_T1_BACKFILL_WINDOW: int = 120
     COMPOSITE_T1_WINSORIZE_STD: int = 4
 

@@ -151,6 +151,7 @@ def generate_composite_t1_candidates(
     available_fields: Iterable[str],
     region: str = "USA",
     max_per_composite: int = 2,
+    apply_preprocess: bool = False,
     backfill_window: int = DEFAULT_BACKFILL_WINDOW,
     winsorize_std: int = DEFAULT_WINSORIZE_STD,
 ) -> List[Dict[str, Any]]:
@@ -165,8 +166,14 @@ def generate_composite_t1_candidates(
         max_per_composite: Sample cap per composite. With 8 ts_ops × 5 windows
             = 40 raw combos per composite, capping at 2 keeps the candidate
             pool balanced across composites instead of flooding it with one.
-        backfill_window: ts_backfill window in the preprocess wrapper.
-        winsorize_std: winsorize std bound in the preprocess wrapper.
+        apply_preprocess: When True, wraps each composite_expr with
+            winsorize(ts_backfill(..., backfill_window), std=winsorize_std)
+            before the outer ts_op. V-22.6.1 default OFF: BRAIN's 8-operator
+            complexity limit rejects the full wrap on multi-leg composites.
+            The bare form `ts_op(<composite>, w)` still classifies as T2 via
+            _peel_composite_preprocess in factor_tier_classifier.
+        backfill_window: ts_backfill window — only used when apply_preprocess.
+        winsorize_std: winsorize std bound — only used when apply_preprocess.
 
     Returns:
         List of candidate dicts shaped for _dedup_and_validate:
@@ -197,11 +204,17 @@ def generate_composite_t1_candidates(
             continue
 
         name = composite["name"]
-        wrapped = wrap_with_preprocess(
-            composite["composite_expr"],
-            backfill_window=backfill_window,
-            winsorize_std=winsorize_std,
-        )
+        if apply_preprocess:
+            wrapped = wrap_with_preprocess(
+                composite["composite_expr"],
+                backfill_window=backfill_window,
+                winsorize_std=winsorize_std,
+            )
+        else:
+            # V-22.6.1: bare composite, no winsorize/ts_backfill wrap.
+            # `ts_op(<composite>, w)` stays under BRAIN's 8-op complexity gate
+            # for most composites (4 ops total for 2-leg; 5-6 for 3-leg).
+            wrapped = composite["composite_expr"]
 
         combos = [
             {
