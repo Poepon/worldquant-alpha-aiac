@@ -52,37 +52,75 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
 
             # 2026-05-11: concurrent-run guard (cascade-stuck-T2 RCA).
             # Multiple run_mining_task celery deliveries can stack up for one
-            # task (manual resume + watchdog revive + crash redelivery) and
-            # then all run concurrently — each worker reads task.cascade_phase
-            # independently, all enter T2 phase, none advances T1 phase
-            # cleanly. Empirically observed 3 workers in same _run_cascade_
-            # phase tier=2 at the same millisecond after restart, with 0
-            # RAG_QUERY trace entries over 1h46m.
+            # task (manual resume + watchdog 5min revive + crash redelivery)
+            # and then all run concurrently — each worker reads task.
+            # cascade_phase independently, all enter T2 phase, none advances
+            # T1 phase cleanly. Empirically observed 3 workers in same
+            # _run_cascade_phase tier=2 at the same millisecond after restart,
+            # with 0 RAG_QUERY trace entries over 1h46m.
             #
-            # Fix: pg_try_advisory_lock keyed on task_id. First worker wins,
-            # others exit no-op. Lock auto-releases on connection close —
-            # crash-safe. Lock scope = `db` AsyncSessionLocal which lasts the
-            # entire run, so no premature release.
+            # First-attempt fix (b6a6c97): pg_try_advisory_lock. Did NOT work
+            # because SQLAlchemy AsyncSession uses connection pool — each
+            # db.execute() may check out a different connection from pool,
+            # and pg advisory locks are session/connection-scoped. Lock got
+            # released between queries.
+            #
+            # Revised fix: Redis SET NX EX. Cross-process, cross-connection,
+            # crash-safe via TTL (3h = max expected cascade run). Worker exits
+            # cleanly on duplicate; redis cleanup on normal exit + TTL safety.
+            cascade_lock_key = f"cascade_lock:task:{task_id}"
+            cascade_lock_token = self.request.id  # unique per celery dispatch
+            cascade_lock_acquired = False
+            _redis_cli = None
             try:
-                from sqlalchemy import text as _sa_text
-                lock_acquired = (await db.execute(
-                    _sa_text("SELECT pg_try_advisory_lock(:tid)"),
-                    {"tid": int(task_id)},
-                )).scalar()
+                import redis as _redis
+                from backend.config import settings as _s
+                _redis_cli = _redis.Redis.from_url(_s.REDIS_URL)
+                cascade_lock_acquired = bool(_redis_cli.set(
+                    cascade_lock_key,
+                    cascade_lock_token,
+                    nx=True,
+                    ex=10800,  # 3h TTL safety net for crashed workers
+                ))
             except Exception as _e:
-                logger.warning(f"[cascade] advisory_lock failed (proceeding without): {_e}")
-                lock_acquired = True
-            if not lock_acquired:
+                logger.warning(
+                    f"[cascade] redis lock failed (proceeding without): {_e}"
+                )
+                cascade_lock_acquired = True
+            if not cascade_lock_acquired:
+                try:
+                    holder = _redis_cli.get(cascade_lock_key) if _redis_cli else None
+                    holder_str = holder.decode() if isinstance(holder, bytes) else str(holder)
+                except Exception:
+                    holder_str = "?"
                 logger.warning(
                     f"[cascade] Task {task_id} already has an active run "
-                    f"(advisory_lock denied); celery_task={self.request.id} "
-                    f"exits as duplicate."
+                    f"(redis lock held by {holder_str}); celery_task="
+                    f"{self.request.id} exits as duplicate."
                 )
                 return {
                     "skipped": True,
                     "reason": "duplicate_active_run",
                     "task_id": task_id,
+                    "lock_holder": holder_str,
                 }
+
+            # Helper to release the cascade lock on exit (acquired above).
+            # Lua-style check-and-delete: only release if WE still hold the
+            # token. If TTL expired and another worker re-acquired with a
+            # different token, leave it alone. Idempotent + no-op safe.
+            def _release_lock():
+                if _redis_cli is None:
+                    return
+                try:
+                    held = _redis_cli.get(cascade_lock_key)
+                    if held is None:
+                        return
+                    held_str = held.decode() if isinstance(held, bytes) else str(held)
+                    if held_str == cascade_lock_token:
+                        _redis_cli.delete(cascade_lock_key)
+                except Exception as _re:
+                    logger.warning(f"[cascade] redis lock release failed (TTL will clean): {_re}")
 
             # Update status to RUNNING
             await db.execute(
@@ -122,6 +160,8 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                         logger.error(f"[cascade] failed to mark task FAILED: {db_err}")
                         await db.rollback()
                     raise
+                finally:
+                    _release_lock()
 
             try:
                 async with BrainAdapter() as brain:
@@ -298,7 +338,11 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                     logger.error(f"Failed to update task status: {db_err}")
                     await db.rollback()
                 raise
-    
+            finally:
+                # 2026-05-11 cascade-stuck-T2: release Redis lock for discrete
+                # task path. CONTINUOUS_CASCADE path has its own finally above.
+                _release_lock()
+
     return run_async(_run())
 
 
