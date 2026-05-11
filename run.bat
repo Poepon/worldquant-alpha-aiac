@@ -169,6 +169,14 @@ start "AIAC Celery Worker 1" cmd /k "call venv\Scripts\activate && celery -A bac
 start "AIAC Celery Worker 2" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -n worker2@%%h --logfile=.celery_worker2.log"
 start "AIAC Celery Worker 3" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -n worker3@%%h --logfile=.celery_worker3.log"
 
+REM Start Celery Beat — drives the scheduled tasks declared in
+REM celery_app.beat_schedule (V-19.7 watchdog every 5min, quota guard
+REM every 10min, daily sync/refresh tasks). Without beat the watchdog
+REM never fires and CONTINUOUS_CASCADE sessions stop being revived
+REM after worker crashes.
+echo [INFO] Starting Celery Beat (scheduler)...
+start "AIAC Celery Beat" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app beat --loglevel=info --logfile=.celery_beat.log"
+
 echo.
 echo ==========================================
 echo             Services Started!
