@@ -151,6 +151,25 @@ class Settings(BaseSettings):
     T1_AUTO_DECAY_WRAPPER: bool = True
     T1_AUTO_DECAY_VALUE: int = 4  # the d in ts_decay_linear(expr, d)
 
+    # V-22.6 (2026-05-12) — Composite-field T1 enumeration. BRAIN ts_op accepts
+    # only one primary input series, so multi-field signals (PE = close/eps,
+    # accrual = cfo/ni, intraday range = (high-low)/close ...) must be
+    # synthesized arithmetically BEFORE ts_op. Source: spike showed every
+    # PROV/PASS alpha in rounds 16-20 was single-field; 38 V-22.5-safe
+    # candidates had Δscore<0 because Δscore>0 ones got self-corr blocked
+    # against the OS portfolio (also single-field returns variants).
+    #   - COMPOSITE_T1_ENABLED: master switch (False reverts to single-field).
+    #   - COMPOSITE_T1_MAX_PER_COMPOSITE: cap ts_op×window combos per composite
+    #     so 1 composite doesn't crowd stratified-sample.
+    #   - COMPOSITE_T1_BACKFILL_WINDOW: ts_backfill window for sparse
+    #     fundamentals (quarterly EPS / EBIT carry NaN between reports).
+    #   - COMPOSITE_T1_WINSORIZE_STD: winsorize σ bound to trim ratios with
+    #     near-zero denominators.
+    COMPOSITE_T1_ENABLED: bool = True
+    COMPOSITE_T1_MAX_PER_COMPOSITE: int = 2
+    COMPOSITE_T1_BACKFILL_WINDOW: int = 120
+    COMPOSITE_T1_WINSORIZE_STD: int = 4
+
     # Plan v5+ §Phase 1 — Hypothesis-Guided Exploration (HGE) staging flag.
     # 0 = current dataset-centric (pre-Phase 1, default until Phase 1 verified)
     # 1 = cross-dataset hypothesis: LLM picks 1-3 datasets per hypothesis from

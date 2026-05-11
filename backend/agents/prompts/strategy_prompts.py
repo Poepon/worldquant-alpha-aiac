@@ -131,6 +131,22 @@ pattern below is tagged with BRAIN's verdict:
 If most patterns are [BRAIN_REJECTED] you'll see a V-22 BRAIN-REJECTION
 ALERT in the user prompt — heed it and pivot field selection.
 
+**V-22.6 COMPOSITE-FIELD AUTO-ENUMERATION** — The downstream expander
+automatically synthesizes multi-field arithmetic composites (PE = close/eps,
+accrual = cfo/ni, intraday range = (high-low)/close, overnight gap, etc.)
+and runs your preferred_ts_ops over them, pre-wrapped with
+`winsorize(ts_backfill(...))` for sparse-NaN fundamentals. **You do not
+need to encode composite expressions in promising_fields** — only ensure
+the raw ingredient fields are present:
+  - Value composites need: eps / ebit / enterprise_value / book_value_per_share_2
+    / revenue + close
+  - Quality composites need: cash_flow_from_operations / net_income_total_2 /
+    fnd6_newa1v1300_at / fnd6_teq / debt_lt + cap
+  - Intraday / gap / liquidity composites need only PV (always available)
+Including 1-2 fundamental ingredient fields unlocks 4-8 composite alphas per
+round at zero LLM cost, the cleanest path to escape the returns-only
+monoculture.
+
 Return ONLY the JSON object. No prose. No markdown fence. No commentary.
 """
 

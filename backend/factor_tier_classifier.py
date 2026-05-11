@@ -533,6 +533,72 @@ def _is_t1_or_quasi_t1(expr: str) -> bool:
     return _is_t1(expr) or _is_quasi_t1(expr)
 
 
+_COMPOSITE_PREPROCESS_OPS: Set[str] = {"winsorize", "ts_backfill"}
+
+
+def _peel_composite_preprocess(expr: str) -> str:
+    """Strip outer winsorize / ts_backfill layers used as preprocess wrappers.
+
+    V-22.6 (2026-05-12) emits composites in the canonical shape:
+        ts_op(winsorize(ts_backfill(<quasi_t1>, W), std=S), w)
+    Both winsorize and ts_backfill are transparent preprocess steps from a
+    tier-classification standpoint — they don't change the underlying signal's
+    structural identity. This helper unwraps them so the underlying composite
+    can be matched against _is_quasi_t1.
+
+    Peels up to 3 layers (in practice the V-22.6 wrap is at most 2 deep).
+    """
+    s = _strip_outer_parens(expr.strip())
+    for _ in range(3):
+        parsed = _top_level_call(s)
+        if not parsed:
+            return s
+        op, args = parsed
+        if op in _COMPOSITE_PREPROCESS_OPS and args:
+            s = _strip_outer_parens(args[0].strip())
+            continue
+        return s
+    return s
+
+
+def _is_t2_composite(expr: str) -> bool:
+    """V-22.6 (2026-05-12) composite-field T2 path.
+
+    Recognizes ts_op(<preprocess>(<quasi_t1>, ...), w) where <preprocess> is
+    any combination of winsorize / ts_backfill layers (or absent).
+
+    Examples that match (all T2):
+        ts_rank(divide(ebit, enterprise_value), 20)
+        ts_zscore(ts_backfill(divide(ebit, ev), 120), 60)
+        ts_rank(winsorize(ts_backfill(divide(ebit, ev), 120), std=4), 20)
+
+    Distinct from _is_t2_via_wrapper because:
+      - Outer op here is a *statistical* ts_op (ts_rank/ts_zscore/...), NOT
+        a smoothing wrapper. Strict T2 via wrapper requires the outer to be a
+        group / pure-xs / smoothing-ts op around a T1 inner.
+      - Inner here is multi-field arithmetic (Quasi-T1), NOT a single-field
+        T1 expression.
+
+    Together these give composite-field alphas a clean T2 home so the
+    pipeline can mine them via expand_t1_strategy + allowed_tiers={1, 2}.
+    """
+    parsed = _top_level_call(expr)
+    if not parsed:
+        return False
+    op, args = parsed
+    if op not in _ts_ops():
+        return False
+    if not args:
+        return False
+    inner = _peel_composite_preprocess(args[0])
+    if not _is_quasi_t1(inner):
+        return False
+    for a in args[1:]:
+        if not _is_scalar_or_param(a):
+            return False
+    return True
+
+
 def _is_t2_via_wrapper(expr: str) -> bool:
     """T2: top-level is a T2-eligible wrapper (group_* / pure_xs / vec_* / smoothing ts) AND first arg is T1.
 
@@ -625,7 +691,7 @@ def classify_tier(expression: str) -> Optional[int]:
     # two-field arithmetic patterns (Plan v5+ §"Quasi-T1 准一阶白名单 v1.0").
     if _is_t1_or_quasi_t1(s):
         return 1
-    if _is_t2_via_wrapper(s):
+    if _is_t2_via_wrapper(s) or _is_t2_composite(s):
         return 2
     return None
 

@@ -540,6 +540,149 @@ class TestQuasiT1:
         assert classify_tier(expr) is None
 
 
+class TestCompositeT2:
+    """V-22.6 (2026-05-12) composite-field T2 path.
+
+    Covers `ts_op(<preprocess>(<quasi_t1>, ...), w)` shapes where preprocess is
+    any combination of winsorize / ts_backfill layers (or absent). These are
+    NOT strict T2 (outer is statistical ts_op, not a smoothing/group wrapper)
+    nor strict T1 (inner is multi-field arithmetic, not a single field), so
+    they need their own classifier path.
+    """
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # ts_op directly on Quasi-T1 (no preprocess)
+            "ts_rank(divide(ebit, ev), 20)",
+            "ts_zscore(divide(subtract(high, low), close), 60)",
+            "ts_rank(divide(volume, cap), 20)",
+            # Single preprocess layer
+            "ts_rank(ts_backfill(divide(ebit, ev), 120), 20)",
+            "ts_rank(winsorize(divide(ebit, ev), std=4), 20)",
+            # Full V-22.6 wrap (winsorize ∘ ts_backfill ∘ quasi_t1)
+            "ts_rank(winsorize(ts_backfill(divide(ebit, ev), 120), std=4), 20)",
+            "ts_zscore(winsorize(ts_backfill(divide(subtract(high, low), close), 120), std=4), 60)",
+            # Decay-linear outer (smoothing op, also covered by _is_t2_via_wrapper)
+            "ts_decay_linear(winsorize(ts_backfill(divide(volume, cap), 120), std=4), 20)",
+        ],
+    )
+    def test_composite_t2_classifies_as_2(self, expr: str):
+        assert classify_tier(expr) == 2, f"expected T2 (composite): {expr}"
+
+    def test_negation_of_composite_t2_still_t2(self):
+        expr = "multiply(-1, ts_rank(divide(ebit, ev), 20))"
+        assert classify_tier(expr) == 2
+
+    @pytest.mark.parametrize(
+        "expr",
+        [
+            # Stat ts_op inside preprocess → must reject (not bare Quasi-T1 inside)
+            "ts_rank(ts_backfill(ts_mean(close, 5), 120), 20)",
+            # Group op inside preprocess → must reject
+            "ts_rank(ts_backfill(group_neutralize(close, industry), 120), 20)",
+            # Outer is non-ts op → not composite T2 path
+            "rank(divide(ebit, ev))",
+        ],
+    )
+    def test_invalid_composite_forms_reject(self, expr: str):
+        # Should NOT be classified as T2 via the composite path; some may be
+        # None outright, none should be 1.
+        tier = classify_tier(expr)
+        assert tier != 1, f"composite-T2 rejects must not be T1: {expr}"
+
+    def test_strict_t1_still_t1(self):
+        # T1 must remain T1 (no accidental promotion to T2 via composite path)
+        assert classify_tier("ts_rank(close, 20)") == 1
+        assert classify_tier("ts_zscore(returns, 5)") == 1
+
+    def test_strict_t2_via_wrapper_still_t2(self):
+        # group_neutralize over T1 inner — pre-existing T2 path
+        assert classify_tier("group_neutralize(ts_rank(close, 20), industry)") == 2
+
+
+class TestCompositeFieldsLoader:
+    """V-22.6 composite_fields loader sanity checks."""
+
+    def test_yaml_loads(self):
+        from backend.agents.seed_pool.composite_fields import list_composites
+        items = list_composites()
+        assert len(items) >= 10, "Expected at least 10 composites in seed pool"
+        # Schema sanity
+        for c in items:
+            assert c.get("name"), f"composite missing name: {c}"
+            assert c.get("composite_expr"), f"composite missing expr: {c}"
+            assert c.get("required_fields"), f"composite missing fields: {c}"
+            assert c.get("family"), f"composite missing family: {c}"
+
+    def test_wrap_with_preprocess_shape(self):
+        from backend.agents.seed_pool.composite_fields import wrap_with_preprocess
+        out = wrap_with_preprocess("divide(ebit, ev)")
+        assert out == "winsorize(ts_backfill(divide(ebit, ev), 120), std=4)"
+
+    def test_eligibility_universal_fields_only(self):
+        """Composites needing only PV fields are eligible when no fundamental
+        fields are present in the available_fields set."""
+        from backend.agents.seed_pool.composite_fields import (
+            generate_composite_t1_candidates,
+        )
+        cands = generate_composite_t1_candidates(
+            ts_ops=["ts_rank"],
+            windows=[20],
+            available_fields=[],  # no fundamental
+            region="USA",
+            max_per_composite=1,
+        )
+        # Only PV-only composites (intraday / gap / liquidity) should survive
+        assert len(cands) > 0
+        for c in cands:
+            assert c["op"].startswith("composite_"), c
+            assert c["field"].startswith("_composite_"), c
+
+    def test_eligibility_with_fundamentals(self):
+        """All 15 composites fire when fundamentals + PV are available."""
+        from backend.agents.seed_pool.composite_fields import (
+            generate_composite_t1_candidates, total_composite_count,
+        )
+        cands = generate_composite_t1_candidates(
+            ts_ops=["ts_rank"],
+            windows=[20],
+            available_fields=[
+                "eps", "ebit", "enterprise_value", "book_value_per_share_2",
+                "revenue", "cash_flow_from_operations", "net_income_total_2",
+                "fnd6_newa1v1300_at", "debt_lt", "fnd6_teq",
+            ],
+            region="USA",
+            max_per_composite=1,
+        )
+        assert len(cands) == total_composite_count()
+
+    def test_generated_candidates_classify_as_t2(self):
+        """Every generated composite candidate must classify as T2 — without
+        this, _dedup_and_validate (with allowed_tiers={1,2}) would drop them
+        all and the V-22.6 branch contributes 0 alphas to mining."""
+        from backend.agents.seed_pool.composite_fields import (
+            generate_composite_t1_candidates,
+        )
+        cands = generate_composite_t1_candidates(
+            ts_ops=["ts_rank", "ts_zscore"],
+            windows=[20, 60],
+            available_fields=[
+                "eps", "ebit", "enterprise_value", "book_value_per_share_2",
+                "revenue", "cash_flow_from_operations", "net_income_total_2",
+                "fnd6_newa1v1300_at", "debt_lt", "fnd6_teq",
+            ],
+            region="USA",
+            max_per_composite=2,
+        )
+        assert cands, "expected at least one composite candidate"
+        mismatched = [c for c in cands if classify_tier(c["expression"]) != 2]
+        assert not mismatched, (
+            f"composites must classify as T2; "
+            f"{len(mismatched)} failed: {[c['expression'][:100] for c in mismatched[:3]]}"
+        )
+
+
 class TestRealDataFixture:
     def test_classifier_total_on_real_alphas(self, brain_alpha_expressions):
         """classify_tier never raises on any real BRAIN expression."""

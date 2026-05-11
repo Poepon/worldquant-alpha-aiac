@@ -314,6 +314,43 @@ def expand_t1_strategy(
             f"[factor_generation] #2 pair generation failed (non-fatal): {_pair_e}"
         )
 
+    # V-22.6 (2026-05-12) — composite-field T1 candidates. Mining rounds 16-20
+    # produced 100% single-field alphas; high-Δscore variants got blocked by
+    # OS self-corr because the alpha pool is dominated by returns-reversal.
+    # Composites synthesize multi-field signals (PE / accrual / intraday range
+    # / overnight gap / ...) BEFORE ts_op, breaking the returns-only monoculture.
+    if bool(getattr(_settings, "COMPOSITE_T1_ENABLED", False)):
+        try:
+            from backend.agents.seed_pool.composite_fields import (
+                generate_composite_t1_candidates,
+            )
+            composites = generate_composite_t1_candidates(
+                ts_ops=strategy.preferred_ts_ops,
+                windows=windows,
+                available_fields=strategy.promising_fields,
+                region=region,
+                max_per_composite=int(
+                    getattr(_settings, "COMPOSITE_T1_MAX_PER_COMPOSITE", 2)
+                ),
+                backfill_window=int(
+                    getattr(_settings, "COMPOSITE_T1_BACKFILL_WINDOW", 120)
+                ),
+                winsorize_std=int(
+                    getattr(_settings, "COMPOSITE_T1_WINSORIZE_STD", 4)
+                ),
+            )
+            candidates.extend(composites)
+            if composites:
+                logger.info(
+                    f"[factor_generation] V-22.6 composite candidates appended: "
+                    f"{len(composites)}"
+                )
+        except Exception as _comp_e:
+            logger.warning(
+                f"[factor_generation] V-22.6 composite generation failed "
+                f"(non-fatal): {_comp_e}"
+            )
+
     target_n = max(1, math.ceil(daily_goal * target_multiplier))
     if len(candidates) > target_n:
         candidates = stratified_sample(candidates, by="op", n=target_n)

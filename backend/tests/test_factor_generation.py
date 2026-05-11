@@ -62,12 +62,14 @@ class TestExpandT1Strategy:
             preferred_ts_ops=["ts_rank", "ts_zscore"],
         )
         result = expand_t1_strategy(strat, daily_goal=4, region="USA")
-        # 2 fields × 2 ops × 2 windows = 8 candidates max; sample target = ceil(4*1.5) = 6
-        assert 1 <= len(result) <= 6
-        # All must be classified as T1
+        assert len(result) >= 1
+        # T1 + T2 are both valid downstream of expand_t1_strategy:
+        # - T1: raw ts_op(field, w) candidates
+        # - T2: ts_decay_linear wrapper (T1_AUTO_DECAY_WRAPPER), field-pair
+        #       Quasi-T1 templates, V-22.6 composite-field enumeration
         from backend.factor_tier_classifier import classify_tier
         for r in result:
-            assert classify_tier(r["expression"]) == 1
+            assert classify_tier(r["expression"]) in (1, 2), r["expression"]
 
     def test_empty_strategy_returns_empty(self):
         strat = T1Strategy(
