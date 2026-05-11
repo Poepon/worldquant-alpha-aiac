@@ -874,32 +874,97 @@ class FeedbackAgent:
             hids_clean = [h for h in (hypothesis_ids or []) if h is not None]
             primary_hid = hids_clean[0] if hids_clean else None
 
+            # V-22.2 (2026-05-11): pattern field MUST be canonical skeleton
+            # so update_pattern_brain_status (V-22 chain) can match. Previously
+            # we wrote the LLM's raw "pattern" string (often natural language
+            # like "ts_decay_linear of ts_mean with sentiment vectors"), which
+            # expression_to_skeleton collapses to "FIELD" — making V-22 lookup
+            # silently 0-row update on ~90% of KB entries.
+            #
+            # Strategy:
+            #  (a) Try to canonicalize the LLM's `template` field first
+            #      (LLM is asked to produce a generalized expression there).
+            #  (b) Fall back to LLM's `pattern` field.
+            #  (c) Fall back to skeletonizing the representative alpha's
+            #      expression (guaranteed-canonical when successes is non-empty).
+            #  (d) If every option collapses to "FIELD"/"UNKNOWN" (pure prose),
+            #      skip writing — preserve the insight in description if a
+            #      canonical sibling already exists, else just drop.
+            from backend.knowledge_extraction import expression_to_skeleton as _exp_to_skel
+
+            def _canonicalize(candidate: str) -> str:
+                if not candidate:
+                    return ""
+                if "(" not in candidate:
+                    return ""  # not expression-shape, skip
+                try:
+                    sk = _exp_to_skel(candidate)
+                except Exception:
+                    return ""
+                if sk in ("FIELD", "UNKNOWN", ""):
+                    return ""
+                return sk
+
+            rep_expression = (
+                successes[0].expression if successes else None
+            )
+            rep_skeleton_fallback = _canonicalize(rep_expression) if rep_expression else ""
+
             for p in analysis.get("new_patterns", []):
-                pattern_str = p.get("pattern", "")
-                if pattern_str and not await self._pattern_exists(pattern_str):
-                    entry = KnowledgeEntry(
-                        entry_type='SUCCESS_PATTERN',
-                        pattern=pattern_str,
-                        description=p.get("description"),
-                        meta_data={
-                            'round': iteration,
-                            'dataset_id': dataset_id,
-                            'region': region,
-                            'score': p.get("score"),
-                            'template': p.get("template"),  # Generalized template
-                            'economic_logic': p.get("economic_logic"),
-                            'variants': p.get("variants", []),
-                            'source': 'evolution_loop',
-                            'alpha_id_ref': representative_alpha_id,
-                            # Plan v5+ §B8: typed Hypothesis lineage
-                            'hypothesis_id': primary_hid,
-                            'hypothesis_ids': hids_clean,
-                            'experiment_variant': experiment_variant,
-                        },
-                        factor_tier=classify_tier(pattern_str),
+                llm_pattern_text = p.get("pattern", "") or ""
+                template_text = p.get("template", "") or ""
+                # Try template → pattern → representative-alpha skeleton
+                skeleton = (
+                    _canonicalize(template_text)
+                    or _canonicalize(llm_pattern_text)
+                    or rep_skeleton_fallback
+                )
+                if not skeleton:
+                    logger.info(
+                        f"[feedback_agent] V-22.2 skip non-canonicalizable "
+                        f"pattern (NL prose): {llm_pattern_text[:60]!r}"
                     )
-                    self.db.add(entry)
-                    new_entries += 1
+                    continue
+                if await self._pattern_exists(skeleton):
+                    continue
+                # Preserve LLM insight in description even when pattern is
+                # canonical-skeleton (so RAG retrieval still surfaces the
+                # economic context).
+                desc_parts = [p.get("description") or ""]
+                if llm_pattern_text and llm_pattern_text != skeleton:
+                    desc_parts.append(f"LLM-pattern: {llm_pattern_text}")
+                description = " | ".join(s for s in desc_parts if s)
+
+                entry = KnowledgeEntry(
+                    entry_type='SUCCESS_PATTERN',
+                    pattern=skeleton,
+                    description=description,
+                    meta_data={
+                        'round': iteration,
+                        'dataset_id': dataset_id,
+                        'region': region,
+                        'score': p.get("score"),
+                        'template': p.get("template"),  # Generalized template
+                        'economic_logic': p.get("economic_logic"),
+                        'variants': p.get("variants", []),
+                        'source': 'evolution_loop',
+                        'alpha_id_ref': representative_alpha_id,
+                        # V-22.2: keep raw LLM string for audit / debug
+                        'llm_raw_pattern': llm_pattern_text or None,
+                        # Plan v5+ §B8: typed Hypothesis lineage
+                        'hypothesis_id': primary_hid,
+                        'hypothesis_ids': hids_clean,
+                        'experiment_variant': experiment_variant,
+                        # V-22 BRAIN feedback placeholders (filled by
+                        # refresh_can_submit_for_alpha → update_pattern_brain_status)
+                        'brain_can_submit': None,
+                        'brain_failed_checks': [],
+                        'brain_check_at': None,
+                    },
+                    factor_tier=classify_tier(skeleton),
+                )
+                self.db.add(entry)
+                new_entries += 1
 
             # 2. Store New Pitfalls (with error type and severity)
             for p in analysis.get("new_pitfalls", []):
