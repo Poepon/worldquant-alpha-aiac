@@ -531,13 +531,42 @@ class BrainProtocol(Protocol):
     ) -> Dict[str, Any]:
         """
         Check alpha correlation against production alphas.
-        
+
         Args:
             alpha_id: The alpha ID to check
             check_type: Type of correlation check (PROD, SELF, etc.)
-            
+
         Returns:
             Correlation check results
+        """
+        ...
+
+    async def get_before_and_after_performance(
+        self,
+        alpha_id: str,
+        competition: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Get standalone-vs-merged marginal performance comparison for an alpha.
+
+        BRAIN endpoint returns the alpha's PnL and score when run in
+        isolation versus when merged into the named scope's portfolio.
+        The competition leaderboard score uses the merged (after) value, so
+        this is the canonical source for "should I submit this alpha".
+
+        Scope precedence: competition > team_id > users/self (when neither
+        provided, scope defaults to the authenticated user's personal
+        portfolio).
+
+        Args:
+            alpha_id: The BRAIN alpha ID (e.g. "e7dYX3Ez")
+            competition: Optional competition ID (e.g. "IQC2026S1")
+            team_id: Optional team ID (mutually exclusive with competition)
+
+        Returns:
+            Dict with stats {before, after}, yearlyStats, pnl, score, etc.
+            Empty dict on failure.
         """
         ...
     

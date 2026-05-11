@@ -1155,6 +1155,80 @@ class BrainAdapter:
             logger.warning(f"[BrainAdapter] get_alpha({alpha_id}) failed: {e}")
             return {}
 
+    async def get_before_and_after_performance(
+        self,
+        alpha_id: str,
+        competition: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> Dict:
+        """GET /competitions/{competition}/alphas/{alpha_id}/before-and-after-performance
+        (or /teams/{team_id}/... or /users/self/... when neither is given).
+
+        BRAIN's marginal-contribution comparison: returns this alpha's PnL
+        standalone vs. merged into the named competition / team / personal
+        portfolio. Used by IQC submission-selection workflow — competition
+        leaderboard scores merged metrics not standalone IS metrics, so picking
+        which can_submit alphas to actually submit depends on this delta.
+
+        Response shape (key fields):
+          stats.before / stats.after  — sharpe / fitness / turnover / pnl /
+                                        margin / returns / drawdown / longCount
+          yearlyStats.before / .after — per-year records
+          pnl.records                  — per-day [date, beforePnL, afterPnL]
+          score.before / .after        — competition score
+          competition / team / partition
+
+        Polls on Retry-After (BRAIN computes merged stats asynchronously).
+        Returns {} on persistent failure; caller checks for empty dict.
+        """
+        if competition is not None:
+            scope = f"competitions/{competition}"
+        elif team_id is not None:
+            scope = f"teams/{team_id}"
+        else:
+            scope = "users/self"
+        url = f"{self.BASE_URL}/{scope}/alphas/{alpha_id}/before-and-after-performance"
+
+        max_polls = 30  # ~30 × Retry-After (BRAIN typically returns 1-5s)
+        for poll_idx in range(max_polls):
+            try:
+                response = await self._safe_api_call("GET", url.replace(self.BASE_URL, ""))
+            except Exception as e:
+                logger.warning(
+                    f"[BrainAdapter] get_before_and_after_performance({alpha_id}) "
+                    f"scope={scope} poll={poll_idx} failed: {e}"
+                )
+                return {}
+            if response.status_code != 200:
+                logger.warning(
+                    f"[BrainAdapter] get_before_and_after_performance({alpha_id}) "
+                    f"scope={scope} status={response.status_code}"
+                )
+                return {}
+            # Retry-After signals "still computing"; absent/0 = ready.
+            retry_after = (
+                response.headers.get("Retry-After")
+                or response.headers.get("retry-after")
+            )
+            if not retry_after or retry_after == "0":
+                data = response.json() or {}
+                if data.get("stats"):
+                    return data
+                logger.warning(
+                    f"[BrainAdapter] get_before_and_after_performance({alpha_id}) "
+                    f"empty stats payload"
+                )
+                return {}
+            try:
+                await asyncio.sleep(float(retry_after))
+            except (TypeError, ValueError):
+                await asyncio.sleep(2)
+        logger.warning(
+            f"[BrainAdapter] get_before_and_after_performance({alpha_id}) "
+            f"polled {max_polls}× without completion"
+        )
+        return {}
+
     async def check_correlation(self, alpha_id: str, check_type: str = "PROD") -> Dict:
         try:
             response = await self._request("GET", f"{self.BASE_URL}/alphas/{alpha_id}/correlations/{check_type}")

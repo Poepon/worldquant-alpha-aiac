@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -27,6 +28,9 @@ import {
   BranchesOutlined,
   HistoryOutlined,
   ReloadOutlined,
+  TrophyOutlined,
+  ArrowDownOutlined,
+  ArrowUpOutlined,
 } from '@ant-design/icons'
 import { 
   LineChart, 
@@ -485,6 +489,13 @@ function LineageNodeCard({ node, navigate, label }) {
 function LineageSection({ alphaId }) {
   const navigate = useNavigate()
 
+  // Same queryKey as parent — react-query dedupes, so this is free
+  const { data: alpha } = useQuery({
+    queryKey: ['alpha', alphaId],
+    queryFn: () => api.getAlpha(alphaId),
+    enabled: !!alphaId,
+  })
+
   const { data: lineage, isLoading: lineageLoading } = useQuery({
     queryKey: ['alpha', alphaId, 'lineage'],
     queryFn: () => api.getAlphaLineage(alphaId),
@@ -495,6 +506,25 @@ function LineageSection({ alphaId }) {
     queryKey: ['alpha', alphaId, 'transitions'],
     queryFn: () => api.getAlphaTransitions(alphaId, 50),
     enabled: !!alphaId,
+  })
+
+  // IQC marginal contribution — lazy fetch (BRAIN poll can be slow)
+  const [marginalEnabled, setMarginalEnabled] = useState(false)
+  const [marginalCompetition, setMarginalCompetition] = useState('IQC2026S1')
+  const {
+    data: marginal,
+    isLoading: marginalLoading,
+    error: marginalError,
+    refetch: refetchMarginal,
+  } = useQuery({
+    queryKey: ['alpha', alphaId, 'marginal', marginalCompetition],
+    queryFn: () =>
+      api.getAlphaMarginalContribution(alphaId, {
+        competition: marginalCompetition || undefined,
+      }),
+    enabled: marginalEnabled && !!alpha?.alpha_id,
+    retry: false,
+    staleTime: 5 * 60 * 1000,
   })
 
   if (lineageLoading) return null
@@ -578,6 +608,141 @@ function LineageSection({ alphaId }) {
                 </Row>
               </>
             ) : null,
+          },
+          {
+            key: 'marginal',
+            label: (
+              <Space>
+                <TrophyOutlined />
+                边际贡献
+                {alpha?.can_submit && <Tag color="green">可提交</Tag>}
+              </Space>
+            ),
+            children: (
+              <div>
+                <Alert
+                  type="info"
+                  message="BRAIN before-and-after-performance"
+                  description={
+                    <Space direction="vertical" size={4} style={{ fontSize: 12 }}>
+                      <span>
+                        Standalone(独立运行)vs Merged(并入组合)
+                        的 score/sharpe/fitness 对比 — 决定是否值得提交。
+                      </span>
+                      <span style={{ color: '#888' }}>
+                        Competition leaderboard 用 merged score 而非 IS sharpe,
+                        因此一个 can_submit=true 的 alpha 可能 score delta 为负。
+                      </span>
+                    </Space>
+                  }
+                  style={{ marginBottom: 16 }}
+                  showIcon
+                />
+                <Space style={{ marginBottom: 16 }}>
+                  <Input
+                    placeholder="competition ID (空=个人组合)"
+                    value={marginalCompetition}
+                    onChange={(e) => setMarginalCompetition(e.target.value)}
+                    style={{ width: 200 }}
+                  />
+                  <Button
+                    type="primary"
+                    icon={<ReloadOutlined />}
+                    loading={marginalLoading}
+                    disabled={!alpha?.alpha_id}
+                    onClick={() => {
+                      setMarginalEnabled(true)
+                      // useQuery picks up on next render; force refetch when already enabled
+                      if (marginalEnabled) refetchMarginal()
+                    }}
+                  >
+                    拉取 BRAIN 数据
+                  </Button>
+                  {!alpha?.alpha_id && (
+                    <Text type="warning">该 alpha 无 BRAIN ID,不能拉取</Text>
+                  )}
+                </Space>
+                {marginalError && (
+                  <Alert
+                    type="error"
+                    message="拉取失败"
+                    description={marginalError.message || '未知错误'}
+                    style={{ marginBottom: 16 }}
+                  />
+                )}
+                {marginalLoading && (
+                  <Spin tip="BRAIN 计算中(可能 5-20s)..." />
+                )}
+                {marginal && (
+                  <>
+                    <Descriptions
+                      title={`Scope: ${marginal.scope}`}
+                      bordered
+                      size="small"
+                      column={1}
+                      style={{ marginBottom: 16 }}
+                    >
+                      <Descriptions.Item label="Competition score (before → after)">
+                        <Space>
+                          <Text>{marginal.raw?.score?.before ?? '—'}</Text>
+                          <span>→</span>
+                          <Text strong>{marginal.raw?.score?.after ?? '—'}</Text>
+                          {marginal.deltas?.score != null && (
+                            <Tag
+                              color={marginal.deltas.score >= 0 ? 'green' : 'red'}
+                              icon={
+                                marginal.deltas.score >= 0
+                                  ? <ArrowUpOutlined />
+                                  : <ArrowDownOutlined />
+                              }
+                            >
+                              Δ {marginal.deltas.score > 0 ? '+' : ''}{marginal.deltas.score}
+                            </Tag>
+                          )}
+                        </Space>
+                      </Descriptions.Item>
+                    </Descriptions>
+                    <Row gutter={16}>
+                      {['sharpe', 'fitness', 'turnover', 'returns', 'pnl', 'drawdown'].map((k) => {
+                        const before = marginal.raw?.stats?.before?.[k]
+                        const after = marginal.raw?.stats?.after?.[k]
+                        const delta = marginal.deltas?.[k]
+                        const isMoney = k === 'pnl'
+                        const fmt = (v) =>
+                          typeof v === 'number'
+                            ? (isMoney ? v.toLocaleString() : v.toFixed(4))
+                            : '—'
+                        return (
+                          <Col span={8} key={k} style={{ marginBottom: 12 }}>
+                            <Card size="small" title={k.toUpperCase()}>
+                              <Space direction="vertical" size={2} style={{ fontSize: 12 }}>
+                                <Text type="secondary">before: {fmt(before)}</Text>
+                                <Text strong>after: {fmt(after)}</Text>
+                                {delta != null && (
+                                  <Tag
+                                    color={
+                                      // for turnover/drawdown lower is better — invert color
+                                      (k === 'turnover' || k === 'drawdown')
+                                        ? (delta <= 0 ? 'green' : 'red')
+                                        : (delta >= 0 ? 'green' : 'red')
+                                    }
+                                  >
+                                    Δ {delta > 0 ? '+' : ''}{fmt(delta)}
+                                  </Tag>
+                                )}
+                              </Space>
+                            </Card>
+                          </Col>
+                        )
+                      })}
+                    </Row>
+                  </>
+                )}
+                {!marginalEnabled && !marginalLoading && !marginal && (
+                  <Empty description="点击「拉取 BRAIN 数据」开始,首次调用 BRAIN 可能 5-20s" />
+                )}
+              </div>
+            ),
           },
           {
             key: 'transitions',

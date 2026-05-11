@@ -182,6 +182,17 @@ const api = {
     return data
   },
 
+  // IQC submission strategy — standalone vs merged marginal-contribution.
+  // BRAIN: GET /{scope}/alphas/{brain_id}/before-and-after-performance
+  // scope defaults to users/self; pass competition or team_id to scope.
+  getAlphaMarginalContribution: async (id, { competition, teamId } = {}) => {
+    const params = {}
+    if (competition) params.competition = competition
+    if (teamId) params.team_id = teamId
+    const { data } = await client.get(`/alphas/${id}/marginal-contribution`, { params })
+    return data
+  },
+
   submitAlphaFeedback: async (id, rating, comment = null) => {
     const { data } = await client.post(`/alphas/${id}/feedback`, { rating, comment })
     return data

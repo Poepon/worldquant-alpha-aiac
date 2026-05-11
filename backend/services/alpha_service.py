@@ -320,13 +320,95 @@ class AlphaService(BaseService):
             "pending_checks": pending,
         }
 
+    async def get_marginal_contribution(
+        self,
+        alpha_pk: int,
+        competition: Optional[str] = None,
+        team_id: Optional[str] = None,
+        brain_adapter=None,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch BRAIN marginal performance (standalone vs merged into a scope).
+
+        BRAIN endpoint:
+          /{scope}/alphas/{alpha_id}/before-and-after-performance
+        where scope ∈ {competitions/{competition}, teams/{team_id}, users/self}.
+
+        Returns the raw BRAIN payload (stats.before/after, yearlyStats, pnl,
+        score) with an envelope adding our DB alpha_pk + the resolved scope
+        for the frontend. None when alpha lacks brain alpha_id or BRAIN call
+        fails — caller maps to 404 / 502.
+
+        IQC submission workflow: competition leaderboard score uses
+        merged (after) value not standalone IS metrics, so this is the
+        canonical signal for "which can_submit alpha actually helps the
+        team score".
+        """
+        alpha = await self.alpha_repo.get_by_id(alpha_pk)
+        if not alpha or not alpha.alpha_id:
+            return None
+
+        if brain_adapter is None:
+            from backend.adapters.brain_adapter import BrainAdapter
+            async with BrainAdapter() as ba:
+                payload = await ba.get_before_and_after_performance(
+                    alpha.alpha_id,
+                    competition=competition,
+                    team_id=team_id,
+                )
+        else:
+            payload = await brain_adapter.get_before_and_after_performance(
+                alpha.alpha_id,
+                competition=competition,
+                team_id=team_id,
+            )
+
+        if not payload:
+            return None
+
+        # Compute deltas for quick UI display (and KB-feedback later)
+        stats = payload.get("stats") or {}
+        before = stats.get("before") or {}
+        after = stats.get("after") or {}
+        def _delta(k: str):
+            b, a = before.get(k), after.get(k)
+            if isinstance(b, (int, float)) and isinstance(a, (int, float)):
+                return round(a - b, 6)
+            return None
+        score = payload.get("score") or {}
+        score_b, score_a = score.get("before"), score.get("after")
+        score_delta = (
+            (score_a - score_b)
+            if isinstance(score_a, (int, float))
+            and isinstance(score_b, (int, float))
+            else None
+        )
+
+        return {
+            "alpha_pk": alpha_pk,
+            "alpha_brain_id": alpha.alpha_id,
+            "scope": (
+                f"competitions/{competition}" if competition
+                else (f"teams/{team_id}" if team_id else "users/self")
+            ),
+            "raw": payload,
+            "deltas": {
+                "sharpe": _delta("sharpe"),
+                "fitness": _delta("fitness"),
+                "turnover": _delta("turnover"),
+                "returns": _delta("returns"),
+                "pnl": _delta("pnl"),
+                "drawdown": _delta("drawdown"),
+                "score": score_delta,
+            },
+        }
+
     async def get_alpha_by_brain_id(self, brain_alpha_id: str) -> Optional[AlphaDetail]:
         """
         Get alpha by BRAIN platform ID.
-        
+
         Args:
             brain_alpha_id: BRAIN alpha ID string
-            
+
         Returns:
             AlphaDetail or None if not found
         """

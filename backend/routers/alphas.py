@@ -263,6 +263,64 @@ async def refresh_can_submit(
     return CanSubmitRefreshResponse(**result)
 
 
+class MarginalContributionDelta(BaseModel):
+    sharpe: Optional[float] = None
+    fitness: Optional[float] = None
+    turnover: Optional[float] = None
+    returns: Optional[float] = None
+    pnl: Optional[float] = None
+    drawdown: Optional[float] = None
+    score: Optional[float] = None
+
+
+class MarginalContributionResponse(BaseModel):
+    alpha_pk: int
+    alpha_brain_id: str
+    scope: str
+    deltas: MarginalContributionDelta
+    raw: dict
+    message: Optional[str] = None
+
+
+@router.get(
+    "/{alpha_id}/marginal-contribution",
+    response_model=MarginalContributionResponse,
+)
+async def get_alpha_marginal_contribution(
+    alpha_id: int,
+    competition: Optional[str] = Query(
+        None,
+        description="Competition ID (e.g. IQC2026S1). Mutually exclusive with team_id; "
+                    "when both omitted, BRAIN returns the user's personal portfolio delta.",
+    ),
+    team_id: Optional[str] = Query(
+        None, description="Team ID for team-scoped comparison."
+    ),
+    service: AlphaService = Depends(get_alpha_service),
+):
+    """Fetch BRAIN marginal performance (standalone vs merged) for an alpha.
+
+    IQC submission workflow: competition leaderboard ranks teams by the
+    MERGED score (after-merge), not by the standalone IS sharpe each alpha
+    shows in the alphas table. This endpoint surfaces that delta so the user
+    can pick which can_submit alphas actually help team score before sending
+    them to the submission queue.
+
+    Performance: BRAIN computes the comparison asynchronously and may serve
+    Retry-After while computing; the adapter polls up to 30× internally.
+    Typical first call ~5-20s, subsequent calls ~1-3s (BRAIN-side cache).
+    """
+    result = await service.get_marginal_contribution(
+        alpha_id, competition=competition, team_id=team_id,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Alpha not found, missing BRAIN alpha_id, or BRAIN call failed.",
+        )
+    return MarginalContributionResponse(**result)
+
+
 @router.post("/{alpha_id}/feedback")
 async def submit_feedback(
     alpha_id: int,

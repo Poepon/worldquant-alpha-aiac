@@ -1,6 +1,6 @@
 # IQC2026S1 Submission Strategy Backlog
 
-> Backlog 项 — 不进当前 V-19 / V-12 / R7 主路径,IQC2026S1 提交冲刺期前实施。
+> ✅ **DONE 2026-05-11** — backend + frontend 整栈实施完毕。原 backlog 估时 2.25 day,实施实际 ~2h(单 alpha-keyed endpoint,无需新建 service / model)。文档保留作下游使用 + KB feedback 增强(未做)的入口。
 
 ## Item: BRAIN before-and-after-performance API 集成
 
@@ -9,7 +9,14 @@
 
 确认现状:
 - `ace_lib.py:1335-1367` 有 reference SDK 实现(同步 requests)
-- `backend/adapters/brain_adapter.py` **未实现**,backend 0 引用
+- ✅ `backend/adapters/brain_adapter.py:1158` 已实现(async + Retry-After 轮询 30× / 401 re-auth via `_safe_api_call`)
+- ✅ `backend/services/alpha_service.py:get_marginal_contribution()` — 服务层包装 + 自动计算 delta(sharpe/fitness/turnover/returns/pnl/drawdown/score)
+- ✅ `GET /api/v1/alphas/{alpha_id}/marginal-contribution?competition=IQC2026S1` — 路由暴露
+- ✅ `frontend/src/pages/AlphaDetail.jsx` 边际贡献 tab(lazy fetch,自动渲染 score 变化卡片 + 6 项 metric delta tags)
+- ✅ Unit tests 5/5 pass(live PG fixture pattern)
+
+### 未做(可选 KB feedback 增强)
+KB 反向 feedback — 边际 score < 0 的 alpha 写入 FAILURE_PITFALL anti-pattern 让 RAG 检索看见。当前 V-22 已把 BRAIN check verdict 喂回 LLM,但 marginal score 这个更精细的信号还没接到 KB。属"6 月观察后实测决定"的 backlog 项。
 
 ### 接口语义(对照 `ace_lib.py:1334` "merged performance check")
 **单 alpha 的 standalone vs merged 表现对比**,不是池 before/after:

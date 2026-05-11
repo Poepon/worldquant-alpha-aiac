@@ -455,6 +455,42 @@ class MockBrainAdapter:
             "check_type": check_type,
         })
         return {"correlations": [], "max_correlation": 0.3}
+
+    async def get_before_and_after_performance(
+        self,
+        alpha_id: str,
+        competition: Optional[str] = None,
+        team_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return mock marginal-perf comparison data."""
+        if competition is not None:
+            scope = f"competitions/{competition}"
+        elif team_id is not None:
+            scope = f"teams/{team_id}"
+        else:
+            scope = "users/self"
+        self._call_history.append({
+            "method": "get_before_and_after_performance",
+            "alpha_id": alpha_id,
+            "scope": scope,
+        })
+        return {
+            "partitionName": "EQUITY:1",
+            "stats": {
+                "before": {
+                    "sharpe": 3.19, "fitness": 2.67, "turnover": 0.156,
+                    "returns": 0.109, "pnl": 5_387_851, "drawdown": 0.032,
+                },
+                "after": {
+                    "sharpe": 3.14, "fitness": 2.57, "turnover": 0.183,
+                    "returns": 0.123, "pnl": 6_066_501, "drawdown": 0.029,
+                },
+            },
+            "score": {"before": 7227, "after": 6780},
+            "competition": {"id": competition, "name": competition or "self"},
+            "yearlyStats": {"before": {"records": []}, "after": {"records": []}},
+            "pnl": {"records": []},
+        }
     
     async def get_user_alphas(
         self,
