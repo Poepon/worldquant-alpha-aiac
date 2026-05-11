@@ -881,6 +881,16 @@ class FeedbackAgent:
             # expression_to_skeleton collapses to "FIELD" — making V-22 lookup
             # silently 0-row update on ~90% of KB entries.
             #
+            # V-22.3 (2026-05-11): also reject skeletons containing hallucinated
+            # op names (LLM emitted `t2_function(...)` / `group_operation(...)`
+            # in template field — observed in KB#6734 / KB#6727). Even though
+            # those are syntactically expression-shape, the op names don't exist
+            # in the BRAIN operators registry, so V-22's expression_to_skeleton
+            # of a real alpha will never produce that shape → still 0-row update.
+            # Fix: validate every extracted op against the active Operator
+            # registry; if any op is hallucinated, fall back to the representative
+            # alpha's skeleton (which uses real BRAIN ops only).
+            #
             # Strategy:
             #  (a) Try to canonicalize the LLM's `template` field first
             #      (LLM is asked to produce a generalized expression there).
@@ -890,7 +900,39 @@ class FeedbackAgent:
             #  (d) If every option collapses to "FIELD"/"UNKNOWN" (pure prose),
             #      skip writing — preserve the insight in description if a
             #      canonical sibling already exists, else just drop.
-            from backend.knowledge_extraction import expression_to_skeleton as _exp_to_skel
+            from backend.knowledge_extraction import (
+                expression_to_skeleton as _exp_to_skel,
+                extract_operator_chain as _extract_ops,
+            )
+
+            # V-22.3: load active op whitelist once per learn_from_round call.
+            # Cached in-process by SQLAlchemy session, ~66 rows.
+            from sqlalchemy import select as _sel
+            from backend.models.metadata import Operator as _Op
+            _valid_ops = set(
+                r[0] for r in (await self.db.execute(
+                    _sel(_Op.name).where(_Op.is_active == True)  # noqa: E712
+                )).all()
+            )
+
+            def _skeleton_uses_only_valid_ops(sk: str) -> bool:
+                """Every operator extracted from skeleton must be in the
+                BRAIN registry. Empty extraction (no parens) → trivially valid
+                (caller already rejected NL prose earlier).
+
+                expression_to_skeleton emits FIELD(...) / NUM(...) as placeholders
+                for deeply-nested subtrees (max_depth cutoff). extract_operator_chain
+                regex matches these as 'ops', so we filter the placeholders out
+                before whitelist comparison."""
+                _SKELETON_PLACEHOLDERS = {"field", "num"}
+                ops = [
+                    o for o in (_extract_ops(sk or "") or [])
+                    if o.lower() not in _SKELETON_PLACEHOLDERS
+                ]
+                if not ops:
+                    return True
+                bad = [o for o in ops if o not in _valid_ops]
+                return not bad
 
             def _canonicalize(candidate: str) -> str:
                 if not candidate:
@@ -902,6 +944,9 @@ class FeedbackAgent:
                 except Exception:
                     return ""
                 if sk in ("FIELD", "UNKNOWN", ""):
+                    return ""
+                # V-22.3: reject hallucinated op names
+                if not _skeleton_uses_only_valid_ops(sk):
                     return ""
                 return sk
 
