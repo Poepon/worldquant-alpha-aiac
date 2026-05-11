@@ -995,6 +995,16 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
                 _outer_diag(f"exit_status={task.status}")
                 break
 
+            # 2026-05-11: proactively refresh BRAIN session at every phase
+            # boundary. Token expires ~4h; a single cascade phase can run
+            # ~1h, so we'd hit token expiry mid-T1 or mid-T2 if cascade
+            # cycles 4+ times. ensure_session() is no-op when token is
+            # fresh (Redis cache hit or _is_session_valid OK).
+            try:
+                await brain.ensure_session()
+            except Exception as _es:
+                logger.warning(f"[cascade] ensure_session at phase boundary failed: {_es}")
+
             # Resume: if cascade_phase is None or invalid, start at T1
             current_phase = task.cascade_phase or "T1"
             _outer_diag(f"loop_top current_phase={current_phase} round_idx={task.cascade_round_idx}")

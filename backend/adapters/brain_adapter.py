@@ -964,28 +964,62 @@ class BrainAdapter:
             logger.error(f"Get alpha details error: {e}")
             return {"success": False, "error": str(e)}
 
+    # 2026-05-11: instance-level mutex coalescing concurrent re-auth attempts.
+    # Without this, V-20.1 pipeline's 2 concurrent rounds each hit 401 and
+    # each fire authenticate() (which is @retry(5)+backoff). BRAIN throttles
+    # the auth endpoint when called too often → both fail → cascade stuck
+    # in 401 loop. Observed 2026-05-11 06:55+ UTC: 4 consecutive SIMULATE
+    # batches returned 'Incorrect authentication credentials.' because the
+    # poll-path re-auth never recovered.
+    _auth_lock: Optional[asyncio.Lock] = None
+
+    def _get_auth_lock(self) -> asyncio.Lock:
+        if BrainAdapter._auth_lock is None:
+            BrainAdapter._auth_lock = asyncio.Lock()
+        return BrainAdapter._auth_lock
+
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """Single-shot HTTP call with 401 → re-auth → retry-once.
+        """Single-shot HTTP call with 401 → coalesced re-auth → retry-once.
 
         For methods that own their own state machine (simulate POST + poll
         loop, slot accounting, paginated cursors) and can't easily wrap the
         full _safe_api_call retry/backoff machinery. This is just the
         token-refresh path — 429/5xx still need to be handled by the caller.
 
-        Why this exists: BRAIN session tokens expire every 4h. Task #19
+        Why this exists: BRAIN session tokens expire every ~4h. Task #19
         loop-stuck for 2.6h with all simulates returning 401 because
         simulate_alpha / simulate_batch / poll GET / get_alpha_pnl etc.
         were calling self.client.* directly, bypassing _safe_api_call's
         re-auth branch.
+
+        2026-05-11 refinement: serialize concurrent re-auths via _auth_lock.
+        After acquiring lock, re-check session validity — another coroutine
+        may have already refreshed. This prevents BRAIN auth-endpoint
+        throttling when multiple rounds hit 401 simultaneously.
         """
         response = await getattr(self.client, method.lower())(url, **kwargs)
-        if response.status_code == 401:
-            logger.warning(f"401 on {method} {url} — re-authenticating")
+        if response.status_code != 401:
+            return response
+        logger.warning(f"401 on {method} {url} — re-authenticating")
+        async with self._get_auth_lock():
+            # Lock held; check if another coroutine already refreshed.
             try:
-                if await self.authenticate():
-                    response = await getattr(self.client, method.lower())(url, **kwargs)
-            except Exception as e:
-                logger.error(f"Re-auth failed: {e}")
+                fresh = await self._is_session_valid()
+            except Exception:
+                fresh = False
+            if not fresh:
+                try:
+                    await self.authenticate()
+                except Exception as e:
+                    logger.error(f"Re-auth failed under lock: {e}")
+                    return response  # return original 401
+        # Retry up to 2x — cookie propagation across httpx pool can take
+        # a tick on busy event loops.
+        for _attempt in range(2):
+            response = await getattr(self.client, method.lower())(url, **kwargs)
+            if response.status_code != 401:
+                break
+            await asyncio.sleep(0.5)
         return response
 
     async def _safe_api_call(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
