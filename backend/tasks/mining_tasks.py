@@ -50,6 +50,40 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                 logger.info(f"Task {task_id} already in terminal state {task.status}, skipping")
                 return {"skipped": True, "status": task.status}
 
+            # 2026-05-11: concurrent-run guard (cascade-stuck-T2 RCA).
+            # Multiple run_mining_task celery deliveries can stack up for one
+            # task (manual resume + watchdog revive + crash redelivery) and
+            # then all run concurrently — each worker reads task.cascade_phase
+            # independently, all enter T2 phase, none advances T1 phase
+            # cleanly. Empirically observed 3 workers in same _run_cascade_
+            # phase tier=2 at the same millisecond after restart, with 0
+            # RAG_QUERY trace entries over 1h46m.
+            #
+            # Fix: pg_try_advisory_lock keyed on task_id. First worker wins,
+            # others exit no-op. Lock auto-releases on connection close —
+            # crash-safe. Lock scope = `db` AsyncSessionLocal which lasts the
+            # entire run, so no premature release.
+            try:
+                from sqlalchemy import text as _sa_text
+                lock_acquired = (await db.execute(
+                    _sa_text("SELECT pg_try_advisory_lock(:tid)"),
+                    {"tid": int(task_id)},
+                )).scalar()
+            except Exception as _e:
+                logger.warning(f"[cascade] advisory_lock failed (proceeding without): {_e}")
+                lock_acquired = True
+            if not lock_acquired:
+                logger.warning(
+                    f"[cascade] Task {task_id} already has an active run "
+                    f"(advisory_lock denied); celery_task={self.request.id} "
+                    f"exits as duplicate."
+                )
+                return {
+                    "skipped": True,
+                    "reason": "duplicate_active_run",
+                    "task_id": task_id,
+                }
+
             # Update status to RUNNING
             await db.execute(
                 update(MiningTask)
@@ -710,13 +744,28 @@ async def _run_cascade_phase(
     """
     from backend.config import settings
 
+    # 2026-05-11 DIAG (cascade-stuck-T2): file-marker bypassing loguru since
+    # loguru sink stops writing to celery worker logfile after a restart.
+    # Writes to .cascade_phase_diag.log in repo root. Drop after RCA done.
+    def _phase_diag(msg: str) -> None:
+        try:
+            from datetime import datetime as _dt
+            with open(".cascade_phase_diag.log", "a", encoding="utf-8") as _fp:
+                _fp.write(f"{_dt.utcnow().isoformat()} task={task.id} {msg}\n")
+        except Exception:
+            pass
+
+    _phase_diag(f"_run_cascade_phase ENTER tier={tier} max_rounds={max_rounds}")
+
     # Pick datasets fresh per phase (T1's main pool may differ from T2/T3
     # which need predecessor PASS alphas as seeds — node_tier_seed_load
     # handles seed plumbing internally given factor_tier > 1).
     datasets = await _get_datasets_to_mine(db, task)
     if not datasets:
         logger.warning(f"[cascade T{tier}] no datasets, phase skipped")
+        _phase_diag(f"_run_cascade_phase EXIT_NO_DATASETS tier={tier}")
         return {"alphas_added": 0, "rounds_run": 0, "paused": False}
+    _phase_diag(f"_run_cascade_phase tier={tier} datasets={len(datasets)} {datasets[:3]}...")
 
     # Plan round sequence: distribute max_rounds across datasets, 1 round
     # per call. With 10 datasets / 10 rounds: 1 round per dataset.
@@ -878,6 +927,15 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
         f"phase={task.cascade_phase or 'T1'} round_idx={task.cascade_round_idx}"
     )
 
+    # 2026-05-11 DIAG (cascade-stuck-T2) — file-marker bypassing loguru
+    def _outer_diag(msg: str) -> None:
+        try:
+            from datetime import datetime as _dt
+            with open(".cascade_phase_diag.log", "a", encoding="utf-8") as _fp:
+                _fp.write(f"{_dt.utcnow().isoformat()} task={task.id} OUTER {msg}\n")
+        except Exception:
+            pass
+
     total_alphas = 0
     async with BrainAdapter() as brain:
         mining_agent = MiningAgent(db, brain)
@@ -890,10 +948,12 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
                 logger.info(
                     f"[cascade] task={task.id} status={task.status}, exiting main loop"
                 )
+                _outer_diag(f"exit_status={task.status}")
                 break
 
             # Resume: if cascade_phase is None or invalid, start at T1
             current_phase = task.cascade_phase or "T1"
+            _outer_diag(f"loop_top current_phase={current_phase} round_idx={task.cascade_round_idx}")
 
             # ============================================================
             # T1 phase
@@ -903,10 +963,12 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
                     f"[cascade] task={task.id} T1 phase begin "
                     f"(round_idx={task.cascade_round_idx} budget={settings.CASCADE_T1_ROUNDS})"
                 )
+                _outer_diag(f"T1_phase_begin round_idx={task.cascade_round_idx}")
                 phase_result = await _run_cascade_phase(
                     db, task, run, brain, mining_agent, operators,
                     tier=1, max_rounds=settings.CASCADE_T1_ROUNDS,
                 )
+                _outer_diag(f"T1_phase_end result={phase_result}")
                 total_alphas += phase_result["alphas_added"]
                 if phase_result["paused"]:
                     break
@@ -983,6 +1045,7 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
                 task.cascade_round_idx += 1
                 task.cascade_phase = "T1"
                 await db.commit()
+                _outer_diag(f"T3_phase_end round_idx_new={task.cascade_round_idx} reset_to=T1")
                 logger.info(
                     f"[cascade] task={task.id} round {task.cascade_round_idx} complete; "
                     f"total alphas this session: {total_alphas}"
