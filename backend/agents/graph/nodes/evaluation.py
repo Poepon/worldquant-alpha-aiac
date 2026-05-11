@@ -326,10 +326,12 @@ async def node_simulate(
         indices_to_simulate = valid_indices
     
     # Helper to merge dedup_skel_buf into state.recent_dedup_skeletons,
-    # de-duped, last-50 retained (insertion-order preserved).
+    # de-duped, last-N retained (insertion-order preserved). Cap from
+    # settings.DEDUP_BLACKLIST_CAP (default 50, V-22.4 made configurable).
     def _merge_dedup_skels() -> list[str]:
+        cap = int(getattr(settings, "DEDUP_BLACKLIST_CAP", 50) or 50)
         merged = list(state.recent_dedup_skeletons or []) + dedup_skel_buf
-        return list(dict.fromkeys(merged))[-50:]
+        return list(dict.fromkeys(merged))[-cap:]
 
     if not indices_to_simulate:
         logger.warning(f"[{node_name}] All expressions already in DB")

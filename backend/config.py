@@ -275,6 +275,20 @@ class Settings(BaseSettings):
     # 0.3 = 1 in ~3 rounds explores; tune up if collapse persists.
     EXPLORE_BUDGET_PCT: float = 0.3
 
+    # Layer 1 dedup blacklist tunables (2026-05-11 V-22.4):
+    # state.recent_dedup_skeletons FIFO cap. evaluation.py appends rejected
+    # skeletons; strategy_prompts renders last N to LLM. Higher cap = longer
+    # memory, more pressure to diversify, but also pressure to wander into
+    # low-sharpe field combos. Empirically 50 captures ~5-8 round history.
+    DEDUP_BLACKLIST_CAP: int = 50
+    # How many recent skeletons appear in T1/T2/T3 prompt blocks. T1 has
+    # widest search space so more context helps; T3 has narrowest (template
+    # picks) so fewer suffices. Setting to 0 disables the dedup block for
+    # that tier (LLM won't see the blacklist).
+    DEDUP_PROMPT_T1_LIMIT: int = 30
+    DEDUP_PROMPT_T2_LIMIT: int = 20
+    DEDUP_PROMPT_T3_LIMIT: int = 15
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     

@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
+from backend.config import settings
+
 
 # =============================================================================
 # T1 — single ts_op over a single field
@@ -345,10 +347,12 @@ def build_t1_strategy_user_prompt(
     # Without this signal the LLM keeps sampling the same narrow
     # neighborhood (db_duplicate rate ~90% in spike). Empirically this is
     # the highest-ROI fix when cascade is producing 0 new alphas.
+    # V-22.4 (2026-05-11): render limit from settings.DEDUP_PROMPT_T1_LIMIT
+    # (default 30). Set to 0 to disable the block entirely for T1.
     dedup_block = ""
-    if dedup_skeletons:
-        # Cap at 30 most recent for prompt budget; each skeleton ~80 chars
-        recent_skels = list(dedup_skeletons)[-30:]
+    _t1_limit = int(getattr(settings, "DEDUP_PROMPT_T1_LIMIT", 30) or 0)
+    if dedup_skeletons and _t1_limit > 0:
+        recent_skels = list(dedup_skeletons)[-_t1_limit:]
         bullets = "\n".join(f"  - {sk[:120]}" for sk in recent_skels)
         dedup_block = (
             f"\n**L1 ANTI-COLLAPSE: DO NOT REGENERATE THESE SKELETONS** "
@@ -487,9 +491,11 @@ def build_t2_strategy_user_prompt(
     )
     groups_str = ", ".join(region_groups or ["industry", "subindustry", "sector", "market"])
 
+    # V-22.4: T2 render limit from settings.DEDUP_PROMPT_T2_LIMIT (default 20)
     dedup_block = ""
-    if dedup_skeletons:
-        recent_skels = list(dedup_skeletons)[-20:]
+    _t2_limit = int(getattr(settings, "DEDUP_PROMPT_T2_LIMIT", 20) or 0)
+    if dedup_skeletons and _t2_limit > 0:
+        recent_skels = list(dedup_skeletons)[-_t2_limit:]
         bullets = "\n".join(f"  - {sk[:120]}" for sk in recent_skels)
         dedup_block = (
             f"\n**L1 ANTI-COLLAPSE: DO NOT regenerate wrapper combos that produce "
@@ -588,9 +594,11 @@ def build_t3_strategy_user_prompt(
         else "all templates available"
     )
 
+    # V-22.4: T3 render limit from settings.DEDUP_PROMPT_T3_LIMIT (default 15)
     dedup_block = ""
-    if dedup_skeletons:
-        recent_skels = list(dedup_skeletons)[-15:]
+    _t3_limit = int(getattr(settings, "DEDUP_PROMPT_T3_LIMIT", 15) or 0)
+    if dedup_skeletons and _t3_limit > 0:
+        recent_skels = list(dedup_skeletons)[-_t3_limit:]
         bullets = "\n".join(f"  - {sk[:120]}" for sk in recent_skels)
         dedup_block = (
             f"\n**L1 ANTI-COLLAPSE: DO NOT regenerate templates that produce "
