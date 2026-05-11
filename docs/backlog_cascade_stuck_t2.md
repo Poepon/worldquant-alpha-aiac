@@ -1,6 +1,13 @@
 # Cascade stuck in T2 phase — known bug
 
-> ✅ **RCA + FIX DONE 2026-05-11** — commit b6a6c97 (pg advisory-lock guards run_mining_task)。原因不是 round_plan 或 T1 phase 逻辑,是**3 workers 并发跑同一 task**。Redis 队列堆了 40 个 pending `run_mining_task.delay(384)`(每次手动 resume + 每 5min watchdog beat revive 都加一个)。Workers restart 后多 worker 同时拿活,每个独立读 task.cascade_phase 各自跑独立 cascade 循环。修法:pg_try_advisory_lock(task_id) 入口守卫。
+> ✅ **COMPLETELY FIXED 2026-05-11** — 两次迭代:
+>
+> 1. b6a6c97 pg_try_advisory_lock — **失败**。SQLAlchemy AsyncSession 用 connection pool,advisory lock 跟 connection 释放。
+> 2. fed1226 Redis SET NX EX(token=celery_id, TTL=3h)— **成功**。
+>
+> 实测验证 2026-05-11 06:05 UTC:T2 phase 完整跑完(05:03→06:05 = 1h2m),`T3_phase_end round_idx_new=15 reset_to=T1` 切换正确,T1 phase 启动,5 个 RAG_QUERY/DISTILL_CONTEXT/STRATEGY_SELECT entries 出现。T1 rationale 跨 SENTIMENT/OPTION/FACTOR_COMPOSITE/PRICE_PV/FUNDAMENTAL 5 个 family — Layer 1 ε-greedy + diversity-aware RAG 在 T1 path 也工作。
+>
+> 原因:**3 workers 并发跑同一 task**。Redis 队列堆了 40 个 pending `run_mining_task.delay(384)`(每次手动 resume + 每 5min watchdog beat revive 都加一个)。Workers restart 后多 worker 同时拿活,每个独立读 task.cascade_phase 各自跑独立 cascade 循环。
 
 > 原始发现:Layer 1 长期验证(60min)发现 cascade_round_idx 自 13→14 transition 后停滞 1h46m+,期间 86 个 T2 STRATEGY_SELECT 调用都在并发 T2 phase 内,T1 phase 完全未触发。
 
