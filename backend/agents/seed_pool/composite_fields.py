@@ -71,6 +71,19 @@ REGION_BLOCKED_FIELDS: Dict[str, Set[str]] = {
 DEFAULT_BACKFILL_WINDOW = 120
 DEFAULT_WINSORIZE_STD = 4
 
+# V-22.6.2 (2026-05-12): ts ops that BRAIN requires TWO time-series inputs +
+# a window arg (signature `op(x, y, d)`). Composite enumeration produces a
+# single series (the composite expression), so these ops can't be paired
+# with a composite cleanly — `op(<composite>, w)` would be flagged as
+# "需要至少 3 个参数". SELF_CORRECT cascades into duplicating the composite
+# as y (`op(<composite>, <composite>, w)`), which then breaks BRAIN's 8-op
+# complexity gate. Filter these out from the candidate ts_op set entirely.
+TWO_INPUT_TS_OPS: frozenset = frozenset({
+    "ts_corr",         # ts_corr(x, y, d)
+    "ts_regression",   # ts_regression(y, x, d)
+    "ts_covariance",   # ts_covariance(x, y, d)
+})
+
 
 def _load() -> List[Dict[str, Any]]:
     global _LOADED
@@ -189,7 +202,16 @@ def generate_composite_t1_candidates(
     if not composites:
         return []
 
-    ts_op_list = list(ts_ops)
+    # V-22.6.2: drop two-input ts ops — they need a second series, not a
+    # window. Pairing them with a composite triggers SELF_CORRECT loops that
+    # blow past BRAIN's 8-op complexity gate.
+    ts_op_list = [op for op in ts_ops if op not in TWO_INPUT_TS_OPS]
+    dropped = [op for op in ts_ops if op in TWO_INPUT_TS_OPS]
+    if dropped:
+        logger.debug(
+            f"[composite_fields] dropped two-input ts ops from composite "
+            f"enumeration: {dropped}"
+        )
     window_list = list(windows)
     available_set = set(available_fields or [])
 

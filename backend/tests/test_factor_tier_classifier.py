@@ -683,6 +683,48 @@ class TestCompositeFieldsLoader:
             f"{len(mismatched)} failed: {[c['expression'][:100] for c in mismatched[:3]]}"
         )
 
+    def test_two_input_ts_ops_filtered_out(self):
+        """V-22.6.2: ts_corr / ts_regression / ts_covariance need a 2nd series
+        input plus a window arg. Pairing them with a single-output composite
+        triggers BRAIN's 'arg count mismatch' error and SELF_CORRECT cascades
+        into 8-op-overflow loops. The loader must drop these ops silently."""
+        from backend.agents.seed_pool.composite_fields import (
+            generate_composite_t1_candidates,
+            TWO_INPUT_TS_OPS,
+        )
+        # Mix two-input ops with single-input ops
+        cands = generate_composite_t1_candidates(
+            ts_ops=["ts_rank", "ts_corr", "ts_regression", "ts_covariance", "ts_mean"],
+            windows=[20],
+            available_fields=["eps", "ebit", "enterprise_value"],
+            region="USA",
+            max_per_composite=1,
+        )
+        assert cands, "expected single-input ops to still produce candidates"
+        for c in cands:
+            outer_op = c["op"].replace("composite_", "")
+            assert outer_op not in TWO_INPUT_TS_OPS, (
+                f"two-input op '{outer_op}' leaked into composite candidates: "
+                f"{c['expression']}"
+            )
+
+    def test_only_two_input_ts_ops_returns_empty(self):
+        """If every supplied ts_op is two-input, no candidates can be safely
+        produced — return empty rather than crash or emit malformed."""
+        from backend.agents.seed_pool.composite_fields import (
+            generate_composite_t1_candidates,
+        )
+        cands = generate_composite_t1_candidates(
+            ts_ops=["ts_corr", "ts_regression", "ts_covariance"],
+            windows=[20],
+            available_fields=["eps", "ebit"],
+            region="USA",
+        )
+        assert cands == [], (
+            "expected empty list when all ts_ops are two-input — "
+            f"got {len(cands)} candidates"
+        )
+
     def test_bare_form_default_no_preprocess(self):
         """V-22.6.1 default: bare `ts_op(<composite>, w)` without winsorize/
         ts_backfill wrap, to stay under BRAIN's 8-operator complexity limit.
