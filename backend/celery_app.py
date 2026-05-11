@@ -79,4 +79,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.quota_guard_pause_at_threshold",
         "schedule": 600,   # every 10 minutes
     },
+    # V-22.3 long-term enforcement (2026-05-11): scan active KB entries for
+    # hallucinated op names (LLM emits ops not in BRAIN registry). Catches
+    # writes that bypass the canonicalize chain + drift after sync_datasets.
+    # Soft-deactivates affected entries + writes daily report under
+    # docs/llm_op_monitor/<date>.md. Runs at 06:30 after sync_datasets
+    # (06:00) and refresh_kb_referenced_alphas (06:15) so the Operator
+    # whitelist is fresh.
+    "monitor-llm-op-hallucinations": {
+        "task": "backend.tasks.monitor_llm_op_hallucinations",
+        "schedule": crontab(hour=6, minute=30),
+    },
 }

@@ -47,6 +47,8 @@ from backend.tasks.session_watchdog import (
     watchdog_revive_dead_sessions,
     quota_guard_pause_at_threshold,
 )
+# V-22.3 long-term: daily LLM-op-hallucination monitor
+from backend.tasks.llm_op_monitor import monitor_llm_op_hallucinations
 
 __all__ = [
     # Utilities
@@ -70,4 +72,6 @@ __all__ = [
     # V-19.7: persistent mining service watchdog
     "watchdog_revive_dead_sessions",
     "quota_guard_pause_at_threshold",
+    # V-22.3 long-term: LLM op hallucination monitor
+    "monitor_llm_op_hallucinations",
 ]
