@@ -1,6 +1,8 @@
 # Cascade stuck in T2 phase — known bug
 
-> 发现日期 2026-05-11。Layer 1 长期验证(60min)发现 cascade_round_idx 自 13→14 transition 后停滞 1h46m+,期间 86 个 T2 STRATEGY_SELECT 调用都在单 T2 phase 内,T1 phase 完全未触发。
+> ✅ **RCA + FIX DONE 2026-05-11** — commit b6a6c97 (pg advisory-lock guards run_mining_task)。原因不是 round_plan 或 T1 phase 逻辑,是**3 workers 并发跑同一 task**。Redis 队列堆了 40 个 pending `run_mining_task.delay(384)`(每次手动 resume + 每 5min watchdog beat revive 都加一个)。Workers restart 后多 worker 同时拿活,每个独立读 task.cascade_phase 各自跑独立 cascade 循环。修法:pg_try_advisory_lock(task_id) 入口守卫。
+
+> 原始发现:Layer 1 长期验证(60min)发现 cascade_round_idx 自 13→14 transition 后停滞 1h46m+,期间 86 个 T2 STRATEGY_SELECT 调用都在并发 T2 phase 内,T1 phase 完全未触发。
 
 ## 现象
 
