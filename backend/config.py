@@ -84,7 +84,19 @@ class Settings(BaseSettings):
     TIER3_FITNESS_MIN: float = 1.0
     TIER3_TURNOVER_MIN: float = 0.01
     TIER3_TURNOVER_MAX: float = 0.70
-    TIER3_SELF_CORR_MAX: float = 0.7  # 仅 T3 严格判 self_corr（T1/T2 跳过）
+    TIER3_SELF_CORR_MAX: float = 0.7  # T3 严格判 self_corr
+
+    # V-22.5 (2026-05-11): T2 self_corr PASS gate. Default ON with same 0.7
+    # threshold as T3. Before V-22.5, T2 skipped self_corr (rationale "within-
+    # batch wrapper variants correlate, would FAIL whole batch") — but
+    # BRAIN /correlations/SELF is vs already-submitted OS cache not within
+    # batch, so this rationale was wrong. IQC audit showed 13/13 net-positive
+    # Δscore T2 alphas all had self_corr 0.85-0.99 vs portfolio — all BRAIN
+    # submit-rejected. Mining-time gate puts these PROV instead of PASS so
+    # KB / submission queue stay clean. Disable by setting threshold to 1.0
+    # or ENABLE_T2_SELF_CORR_CHECK=False to revert.
+    TIER2_SELF_CORR_MAX: float = 0.7
+    ENABLE_T2_SELF_CORR_CHECK: bool = True
 
     # PASS_PROVISIONAL 阈值（同梯度，各项放宽 30-40%）
     # 2026-05-07 P0 同步上调 — 与 T1 PASS 1.25/0.95 配合作 探索 bar

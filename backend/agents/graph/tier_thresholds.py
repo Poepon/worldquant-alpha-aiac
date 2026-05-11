@@ -41,6 +41,14 @@ def get_tier_thresholds(tier: Optional[int]) -> Dict:
             },
         }
     if tier == 2:
+        # V-22.5 (2026-05-11): self_corr 在 PASS gate 从默认 False 改为可配。
+        # 原 rationale("wrapper variants 必然相关,gating 会 FAIL 整个 batch")
+        # 假设了"vs within-batch 同 seed 衍生"。实际 BRAIN /correlations/SELF
+        # 是 vs OS cache(已提交 portfolio),不是 within-batch — 不会因此误伤。
+        # IQC audit 实测发现 13/13 Δscore>0 T2 alphas 都 corr ≥ 0.7,全部
+        # BRAIN 提交期拒。开 self_corr gate 让 mining 时就拦掉 → 这些
+        # alphas 自动 PROV 而非 PASS,KB 不污染 + 不入 submission queue 队尾。
+        # 设 T2_SELF_CORR_MAX=1.0 或 ENABLE_T2_SELF_CORR_CHECK=False 可回退。
         return {
             "tier": 2,
             "sharpe_min": settings.TIER2_SHARPE_MIN,
@@ -48,8 +56,8 @@ def get_tier_thresholds(tier: Optional[int]) -> Dict:
             "turnover_min": settings.TIER2_TURNOVER_MIN,
             "turnover_max": settings.TIER2_TURNOVER_MAX,
             "subuniv_min": settings.TIER2_SUBUNIV_MIN,
-            "self_corr_max": None,  # T2 不查 self_corr（同种子产物簇允许共存，T3 阶段才收敛）
-            "check_self_corr": False,
+            "self_corr_max": settings.TIER2_SELF_CORR_MAX,
+            "check_self_corr": settings.ENABLE_T2_SELF_CORR_CHECK,
             "check_concentrated": True,
             "provisional": {
                 "sharpe_min": settings.TIER2_PROVISIONAL_SHARPE_MIN,
