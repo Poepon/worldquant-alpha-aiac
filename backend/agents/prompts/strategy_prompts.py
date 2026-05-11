@@ -140,6 +140,8 @@ def build_t1_strategy_user_prompt(
     success_patterns: Optional[List[Dict]] = None,
     last_round_feedback: Optional[Dict] = None,
     selected_datasets: Optional[List[str]] = None,
+    dedup_skeletons: Optional[List[str]] = None,
+    explore_mode: bool = False,
 ) -> str:
     """Compose the T1 user prompt.
 
@@ -152,7 +154,21 @@ def build_t1_strategy_user_prompt(
             should expose pattern, expected_sharpe, is_synthesized.
         last_round_feedback: When called for round N (N>1), pass the last round's
             summary so the LLM can shift fields/velocity if it produced 0 PASS.
+        dedup_skeletons: Layer 1 Anti-collapse (2026-05-11) — skeletons that
+            the pre-simulate dedup gate already rejected this run. Renders a
+            "DO NOT REGENERATE" block so the LLM stops sampling the same
+            narrow neighborhood.
+        explore_mode: Layer 1 ε-greedy — when True, hide RAG success patterns
+            and prepend an EXPLORE MODE directive instructing the LLM to
+            prioritize structural novelty over historical mimicry. Caller
+            (strategy_select node) tosses a coin against EXPLORE_BUDGET_PCT
+            once per round.
     """
+    # In explore mode, intentionally hide success_patterns from the LLM so
+    # it can't anchor to known PASS shapes. The LLM still sees fields,
+    # dedup_skeletons, and the explore directive.
+    if explore_mode:
+        success_patterns = []
     # P0 CW防御 (2026-05-07): 硬过滤明显 CW-prone 字段。低覆盖 / IV / 衍生
     # 后缀字段在 T1 (bare ts_op) 形态下几乎必然触发 BRAIN CONCENTRATED_WEIGHT。
     # 历史 mining: 4 batch / 38 PROV+PASS alpha / 0 submittable, 主因即此类字段。
@@ -324,12 +340,49 @@ def build_t1_strategy_user_prompt(
     # naturally without misleading specific-field claims).
     high_fit_block = ""
 
-    return f"""Dataset (anchor): {dataset_id}
+    # Layer 1 Anti-collapse (2026-05-11): show the LLM a blacklist of
+    # skeletons already rejected by pre-simulate dedup gates this run.
+    # Without this signal the LLM keeps sampling the same narrow
+    # neighborhood (db_duplicate rate ~90% in spike). Empirically this is
+    # the highest-ROI fix when cascade is producing 0 new alphas.
+    dedup_block = ""
+    if dedup_skeletons:
+        # Cap at 30 most recent for prompt budget; each skeleton ~80 chars
+        recent_skels = list(dedup_skeletons)[-30:]
+        bullets = "\n".join(f"  - {sk[:120]}" for sk in recent_skels)
+        dedup_block = (
+            f"\n**L1 ANTI-COLLAPSE: DO NOT REGENERATE THESE SKELETONS** "
+            f"({len(recent_skels)} of {len(dedup_skeletons)} shown)\n"
+            f"These skeletons (operator shapes) were already in DB or in your "
+            f"submitted portfolio — regenerating wastes BRAIN sim quota and "
+            f"produces 0 new alphas. Pick fields and operator chains that "
+            f"yield STRUCTURALLY DIFFERENT skeletons:\n"
+            f"{bullets}\n"
+        )
+
+    # L1 ε-greedy EXPLORE prefix — strongly worded directive at top of
+    # prompt so the LLM treats this round as a deliberate break from past
+    # patterns. Pairs with success_patterns=[] above (no anchor examples).
+    explore_prefix = ""
+    if explore_mode:
+        explore_prefix = (
+            "**L1 EXPLORE MODE (this round)** — historical PASS patterns are "
+            "intentionally hidden. This round is part of an explicit ε-greedy "
+            "exploration budget designed to escape collapsed search "
+            "neighborhoods.\n"
+            "  - Bias selection toward fields and operator chains the prior "
+            "rounds have NOT exploited.\n"
+            "  - Don't try to mimic past shapes; aim for structural novelty.\n"
+            "  - Lower-confidence picks are OK — exploration value is in the "
+            "diversity, not the expected sharpe.\n\n"
+        )
+
+    return f"""{explore_prefix}Dataset (anchor): {dataset_id}
 Region: {region}
 {cross_block}
 Available fields (first 80):
 {fields_block}
-
+{dedup_block}
 Recent T1 success patterns:
 {patterns_block}
 {diversity_callout}{brain_rejected_callout}{feedback_block}{portfolio_block}{high_fit_block}
@@ -409,6 +462,8 @@ def build_t2_strategy_user_prompt(
     region: str = "USA",
     dataset_id: str = "",
     region_groups: Optional[List[str]] = None,
+    dedup_skeletons: Optional[List[str]] = None,
+    explore_mode: bool = False,
 ) -> str:
     """Compose the T2 user prompt.
 
@@ -419,6 +474,11 @@ def build_t2_strategy_user_prompt(
         dataset_id: Source dataset.
         region_groups: Available group names for this region. CHN drops "sector",
             EUR/ASI add "country". Caller looks this up from settings.REGION_GROUPS.
+        dedup_skeletons: Layer 1 Anti-collapse — skeletons rejected by
+            pre-simulate dedup gate this run. T2 wrapper space is narrow
+            (~5 wrapper × 4 group = 20 combos), so this list breaks the
+            LLM's tendency to re-emit the same group_neutralize/group_rank
+            combinations once the seed pool stabilizes.
     """
     metrics = seed_metrics or {}
     metric_str = ", ".join(
@@ -427,13 +487,34 @@ def build_t2_strategy_user_prompt(
     )
     groups_str = ", ".join(region_groups or ["industry", "subindustry", "sector", "market"])
 
-    return f"""T1 seed expression:
+    dedup_block = ""
+    if dedup_skeletons:
+        recent_skels = list(dedup_skeletons)[-20:]
+        bullets = "\n".join(f"  - {sk[:120]}" for sk in recent_skels)
+        dedup_block = (
+            f"\n**L1 ANTI-COLLAPSE: DO NOT regenerate wrapper combos that produce "
+            f"these skeletons** ({len(recent_skels)} of {len(dedup_skeletons)} shown):\n"
+            f"{bullets}\n"
+            f"Pick wrapper / group choices that yield structurally different shapes.\n"
+        )
+
+    explore_prefix = ""
+    if explore_mode:
+        explore_prefix = (
+            "**L1 EXPLORE MODE (this round)** — pick wrapper / group "
+            "combinations the prior T2 rounds have NOT exploited. Bias toward "
+            "less-common wrappers (signed_power, winsorize, ts_decay_linear) "
+            "and less-common groups (market, country) over the dominant "
+            "industry/subindustry × group_neutralize/group_rank pair.\n\n"
+        )
+
+    return f"""{explore_prefix}T1 seed expression:
   {seed_expression}
 
 Seed metrics: {metric_str}
 Region: {region} (available groups: {groups_str})
 Dataset: {dataset_id}
-
+{dedup_block}
 Choose 8-12 wrapper variants. Output the T2Strategy JSON.
 """
 
@@ -484,6 +565,8 @@ def build_t3_strategy_user_prompt(
     seed_metrics: Optional[Dict] = None,
     region: str = "USA",
     dataset_id: str = "",
+    dedup_skeletons: Optional[List[str]] = None,
+    explore_mode: bool = False,
 ) -> str:
     """Compose the T3 user prompt.
 
@@ -492,6 +575,7 @@ def build_t3_strategy_user_prompt(
         seed_metrics: {sharpe, fitness, turnover, returns} from seed.
         region: BRAIN region — controls which templates are available.
         dataset_id: Source dataset.
+        dedup_skeletons: Layer 1 Anti-collapse — skeletons rejected this run.
     """
     metrics = seed_metrics or {}
     metric_str = ", ".join(
@@ -504,12 +588,31 @@ def build_t3_strategy_user_prompt(
         else "all templates available"
     )
 
-    return f"""T2 seed expression:
+    dedup_block = ""
+    if dedup_skeletons:
+        recent_skels = list(dedup_skeletons)[-15:]
+        bullets = "\n".join(f"  - {sk[:120]}" for sk in recent_skels)
+        dedup_block = (
+            f"\n**L1 ANTI-COLLAPSE: DO NOT regenerate templates that produce "
+            f"these skeletons** ({len(recent_skels)} shown):\n"
+            f"{bullets}\n"
+        )
+
+    explore_prefix = ""
+    if explore_mode:
+        explore_prefix = (
+            "**L1 EXPLORE MODE (this round)** — pick trade_when templates "
+            "that prior T3 rounds have NOT exploited. Try less-common "
+            "templates (rebound_entry, oversold_entry, vol_spike_entry) over "
+            "the dominant high_volume_entry / trend_entry pair.\n\n"
+        )
+
+    return f"""{explore_prefix}T2 seed expression:
   {seed_t2_expression}
 
 Seed metrics: {metric_str}
 Region: {region} ({note})
 Dataset: {dataset_id}
-
+{dedup_block}
 Choose 2-5 trade_when templates. Output the T3Strategy JSON.
 """

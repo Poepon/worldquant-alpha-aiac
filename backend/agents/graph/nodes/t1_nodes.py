@@ -10,6 +10,7 @@ is True. Toggle to False to fall back.
 """
 from __future__ import annotations
 
+import random
 import time
 from typing import Dict
 
@@ -19,6 +20,7 @@ from loguru import logger
 from backend.agents.graph.nodes.base import record_trace
 from backend.agents.graph.state import AlphaCandidate, MiningState
 from backend.agents.services.llm_service import get_llm_service
+from backend.config import settings
 from backend.factor_generation import (
     DEFAULT_T1_STRATEGY,
     T1Strategy,
@@ -92,6 +94,18 @@ async def node_t1_strategy_select(
             f"(vs anchor {len(state.fields)})"
         )
 
+    # L1 ε-greedy explore (2026-05-11): per-round coin flip — with
+    # probability EXPLORE_BUDGET_PCT, run this round in EXPLORE mode
+    # (RAG examples hidden, prompt prepended with novelty directive).
+    explore_mode = (
+        random.random() < float(getattr(settings, "EXPLORE_BUDGET_PCT", 0.3) or 0.3)
+    )
+    if explore_mode:
+        logger.info(
+            f"[STRATEGY_SELECT] L1 EXPLORE round (ε-greedy fired) — "
+            f"hiding {len(state.patterns or [])} success_patterns"
+        )
+
     llm_service = get_llm_service()
     strategy = await select_t1_strategy_via_llm(
         dataset_id=state.dataset_id,
@@ -103,6 +117,9 @@ async def node_t1_strategy_select(
         # D2: pass chosen_datasets so the prompt's "MUST sample from EACH"
         # rule has named targets. Empty when not Phase 1 → legacy behavior.
         selected_datasets=chosen_dsets if (chosen_dsets and len(chosen_dsets) > 1) else None,
+        # L1 Anti-collapse: forward dedup blacklist accumulated this run.
+        dedup_skeletons=list(state.recent_dedup_skeletons or []),
+        explore_mode=explore_mode,
     )
 
     duration_ms = int((time.time() - start) * 1000)
@@ -120,6 +137,9 @@ async def node_t1_strategy_select(
                 "round": state.current_round,
                 "fields_pool_size": len(state.fields),
                 "patterns_in_pool": len(state.patterns),
+                # L1 ε-greedy observability: surface fire rate via SQL.
+                "explore_mode": explore_mode,
+                "dedup_blacklist_size": len(state.recent_dedup_skeletons or []),
             },
             output_data={
                 "economic_hypothesis": strategy.economic_hypothesis,

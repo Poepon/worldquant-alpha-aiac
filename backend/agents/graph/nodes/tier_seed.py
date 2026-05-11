@@ -19,6 +19,7 @@ and loop back to strategy_select if more seeds remain, else END.
 """
 from __future__ import annotations
 
+import random
 import time
 from typing import Dict, List
 
@@ -30,6 +31,7 @@ from backend.agents.graph.nodes.base import record_trace
 from backend.agents.graph.state import AlphaCandidate, MiningState
 from backend.agents.graph.tier_thresholds import get_min_seed_count, get_tier_thresholds
 from backend.agents.services.llm_service import get_llm_service
+from backend.config import settings
 from backend.factor_wrapping import (
     DEFAULT_T2_STRATEGY,
     DEFAULT_T3_STRATEGY,
@@ -261,6 +263,22 @@ async def node_tier_strategy_select(
     seed = seeds[idx]
     llm_service = get_llm_service()
 
+    # L1 Anti-collapse: forward dedup blacklist accumulated this run so
+    # T2/T3 wrapper LLM stops re-emitting the same group/template combos.
+    dedup_skels = list(state.recent_dedup_skeletons or [])
+
+    # L1 ε-greedy explore: per-round coin flip — escape narrow wrapper
+    # combinatorial space (T2 ≈ 5 wrapper × 4 group ≈ 20 combos so collapse
+    # is sharp; explore directs LLM toward less-common slots).
+    explore_mode = (
+        random.random() < float(getattr(settings, "EXPLORE_BUDGET_PCT", 0.3) or 0.3)
+    )
+    if explore_mode:
+        logger.info(
+            f"[STRATEGY_SELECT] L1 EXPLORE round T{state.factor_tier} "
+            f"seed_idx={idx} (ε-greedy fired)"
+        )
+
     if state.factor_tier == 2:
         strategy = await select_t2_strategy_via_llm(
             seed_expression=seed["expression"],
@@ -268,6 +286,8 @@ async def node_tier_strategy_select(
             region=state.region,
             dataset_id=state.dataset_id or seed.get("dataset_id") or "",
             llm_service=llm_service,
+            dedup_skeletons=dedup_skels,
+            explore_mode=explore_mode,
         )
     elif state.factor_tier == 3:
         strategy = await select_t3_strategy_via_llm(
@@ -276,6 +296,8 @@ async def node_tier_strategy_select(
             region=state.region,
             dataset_id=state.dataset_id or seed.get("dataset_id") or "",
             llm_service=llm_service,
+            dedup_skeletons=dedup_skels,
+            explore_mode=explore_mode,
         )
     else:
         logger.error(f"[{node_name}] tier {state.factor_tier} not supported by tier_seed nodes")
@@ -295,6 +317,9 @@ async def node_tier_strategy_select(
                 "seed_index": idx,
                 "seed_alpha_id": seed.get("alpha_id"),
                 "seed_expression": seed["expression"][:200],
+                # L1 ε-greedy observability for T2/T3 wrappers.
+                "explore_mode": explore_mode,
+                "dedup_blacklist_size": len(dedup_skels),
             },
             output_data={
                 "rationale": getattr(strategy, "rationale", ""),

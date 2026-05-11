@@ -203,8 +203,18 @@ async def select_t2_strategy_via_llm(
     region: str,
     dataset_id: str,
     llm_service: "LLMService",
+    dedup_skeletons: Optional[List[str]] = None,
+    explore_mode: bool = False,
 ) -> T2Strategy:
-    """Run LLM to choose T2 wrapper strategy. Falls back to DEFAULT on failure."""
+    """Run LLM to choose T2 wrapper strategy. Falls back to DEFAULT on failure.
+
+    Args:
+        dedup_skeletons: Layer 1 Anti-collapse — forwarded to prompt builder
+            so the LLM doesn't re-emit the same group_neutralize/group_rank
+            combos that already populated the DB.
+        explore_mode: Layer 1 ε-greedy — direct LLM toward less-common
+            wrapper/group combos for this round.
+    """
     from backend.agents.prompts.strategy_prompts import (
         T2_STRATEGY_SYSTEM,
         build_t2_strategy_user_prompt,
@@ -217,6 +227,8 @@ async def select_t2_strategy_via_llm(
         region=region,
         dataset_id=dataset_id,
         region_groups=region_groups,
+        dedup_skeletons=dedup_skeletons,
+        explore_mode=explore_mode,
     )
 
     try:
@@ -322,8 +334,16 @@ async def select_t3_strategy_via_llm(
     region: str,
     dataset_id: str,
     llm_service: "LLMService",
+    dedup_skeletons: Optional[List[str]] = None,
+    explore_mode: bool = False,
 ) -> T3Strategy:
-    """Run LLM to choose T3 trade_when templates. Falls back to DEFAULT on failure."""
+    """Run LLM to choose T3 trade_when templates. Falls back to DEFAULT on failure.
+
+    Args:
+        dedup_skeletons: Layer 1 Anti-collapse — forwarded to prompt builder.
+        explore_mode: Layer 1 ε-greedy — direct LLM toward less-common
+            trade_when templates.
+    """
     from backend.agents.prompts.strategy_prompts import (
         T3_STRATEGY_SYSTEM,
         build_t3_strategy_user_prompt,
@@ -334,6 +354,8 @@ async def select_t3_strategy_via_llm(
         seed_metrics=seed_metrics,
         region=region,
         dataset_id=dataset_id,
+        dedup_skeletons=dedup_skeletons,
+        explore_mode=explore_mode,
     )
 
     try:

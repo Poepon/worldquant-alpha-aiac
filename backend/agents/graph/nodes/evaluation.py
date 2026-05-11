@@ -281,18 +281,23 @@ async def node_simulate(
     # DB-level deduplication check
     db_duplicates = 0
     indices_to_simulate = []
-    
+    # Layer 1 Anti-collapse (2026-05-11): collect skeletons of dropped
+    # candidates; strategy_select reads state.recent_dedup_skeletons next
+    # round so the LLM stops re-generating the same narrow neighborhood.
+    dedup_skel_buf: list[str] = []
+
     try:
         from backend.database import AsyncSessionLocal
         from backend.selection_strategy import filter_unsimulated_expressions
-        
+        from backend.knowledge_extraction import expression_to_skeleton as _expr_to_skel
+
         expressions_to_check = [state.pending_alphas[i].expression for i in valid_indices]
-        
+
         async with AsyncSessionLocal() as db:
             new_exprs, dup_exprs = await filter_unsimulated_expressions(
                 db, expressions_to_check, state.region, state.universe
             )
-        
+
         new_expr_set = set(new_exprs)
         for idx in valid_indices:
             expr = state.pending_alphas[idx].expression
@@ -303,19 +308,35 @@ async def node_simulate(
                 state.pending_alphas[idx].simulation_error = "DB duplicate: already simulated"
                 state.pending_alphas[idx].is_simulated = True
                 state.pending_alphas[idx].simulation_success = False
-        
+                # Capture skeleton for next-round LLM blacklist
+                try:
+                    sk = _expr_to_skel(expr or "", max_depth=3)
+                    if sk:
+                        dedup_skel_buf.append(sk)
+                except Exception:
+                    pass
+
         logger.info(
             f"[{node_name}] DB dedup: {db_duplicates} duplicates skipped, "
             f"{len(indices_to_simulate)} to simulate"
         )
-        
+
     except Exception as e:
         logger.warning(f"[{node_name}] DB dedup check failed, proceeding with all: {e}")
         indices_to_simulate = valid_indices
     
+    # Helper to merge dedup_skel_buf into state.recent_dedup_skeletons,
+    # de-duped, last-50 retained (insertion-order preserved).
+    def _merge_dedup_skels() -> list[str]:
+        merged = list(state.recent_dedup_skeletons or []) + dedup_skel_buf
+        return list(dict.fromkeys(merged))[-50:]
+
     if not indices_to_simulate:
         logger.warning(f"[{node_name}] All expressions already in DB")
-        return {"pending_alphas": state.pending_alphas}
+        return {
+            "pending_alphas": state.pending_alphas,
+            "recent_dedup_skeletons": _merge_dedup_skels(),
+        }
 
     # Pre-simulate self-corr check (2026-05-09): drop candidates whose
     # skeleton matches an already-submitted alpha — they would fail BRAIN's
@@ -345,6 +366,8 @@ async def node_simulate(
                     )
                     state.pending_alphas[idx].is_simulated = True
                     state.pending_alphas[idx].simulation_success = False
+                    # Layer 1 Anti-collapse: feed back to LLM next round
+                    dedup_skel_buf.append(sk)
                 else:
                     keep_after_skel.append(idx)
             if skel_dups:
@@ -356,7 +379,10 @@ async def node_simulate(
             indices_to_simulate = keep_after_skel
             if not indices_to_simulate:
                 logger.warning(f"[{node_name}] All candidates dropped by portfolio-skel dedup")
-                return {"pending_alphas": state.pending_alphas}
+                return {
+                    "pending_alphas": state.pending_alphas,
+                    "recent_dedup_skeletons": _merge_dedup_skels(),
+                }
     except Exception as e:
         logger.warning(f"[{node_name}] portfolio-skel dedup failed, proceeding: {e}")
 
@@ -403,7 +429,10 @@ async def node_simulate(
         logger.warning(
             f"[{node_name}] All expressions filtered by pre-simulate classifier"
         )
-        return {"pending_alphas": state.pending_alphas}
+        return {
+            "pending_alphas": state.pending_alphas,
+            "recent_dedup_skeletons": _merge_dedup_skels(),
+        }
 
     logger.info(f"[{node_name}] Starting batch simulation | count={len(indices_to_simulate)} region={state.region}")
     
@@ -560,6 +589,7 @@ async def node_simulate(
     
     return {
         "pending_alphas": updated_alphas,
+        "recent_dedup_skeletons": _merge_dedup_skels(),
         **trace_update
     }
 

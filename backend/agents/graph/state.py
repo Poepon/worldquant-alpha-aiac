@@ -189,6 +189,18 @@ class MiningState(BaseModel):
     # -------------------------------------------------------------------------
     retry_count: int = 0
     max_retries: int = 3
+
+    # -------------------------------------------------------------------------
+    # Layer 1 Anti-collapse — dedup signal blacklist (2026-05-11)
+    # -------------------------------------------------------------------------
+    # recent_dedup_skeletons: skeletons that the pre-simulate dedup gate
+    # already rejected this workflow run (DB duplicate OR portfolio self-corr
+    # match). Strategy_select reads this and renders a "DO NOT REGENERATE"
+    # block in the LLM prompt so the LLM stops sampling the same narrow
+    # neighborhood. Accumulates across rounds within one workflow.run();
+    # capped at 50 to bound prompt size. evaluation.py appends; strategy
+    # nodes (t1_nodes / tier_seed) read.
+    recent_dedup_skeletons: List[str] = Field(default_factory=list)
     
     # -------------------------------------------------------------------------
     # Outputs (accumulated)

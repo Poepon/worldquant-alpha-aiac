@@ -121,6 +121,8 @@ async def select_t1_strategy_via_llm(
     llm_service: "LLMService",
     last_round_feedback: Optional[Dict] = None,
     selected_datasets: Optional[List[str]] = None,
+    dedup_skeletons: Optional[List[str]] = None,
+    explore_mode: bool = False,
 ) -> T1Strategy:
     """Run LLM to choose T1 strategy. Falls back to DEFAULT_T1_STRATEGY on
     failure (network error, JSON parse fail, schema mismatch).
@@ -132,6 +134,11 @@ async def select_t1_strategy_via_llm(
         success_patterns: Recent T1 SUCCESS_PATTERNs (may be empty/synthesized).
         llm_service: Injected for testability.
         last_round_feedback: round_history[-1] when called from round N>1.
+        dedup_skeletons: Layer 1 Anti-collapse — skeletons already rejected
+            by pre-simulate dedup gate this run; forwarded to prompt builder
+            as a "DO NOT REGENERATE" blacklist.
+        explore_mode: Layer 1 ε-greedy — when True, prompt hides RAG examples
+            and instructs LLM to prioritize structural novelty.
     """
     # Lazy-import to break the agents-package import cycle (see top-of-module note).
     from backend.agents.prompts.strategy_prompts import (
@@ -146,6 +153,8 @@ async def select_t1_strategy_via_llm(
         success_patterns=success_patterns,
         last_round_feedback=last_round_feedback,
         selected_datasets=selected_datasets,
+        dedup_skeletons=dedup_skeletons,
+        explore_mode=explore_mode,
     )
 
     try:

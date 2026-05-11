@@ -30,6 +30,65 @@ DATASET_CATEGORY_MAPPING = {
 }
 
 
+# =============================================================================
+# Layer 1 Anti-collapse helpers (2026-05-11) — diversity-aware retrieval
+# =============================================================================
+
+# Top-level wrapper op names that we treat as a "wrapper signature" for the
+# purpose of diversity selection. Two patterns sharing the same wrapper +
+# family are considered redundant.
+_WRAPPER_OPS = (
+    "group_neutralize", "group_rank", "group_zscore", "group_mean",
+    "group_scale", "trade_when", "subtract", "rank", "zscore", "normalize",
+    "quantile", "winsorize", "scale", "signed_power", "multiply",
+    "ts_decay_linear", "ts_rank", "ts_zscore", "ts_mean", "ts_std_dev",
+)
+
+
+def _extract_wrapper_signature(pattern: str) -> str:
+    """Return the top-level wrapper op name of a pattern, or "raw" if none.
+
+    Examples:
+        "group_neutralize(rank(returns), industry)" → "group_neutralize"
+        "rank(returns)"                             → "rank"
+        "ts_rank(close, 20)"                        → "ts_rank"
+        "T2 wrap of seed alphas with ..."           → "raw" (NL pattern)
+    """
+    if not pattern:
+        return "raw"
+    text = pattern.strip()
+    # Match leading identifier followed by `(`
+    m = re.match(r"^\s*([a-zA-Z_][\w]*)\s*\(", text)
+    if not m:
+        return "raw"
+    op = m.group(1).lower()
+    return op if op in _WRAPPER_OPS else "other_op"
+
+
+def _classify_pattern_family(text: str) -> str:
+    """Classify a pattern by field family — mirrors strategy_prompts._classify_family.
+
+    Kept locally so RAG retrieval doesn't import the prompts module
+    (otherwise circular imports).
+    """
+    t = (text or "").lower()
+    if "returns" in t or "ret_" in t:
+        return "RETURNS"
+    if "fnd" in t:
+        return "FUNDAMENTAL"
+    if "anl" in t or "fam_" in t or "est" in t:
+        return "ANALYST"
+    if "snt" in t or "news" in t or "social" in t:
+        return "SENTIMENT"
+    if "fscore" in t or "model_" in t or "mdl" in t or "composite" in t or "_score_" in t:
+        return "FACTOR_COMPOSITE"
+    if "opt" in t or "implied_vol" in t:
+        return "OPTION"
+    if any(w in t for w in ("close", "open", "high", "low", "vwap", "volume", "amount", "cap")):
+        return "PRICE_PV"
+    return "OTHER"
+
+
 def infer_dataset_category(dataset_id: str) -> str:
     """
     Infer the category of a dataset from its ID.
@@ -547,18 +606,56 @@ class RAGService:
         if not rows:
             return []
 
+        # L1 Anti-collapse (2026-05-11): score function + LRU penalty.
+        # The previous logic capped usage_count at +0.2 BONUS — patterns the
+        # LLM had already seen many times kept getting recommended, locking
+        # the search neighborhood. Flip to LRU-style penalty: usage>=5 gets
+        # -0.5, deterring over-fed patterns and giving fresher KB entries a
+        # chance to surface. Diversity selection (below) is the real fix —
+        # this is just to break ties in the candidate pool.
         def score(e: KnowledgeEntry) -> float:
             md = e.meta_data or {}
             conf = float(md.get("confidence", 0.5) or 0.5)
             is_hitl = e.created_by == "HITL" or md.get("source") == "hitl"
             hitl_bonus = 0.5 if (apply_hitl_bonus and is_hitl) else 0.0
             region_match = 0.2 if region and (md.get("region") == region or region in (md.get("regions") or [])) else 0.0
-            usage = min(0.2, (e.usage_count or 0) * 0.02)
-            return conf + hitl_bonus + region_match + usage
+            uc = e.usage_count or 0
+            if uc >= 5:
+                lru = -0.5  # over-fed → deprioritize
+            elif uc >= 1:
+                lru = 0.05 * uc  # mild boost for recently-validated patterns
+            else:
+                lru = 0.0
+            return conf + hitl_bonus + region_match + lru
 
         rows.sort(key=score, reverse=True)
+
+        # L1 Anti-collapse: diversity-aware greedy selection.
+        # Without this, the top-K result set is dominated by whichever
+        # (family, wrapper) tuple has the most entries. Greedy walk picks
+        # one entry per (family, wrapper) until limit; if exhausted before
+        # limit, fill the rest by score order.
+        candidate_pool = rows[: max(limit * 3, 12)]
+        chosen_keys: set = set()
+        diverse_pick: list = []
+        leftover: list = []
+        for entry in candidate_pool:
+            text = entry.pattern or entry.description or ""
+            fam = _classify_pattern_family(text)
+            wrap = _extract_wrapper_signature(entry.pattern or "")
+            key = (fam, wrap)
+            if key not in chosen_keys and len(diverse_pick) < limit:
+                chosen_keys.add(key)
+                diverse_pick.append(entry)
+            else:
+                leftover.append(entry)
+        # Top-up by score order if we ran out of unique (family, wrapper)
+        if len(diverse_pick) < limit:
+            need = limit - len(diverse_pick)
+            diverse_pick.extend(leftover[:need])
+
         out = []
-        for entry in rows[:limit]:
+        for entry in diverse_pick:
             md = entry.meta_data or {}
             out.append({
                 "pattern": entry.pattern,

@@ -266,7 +266,15 @@ class Settings(BaseSettings):
     # Rate Limiting
     MAX_SIMULATIONS_PER_DAY: int = 100
     MAX_TOKENS_PER_DAY: int = 500000
-    
+
+    # Layer 1 Anti-collapse (2026-05-11) — ε-greedy explore budget.
+    # Probability that a strategy_select round runs in EXPLORE mode: RAG
+    # success patterns hidden from the LLM, prompt directs structural
+    # novelty. Without this, the LLM keeps sampling the historical PASS
+    # neighborhood and cascade collapses to db_duplicate ≥ 90%. Default
+    # 0.3 = 1 in ~3 rounds explores; tune up if collapse persists.
+    EXPLORE_BUDGET_PCT: float = 0.3
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     
