@@ -91,7 +91,15 @@ class TestExpandT1Strategy:
         )
         assert expand_t1_strategy(strat, daily_goal=4, region="USA") == []
 
-    def test_short_window_scale(self):
+    def test_short_window_scale(self, monkeypatch):
+        # Disable V-22.6 / V-22.6.3 composite emission + T1 decay-twin so this
+        # test focuses on its narrow intent: SHORT scale → window mapping {5, 10}.
+        # Without these stubs, stratified_sample randomly drops the 2 raw
+        # ts_delta candidates among 20+ composite/pair candidates ~75% of runs.
+        from backend.config import settings
+        monkeypatch.setattr(settings, "COMPOSITE_T1_ENABLED", False, raising=False)
+        monkeypatch.setattr(settings, "T1_AUTO_DECAY_WRAPPER", False, raising=False)
+
         strat = T1Strategy(
             economic_hypothesis="fast", signal_velocity="FAST",
             window_scale="SHORT", promising_fields=["close"],
@@ -99,9 +107,9 @@ class TestExpandT1Strategy:
         )
         result = expand_t1_strategy(strat, daily_goal=2, region="USA")
         # ts_delta(close, 5) and ts_delta(close, 10) — both windows from SHORT map.
-        # Filter out field-pair (#2) and composite (V-22.6) candidates which
-        # encode synthetic window=0; only single-field ts_op candidates respect
-        # the window_scale → windows mapping.
+        # Field-pair (#2) candidates still emit (their gating is independent);
+        # filter them out — only single-field ts_op candidates respect the
+        # window_scale → windows mapping.
         assert len(result) >= 1
         raw_t1 = [
             r for r in result

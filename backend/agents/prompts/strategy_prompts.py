@@ -148,6 +148,31 @@ Including 1-2 fundamental ingredient fields unlocks 4-8 composite alphas per
 round at zero LLM cost, the cleanest path to escape the returns-only
 monoculture.
 
+**V-22.6.4 COMPOSITE INGREDIENT BRIDGE (HARD)** — Data-driven evidence:
+in the last 14 days fundamental6 produced 178 PASS/PROV alphas but 0
+V-22.6 composite alphas (pe_synth=0, earnings_yield=0, accrual_quality=0,
+book_to_market=0, leverage_ratio=0, cfo_yield=0, asset_turnover=0). Root
+cause: when you picked `fnd6_*` or `anl4_*` fields you NEVER also picked
+the PV ingredient (`close`, `cap`, `vwap`) needed to construct the
+arithmetic ratio. The composite branch checks `required_fields ⊆
+available_fields`; without PV ingredients it auto-skips.
+
+When `dataset_id` is a fundamental dataset (e.g. fundamental6, fundamental2)
+or analyst dataset (e.g. analyst4) AND your selected fields include any of:
+  - eps / ebit / enterprise_value / revenue / book_value_per_share / sales
+  - cash_flow_from_operations / cfo / net_income / total_assets / total_debt
+  - any anl4_* / news_eps_actual / actual_eps_value_quarterly
+**you MUST ALSO include `close`, `cap`, and `vwap` in promising_fields**.
+These PV anchors don't crowd out your fundamental picks (target is 8-15
+fields, so 12 fnd + 3 PV is fine) and they unlock 4-8 value/quality
+composite alphas the downstream expander will auto-enumerate for free.
+Skipping these PV anchors is the documented #1 reason fundamental rounds
+produce single-field-only alphas that high-correlate with the existing
+returns-reversal monoculture.
+
+For pure PV / sentiment / option datasets you do NOT need to add anything —
+intraday / gap / liquidity composites use PV which is already there.
+
 Return ONLY the JSON object. No prose. No markdown fence. No commentary.
 """
 
