@@ -334,13 +334,18 @@ class TaskService(BaseService):
                 )
 
         if tier == 1 and data.dataset_strategy != "AUTO":
-            from backend.models import DataField
+            # V-22.6.4-followup (2026-05-12): DataField.dataset_id is an INTEGER
+            # FK to datasets.id, but data.target_datasets is a list of string
+            # dataset_id values (e.g. ["fundamental6"]). The old in_(strings)
+            # filter raised an UndefinedColumnError (mapped to 500). Join
+            # through DatasetMetadata.dataset_id (String) instead.
+            from backend.models import DataField, DatasetMetadata
 
-            # Validate that pinned target_datasets exist in DataField table
             if data.target_datasets:
                 ds_count_q = (
                     select(func.count(DataField.id))
-                    .where(DataField.dataset_id.in_(data.target_datasets))
+                    .join(DatasetMetadata, DataField.dataset_id == DatasetMetadata.id)
+                    .where(DatasetMetadata.dataset_id.in_(data.target_datasets))
                 )
                 if (await self.db.execute(ds_count_q)).scalar() == 0:
                     raise ValueError(
