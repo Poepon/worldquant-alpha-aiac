@@ -177,6 +177,15 @@ class Settings(BaseSettings):
     COMPOSITE_T1_APPLY_PREPROCESS: bool = False
     COMPOSITE_T1_BACKFILL_WINDOW: int = 120
     COMPOSITE_T1_WINSORIZE_STD: int = 4
+    # V-22.6.3 (2026-05-12): auto-emit ts_decay_linear(<composite>, 4) variant
+    # per composite. Spike showed 4 PROV composite alphas (sharpe 1.8-2.35) all
+    # blocked by turnover 0.81-0.82 > BRAIN's 0.7 can_submit gate. ts_decay_linear
+    # 4-day smoothing typically halves turnover with minimal sharpe loss (per
+    # T1_AUTO_DECAY_WRAPPER verification 2026-05-07). The decay variant is an
+    # additional candidate alongside the LLM-driven ts_op × window combos,
+    # NOT a replacement — both shapes flow to BRAIN simulate.
+    COMPOSITE_T1_AUTO_DECAY_WRAPPER: bool = True
+    COMPOSITE_T1_AUTO_DECAY_VALUE: int = 4
 
     # Plan v5+ §Phase 1 — Hypothesis-Guided Exploration (HGE) staging flag.
     # 0 = current dataset-centric (pre-Phase 1, default until Phase 1 verified)

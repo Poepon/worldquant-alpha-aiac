@@ -725,6 +725,65 @@ class TestCompositeFieldsLoader:
             f"got {len(cands)} candidates"
         )
 
+    def test_decay_wrapper_variant_emitted(self):
+        """V-22.6.3: when apply_decay_wrapper=True, every composite gets a
+        ts_decay_linear(<composite>, d) variant added alongside the regular
+        ts_op × window combos. This dampens turnover so high-sharpe composites
+        can clear BRAIN's can_submit gate (turnover < 0.7)."""
+        from backend.agents.seed_pool.composite_fields import (
+            generate_composite_t1_candidates, total_composite_count,
+        )
+        cands = generate_composite_t1_candidates(
+            ts_ops=["ts_rank"],
+            windows=[20],
+            available_fields=[
+                "eps", "ebit", "enterprise_value", "book_value_per_share_2",
+                "revenue", "cash_flow_from_operations", "net_income_total_2",
+                "fnd6_newa1v1300_at", "debt_lt", "fnd6_teq",
+            ],
+            region="USA",
+            max_per_composite=1,
+            apply_decay_wrapper=True,
+            decay_value=4,
+        )
+        # Each eligible composite produces 1 (max_per_composite) regular combo
+        # + 1 decay variant = 2 candidates. Total candidates = composites × 2.
+        n_composites = total_composite_count()
+        assert len(cands) == 2 * n_composites, (
+            f"expected {2 * n_composites} candidates ({n_composites} composites "
+            f"× 2 each), got {len(cands)}"
+        )
+        # Decay variants identifiable by op prefix `composite_decay`
+        decay_variants = [c for c in cands if c["op"].startswith("composite_decay")]
+        regular_variants = [c for c in cands if not c["op"].startswith("composite_decay")]
+        assert len(decay_variants) == n_composites
+        assert len(regular_variants) == n_composites
+        # Decay variants must classify as T2 composite
+        for c in decay_variants:
+            assert c["expression"].startswith("ts_decay_linear(")
+            assert "winsorize" not in c["expression"]
+            assert classify_tier(c["expression"]) == 2, (
+                f"decay-wrapped composite must classify as T2: {c['expression']}"
+            )
+
+    def test_decay_wrapper_disabled_by_default(self):
+        """When apply_decay_wrapper=False (default), no extra decay variant
+        is emitted — preserves V-22.6.1/V-22.6.2 candidate count."""
+        from backend.agents.seed_pool.composite_fields import (
+            generate_composite_t1_candidates,
+        )
+        cands = generate_composite_t1_candidates(
+            ts_ops=["ts_rank"],
+            windows=[20],
+            available_fields=["eps", "ebit"],
+            region="USA",
+            max_per_composite=1,
+            # apply_decay_wrapper not set → defaults False
+        )
+        for c in cands:
+            assert not c["op"].startswith("composite_decay")
+            assert not c["expression"].startswith("ts_decay_linear")
+
     def test_bare_form_default_no_preprocess(self):
         """V-22.6.1 default: bare `ts_op(<composite>, w)` without winsorize/
         ts_backfill wrap, to stay under BRAIN's 8-operator complexity limit.

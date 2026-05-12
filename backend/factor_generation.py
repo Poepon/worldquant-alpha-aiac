@@ -341,6 +341,12 @@ def expand_t1_strategy(
                 winsorize_std=int(
                     getattr(_settings, "COMPOSITE_T1_WINSORIZE_STD", 4)
                 ),
+                apply_decay_wrapper=bool(
+                    getattr(_settings, "COMPOSITE_T1_AUTO_DECAY_WRAPPER", False)
+                ),
+                decay_value=int(
+                    getattr(_settings, "COMPOSITE_T1_AUTO_DECAY_VALUE", 4)
+                ),
             )
             candidates.extend(composites)
             if composites:

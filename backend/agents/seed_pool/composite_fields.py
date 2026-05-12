@@ -167,6 +167,8 @@ def generate_composite_t1_candidates(
     apply_preprocess: bool = False,
     backfill_window: int = DEFAULT_BACKFILL_WINDOW,
     winsorize_std: int = DEFAULT_WINSORIZE_STD,
+    apply_decay_wrapper: bool = False,
+    decay_value: int = 4,
 ) -> List[Dict[str, Any]]:
     """Build T1 candidate dicts from composite fields × ts_ops × windows.
 
@@ -187,6 +189,13 @@ def generate_composite_t1_candidates(
             _peel_composite_preprocess in factor_tier_classifier.
         backfill_window: ts_backfill window — only used when apply_preprocess.
         winsorize_std: winsorize std bound — only used when apply_preprocess.
+        apply_decay_wrapper: V-22.6.3. When True, emits an additional
+            `ts_decay_linear(<composite>, decay_value)` variant per composite
+            alongside the regular ts_op × window combos. The decay variant
+            dampens turnover so high-sharpe composites can clear BRAIN's
+            can_submit turnover gate. Independent from apply_preprocess.
+        decay_value: d-parameter for the ts_decay_linear wrapper. 4 is the
+            T1_AUTO_DECAY_WRAPPER sweet spot per 2026-05-07 verification.
 
     Returns:
         List of candidate dicts shaped for _dedup_and_validate:
@@ -256,6 +265,20 @@ def generate_composite_t1_candidates(
         ]
         random.shuffle(combos)
         out.extend(combos[:max_per_composite])
+
+        # V-22.6.3: always emit a ts_decay_linear smoothing variant per composite
+        # to dampen turnover (typical raw composite ts_op produces turnover
+        # 0.8+, blocking can_submit). Each composite's decay variant gets its
+        # OWN bucket (`composite_decay<d>_<name>`) — without per-composite
+        # bucketing, all 15 decay variants would collide on a single bucket
+        # and stratified_sample would keep only ~1.
+        if apply_decay_wrapper:
+            out.append({
+                "expression": f"ts_decay_linear({wrapped}, {decay_value})",
+                "field": f"_composite_{name}",
+                "op": f"composite_decay{decay_value}_{name}",
+                "window": decay_value,
+            })
 
     if skipped_unavailable:
         logger.debug(
