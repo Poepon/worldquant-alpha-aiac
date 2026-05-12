@@ -1,0 +1,72 @@
+{
+  "competition": "IQC2026S1",
+  "results": [
+    {
+      "alpha_pk": 1367,
+      "brain_id": "E5r2e0Qr",
+      "factor_tier": null,
+      "expression": "group_rank(multiply(rank(multiply(divide(subtract(fnd6_newa2v1300_oancf, fnd6_newa2v1300_ni), fnd6_newa1v1300_icapt), divide(fnd6_newa2v1300_sale, fnd6_newa1v1300_icapt))), ts_rank(multiply(-1, return",
+      "is_sharpe": 2.36,
+      "is_fitness": 1.31,
+      "is_turnover": 0.3807,
+      "merged_sharpe": 3.25,
+      "merged_fitness": 2.53,
+      "before_score": 7227.0,
+      "after_score": 6716.0,
+      "deltas": {
+        "sharpe": 0.06,
+        "fitness": -0.14,
+        "turnover": 0.025,
+        "returns": 0.0009,
+        "pnl": 44855.0,
+        "drawdown": 0.0001,
+        "score": -511.0
+      }
+    },
+    {
+      "alpha_pk": 2501,
+      "brain_id": "npOmRzGM",
+      "factor_tier": null,
+      "expression": "group_rank(multiply(rank(multiply(divide(subtract(fnd6_newa2v1300_oancf, fnd6_newa2v1300_ni), fnd6_newa1v1300_at), divide(fnd6_newa2v1300_sale, fnd6_newa1v1300_at))), ts_rank(-returns, 63)), industry)",
+      "is_sharpe": 2.4,
+      "is_fitness": 1.22,
+      "is_turnover": 0.4031,
+      "merged_sharpe": 3.25,
+      "merged_fitness": 2.5,
+      "before_score": 7227.0,
+      "after_score": 6696.0,
+      "deltas": {
+        "sharpe": 0.06,
+        "fitness": -0.17,
+        "turnover": 0.0275,
+        "returns": -0.0005,
+        "pnl": -25557.0,
+        "drawdown": -0.0011,
+        "score": -531.0
+      }
+    },
+    {
+      "alpha_pk": 2534,
+      "brain_id": "A1OLw3Ml",
+      "factor_tier": null,
+      "expression": "group_rank(multiply(rank(multiply(divide(subtract(fnd6_newa2v1300_oancf, fnd6_newa2v1300_ni), fnd6_newa1v1300_at), divide(fnd6_newa2v1300_sale, fnd6_newa1v1300_at))), ts_rank(subtract(0, returns), 63)",
+      "is_sharpe": 2.32,
+      "is_fitness": 1.25,
+      "is_turnover": 0.3986,
+      "merged_sharpe": 3.24,
+      "merged_fitness": 2.51,
+      "before_score": 7227.0,
+      "after_score": 6661.0,
+      "deltas": {
+        "sharpe": 0.05,
+        "fitness": -0.16,
+        "turnover": 0.027,
+        "returns": 0.0008,
+        "pnl": 41582.0,
+        "drawdown": -0.0002,
+        "score": -566.0
+      }
+    }
+  ],
+  "failures": []
+}
