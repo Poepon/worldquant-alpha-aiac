@@ -683,6 +683,62 @@ class TestCompositeFieldsLoader:
             f"{len(mismatched)} failed: {[c['expression'][:100] for c in mismatched[:3]]}"
         )
 
+    def test_v22_6_5_composite_quota_reserves_slots(self, monkeypatch):
+        """V-22.6.5: composite candidates get a guaranteed fraction of the
+        final pool (default 33%). Without this, stratified_sample averages
+        composites against raw_t1/decay/pair buckets and composites end up
+        at ~21% — fund composites at ~6% — too low for reliable yield."""
+        from backend.config import settings as _s
+        from backend.factor_generation import T1Strategy, expand_t1_strategy
+        # Force decay wrapper + composite settings to deterministic state
+        monkeypatch.setattr(_s, "COMPOSITE_T1_ENABLED", True, raising=False)
+        monkeypatch.setattr(_s, "COMPOSITE_T1_AUTO_DECAY_WRAPPER", True, raising=False)
+        monkeypatch.setattr(_s, "COMPOSITE_T1_FINAL_POOL_QUOTA_PCT", 0.33, raising=False)
+        monkeypatch.setattr(_s, "T1_AUTO_DECAY_WRAPPER", True, raising=False)
+
+        strat = T1Strategy(
+            economic_hypothesis="value+quality test",
+            signal_velocity="FUNDAMENTAL_SLOW", window_scale="MEDIUM",
+            promising_fields=[
+                "close", "open", "high", "low", "volume", "cap", "vwap",
+                "eps", "ebit", "enterprise_value", "book_value_per_share_2",
+                "revenue", "cash_flow_from_operations", "net_income_total_2",
+                "fnd6_newa1v1300_at", "debt_lt", "fnd6_teq",
+            ],
+            preferred_ts_ops=["ts_rank", "ts_zscore", "ts_mean", "ts_decay_linear"],
+            rationale="t",
+        )
+        # daily_goal=6 → target_n=9 (×1.5). Composite quota = ceil(9 * 0.33) = 3.
+        result = expand_t1_strategy(strat, daily_goal=6, region="USA")
+        composites = [
+            c for c in result
+            if c.get("field", "").startswith("_composite_")
+        ]
+        # With 33% quota, expect at least 2 composites in final pool (some
+        # may be lost in dedup/validate). Pre-V-22.6.5: typically 0-1.
+        assert len(composites) >= 2, (
+            f"expected composite quota to reserve ≥2 slots; got {len(composites)} "
+            f"of {len(result)}. Composite quota mechanism not working."
+        )
+
+    def test_v22_6_5_quota_disabled_falls_back(self, monkeypatch):
+        """Setting COMPOSITE_T1_FINAL_POOL_QUOTA_PCT=0.0 falls back to legacy
+        single-stratified-sample path."""
+        from backend.config import settings as _s
+        from backend.factor_generation import T1Strategy, expand_t1_strategy
+        monkeypatch.setattr(_s, "COMPOSITE_T1_FINAL_POOL_QUOTA_PCT", 0.0, raising=False)
+
+        strat = T1Strategy(
+            economic_hypothesis="t", signal_velocity="MEDIUM",
+            window_scale="MEDIUM",
+            promising_fields=["close", "cap", "volume"],
+            preferred_ts_ops=["ts_rank"],
+            rationale="t",
+        )
+        result = expand_t1_strategy(strat, daily_goal=4, region="USA")
+        # Should still produce candidates, just without composite quota carve-out
+        assert len(result) >= 1
+
     def test_two_input_ts_ops_filtered_out(self):
         """V-22.6.2: ts_corr / ts_regression / ts_covariance need a 2nd series
         input plus a window arg. Pairing them with a single-output composite

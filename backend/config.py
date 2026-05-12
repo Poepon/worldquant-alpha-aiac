@@ -186,6 +186,14 @@ class Settings(BaseSettings):
     # NOT a replacement — both shapes flow to BRAIN simulate.
     COMPOSITE_T1_AUTO_DECAY_WRAPPER: bool = True
     COMPOSITE_T1_AUTO_DECAY_VALUE: int = 4
+    # V-22.6.5 (2026-05-12) — reserve a fraction of the final candidate pool
+    # for composite alphas after stratified_sample. Spike on V-22.6.4
+    # verification rounds saw fund composites averaged out by the 42-bucket
+    # stratification (composite ratio ~21% of final pool, fund composite ~6%).
+    # Reserving 33% for composites lifts fund-composite expected count from
+    # ~0.6/round to ~2/round, giving reliable yield of fund composite saves.
+    # 0.0 = disabled (legacy single-stratified-sample behavior).
+    COMPOSITE_T1_FINAL_POOL_QUOTA_PCT: float = 0.33
 
     # Plan v5+ §Phase 1 — Hypothesis-Guided Exploration (HGE) staging flag.
     # 0 = current dataset-centric (pre-Phase 1, default until Phase 1 verified)

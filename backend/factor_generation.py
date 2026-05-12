@@ -361,7 +361,48 @@ def expand_t1_strategy(
             )
 
     target_n = max(1, math.ceil(daily_goal * target_multiplier))
-    if len(candidates) > target_n:
+
+    # V-22.6.5 (2026-05-12) — Reserved composite quota in the final pool.
+    # Before this, stratified_sample averaged composite candidates against
+    # raw_t1 / decay-twin / pair buckets, leaving composites at ~21% of the
+    # final pool. Spike on V-22.6.4 verification rounds saw 5 fundamental6
+    # mining rounds yield 0 fund-composite alphas saved (expected 0.96/round
+    # × ~10% PASS = 0.5 in 5 rounds, hit lower bound). Reserving a fraction
+    # of target_n for composite candidates raises the per-round expectation
+    # 2-3x without doubling BRAIN sim cost.
+    composite_quota_pct = float(
+        getattr(_settings, "COMPOSITE_T1_FINAL_POOL_QUOTA_PCT", 0.33)
+    )
+    composite_candidates = [
+        c for c in candidates if c.get("field", "").startswith("_composite_")
+    ]
+    non_composite = [
+        c for c in candidates if not c.get("field", "").startswith("_composite_")
+    ]
+    if composite_candidates and composite_quota_pct > 0:
+        # Floor 1, cap at min(quota, len(available composites))
+        composite_quota = min(
+            len(composite_candidates),
+            max(1, math.ceil(target_n * composite_quota_pct)),
+        )
+        non_comp_quota = max(1, target_n - composite_quota)
+
+        if len(composite_candidates) > composite_quota:
+            composite_candidates = stratified_sample(
+                composite_candidates, by="op", n=composite_quota,
+            )
+        if len(non_composite) > non_comp_quota:
+            non_composite = stratified_sample(
+                non_composite, by="op", n=non_comp_quota,
+            )
+        candidates = composite_candidates + non_composite
+        logger.info(
+            f"[factor_generation] V-22.6.5 final pool: "
+            f"composite={len(composite_candidates)} (quota={composite_quota}) + "
+            f"non_composite={len(non_composite)} = {len(candidates)}"
+        )
+    elif len(candidates) > target_n:
+        # Legacy path when no composites OR quota disabled
         candidates = stratified_sample(candidates, by="op", n=target_n)
 
     # P1 (2026-05-07): when decay wrapping is enabled, T2-classified twins
