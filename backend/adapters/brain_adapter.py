@@ -978,8 +978,31 @@ class BrainAdapter:
             BrainAdapter._auth_lock = asyncio.Lock()
         return BrainAdapter._auth_lock
 
+    # 2026-05-12 (V-22.7): BRAIN returns this body string on some auth-failure
+    # responses with non-401 status codes (observed: simulate POST returning
+    # the message with the request body intact). The plain status-code check
+    # used to miss these and the round burned with 0 alphas while the session
+    # silently expired. Treat any response whose body contains this marker as
+    # a 401-equivalent for the purposes of triggering re-auth.
+    _AUTH_ERROR_BODY_MARKER: str = "Incorrect authentication credentials"
+
+    def _is_auth_error(self, response: "httpx.Response") -> bool:
+        """True iff the response signals an authentication failure either by
+        status code (401) or by the BRAIN body marker. Reading body is cheap
+        for these short error responses (httpx caches content)."""
+        if response.status_code == 401:
+            return True
+        # Only inspect short, error-shaped bodies to avoid scanning large
+        # success payloads. Cap at 2KB — auth-error bodies are tens of bytes.
+        if response.status_code >= 400 or len(response.content) <= 2048:
+            try:
+                return self._AUTH_ERROR_BODY_MARKER in response.text
+            except Exception:
+                return False
+        return False
+
     async def _request(self, method: str, url: str, **kwargs) -> httpx.Response:
-        """Single-shot HTTP call with 401 → coalesced re-auth → retry-once.
+        """Single-shot HTTP call with auth-failure → coalesced re-auth → retry.
 
         For methods that own their own state machine (simulate POST + poll
         loop, slot accounting, paginated cursors) and can't easily wrap the
@@ -996,11 +1019,19 @@ class BrainAdapter:
         After acquiring lock, re-check session validity — another coroutine
         may have already refreshed. This prevents BRAIN auth-endpoint
         throttling when multiple rounds hit 401 simultaneously.
+
+        V-22.7 (2026-05-12): detection broadened to include the
+        "Incorrect authentication credentials" body marker. Spike on task 530
+        showed BRAIN returning non-401 statuses with that body, bypassing the
+        old status-only check; 3 consecutive simulate rounds returned 0
+        alphas because the session silently expired without re-auth firing.
         """
         response = await getattr(self.client, method.lower())(url, **kwargs)
-        if response.status_code != 401:
+        if not self._is_auth_error(response):
             return response
-        logger.warning(f"401 on {method} {url} — re-authenticating")
+        logger.warning(
+            f"auth failure on {method} {url} (status={response.status_code}) — re-authenticating"
+        )
         async with self._get_auth_lock():
             # Lock held; check if another coroutine already refreshed.
             try:
@@ -1012,12 +1043,12 @@ class BrainAdapter:
                     await self.authenticate()
                 except Exception as e:
                     logger.error(f"Re-auth failed under lock: {e}")
-                    return response  # return original 401
+                    return response  # return original error response
         # Retry up to 2x — cookie propagation across httpx pool can take
         # a tick on busy event loops.
         for _attempt in range(2):
             response = await getattr(self.client, method.lower())(url, **kwargs)
-            if response.status_code != 401:
+            if not self._is_auth_error(response):
                 break
             await asyncio.sleep(0.5)
         return response
