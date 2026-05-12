@@ -211,46 +211,76 @@ class MiningAgent:
             raise
     
     def _apply_field_filters(
-        self, 
-        fields: List[Dict], 
+        self,
+        fields: List[Dict],
         strategy: EvolutionStrategy
     ) -> List[Dict]:
         """
         Apply strategy-based field filtering.
-        
+
         Prioritizes preferred fields, demotes avoided fields.
+
+        V-22.6.6 (2026-05-13): universal PV anchors (close/cap/vwap/high/low/
+        open/volume/returns/vwap/adv*/sharesout/amount) are PROTECTED from
+        avoid_set + screened_set filtering. They're required by V-22.6
+        composite synthesis (PE = close/eps, intraday range = (high-low)/close
+        etc.) and the validator's allowed_fields list rejects composite
+        candidates whose ingredients are absent. Spike on task 534 round 2
+        showed strategy.avoid_fields included PV after a 0-PASS round, which
+        stripped close/cap/vwap from state.fields, causing 5 V-22.6 composite
+        candidates to fail VALIDATE with "Field 'close' not found in dataset".
         """
-        avoid_set = set(strategy.avoid_fields)
+        # V-22.6.6 protected anchors — mirror _UNIVERSAL_PV_FIELDS in
+        # mining_tasks.py. Kept inline rather than imported to avoid the
+        # circular import (mining_agent ← mining_tasks chain).
+        _PROTECTED_PV = {
+            "close", "open", "high", "low", "volume", "vwap", "returns",
+            "cap", "sharesout", "adv5", "adv20", "adv60", "adv120", "amount",
+        }
+
+        avoid_set = set(strategy.avoid_fields) - _PROTECTED_PV
         preferred_set = set(strategy.preferred_fields)
-        screened_set = set(strategy.screened_fields)
-        
+        screened_set = set(strategy.screened_fields) - _PROTECTED_PV
+
+        # Split out the PV anchors first so they always survive.
+        pv_anchors = [
+            f for f in fields
+            if (f.get("id") or f.get("name") or "") in _PROTECTED_PV
+        ]
+        pv_anchor_ids = {(f.get("id") or f.get("name")) for f in pv_anchors}
+        other_fields = [
+            f for f in fields
+            if (f.get("id") or f.get("name") or "") not in pv_anchor_ids
+        ]
+
         # If we have screened fields, prioritize them
         if screened_set:
-            # Put screened fields first, filter out avoided
-            screened = [f for f in fields if f.get("id", f.get("name")) in screened_set]
-            others = [
-                f for f in fields 
-                if f.get("id", f.get("name")) not in screened_set
-                and f.get("id", f.get("name")) not in avoid_set
+            screened = [
+                f for f in other_fields
+                if (f.get("id") or f.get("name")) in screened_set
             ]
-            return screened + others[:20]  # Limit total fields
-        
+            others = [
+                f for f in other_fields
+                if (f.get("id") or f.get("name")) not in screened_set
+                and (f.get("id") or f.get("name")) not in avoid_set
+            ]
+            # PV anchors always at front, then screened, then capped others.
+            return pv_anchors + screened + others[:20]
+
         # Otherwise, use preferred/avoid logic
         preferred = []
         neutral = []
-        avoided = []
-        
-        for f in fields:
-            field_id = f.get("id", f.get("name"))
+        for f in other_fields:
+            field_id = f.get("id") or f.get("name")
             if field_id in avoid_set:
-                avoided.append(f)
-            elif field_id in preferred_set:
+                continue  # excluded
+            if field_id in preferred_set:
                 preferred.append(f)
             else:
                 neutral.append(f)
-        
-        # Preferred first, then neutral, avoided last (or excluded)
-        return preferred + neutral[:30]  # Limit to manageable size
+
+        # PV anchors first (always), then preferred, then capped neutral.
+        return pv_anchors + preferred + neutral[:30]
     
     async def _collect_iteration_alphas(
         self, 
