@@ -55,6 +55,15 @@ Output a JSON object matching the T1Strategy schema:
    - MEDIUM: 20-60 day windows (MEDIUM, FACTOR_COMPOSITE)
    - LONG: 120-240 day windows (FUNDAMENTAL_SLOW)
 4. promising_fields: 8-15 field IDs picked from the available_fields list.
+   **V-22.8 (2026-05-13) HARD CONSTRAINT** — promising_fields MUST be a
+   STRICT SUBSET of the available_fields IDs shown below. **NEVER invent or
+   recall field IDs not present in that list** (no matter how plausible they
+   sound like `opt8_put_call_ratio_30d`, `anl4_afv4_cfps_mean`,
+   `fnd6_debt_to_equity_ratio` — if you don't see them in the list, they
+   don't exist for THIS round's dataset). Any hallucinated field IDs are
+   programmatically dropped by V-22.8 post-LLM filter and replaced with
+   top-coverage fallbacks, but the round still wastes BRAIN sim slots
+   re-generating around them.
    - Avoid categorical / ID / group fields (industry, sector codes, exchange).
    - **HARD: prefer fields with coverage >= 0.7**. Coverage < 0.5 fields almost
      always trigger BRAIN's CONCENTRATED_WEIGHT check because only a small

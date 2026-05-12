@@ -183,6 +183,49 @@ async def select_t1_strategy_via_llm(
         topped = _fill_default_with_top_fields(available_fields)
         parsed = parsed.model_copy(update={"promising_fields": topped.promising_fields})
 
+    # V-22.8 (2026-05-13) — cross-dataset hallucination guard.
+    # Spike on task 534/535 found LLM occasionally adds fields not in the
+    # available_fields list (e.g. opt8_put_call_ratio_30d in a fundamental6
+    # task, anl4_afv4_cfps_mean when the dataset was option). These hit
+    # VALIDATE with "Field 'X' not found in dataset" and waste 1-2 BRAIN
+    # sim slots per round (SELF_CORRECT must rewrite, drops more
+    # candidates). Hard-filter LLM output to the strict subset of
+    # available_fields IDs.
+    if available_fields:
+        available_ids = {
+            (f.get("id") or f.get("name") or "").lower()
+            for f in (available_fields or [])
+            if isinstance(f, dict)
+        }
+        before = list(parsed.promising_fields)
+        kept = [
+            fid for fid in before if (fid or "").lower() in available_ids
+        ]
+        dropped = [fid for fid in before if (fid or "").lower() not in available_ids]
+        if dropped:
+            logger.warning(
+                f"[factor_generation] V-22.8 dropped {len(dropped)} hallucinated fields "
+                f"not in available_fields: {dropped[:10]}"
+            )
+            # If filter strips too aggressively, backfill from top-coverage.
+            if len(kept) < 5:
+                logger.info(
+                    f"[factor_generation] V-22.8 after-hallucination-filter has only "
+                    f"{len(kept)} fields, backfilling with top-coverage"
+                )
+                topped = _fill_default_with_top_fields(available_fields)
+                # Merge: keep what LLM picked that's valid + top-coverage backfill,
+                # dedup preserving order
+                seen = set(fid.lower() for fid in kept)
+                for fid in topped.promising_fields:
+                    fl = fid.lower()
+                    if fl not in seen:
+                        kept.append(fid)
+                        seen.add(fl)
+                    if len(kept) >= 12:
+                        break
+            parsed = parsed.model_copy(update={"promising_fields": kept})
+
     logger.info(
         f"[factor_generation] T1Strategy selected | "
         f"velocity={parsed.signal_velocity} window={parsed.window_scale} "
