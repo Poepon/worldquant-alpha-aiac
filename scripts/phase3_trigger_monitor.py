@@ -65,6 +65,12 @@ async def cohort_pass_rate(db, days: int, variant_filter: str) -> dict:
     variant_filter examples:
       "= '2'"     → LEVEL=2 cohort (Phase 2 typed)
       "IS NULL OR config->>'hypothesis_centric_variant' = '0'" → legacy
+
+    V-22.13b (2026-05-13): restrict comparison to AUTONOMOUS_TIER1 tasks
+    only — CONTINUOUS_CASCADE tasks include T2/T3 wrapper paths that
+    inflate PASS rate independently of hypothesis variant. Spike showed
+    mixed-mode comparison gave -13pp uplift; same-mode (AUTONOMOUS_TIER1
+    only) gave +4.8pp uplift. Apples-to-apples requires same agent_mode.
     """
     sql = text(f"""
         SELECT
@@ -75,6 +81,7 @@ async def cohort_pass_rate(db, days: int, variant_filter: str) -> dict:
         JOIN mining_tasks t ON a.task_id = t.id
         WHERE a.created_at > NOW() - INTERVAL '{days} days'
           AND (t.config->>'hypothesis_centric_variant' {variant_filter})
+          AND t.agent_mode = 'AUTONOMOUS_TIER1'
     """)
     row = (await db.execute(sql)).first()
     alpha_n, pass_n, prov_or_pass_n = row[0], row[1], row[2]
