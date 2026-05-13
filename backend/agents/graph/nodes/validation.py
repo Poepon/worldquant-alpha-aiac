@@ -210,7 +210,17 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
 # NODE: Self-Correct
 # =============================================================================
 
-# Error knowledge base for learning from corrections
+# V-26.17 (2026-05-13): error knowledge base for SELF_CORRECT learning.
+# Pre-fix this was a module-level Python list — wiped on worker restart,
+# unsharable across celery workers. Now backed by Redis via
+# backend.tasks.redis_pool (cross-worker, survives worker restart, capped
+# at 200 entries with LTRIM-oldest eviction).
+#
+# `_ERROR_KNOWLEDGE_BASE` is preserved as an in-memory fallback for two
+# narrow cases:
+#   1. Redis unreachable — error_kb_load returns [] and we fall back to
+#      whatever this worker has accumulated this session.
+#   2. Tests that import the symbol directly (kept for backward-compat).
 _ERROR_KNOWLEDGE_BASE: List[Dict] = []
 
 
@@ -258,20 +268,44 @@ def _record_correction(
     error_type: str,
     fix_description: str
 ) -> None:
-    """Record a successful correction for future learning."""
+    """Record a successful correction for future learning.
+
+    V-26.17: writes through to the Redis-backed cross-worker store and
+    also appends to the in-memory list for the same-process / Redis-down
+    fallback case.
+    """
     global _ERROR_KNOWLEDGE_BASE
-    
-    _ERROR_KNOWLEDGE_BASE.append({
+    entry = {
         "failed_expression": original_expression,
         "fixed_expression": fixed_expression,
         "error": error_message,
         "error_category": _categorize_error(error_message),
-        "fix_description": fix_description
-    })
-    
-    # Keep knowledge base manageable
+        "fix_description": fix_description,
+    }
+    try:
+        from backend.tasks.redis_pool import error_kb_record
+        error_kb_record(entry)
+    except Exception as exc:
+        # Module import failure shouldn't break the in-flight node — log
+        # and keep going on the in-memory fallback below.
+        logger.warning(f"[validate] V-26.17 redis kb record failed: {exc}")
+    _ERROR_KNOWLEDGE_BASE.append(entry)
     if len(_ERROR_KNOWLEDGE_BASE) > 100:
         _ERROR_KNOWLEDGE_BASE = _ERROR_KNOWLEDGE_BASE[-50:]
+
+
+def _load_correction_kb(max_entries: int = 100) -> List[Dict]:
+    """V-26.17: return the active correction examples, preferring the
+    Redis cross-worker store. Falls back to the in-memory list when
+    Redis is empty or unreachable."""
+    try:
+        from backend.tasks.redis_pool import error_kb_load
+        redis_kb = error_kb_load(max_entries=max_entries)
+        if redis_kb:
+            return redis_kb
+    except Exception as exc:
+        logger.warning(f"[validate] V-26.17 redis kb load failed: {exc}")
+    return list(_ERROR_KNOWLEDGE_BASE)
 
 
 async def node_self_correct(
@@ -325,14 +359,18 @@ async def node_self_correct(
     corrections_made = []
     knowledge_extracted = []
     
+    # V-26.17: load shared cross-worker correction KB (Redis-backed). Falls
+    # back to the in-memory list if Redis is unreachable.
+    correction_kb = _load_correction_kb(max_entries=100)
+
     for idx in invalid_indices:
         current = state.pending_alphas[idx]
         error_message = current.validation_error or "Unknown error"
         error_type = _categorize_error(error_message)
-        
+
         # Find similar errors for learning
         similar_errors = _find_similar_errors(
-            error_message, error_type, _ERROR_KNOWLEDGE_BASE
+            error_message, error_type, correction_kb
         )
         
         if similar_errors:

@@ -113,3 +113,67 @@ def peek_lock_holder(key: str) -> Optional[str]:
         return held.decode() if isinstance(held, bytes) else str(held)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# V-26.17 — cross-worker error knowledge base for SELF_CORRECT learning
+# ---------------------------------------------------------------------------
+#
+# Pre-fix the SELF_CORRECT node kept its "what fix worked for what error"
+# memory in a module-level Python list (validation._ERROR_KNOWLEDGE_BASE).
+# That meant:
+#   - worker restart wiped accumulated corrections
+#   - watchdog revive started from zero learning state
+#   - parallel celery workers couldn't share lessons
+#   - the 100-entry cap dropped the *oldest* half FIFO with no quality signal
+#
+# Redis LIST storage fixes the first three. Cap stays simple (LTRIM
+# right side, oldest dropped) — a quality-aware eviction is its own
+# follow-up.
+import json as _json
+
+_ERROR_KB_KEY = "agent:error_kb:corrections"
+_ERROR_KB_MAX = 200  # cap; LTRIM trims oldest
+
+
+def error_kb_record(entry: dict) -> bool:
+    """LPUSH a correction entry. Returns True on success."""
+    try:
+        cli = get_redis_client()
+        payload = _json.dumps(entry, ensure_ascii=False, default=str)
+        cli.lpush(_ERROR_KB_KEY, payload)
+        cli.ltrim(_ERROR_KB_KEY, 0, _ERROR_KB_MAX - 1)
+        return True
+    except Exception as exc:
+        logger.warning(f"[error_kb] record failed: {exc}")
+        return False
+
+
+def error_kb_load(max_entries: int = 100) -> list:
+    """Return the most-recent corrections (newest first). On Redis error
+    returns an empty list — caller treats it as cold KB and proceeds.
+    SELF_CORRECT only uses these as LLM in-context examples so missing
+    them degrades quality, not correctness."""
+    try:
+        cli = get_redis_client()
+        raw = cli.lrange(_ERROR_KB_KEY, 0, max_entries - 1)
+    except Exception as exc:
+        logger.warning(f"[error_kb] load failed: {exc}")
+        return []
+    out = []
+    for b in raw:
+        try:
+            s = b.decode() if isinstance(b, bytes) else b
+            out.append(_json.loads(s))
+        except Exception:
+            continue
+    return out
+
+
+def error_kb_size() -> int:
+    """Current LIST length. Used by audit / monitoring scripts."""
+    try:
+        cli = get_redis_client()
+        return int(cli.llen(_ERROR_KB_KEY) or 0)
+    except Exception:
+        return 0
