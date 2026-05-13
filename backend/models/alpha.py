@@ -95,6 +95,11 @@ class Alpha(SQLAlchemyBase):
     factor_tier = Column(Integer, nullable=True, index=True)  # 1/2/3 or NULL (not in tier hierarchy)
     parent_alpha_id = Column(Integer, ForeignKey("alphas.id"), nullable=True, index=True)
     metrics_snapshot_at = Column(DateTime(timezone=True), nullable=True)  # Last refresh from BRAIN
+    # TODO #1 (2026-05-14): rolling OS-metric snapshots for decay/half-life
+    # analysis. Daily Celery beat appends weekly. Each entry: snapshot_date,
+    # days_since_submit, sharpe, fitness, turnover, returns, drawdown, margin.
+    # Read pattern: per-alpha only — never queried by content.
+    decay_curve = Column(JSONB, nullable=False, default=list, server_default="[]")
     # NULL = not yet refreshed from BRAIN GET /alphas/{id};
     # True = is.checks 全无 FAIL；False = 至少 1 个 FAIL
     can_submit = Column(Boolean, nullable=True)

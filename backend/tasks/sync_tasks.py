@@ -100,10 +100,12 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
     from backend.database import AsyncSessionLocal
     from backend.models import Alpha
     from backend.services.alpha_service import AlphaService
+    from backend.services.decay_service import maybe_append_decay_snapshot
 
     refreshed = 0
     demoted = 0
     failed = 0
+    decay_snapshots_added = 0
 
     async with AsyncSessionLocal() as db:
         # OS-active = stage='OS' AND quality_status in (PASS, PASS_PROVISIONAL).
@@ -144,6 +146,19 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
                 alpha.metrics = merged
             alpha.metrics_snapshot_at = _dt.utcnow()
             refreshed += 1
+
+            # TODO #1: append a weekly decay-curve snapshot. The helper
+            # gates on a 6-day dedup window, so calling daily is fine — only
+            # the first call each week mutates the row. Failures here are
+            # advisory and must not abort the metrics refresh loop.
+            try:
+                if maybe_append_decay_snapshot(alpha, _dt.utcnow()):
+                    decay_snapshots_added += 1
+            except Exception as e:
+                logger.warning(
+                    f"[refresh_os_metrics] decay snapshot append failed for "
+                    f"alpha={alpha.id}: {e}"
+                )
 
             # Re-evaluate against tier-specific thresholds; demote PASS rows
             # whose metrics drifted below the bar so KB stays clean.
@@ -209,6 +224,7 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
         "metrics_refreshed": refreshed,
         "metrics_demoted": demoted,
         "metrics_failed": failed,
+        "decay_snapshots_added": decay_snapshots_added,
     }
 
 
