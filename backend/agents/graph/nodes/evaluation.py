@@ -925,9 +925,27 @@ async def node_evaluate(
             # "已接近/达到门槛..." skip branch). Downgrading to PASS_PROVISIONAL
             # routes them into _collect_optimization_candidates so wrapper /
             # window optimizations get a chance to push fitness over BRAIN's bar.
+            # V-26.21 (2026-05-13): expand the BRAIN-aware downgrade set.
+            # Original list (LOW_FITNESS / LOW_SHARPE / CONCENTRATED_WEIGHT)
+            # left a theoretical hole — an alpha could PASS via the
+            # `score >= score_pass_threshold` branch in line 903 while BRAIN
+            # had flagged HIGH_TURNOVER / MATCHES_PYRAMID / HIGH_CORRELATION
+            # etc. as failed_checks. 30-day audit
+            # (scripts/v26_21_score_only_pass_audit.py) showed 0% slip-through
+            # today, so this is preemptive — close the hole now before a
+            # prompt change or threshold tweak surfaces it.
             brain_actionable_fails = [
                 c.get("name") for c in brain_failed_checks or []
-                if c.get("name") in ("LOW_FITNESS", "LOW_SHARPE", "CONCENTRATED_WEIGHT")
+                if c.get("name") in (
+                    "LOW_FITNESS",
+                    "LOW_SHARPE",
+                    "CONCENTRATED_WEIGHT",
+                    "HIGH_TURNOVER",
+                    "LOW_TURNOVER",
+                    "MATCHES_PYRAMID",
+                    "HIGH_CORRELATION",
+                    "SELF_CORRELATION",
+                )
             ]
             if hard_flags:
                 alpha.quality_status = "PASS_PROVISIONAL"
