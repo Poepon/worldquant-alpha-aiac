@@ -1,153 +1,123 @@
-# RCA — can_submit gate 与 IQC value-add 完全脱钩
+# RCA — IQC marginal audit data 解读 (2026-05-13 修订版)
 
-**日期**: 2026-05-13
+**日期**: 2026-05-13(初稿),2026-05-13 修订(用户校准认知错误)
 **触发**: V-22.12.1 IQC audit beat sweep 上线后,Trigger monitor 显示 41 audited / 0 positive Δscore
-**严重度**: 🔴 高 — mining pipeline 全力优化的"通过率"目标与最终 portfolio 价值无关
+**严重度**: 🟡 中 — 数据已就位,但**原初 RCA 把现象当 bug 解读错了**
 
 ---
 
-## 现象
+## ⚠ 关键认知校准(2026-05-13 用户指出)
+
+初稿 RCA 把两个完全独立的概念混为一谈,是错的:
+
+| 概念 | 实质 | 关系 |
+|---|---|---|
+| **WQB `can_submit`** | 平台 8 个硬性 check(syntax / correlation / sub_universe / ...) | **形式合规**,跟 IQC 无关 |
+| **IQC marginal Δscore** | 提交后 merged portfolio 累加效应**快照** | **动态**,随其他 alpha 提交/删除变化 |
+| **Mining quality gate** | SHARPE_MIN / FITNESS_MIN / TURNOVER_MAX 等阈值 | **独立** mining 决策,不应绑 IQC 状态 |
+
+**`can_submit` 与 IQC value-add 脱钩不是 bug,是 by design**。`can_submit` 只承诺"WQB 允许提交",从未承诺"对 IQC 加分"。这两件事在系统里**就该**独立。
+
+**IQC marginal Δscore 是动态快照,不是稳定 quality 标签**。提交一个 alpha 之后,所有未提交 alpha 的 marginal Δscore 都会变化。删除一个已提交 alpha 也会变。今天 -1200 的 alpha 可能明天就 +500。
+
+## 现象(数据未变,解读修正)
 
 41 个 can_submit=true unsubmitted alpha,V-22.12.1 sweep 后全部审计完毕:
 
-| 维度 | n | mean Δscore | mean Δsharpe | merged_sharpe | standalone_sharpe |
+| 维度 | n | mean Δscore | mean Δsharpe | merged_sharpe(当前 portfolio)| standalone_sharpe |
 |---|---|---|---|---|---|
 | T1 | 7 | -1183.0 | -0.246 | 3.034 | 1.493 |
 | T2 | 34 | -1257.2 | -0.351 | 2.929 | 1.412 |
 | **合计** | **41** | **-1245** | **-0.34** | **~2.95** | **~1.43** |
 
-- **Δscore>0**: 0 / 41
-- **Δsharpe>0**: 0 / 41
-- **Δfitness>0**: 1 / 41
+**正确解读**:
+1. 当前 portfolio 已包含 pk=7810 等贡献者 → merged sharpe ~2.95
+2. 在**此时此刻**这个 portfolio 状态下,这 41 个 standalone sharpe~1.43 的 alpha 提交进去会摊薄(标的 sharpe 低于 merged sharpe)
+3. **如果删除已提交的 pk=7810**(portfolio 回到更稀疏状态),这 41 个 alpha 的 Δscore 大概率会**全部重算**,部分可能转正
+4. **如果再提交 1 个更高 sharpe 的 alpha**,merged 提升,这 41 个 Δscore 会更负
 
-跨 dataset 覆盖广(model51 / option9 / pv1 / pv13 / sentiment1 / socialmedia* / fundamental6),不是单点问题。
+**错误解读(初稿)**: "can_submit gate 找出的 alpha 全部对 IQC 无价值 → gate 失效"。错。Gate 本来就不管这事。
 
-## 根因 — 三层错位
+## 真正的洞察
 
-### 1. can_submit 的语义不是"value-add",是"形式合规"
+不是"gate 失效",而是**系统缺少一个组件**:**IQC marginal 是动态信号,需要 stale 跟踪 + 提交时重新 audit**。
 
-`backend/can_submit.py:compute_can_submit` 计算的是 BRAIN 8-check 通过(SYNTAX / CONCENTRATED_WEIGHT / LOW_SUB_UNIVERSE_SHARPE / SELF_CORR / PROD_CORR / IS_SHARPE / IS_FITNESS / IS_TURNOVER)。
+当前问题:
+- audit 时刻拿到的 Δscore 是 portfolio 那一刻的快照
+- 没有任何机制提醒用户"这个 Δscore 是 X 小时前 audited 的,期间有 Y 个 alpha 已提交,数据可能过时"
+- 用户看到队列里 41 个 Δscore 都是负的,可能误以为这 41 个 alpha "本质上没价值"。其实它们的 Δscore 跟 portfolio 状态强耦合
 
-这是 **submission eligibility** check —— 检查 alpha 没有触发明显 risk flag。它**不预测** alpha 加入 portfolio 后的边际贡献。
+## 正确处理方向(替代初稿 V-23.A/B/C/D)
 
-### 2. Mining gate 阈值与 merged portfolio 状态脱节
+### V-23.A (修正): submit queue 按 Δscore 排序 + stale 标记
 
-当前 SHARPE_MIN=1.25,FITNESS_MIN=1.0,TURNOVER_MAX=0.5 是**绝对阈值**。但 IQC merged portfolio 已达 **sharpe ~2.95**,新增 standalone sharpe 1.43 的 alpha:
+**不是 filter** — IQC marginal 是动态的,不能用来"过滤掉"alpha。
 
-- 摊薄 merged sharpe(-0.34 平均)
-- 同时增加 turnover(+0.03 平均)
-- BRAIN IQC score = f(merged_sharpe, fitness, returns, turnover),双重惩罚
+- 按 `metrics._iqc_marginal.delta_score DESC` 排序展示
+- 显示 audited_at 时间戳
+- 若 audited_at 超过 N 小时,或自该 audit 后有新 alpha 提交 → 标 "stale"
+- 用户看到的是"当前 portfolio 状态下,这些 alpha 谁更有可能加分"的 ranked list,而非"过滤后的可提交 candidates"
 
-要正向贡献,新 alpha 的 standalone sharpe 需要 **接近或超过 merged sharpe(~3.0)**,且 correlation 与现有 portfolio 低。当前 mining 完全没有这两个信号。
+**工时**: 0.5 day
 
-### 3. pk=7810 (+341) 是个反例,标杆错位
+### V-23.E (新增): IQC marginal re-audit on submission
 
-用户上次手工提交的 pk=7810 标杆:
-- `multiply(-1, ts_decay_linear(divide(subtract(close, open), open), 20))`
-- standalone sharpe=1.55,turnover=0.217,**T1 单 dataset(model51)**
-- merged 之后 +341 Δscore
+提交 alpha 后,portfolio 状态变化,所有未提交 can_submit alpha 的 Δscore stale:
 
-它能赢不是因为 sharpe 高(实际只 1.55,跟当前 41 个 fail 的差不多),而是因为它进入 portfolio 时 portfolio 尚未饱和。**现在 portfolio 已经包含它了,再来一个相似 sharpe 的 alpha 就是冗余**。
+- 加 `alpha.metrics._iqc_marginal.stale: bool` 字段
+- 提交触发(date_submitted flip None→timestamp): 批量 SET 所有未提交 can_submit alpha 的 `stale=true`
+- `iqc_audit_backfill_sweep` 优先扫 `stale=true` 的 alpha(WHERE 加 ORDER BY stale=true DESC)
+- frontend 显示 stale 标记 + 用户主动 trigger re-audit 按钮
 
-## 数据证据
+**工时**: 1 day
 
-- mining pipeline 14 天产 ~660 alpha,其中 50 个 can_submit=true
-- 50 中 9 个已提交(含 pk=7810),41 未提交可审计的 alpha **100% Δscore<0**
-- top-5 best Δscore: -707, -1033, -1042, -1057, -1061 — 即"最不糟"的也扣 707 分
-- 没有任何一个 alpha 的 standalone sharpe ≥ merged sharpe(全部 < 2.0 vs merged ~2.95)
+### 撤回的初稿建议
 
-## 影响
+| 初稿 task | 状态 | 撤回理由 |
+|---|---|---|
+| V-23.B IQC-aware demote in evaluation | 🗑 删除 | 把动态 Δscore 当稳定 quality 标签,demote 不可逆,portfolio 状态变了无法回滚 |
+| V-23.C portfolio-aware mining gate | 🗑 删除 | mining gate 跟 portfolio 状态绑定会让 mining 追逐移动靶,且 mixed-region/dataset 时 portfolio 维度未定义 |
+| V-23.D Trigger 4 hard gating | 🗑 删除 | IQC marginal 是动态信号,不适合做严格 gating;trigger monitor 保留 observational 角色,加 stale-awareness |
 
-### 短期
-- Mining 持续产 alpha,但**没有**新 alpha 能改善 IQC portfolio
-- 用户手工 review can_submit 队列时 100% 都是负向贡献,等于在错误指标上挑选
-- BRAIN simulate 配额每天烧掉,产出零 portfolio value
+## Plan v5+ 影响修正
 
-### 长期对 Plan v5+
-- **Phase 3 hypothesis-centric 主循环翻转优先级降级** — 产更多 hypothesis-driven alpha 不解决"个体 sharpe<3" 的根本约束
-- 真正阻塞 IQC 提交价值的 bottleneck 在两个地方:
-  1. mining gate 没有 "marginal portfolio contribution" 信号
-  2. SHARPE_MIN 阈值跟 portfolio 状态完全无关
-- 当前 Trigger 1 +4.7pp (Phase 2 vs legacy PASS uplift) 测的是 "PASS rate",而 PASS rate 已经被证明跟 IQC value 脱钩,所以 Trigger 1 即使过线也不证明 Phase 3 ROI
+**初稿错误结论**: "Phase 3 hypothesis-centric 优先级降级,portfolio-aware mining 是真 bottleneck"。
 
-## 修复方向
+**正确结论**: Phase 3 优先级不受这次发现影响。Phase 3 关于"用 hypothesis 而非 dataset 锚 mining 路径",跟 IQC marginal 解读没有直接因果。
 
-### Option A — IQC delta_score 作为 submit-queue 二级 filter(最小)
+Phase 3 ROI 判断仍基于:
+- Trigger 1 PASS uplift(+4.7pp,临阈值)
+- Trigger 2 retirement rate(43.4% ✅)
+- Trigger 3 cross-dataset rate(51.1% ✅)
+- Trigger 4 **仍保持 observational** — IQC 价值是提交决策辅助信号,不是 Phase 3 启动 gate
 
-不动 mining gate,只在 frontend / can_submit queue 视图层加 filter:
-```
-display only: can_submit=true AND (metrics._iqc_marginal.delta_score IS NULL OR > 0)
-```
+## 数据示例(教学价值)
 
-用户看到的待提交队列自动剔除 100% 负向 alpha。
+pk=7810 winner (+341 Δscore) 与当前 41 个 fails 对比:
 
-**工时**: 0.5 day(frontend 加 filter toggle + default ON)
-**ROI**: 立竿见影 — 用户不再 review 0% 有用的队列
-**局限**: mining 仍然产负向 alpha,只是不展示
+| 维度 | pk=7810 winner(已提交)| 41 个未提交 fails |
+|---|---|---|
+| factor_tier | 1 | 1(7) + 2(34) |
+| standalone sharpe | 1.55 | 1.28-1.55(mean 1.43) |
+| turnover | 0.217 | 0.10-0.40 |
+| dataset | model51 | 跨 10+ datasets |
+| **提交时点 portfolio 状态** | **稀疏(~2.0 merged sharpe)** | **饱和(~2.95 merged sharpe,已含 7810)** |
+| Δscore | +341 | -707 ~ -1922 |
 
-### Option B — IQC delta_score 进 alpha quality_status gating
+结论:**这两组 alpha 个体质量几乎相同**。差别在提交时点。如果**先**提交 41 中任意一个,后**再**提交 7810,标签会反过来 — 41 中那个变 winner,7810 反而摊薄(因为后者 sharpe 1.55 < 已提交那个的 merged sharpe)。
 
-mining evaluation 写完 _iqc_marginal 后,若 delta_score < 0 → demote `quality_status` PASS→PASS_PROVISIONAL。
-KB 不学这些 pattern,T2/T3 seed pool 也不取。
-
-**工时**: 1 day(evaluation.py + backfill 41 alpha)
-**ROI**: 中长期 — KB pitfall 学到"sharpe~1.5 的 T1/T2 加 portfolio 扣分"模式
-**风险**: portfolio 一旦变化(其他人提交 / 删除已提交),历史 pitfall 失效
-
-### Option C — Mining 主循环加 portfolio-aware target(根本但激进)
-
-修改 SHARPE_MIN / FITNESS_MIN 阈值为相对值:`SHARPE_MIN = max(1.25, current_merged_sharpe - 0.5)`。
-LLM prompt 加 "target portfolio sharpe is X, your alpha must be Y" 提示。
-RAG 检索 SUCCESS_PATTERN 只取 +Δscore 的(需 KB schema 加 marginal field)。
-
-**工时**: 3-5 day
-**ROI**: 长期 — pipeline 自动追踪 portfolio 状态,产 alpha 直接对齐 IQC 提交标准
-**风险**: portfolio 饱和情况下 mining 几乎产不出任何 PASS,需配套调度策略(切换 region/dataset 加冷启动)
-
-## 推荐路径
-
-```
-Phase 1 立即(1 day内):
-  - Option A: frontend submit queue 加 Δscore > 0 filter
-  - 用户手动 review 时已经看到剩 0 个,直接放弃当前队列
-
-Phase 2 短期(1 week内):
-  - Option B: evaluation + KB pipeline 启用 IQC-aware demote
-  - V-22.12.1 sweep 已就位,supplied data 已有 metrics._iqc_marginal
-  - 加 1 个 unit test 验证 demote 逻辑
-
-Phase 3 中长期(2-4 week,需用户决策):
-  - Option C: portfolio-aware mining 重构
-  - 与 Plan v5+ Phase 3 (hypothesis-centric) 形成 trade-off:
-    * 选 Plan v5+ Phase 3 = 产更多 hypothesis 但仍受 portfolio 饱和限制
-    * 选 Option C = portfolio-aware 但仍可叠加 hypothesis-driven 生成
-  - **建议先 Option C 再 Phase 3**,因为 portfolio 阈值是底层 gate,Phase 3 只改生成路径
-```
-
-## Plan v5+ Trigger Monitor 解读修正
-
-Trigger 4 (IQC marginal positive rate) 从 plan v5+ 当前的"observational, non-gating"应升级为 **hard gating prerequisite for Phase 3**:
-
-```
-Phase 3 启动前置条件:
-  - 现有 Trigger 1+2+3 全过 → necessary not sufficient
-  - **Trigger 4 IQC positive rate ≥ 20%** → sufficient signal
-  - 如果 Trigger 4 仍为 0% → Phase 3 不会改善状况,先做 Option C
-```
-
-更新 `scripts/phase3_trigger_monitor.py`:Trigger 4 从 `gating=False` 改为 `gating=True`,加阈值 20%。
+这正是 V-23.E re-audit on submission 要解决的:**提交决策的影响是双向的**,Δscore 必须实时反映当前 portfolio 状态。
 
 ---
 
-## 数据集证据 — pk=7810 vs 当前 41 个
+## V-23 修正后的最终 task 清单
 
-| 维度 | pk=7810 winner | 41 个 fails |
-|---|---|---|
-| factor_tier | 1 | 1(7)+ 2(34) |
-| standalone sharpe | 1.55 | 1.28-1.55(mean 1.43) |
-| turnover | 0.217 | 0.10-0.40 |
-| dataset | model51 单一 | 跨 10+ datasets |
-| 提交时点 | portfolio sharpe ~2.0 | portfolio sharpe ~2.95(已含 7810)|
-| Δscore | +341 | -707 ~ -1922 |
+| Task | 内容 | 工时 | 依赖 |
+|---|---|---|---|
+| V-23.A | submit queue 按 Δscore 排序 + stale 标记(不 filter) | 0.5 day | — |
+| V-23.E | IQC marginal re-audit on submission(提交时 stale + sweep 优先) | 1 day | — |
+| ~~V-23.B~~ | ~~IQC-aware demote~~ — **撤回**:动态信号不能用作稳定 quality 标签 | — | — |
+| ~~V-23.C~~ | ~~portfolio-aware mining gate~~ — **撤回**:mining 不应追逐 portfolio 移动靶 | — | — |
+| ~~V-23.D~~ | ~~Trigger 4 hard gating~~ — **撤回**:动态信号不适合 hard gate | — | — |
 
-结论:**winner 与 failure 在 individual quality 上几乎没区别**,差在提交时点 portfolio 状态。这是 portfolio-state-aware mining 的核心 case。
+总工时 1.5 day,且**不影响 Plan v5+ Phase 3 / V-23.C portfolio-aware mining 等中长期路径**。
