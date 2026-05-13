@@ -256,6 +256,28 @@ async def _refresh_can_submit_async(alpha_pk: int) -> Dict:
                     if kb_recorded > 0:
                         await db.commit()
 
+        # V-22.12 (2026-05-13): when refresh flips can_submit=True, enqueue
+        # an IQC marginal-contribution audit. Stores Δscore / Δsharpe into
+        # alpha.metrics._iqc_marginal so frontend can surface "actually adds
+        # value to team portfolio" filter. Fire-and-forget — failure here
+        # never blocks the refresh result.
+        if result.get("can_submit") is True:
+            try:
+                competition = getattr(
+                    __import__("backend.config", fromlist=["settings"]).settings,
+                    "IQC_AUTO_AUDIT_COMPETITION",
+                    "IQC2026S1",
+                )
+                if competition:
+                    audit_iqc_marginal_for_alpha.apply_async(
+                        args=[alpha_pk, competition], countdown=5,
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"[refresh_can_submit] V-22.12 IQC audit enqueue failed for "
+                    f"alpha_pk={alpha_pk}: {e}"
+                )
+
         return {
             "alpha_pk": alpha_pk,
             "can_submit": result["can_submit"],
@@ -266,3 +288,77 @@ async def _refresh_can_submit_async(alpha_pk: int) -> Dict:
     except Exception as e:
         logger.warning(f"[refresh_can_submit] alpha_pk={alpha_pk} failed: {e}")
         return {"alpha_pk": alpha_pk, "can_submit": None, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# V-22.12 (2026-05-13) — IQC marginal-contribution auto-audit
+# ---------------------------------------------------------------------------
+
+@celery_app.task(name="backend.tasks.audit_iqc_marginal_for_alpha")
+def audit_iqc_marginal_for_alpha(alpha_pk: int, competition: str = "IQC2026S1") -> Dict:
+    """Auto-triggered after can_submit refresh flips True.
+
+    Calls BRAIN /competitions/{competition}/alphas/{alpha_id}/before-and-after
+    -performance and stores the resulting Δscore / Δsharpe / Δturnover into
+    alpha.metrics._iqc_marginal. Doesn't change submission state — the user
+    still decides; this just surfaces the team-impact signal.
+
+    Idempotent: re-runs overwrite the metric. Failure is silent (logged at
+    warning level) — IQC audit is a nice-to-have, not blocking.
+    """
+    return run_async(_audit_iqc_marginal_async(alpha_pk, competition))
+
+
+async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
+    from datetime import datetime, timezone
+    from sqlalchemy import update
+    from backend.adapters.brain_adapter import BrainAdapter
+    from backend.database import AsyncSessionLocal
+    from backend.models import Alpha
+    from backend.services.alpha_service import AlphaService
+
+    try:
+        async with AsyncSessionLocal() as db:
+            svc = AlphaService(db)
+            async with BrainAdapter() as brain:
+                result = await svc.get_marginal_contribution(
+                    alpha_pk=alpha_pk,
+                    competition=competition,
+                    brain_adapter=brain,
+                )
+                if result is None:
+                    return {"alpha_pk": alpha_pk, "skipped": True}
+
+            # Merge audit info into alpha.metrics._iqc_marginal
+            alpha = await svc.alpha_repo.get_by_id(alpha_pk)
+            if alpha is None:
+                return {"alpha_pk": alpha_pk, "skipped": True, "reason": "alpha_not_found"}
+
+            deltas = result.get("deltas") or {}
+            stats = (result.get("raw") or {}).get("stats") or {}
+            new_metrics = dict(alpha.metrics or {})
+            new_metrics["_iqc_marginal"] = {
+                "competition": competition,
+                "audited_at": datetime.now(timezone.utc).isoformat(),
+                "delta_score": deltas.get("score"),
+                "delta_sharpe": deltas.get("sharpe"),
+                "delta_fitness": deltas.get("fitness"),
+                "delta_turnover": deltas.get("turnover"),
+                "delta_returns": deltas.get("returns"),
+                "delta_pnl": deltas.get("pnl"),
+                "merged_sharpe": (stats.get("after") or {}).get("sharpe"),
+                "merged_fitness": (stats.get("after") or {}).get("fitness"),
+            }
+            await db.execute(
+                update(Alpha).where(Alpha.id == alpha_pk).values(metrics=new_metrics)
+            )
+            await db.commit()
+            return {
+                "alpha_pk": alpha_pk,
+                "competition": competition,
+                "delta_score": deltas.get("score"),
+                "delta_sharpe": deltas.get("sharpe"),
+            }
+    except Exception as e:
+        logger.warning(f"[audit_iqc_marginal] alpha_pk={alpha_pk} failed: {e}")
+        return {"alpha_pk": alpha_pk, "error": str(e)}

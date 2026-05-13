@@ -203,6 +203,13 @@ class Settings(BaseSettings):
     #     A/B path via task_service.assign_variant.
     # 2 = typed Hypothesis + lifecycle (Phase 2, 9-12 day)
     # 3 = main-loop invert (Phase 3, deferred to Q3 re-evaluation)
+    # V-22.12 (2026-05-13): when a can_submit refresh flips True, automatically
+    # call BRAIN /competitions/{comp}/before-and-after-performance and stash
+    # the deltas in alpha.metrics._iqc_marginal. Empty string disables the
+    # auto-audit. Frontend filters by metrics._iqc_marginal.delta_score>0 to
+    # surface "actually adds value to team portfolio" candidates.
+    IQC_AUTO_AUDIT_COMPETITION: str = "IQC2026S1"
+
     HYPOTHESIS_CENTRIC_LEVEL: int = 0
     # V-22.11 (2026-05-13): Phase 2 A/B activation. CANDIDATE=2 enables 50/50
     # split — new tasks get either legacy (LEVEL=0) or Phase 2 typed

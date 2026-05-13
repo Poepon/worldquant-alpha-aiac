@@ -40,6 +40,8 @@ from backend.tasks.sync_tasks import (
 )
 # PR2: tier-system refresh beat
 from backend.tasks.refresh_tasks import refresh_kb_referenced_alphas
+# V-22.12: auto IQC marginal-contribution audit after can_submit flips True
+from backend.tasks.refresh_tasks import audit_iqc_marginal_for_alpha
 # Phase 3 prep T02: weekly readiness check
 from backend.tasks.phase3_tasks import run_phase3_readiness_check
 # V-19.7: persistent mining service watchdog + BRAIN quota guard
@@ -69,6 +71,8 @@ __all__ = [
     "refresh_os_correlation_cache",
     # PR2: tier system
     "refresh_kb_referenced_alphas",
+    # V-22.12: IQC marginal audit hook
+    "audit_iqc_marginal_for_alpha",
     # V-19.7: persistent mining service watchdog
     "watchdog_revive_dead_sessions",
     "quota_guard_pause_at_threshold",
