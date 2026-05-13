@@ -35,7 +35,7 @@ from sqlalchemy import select, update, func
 from backend.celery_app import celery_app
 from backend.config import settings
 from backend.database import AsyncSessionLocal
-from backend.models import Alpha, ExperimentRun, MiningTask
+from backend.models import Alpha, AlphaFailure, ExperimentRun, MiningTask
 from backend.models.task import TraceStep
 from backend.tasks import run_async
 
@@ -215,19 +215,37 @@ async def _quota_guard_async() -> dict:
 
     paused: list[dict] = []
     async with AsyncSessionLocal() as db:
-        # Count today's alphas (proxy for BRAIN simulate calls — every alpha
-        # row corresponds to ~1 simulate. We don't track simulate calls
-        # directly in DB; alpha INSERT is the closest signal.)
-        cnt = (
+        # Count today's BRAIN simulate calls. Every alpha row corresponds
+        # to ~1 simulate; every alpha_failure that wasn't a pre-sim
+        # rejection ALSO corresponds to ~1 simulate (timeouts, sim
+        # errors, server-side validation rejections all hit the API
+        # before we record the failure).
+        #
+        # V-26.31 (2026-05-13): the original counter only looked at the
+        # alphas table, missing failure rows that came from successful-but-
+        # rejected sims. On a worker burning 30% of its quota on
+        # sim-fail expressions, the guard would not trigger until 130%
+        # actual usage — long past the threshold. Adding alpha_failures
+        # closes the gap.
+        alpha_cnt = (
             await db.execute(
                 select(func.count(Alpha.id))
                 .where(Alpha.created_at >= today_start)
             )
         ).scalar() or 0
+        fail_cnt = (
+            await db.execute(
+                select(func.count(AlphaFailure.id))
+                .where(AlphaFailure.created_at >= today_start)
+            )
+        ).scalar() or 0
+        cnt = alpha_cnt + fail_cnt
 
         if cnt < threshold:
             return {
-                "today_alpha_count": cnt,
+                "today_alpha_count": alpha_cnt,
+                "today_failure_count": fail_cnt,
+                "today_total_count": cnt,
                 "threshold": threshold,
                 "limit": limit,
                 "paused_count": 0,
@@ -256,7 +274,7 @@ async def _quota_guard_async() -> dict:
                 })
                 logger.warning(
                     f"[quota_guard] PAUSED task={task.id} region={task.region} "
-                    f"(today_alpha_count={cnt} >= {threshold})"
+                    f"(today_total={cnt} alphas={alpha_cnt} failures={fail_cnt} >= {threshold})"
                 )
             except Exception as e:
                 logger.error(f"[quota_guard] failed to pause task={task.id}: {e}")
@@ -264,7 +282,9 @@ async def _quota_guard_async() -> dict:
             await db.commit()
 
     return {
-        "today_alpha_count": cnt,
+        "today_alpha_count": alpha_cnt,
+        "today_failure_count": fail_cnt,
+        "today_total_count": cnt,
         "threshold": threshold,
         "limit": limit,
         "paused_count": len(paused),

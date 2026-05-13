@@ -963,6 +963,41 @@ async def node_evaluate(
                 alpha.quality_status = "PASS"
                 pass_count += 1
         elif near_pass:
+            # V-26.20 (2026-05-13): run V-16 suspicion + annotate BRAIN
+            # actionable fails on the PROVISIONAL path too. The pre-fix code
+            # immediately labelled near_pass alphas PASS_PROVISIONAL without
+            # any further check — a sharpe-4.5 near_pass with hard suspicion
+            # flags (look-ahead / divide-by-zero) entered the KB and optimization
+            # pool unfiltered, polluting both. The flags themselves don't
+            # change the PROV verdict (PROV is already a hold-for-review
+            # state) — they just need to be visible to the KB filter, the
+            # optimization chain ("don't try to upgrade a flagged alpha"),
+            # and downstream submission queueing.
+            v16_flags_prov = _run_suspicion_checks(metrics, alpha.expression or "")
+            if v16_flags_prov:
+                if isinstance(alpha.metrics, dict):
+                    alpha.metrics["_v16_suspicion_flags"] = v16_flags_prov
+                logger.warning(
+                    f"[{node_name}] V-16 suspicion mode on PROVISIONAL "
+                    f"(sharpe={sharpe:.2f}) | flags={[f['check'] for f in v16_flags_prov]}"
+                )
+            # Same brain_actionable_fails set as PASS path. PROV already
+            # holds for review, so we only annotate (no further downgrade).
+            brain_actionable_fails_prov = [
+                c.get("name") for c in brain_failed_checks or []
+                if c.get("name") in (
+                    "LOW_FITNESS",
+                    "LOW_SHARPE",
+                    "CONCENTRATED_WEIGHT",
+                    "HIGH_TURNOVER",
+                    "LOW_TURNOVER",
+                    "MATCHES_PYRAMID",
+                    "HIGH_CORRELATION",
+                    "SELF_CORRELATION",
+                )
+            ]
+            if brain_actionable_fails_prov and isinstance(alpha.metrics, dict):
+                alpha.metrics["_brain_actionable_fails"] = brain_actionable_fails_prov
             alpha.quality_status = "PASS_PROVISIONAL"
             optimize_count += 1
         elif should_opt and score >= score_optimize_threshold:
