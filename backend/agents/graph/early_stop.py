@@ -19,6 +19,8 @@ from __future__ import annotations
 from statistics import median
 from typing import Dict, List, Optional, Tuple
 
+from loguru import logger
+
 
 WARMUP_ROUNDS = 5
 PASS_RATE_DROP_RATIO = 0.5  # below 50% of historical median triggers pruning
@@ -131,6 +133,7 @@ def should_abandon_hypothesis(
     history_for_hid: List[Dict],
     *,
     n_rounds: int = HYPOTHESIS_ABANDON_ROUNDS,
+    hypothesis_id: Optional[int] = None,
 ) -> Tuple[bool, Optional[str]]:
     """Decide whether one specific hypothesis should be abandoned.
 
@@ -140,26 +143,61 @@ def should_abandon_hypothesis(
             `attribution`. Pass `state.hypothesis_round_history.get(hid, [])`.
         n_rounds: number of consecutive HYPOTHESIS-attribution rounds with
             0 PASS required to trigger. Default 3 per Plan §B6.
+        hypothesis_id: optional id used purely for diagnostic logging so
+            cross-task analytics can join hid → outcome path. Not used in
+            the decision itself.
 
     Returns:
         (should_abandon, reason).
+
+    V-24.A diagnostic logging (2026-05-13): every non-trivial path emits a
+    structured log so scripts/abandon_path_audit.py can answer "why is the
+    ABANDONED column 0?" without re-running the workflow. Three log levels:
+
+    - history_len < n_rounds  → TRACE (still accumulating, normal)
+    - history_len >= n_rounds → DEBUG with attribution distribution
+    - decision=True            → INFO so it's visible in default log level
     """
-    if len(history_for_hid) < n_rounds:
+    n_history = len(history_for_hid)
+    if n_history < n_rounds:
+        # Still accumulating; not worth logging unless we're close.
+        if n_history == n_rounds - 1:
+            logger.debug(
+                f"[B6 abandon-check] hid={hypothesis_id} "
+                f"history={n_history}/{n_rounds} (one round from threshold)"
+            )
         return False, None
+
     last_n = history_for_hid[-n_rounds:]
-    # All last N must be 0 PASS + HYPOTHESIS attribution
-    if not all(
-        (e.get("pass_count", 0) or 0) == 0
-        and (e.get("attribution") == "hypothesis")
-        for e in last_n
-    ):
-        return False, None
+    pass_counts = [(e.get("pass_count", 0) or 0) for e in last_n]
+    attrs = [e.get("attribution") for e in last_n]
     rounds_str = ",".join(str(e.get("round_index", "?")) for e in last_n)
-    return True, (
+    has_any_pass = any(p > 0 for p in pass_counts)
+    has_non_hypothesis_attr = any(a != "hypothesis" for a in attrs)
+
+    if has_any_pass or has_non_hypothesis_attr:
+        # Window satisfied N but condition didn't fire — log why so
+        # abandon_path_audit can quantify the attribution distribution.
+        logger.debug(
+            f"[B6 abandon-skip] hid={hypothesis_id} rounds=[{rounds_str}] "
+            f"pass_counts={pass_counts} attrs={attrs} "
+            f"reason={'has_pass' if has_any_pass else 'non_hypothesis_attr'}"
+        )
+        return False, None
+
+    reason = (
         f"{n_rounds} consecutive rounds (rounds {rounds_str}) with "
         f"0 PASS and attribution=HYPOTHESIS — signal direction does "
         f"not survive validation"
     )
+    # Visible at default INFO so persistence.py's downstream branch
+    # (refine → SUPERSEDED vs direct ABANDONED) is traceable.
+    logger.info(
+        f"[B6 abandon-trigger] hid={hypothesis_id} rounds=[{rounds_str}] "
+        f"reason={reason!r} — downstream may convert to SUPERSEDED via "
+        f"G-refine loop"
+    )
+    return True, reason
 
 
 def summarise_round(

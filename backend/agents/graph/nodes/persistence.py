@@ -768,7 +768,8 @@ async def _process_hypothesis_feedback(
             superseded_via_refine: List[int] = []
             if primary_hid is not None:
                 should_abandon, abandon_reason = should_abandon_hypothesis(
-                    history_out.get(primary_hid, [])
+                    history_out.get(primary_hid, []),
+                    hypothesis_id=primary_hid,
                 )
                 if should_abandon:
                     refined_child_id = None
@@ -830,6 +831,19 @@ async def _process_hypothesis_feedback(
                     if refined_child_id is None:
                         if await svc.mark_abandoned(primary_hid, reason=abandon_reason):
                             abandoned.append(primary_hid)
+                            # V-24.A: explicit terminal-path log so abandon
+                            # audit can quantify abandon vs supersede ratio
+                            logger.info(
+                                f"[B6 terminal=ABANDONED] hid={primary_hid} "
+                                f"reason={abandon_reason!r}"
+                            )
+                    else:
+                        # G refine path already logged via [G refine] above;
+                        # add explicit terminal marker for audit consistency
+                        logger.info(
+                            f"[B6 terminal=SUPERSEDED] hid={primary_hid} "
+                            f"child={refined_child_id} via=G-refine"
+                        )
             # V-19.5 (2026-05-06): NO refresh_stats here. This helper runs
             # inside node_save_results, BEFORE workflow.run_with_persistence's
             # outer commit. Querying alphas at this point sees 0 rows for
