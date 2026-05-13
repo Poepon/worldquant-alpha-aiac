@@ -56,6 +56,13 @@ UNIVERSAL_PV_FIELDS: Set[str] = {
 # Region-specific field guards. If a composite requires any field in this set
 # for the given region, skip the composite for that region. Conservative: only
 # populate when we've verified absence (avoid silent simulation failures).
+#
+# V-26.52 (2026-05-13): only USA has been probed. CHN/EUR/ASI/GLB sit at
+# empty set, meaning **no blocked fields** — composites referencing fields
+# that don't exist in those regions will silently burn BRAIN simulate
+# quota on guaranteed failures. Audit pending; see
+# `docs/v26_52_blocked_fields_audit.md` backlog. Non-USA mining warns
+# once per process when build_candidates_from_composite_fields is called.
 REGION_BLOCKED_FIELDS: Dict[str, Set[str]] = {
     # USA TOP3000 — all 25 ingredients confirmed present (2026-05-12 probe).
     "USA": set(),
@@ -65,6 +72,11 @@ REGION_BLOCKED_FIELDS: Dict[str, Set[str]] = {
     "ASI": set(),
     "GLB": set(),
 }
+
+# V-26.52: tracks regions that have already received the "blocked-field
+# audit pending" warning, so the warning is emitted at most once per region
+# per process lifetime (worker restart resets).
+_REGION_AUDIT_WARNED: Set[str] = set()
 
 # Preprocess parameters. Match the V-22.6 design: ts_backfill 120 days +
 # winsorize ±4 σ. Surface as constants so tests / callers can override.
@@ -210,6 +222,18 @@ def generate_composite_t1_candidates(
     composites = _load()
     if not composites:
         return []
+
+    # V-26.52: warn once per region when blocked-field audit is missing.
+    # Without an audit, composites referencing region-absent fields will
+    # silently fall through to BRAIN and consume simulate quota on
+    # guaranteed failures.
+    if region != "USA" and region not in _REGION_AUDIT_WARNED:
+        _REGION_AUDIT_WARNED.add(region)
+        logger.warning(
+            f"[composite_fields] V-26.52: region={region} has no "
+            f"REGION_BLOCKED_FIELDS audit — composites may reference "
+            f"absent fields and burn BRAIN simulate quota. Audit pending."
+        )
 
     # V-22.6.2: drop two-input ts ops — they need a second series, not a
     # window. Pairing them with a composite triggers SELF_CORRECT loops that
