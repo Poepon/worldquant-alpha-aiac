@@ -828,14 +828,24 @@ async def _run_cascade_phase(
     rounds_run = 0
     paused = False
 
-    async def _stamp_heartbeat() -> None:
+    async def _stamp_heartbeat(round_result: dict | None = None) -> None:
         # V-19.10 H1: heartbeat at every round boundary regardless of PASS count.
+        # V-26.3 (2026-05-13): also accumulate progress_current on the
+        # cascade path. Pre-fix only the discrete loop wrote progress_current
+        # (line 279 via result.get('total_success')); cascade rounds went
+        # silent — frontend progress bar stuck at 0 and daily_goal checks
+        # never fired. Use SQL update-with-expression so concurrent prefetch
+        # rounds don't clobber each other via ORM-staleness.
         try:
             from datetime import timezone as _tz
+            success_count = int((round_result or {}).get("total_success", 0) or 0)
+            values = {"last_alpha_persisted_at": datetime.now(_tz.utc)}
+            if success_count > 0:
+                values["progress_current"] = MiningTask.progress_current + success_count
             await db.execute(
                 update(MiningTask)
                 .where(MiningTask.id == task.id)
-                .values(last_alpha_persisted_at=datetime.now(_tz.utc))
+                .values(**values)
             )
             await db.commit()
         except Exception as _e:
@@ -865,7 +875,8 @@ async def _run_cascade_phase(
             )
             rounds_run += int(result.get("iterations_completed") or 0)
             alphas_added += len(result.get("all_alphas", []))
-            await _stamp_heartbeat()
+            # V-26.3: pass result so progress_current advances with PASS count.
+            await _stamp_heartbeat(result)
         return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
 
     # V-20.1 pipeline path — two-deep lookahead.
@@ -921,7 +932,8 @@ async def _run_cascade_phase(
 
         rounds_run += int(result.get("iterations_completed") or 0)
         alphas_added += len(result.get("all_alphas", []))
-        await _stamp_heartbeat()
+        # V-26.3: pass round result so PASS count flows to progress_current.
+        await _stamp_heartbeat(result)
 
         # Promote next → current; schedule a fresh next if budget remaining
         current = next_task
@@ -993,10 +1005,16 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
             # 2026-05-11: proactively refresh BRAIN session at every phase
             # boundary. Token expires ~4h; a single cascade phase can run
             # ~1h, so we'd hit token expiry mid-T1 or mid-T2 if cascade
-            # cycles 4+ times. ensure_session() is no-op when token is
-            # fresh (Redis cache hit or _is_session_valid OK).
+            # cycles 4+ times.
+            #
+            # V-26.2 (2026-05-13): the original ensure_session() short-
+            # circuited on Redis cache hit without checking actual /authentication
+            # expiry. That meant Redis-cached tokens 30min from expiry would
+            # be reused at the boundary and then expire mid-phase. Pass
+            # force_refresh=True so the Redis short-circuit is bypassed and
+            # _is_session_valid actually probes the BRAIN token expiry field.
             try:
-                await brain.ensure_session()
+                await brain.ensure_session(force_refresh=True)
             except Exception as _es:
                 logger.warning(f"[cascade] ensure_session at phase boundary failed: {_es}")
 

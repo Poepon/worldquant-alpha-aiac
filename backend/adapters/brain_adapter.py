@@ -410,20 +410,34 @@ class BrainAdapter:
         except Exception as e:
             logger.error(f"Failed to save session to Redis: {e}")
 
-    async def ensure_session(self):
-        """Ensure valid session exists, refreshing if needed. Prefer Redis cache."""
+    async def ensure_session(self, force_refresh: bool = False):
+        """Ensure valid session exists, refreshing if needed. Prefer Redis cache.
+
+        V-26.2 (2026-05-13): `force_refresh=True` skips the Redis-cache
+        short-circuit and re-validates against /authentication. Used at
+        cascade phase boundaries because the Redis cache TTL can outlive
+        the actual BRAIN token's `expiry` field — a fresh cache hit can
+        still be 30 minutes from expiry. Forcing the validity check at
+        T1→T2→T3 boundaries (each phase potentially 1-2h) prevents the
+        next phase from opening BRAIN sims with a soon-to-expire token.
+        """
         # 0. Load credentials from DB if not already loaded
         await self._load_credentials_from_db()
-        
-        # 1. Try to load from Redis first
-        if await self._load_session_from_redis():
+
+        # 1. Try to load from Redis first (skip when force_refresh)
+        if not force_refresh and await self._load_session_from_redis():
             # If loaded from Redis, we assume it is valid for now (TTL handles expiry)
             # We could do a lightweight check, but to save requests, we trust Redis.
             return
 
-        # 2. If no Redis session, check active client state
+        # 2. Check active client state. force_refresh path still consults
+        # _is_session_valid so a fresh token from another worker is reused
+        # if it's healthy — we only re-auth when actually invalid.
         if not await self._is_session_valid():
-            logger.info("Session invalid or expiring, re-authenticating...")
+            logger.info(
+                f"Session invalid or expiring "
+                f"(force_refresh={force_refresh}), re-authenticating..."
+            )
             await self.authenticate()
 
     async def _is_session_valid(self) -> bool:
