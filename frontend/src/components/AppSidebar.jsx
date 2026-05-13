@@ -9,6 +9,7 @@ import {
   RocketOutlined,
   DatabaseOutlined,
   ApartmentOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -33,6 +34,11 @@ const menuItems = [
     key: '/factor-library',
     icon: <ApartmentOutlined />,
     label: '因子库',
+  },
+  {
+    key: '/correlation',
+    icon: <WarningOutlined />,
+    label: '危机压力测试',
   },
   {
     key: '/data',

@@ -11,7 +11,7 @@ from backend.config import settings
 from backend.database import init_db
 
 # Import all routers
-from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, factor_library, mining_session
+from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, factor_library, mining_session, correlation
 
 
 @asynccontextmanager
@@ -65,6 +65,8 @@ app.include_router(operators.router, prefix=settings.API_V1_STR)
 app.include_router(factor_library.router, prefix=settings.API_V1_STR)
 # V-19: persistent mining service singleton (start/stop/resume button)
 app.include_router(mining_session.router, prefix=settings.API_V1_STR)
+# Crisis-window correlation stress test (portfolio matrix + per-window summary)
+app.include_router(correlation.router, prefix=settings.API_V1_STR)
 
 # Keep existing routers if needed
 try:

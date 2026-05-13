@@ -21,6 +21,7 @@ Reference: see plan §"Self-correlation 实现路径".
 from __future__ import annotations
 
 import asyncio
+import json
 import pickle
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -45,6 +46,39 @@ MIN_OVERLAP_DAYS = 60
 PNL_FETCH_CONCURRENCY = 10
 # Cache freshness: refresh if older than 24h.
 CACHE_TTL_HOURS = 24
+
+
+# ---------------------------------------------------------------------------
+# Crisis windows for stress-testing pairwise correlation.
+#
+# Selection criteria (see plan):
+#   1. Distinct regime character — each window stresses a different failure
+#      mode (liquidity, rates, sector contagion, geopolitics) so a strategy
+#      that survives one but not another is informative.
+#   2. >= ~30 trading days to keep per-window corr noise reasonable.
+#   3. Falls inside the BRAIN PnL history typically available for OS alphas
+#      (older crises are silently skipped per-alpha when data is missing).
+# ---------------------------------------------------------------------------
+CRISIS_WINDOWS: Dict[str, Tuple[str, str]] = {
+    # Liquidity crash — almost everything goes correlated → 1.
+    "covid_2020": ("2020-02-20", "2020-04-30"),
+    # Rate-shock / inflation regime change — kills growth/duration factors.
+    "rate_shock_2022": ("2022-01-03", "2022-06-30"),
+    # SVB regional-banking contagion — sector cross-correlation spike.
+    "svb_2023": ("2023-02-15", "2023-04-15"),
+    # Tariff shock — most recent geopolitical/policy uncertainty event.
+    "tariff_2025": ("2025-04-01", "2025-05-31"),
+}
+
+# Per-window overlap floor. Crisis windows are inherently shorter than the
+# 4-year lookback so the 60-day default would reject everything. 20 trading
+# days ≈ one calendar month — below that the corr is too noisy to act on.
+MIN_OVERLAP_DAYS_PER_WINDOW = 20
+
+# Threshold above which a per-window pairwise correlation is flagged as a
+# "hotspot" — surfaced in stress-test summary so reviewers can see which
+# alphas converge under stress even if their global self-corr looks fine.
+CRISIS_HOTSPOT_THRESHOLD = 0.7
 
 
 def _cache_path(region: str) -> Path:
@@ -78,6 +112,33 @@ def _series_to_returns(pnl_series: pd.Series) -> pd.Series:
     returns = pnl_series - pnl_series.ffill().shift(1)
     cutoff = pnl_series.index.max() - pd.DateOffset(years=LOOKBACK_YEARS)
     return returns[returns.index > cutoff]
+
+
+def _pnls_to_returns_df(pnls: pd.DataFrame) -> pd.DataFrame:
+    """Convert a wide PnL DataFrame (one column per alpha) to daily returns.
+
+    Unlike _series_to_returns above, this does NOT apply the LOOKBACK_YEARS
+    cutoff — crisis-window slicing happens after this call and may need
+    older data than the 4-year max-corr window.
+    """
+    if pnls.empty:
+        return pnls
+    return pnls.apply(lambda col: col - col.ffill().shift(1), axis=0)
+
+
+def _slice_returns_to_window(
+    returns: pd.DataFrame | pd.Series,
+    window: str,
+) -> pd.DataFrame | pd.Series:
+    """Slice a returns frame/series to one of the named crisis windows.
+
+    Returns an empty frame/series if the window is unknown.
+    """
+    rng = CRISIS_WINDOWS.get(window)
+    if not rng:
+        return returns.iloc[0:0] if hasattr(returns, "iloc") else returns
+    start, end = pd.Timestamp(rng[0]), pd.Timestamp(rng[1])
+    return returns.loc[(returns.index >= start) & (returns.index <= end)]
 
 
 class CorrelationService:
@@ -299,3 +360,266 @@ class CorrelationService:
             logger.warning(f"[CorrelationService] BRAIN /correlations/SELF failed for {alpha_id}: {e}")
 
         return 0.0, "unknown"
+
+    # ------------------------------------------------------------------
+    # Crisis-window stress test
+    # ------------------------------------------------------------------
+
+    async def calc_self_corr_by_window(
+        self,
+        alpha_id: str,
+        region: str,
+        alpha_pnl_series: Optional[pd.Series] = None,
+        windows: Optional[List[str]] = None,
+    ) -> Dict[str, Dict]:
+        """Compute the new alpha's max correlation against the OS pool, sliced
+        per crisis window.
+
+        Differs from `calc_self_corr` in two ways:
+          1. Drops the LOOKBACK_YEARS cutoff — we want older data when a
+             crisis window predates the trailing-4y range.
+          2. Uses MIN_OVERLAP_DAYS_PER_WINDOW (20) instead of the 60-day
+             default since each window is itself short.
+
+        Returns: `{window_name: {max_corr, overlap_days, counterpart_id,
+                                 status}}` where status ∈
+        {"ok", "insufficient_data", "empty_pool", "missing_window"}.
+        """
+        cache = self._load_cache(region)
+        if not cache or not cache.get("alpha_ids"):
+            return {w: {"status": "empty_pool"} for w in (windows or CRISIS_WINDOWS)}
+
+        if alpha_pnl_series is None:
+            alpha_pnl_series = await self._fetch_pnl_series(alpha_id)
+        if alpha_pnl_series.empty:
+            return {w: {"status": "empty_pool"} for w in (windows or CRISIS_WINDOWS)}
+
+        # Full-history returns — DO NOT apply LOOKBACK_YEARS here.
+        target_returns_full = alpha_pnl_series - alpha_pnl_series.ffill().shift(1)
+        os_returns_full = _pnls_to_returns_df(cache["pnls"])
+        if alpha_id in os_returns_full.columns:
+            os_returns_full = os_returns_full.drop(columns=[alpha_id])
+
+        out: Dict[str, Dict] = {}
+        for window in (windows or list(CRISIS_WINDOWS.keys())):
+            if window not in CRISIS_WINDOWS:
+                out[window] = {"status": "missing_window"}
+                continue
+
+            target_w = _slice_returns_to_window(target_returns_full, window).dropna()
+            if len(target_w) < MIN_OVERLAP_DAYS_PER_WINDOW:
+                out[window] = {
+                    "status": "insufficient_data",
+                    "overlap_days": int(len(target_w)),
+                }
+                continue
+
+            os_w = _slice_returns_to_window(os_returns_full, window)
+            if os_w.empty or os_w.shape[1] == 0:
+                out[window] = {"status": "empty_pool"}
+                continue
+
+            corrs = os_w.corrwith(target_w)
+            corrs = corrs.dropna()
+            if corrs.empty:
+                out[window] = {
+                    "status": "insufficient_data",
+                    "overlap_days": int(len(target_w)),
+                }
+                continue
+
+            max_idx = corrs.idxmax()
+            max_corr = float(corrs.loc[max_idx])
+            out[window] = {
+                "status": "ok",
+                "max_corr": max_corr,
+                "overlap_days": int(len(target_w)),
+                "counterpart_id": str(max_idx),
+            }
+
+        return out
+
+    def compute_portfolio_matrix(
+        self,
+        region: str,
+        window: Optional[str] = None,
+    ) -> Dict:
+        """Compute the full pairwise correlation matrix over the OS pool.
+
+        Unlike `calc_self_corr*` which compares a new alpha against the pool,
+        this returns the N×N matrix of OS-vs-OS correlations so the user can
+        see portfolio-level concentration.
+
+        Args:
+            region: BRAIN region code.
+            window: optional crisis-window name. If None, uses the standard
+                    LOOKBACK_YEARS=4 window.
+
+        Returns: dict with keys:
+            - alpha_ids: List[str]
+            - matrix: List[List[float]] (NaN-filled where overlap < floor)
+            - window: str | None
+            - n_obs: int (rows after slicing, before column-wise dropna)
+            - n_alphas: int
+            - status: "ok" | "empty" | "missing_window"
+        """
+        cache = self._load_cache(region)
+        if not cache or not cache.get("alpha_ids"):
+            return {"status": "empty", "window": window}
+
+        returns = _pnls_to_returns_df(cache["pnls"])
+
+        if window is None:
+            cutoff = returns.index.max() - pd.DateOffset(years=LOOKBACK_YEARS)
+            returns = returns[returns.index > cutoff]
+            overlap_floor = MIN_OVERLAP_DAYS
+        else:
+            if window not in CRISIS_WINDOWS:
+                return {"status": "missing_window", "window": window}
+            returns = _slice_returns_to_window(returns, window)
+            overlap_floor = MIN_OVERLAP_DAYS_PER_WINDOW
+
+        if returns.empty:
+            return {"status": "empty", "window": window}
+
+        # Drop columns where the alpha has < floor non-NaN obs in this slice.
+        valid_cols = [c for c in returns.columns if returns[c].dropna().shape[0] >= overlap_floor]
+        returns = returns[valid_cols]
+
+        if returns.shape[1] < 2:
+            return {
+                "status": "empty",
+                "window": window,
+                "alpha_ids": valid_cols,
+                "n_obs": int(returns.shape[0]),
+                "n_alphas": int(returns.shape[1]),
+            }
+
+        # pairwise correlation; NaN where insufficient overlap.
+        corr_df = returns.corr(min_periods=overlap_floor)
+
+        # Replace NaN with None so JSON serialization works downstream.
+        matrix = [
+            [None if pd.isna(v) else float(v) for v in row]
+            for row in corr_df.values
+        ]
+
+        return {
+            "status": "ok",
+            "window": window,
+            "alpha_ids": list(corr_df.columns),
+            "matrix": matrix,
+            "n_obs": int(returns.shape[0]),
+            "n_alphas": int(corr_df.shape[0]),
+        }
+
+    def crisis_stress_test(
+        self,
+        region: str,
+        top_n_hotspots: int = 20,
+        hotspot_threshold: float = CRISIS_HOTSPOT_THRESHOLD,
+    ) -> Dict:
+        """Run the full crisis stress test over the cached OS pool.
+
+        For every crisis window:
+          - Compute the pairwise corr matrix on that slice.
+          - Record max / median / mean pairwise corr (off-diagonal).
+          - Extract pairs whose corr exceeds `hotspot_threshold` ranked by
+            severity.
+
+        Also computes the BASELINE (full-LOOKBACK_YEARS) version for
+        comparison so the caller can see the "calm vs stress" delta.
+
+        Returns: dict with `baseline` and `windows` keys. Each window entry:
+            {
+              status, n_alphas, n_obs,
+              max_pairwise, median_pairwise, mean_pairwise,
+              hotspots: [{a, b, corr}, ...]
+            }
+        """
+        cache = self._load_cache(region)
+        if not cache or not cache.get("alpha_ids"):
+            return {"status": "empty", "windows": {}, "baseline": {"status": "empty"}}
+
+        def _summarize(matrix_payload: Dict) -> Dict:
+            if matrix_payload.get("status") != "ok":
+                return {
+                    "status": matrix_payload.get("status", "empty"),
+                    "n_alphas": matrix_payload.get("n_alphas", 0),
+                    "n_obs": matrix_payload.get("n_obs", 0),
+                }
+            ids = matrix_payload["alpha_ids"]
+            mat = matrix_payload["matrix"]
+            n = len(ids)
+            offdiag: List[float] = []
+            hotspots: List[Dict] = []
+            for i in range(n):
+                for j in range(i + 1, n):
+                    v = mat[i][j]
+                    if v is None:
+                        continue
+                    offdiag.append(v)
+                    if v >= hotspot_threshold:
+                        hotspots.append({"a": ids[i], "b": ids[j], "corr": v})
+            hotspots.sort(key=lambda x: x["corr"], reverse=True)
+            if offdiag:
+                ser = pd.Series(offdiag)
+                summary = {
+                    "max_pairwise": float(ser.max()),
+                    "median_pairwise": float(ser.median()),
+                    "mean_pairwise": float(ser.mean()),
+                }
+            else:
+                summary = {
+                    "max_pairwise": None,
+                    "median_pairwise": None,
+                    "mean_pairwise": None,
+                }
+            return {
+                "status": "ok",
+                "n_alphas": n,
+                "n_obs": matrix_payload["n_obs"],
+                "hotspots": hotspots[:top_n_hotspots],
+                **summary,
+            }
+
+        baseline = _summarize(self.compute_portfolio_matrix(region, window=None))
+        windows = {
+            name: _summarize(self.compute_portfolio_matrix(region, window=name))
+            for name in CRISIS_WINDOWS
+        }
+
+        return {
+            "status": "ok",
+            "region": region,
+            "computed_at": datetime.utcnow().isoformat(),
+            "hotspot_threshold": hotspot_threshold,
+            "baseline": baseline,
+            "windows": windows,
+        }
+
+    # ------------------------------------------------------------------
+    # Snapshot persistence
+    # ------------------------------------------------------------------
+
+    def save_crisis_snapshot(self, region: str, payload: Dict) -> Path:
+        """Persist crisis stress-test output to disk for the UI / audit log."""
+        path = CACHE_DIR / f"crisis_corr_{region}.json"
+        try:
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, default=str)
+        except Exception as e:
+            logger.error(f"[CorrelationService] Failed to save crisis snapshot {path}: {e}")
+        return path
+
+    def load_crisis_snapshot(self, region: str) -> Optional[Dict]:
+        """Load the last persisted crisis stress-test snapshot, if any."""
+        path = CACHE_DIR / f"crisis_corr_{region}.json"
+        if not path.exists():
+            return None
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"[CorrelationService] Failed to load crisis snapshot {path}: {e}")
+            return None

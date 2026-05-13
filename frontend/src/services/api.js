@@ -307,6 +307,33 @@ const api = {
     const { data } = await client.delete(`/config/credentials/${key}`)
     return data
   },
+
+  // Crisis-window correlation stress test
+  listCrisisWindows: async () => {
+    const { data } = await client.get('/correlation/windows')
+    return data
+  },
+
+  getPortfolioMatrix: async (region = 'USA', window = null) => {
+    const params = { region }
+    if (window) params.window = window
+    const { data } = await client.get('/correlation/portfolio-matrix', { params })
+    return data
+  },
+
+  getCrisisSummary: async (region = 'USA', { refresh = false, topNHotspots = 20 } = {}) => {
+    const { data } = await client.get('/correlation/crisis-summary', {
+      params: { region, refresh, top_n_hotspots: topNHotspots },
+    })
+    return data
+  },
+
+  getAlphaCrisisCorrelations: async (alphaId, region = 'USA') => {
+    const { data } = await client.get(`/correlation/alpha/${alphaId}/crisis`, {
+      params: { region },
+    })
+    return data
+  },
 }
 
 export default api

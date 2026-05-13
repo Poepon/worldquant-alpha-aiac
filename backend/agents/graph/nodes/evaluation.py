@@ -948,6 +948,38 @@ async def node_evaluate(
                 except Exception as e:
                     logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
                     self_corr_source = "unknown"
+
+                # Crisis-window stress test: piggyback on the same local PnL
+                # cache that just resolved self_corr. Only runs when the
+                # cache produced a real value ("local") — if the global
+                # max-corr couldn't be measured the per-window slice has
+                # even less data to work with. Failures are non-fatal: the
+                # crisis read is advisory, not a hard gate.
+                if self_corr_source == "local":
+                    try:
+                        crisis_by_window = await correlation_service.calc_self_corr_by_window(
+                            alpha_id=alpha.alpha_id, region=state.region
+                        )
+                        if isinstance(alpha.metrics, dict):
+                            alpha.metrics = dict(alpha.metrics)
+                        else:
+                            alpha.metrics = {}
+                        alpha.metrics["_crisis_correlations"] = crisis_by_window
+                        spikes = [
+                            (w, info["max_corr"])
+                            for w, info in crisis_by_window.items()
+                            if info.get("status") == "ok"
+                            and info.get("max_corr", 0.0) >= max_correlation
+                        ]
+                        if spikes:
+                            logger.info(
+                                f"[{node_name}] {alpha.alpha_id} crisis-corr spikes: "
+                                f"{spikes} (global self_corr={self_corr:.3f})"
+                            )
+                    except Exception as e:
+                        logger.warning(
+                            f"[{node_name}] crisis-window corr failed for {alpha.alpha_id}: {e}"
+                        )
             else:
                 try:
                     self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")

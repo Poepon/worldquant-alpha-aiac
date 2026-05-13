@@ -62,6 +62,72 @@ const mockPnL = [
   { date: '2025-12', returns: 12.5 },
 ]
 
+const CRISIS_WINDOW_LABELS = {
+  covid_2020: 'COVID 2020',
+  rate_shock_2022: '利率冲击 2022',
+  svb_2023: 'SVB 2023',
+  tariff_2025: '关税 2025',
+}
+
+function CrisisCorrelationPanel({ crisis }) {
+  // crisis: { [window]: { status, max_corr?, overlap_days?, counterpart_id? } }
+  if (!crisis || Object.keys(crisis).length === 0) {
+    return (
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        尚无危机相关性数据（仅 PASS-eligible alpha 在本地 PnL 缓存命中时计算）。
+      </Text>
+    )
+  }
+  const order = ['covid_2020', 'rate_shock_2022', 'svb_2023', 'tariff_2025']
+  const items = order
+    .filter((k) => k in crisis)
+    .concat(Object.keys(crisis).filter((k) => !order.includes(k)))
+
+  return (
+    <Space wrap size={[8, 8]}>
+      {items.map((w) => {
+        const info = crisis[w] || {}
+        const label = CRISIS_WINDOW_LABELS[w] || w
+        if (info.status !== 'ok') {
+          return (
+            <AntTooltip
+              key={w}
+              title={
+                <div style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                  status: {info.status || 'unknown'}
+                  {info.overlap_days !== undefined && (
+                    <> · overlap_days: {info.overlap_days}</>
+                  )}
+                </div>
+              }
+            >
+              <Tag>{label} · n/a</Tag>
+            </AntTooltip>
+          )
+        }
+        const v = info.max_corr
+        const color = v >= 0.7 ? 'red' : v >= 0.5 ? 'orange' : v >= 0.3 ? 'gold' : 'green'
+        return (
+          <AntTooltip
+            key={w}
+            title={
+              <div style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                <div>max_corr: {v.toFixed(4)}</div>
+                <div>counterpart: {info.counterpart_id}</div>
+                <div>overlap: {info.overlap_days} days</div>
+              </div>
+            }
+          >
+            <Tag color={color} style={{ cursor: 'help' }}>
+              {label} · {v.toFixed(2)}
+            </Tag>
+          </AntTooltip>
+        )
+      })}
+    </Space>
+  )
+}
+
 function CanSubmitTag({ canSubmit, failed, pending, loading, onRefresh }) {
   if (canSubmit === true) {
     const pendN = pending?.length || 0
@@ -322,6 +388,24 @@ export default function AlphaDetail() {
                 {metrics.fitness?.toFixed(2) || '--'}
               </Descriptions.Item>
             </Descriptions>
+          </Card>
+
+          {/* Crisis-window correlation strip — sourced from
+              alpha.metrics._crisis_correlations populated in evaluation.py
+              when local PnL cache hit. */}
+          <Card
+            className="glass-card"
+            title={
+              <Space>
+                <span>危机窗口相关性</span>
+                <AntTooltip title="该 alpha 在 4 个历史危机窗口下相对 OS 池的 max-corr。任一窗口 ≥ 0.7 (红) 提示隐性集中度风险，慎重提交。">
+                  <Tag color="purple">stress test</Tag>
+                </AntTooltip>
+              </Space>
+            }
+            style={{ marginTop: 16 }}
+          >
+            <CrisisCorrelationPanel crisis={metrics?._crisis_correlations} />
           </Card>
 
           {/* Metadata */}

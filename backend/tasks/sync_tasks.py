@@ -60,6 +60,23 @@ def refresh_os_correlation_cache():
                     logger.warning(f"[refresh_os_metrics] {region} failed: {e}")
                     results.setdefault(region, {})["metrics_error"] = str(e)
 
+            # Crisis-window stress test snapshot. Reuses the PnL cache we
+            # just refreshed — no extra BRAIN calls. Persisted JSON powers
+            # /correlation/crisis-summary without recomputing the full
+            # N×N matrix per request.
+            for region in ["USA", "CHN", "EUR", "HKG", "JPN"]:
+                try:
+                    payload = svc.crisis_stress_test(region=region)
+                    if payload.get("status") == "ok":
+                        svc.save_crisis_snapshot(region, payload)
+                        n_alphas = payload.get("baseline", {}).get("n_alphas", 0)
+                        results.setdefault(region, {})["crisis_snapshot_n"] = n_alphas
+                    else:
+                        results.setdefault(region, {})["crisis_snapshot_status"] = payload.get("status")
+                except Exception as e:
+                    logger.warning(f"[refresh_crisis_snapshot] {region} failed: {e}")
+                    results.setdefault(region, {})["crisis_snapshot_error"] = str(e)
+
             return results
 
     results = run_async(_run())
