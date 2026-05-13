@@ -460,47 +460,94 @@ async def node_hypothesis(
     # that hypothesis is still ACTIVE AND its round_history has < N entries,
     # REUSE it for this round. Same Hypothesis row accumulates rounds; B6
     # abandon fires at round 3 if pattern is hypothesis-fail × 3.
-    if hge_level >= 2 and state.current_hypothesis_id:
-        try:
-            from backend.database import AsyncSessionLocal
-            from backend.services.hypothesis_service import HypothesisService
-            from backend.agents.graph.early_stop import HYPOTHESIS_ABANDON_ROUNDS
-            history_len = len(
-                (state.hypothesis_round_history or {}).get(
-                    state.current_hypothesis_id, []
+    # V-25.C (2026-05-13): track every V-22.13 skip path so the post-hoc
+    # audit (scripts/v22_13_reuse_audit.py) can quantify the failure modes:
+    #   path_a_no_state: state.current_hypothesis_id None at round entry
+    #                    (LangGraph scalar-field drop — known issue, see
+    #                    persistence.py:388-395 fallback)
+    #   path_b_history_full: history_len >= N — V-22.13 deliberately gives
+    #                        up so the next round creates a fresh hypothesis
+    #   path_c_db_missing: get_by_id returned None — hypothesis row deleted
+    #                      or never persisted
+    #   path_d_wrong_status: existing.status NOT in (ACTIVE, PROPOSED) —
+    #                        already PROMOTED / SUPERSEDED / ABANDONED
+    #   path_e_exception: DB lookup raised — connection / ORM issue
+    #   path_ok: reuse succeeded
+    v22_13_skip_reason: Optional[str] = None
+    if hge_level >= 2:
+        # V-25.C (2026-05-13): LangGraph scalar field propagation can drop
+        # state.current_hypothesis_id between nodes while state.current_hypothesis_ids
+        # (list, reducer-friendly) still propagates. persistence.py:388-395
+        # already does this fallback for B4 alpha linking; mirror it here so
+        # V-22.13 reuse picks up the same value rather than re-creating a
+        # fresh hypothesis row.
+        _state_hid = state.current_hypothesis_id
+        if _state_hid is None:
+            _state_hids = state.current_hypothesis_ids or []
+            if _state_hids:
+                _state_hid = _state_hids[0]
+                logger.info(
+                    f"[{node_name}] V-22.13 scalar drop recovered via list[0]="
+                    f"{_state_hid}"
                 )
-            )
-            if history_len < HYPOTHESIS_ABANDON_ROUNDS:
-                async with AsyncSessionLocal() as _reuse_db:
-                    svc = HypothesisService(_reuse_db)
-                    existing = await svc.get_by_id(state.current_hypothesis_id)
-                if existing is not None and existing.status in ("ACTIVE", "PROPOSED"):
-                    current_hypothesis_id = existing.id
-                    current_hypothesis_ids = [existing.id]
-                    hypotheses = [{
-                        "idea": existing.statement,
-                        "statement": existing.statement,
-                        "rationale": existing.rationale or "",
-                        "expected_signal": existing.expected_signal or "unknown",
-                        "key_fields": existing.key_fields or [],
-                        "suggested_operators": existing.suggested_operators or [],
-                        "selected_datasets": existing.dataset_pool or [],
-                        "confidence": existing.confidence,
-                        "novelty": existing.novelty,
-                        "hypothesis_id": existing.id,
-                        "_v22_13_reused": True,
-                    }]
-                    chosen_datasets = existing.dataset_pool or [legacy_anchor]
-                    logger.info(
-                        f"[{node_name}] V-22.13 cross-round reuse: hypothesis_id="
-                        f"{existing.id} (history_len={history_len}/"
-                        f"{HYPOTHESIS_ABANDON_ROUNDS}, status={existing.status}, "
-                        f"statement={existing.statement[:60]!r})"
-                    )
-        except Exception as _v22_13_ex:
-            logger.warning(
-                f"[{node_name}] V-22.13 reuse check failed (non-fatal): {_v22_13_ex}"
-            )
+        if not _state_hid:
+            v22_13_skip_reason = "path_a_no_state"
+        else:
+            try:
+                from backend.database import AsyncSessionLocal
+                from backend.services.hypothesis_service import HypothesisService
+                from backend.agents.graph.early_stop import HYPOTHESIS_ABANDON_ROUNDS
+                history_len = len(
+                    (state.hypothesis_round_history or {}).get(_state_hid, [])
+                )
+                if history_len >= HYPOTHESIS_ABANDON_ROUNDS:
+                    v22_13_skip_reason = "path_b_history_full"
+                else:
+                    async with AsyncSessionLocal() as _reuse_db:
+                        svc = HypothesisService(_reuse_db)
+                        existing = await svc.get_by_id(_state_hid)
+                    if existing is None:
+                        v22_13_skip_reason = "path_c_db_missing"
+                    elif existing.status not in ("ACTIVE", "PROPOSED"):
+                        v22_13_skip_reason = f"path_d_wrong_status:{existing.status}"
+                    else:
+                        current_hypothesis_id = existing.id
+                        current_hypothesis_ids = [existing.id]
+                        hypotheses = [{
+                            "idea": existing.statement,
+                            "statement": existing.statement,
+                            "rationale": existing.rationale or "",
+                            "expected_signal": existing.expected_signal or "unknown",
+                            "key_fields": existing.key_fields or [],
+                            "suggested_operators": existing.suggested_operators or [],
+                            "selected_datasets": existing.dataset_pool or [],
+                            "confidence": existing.confidence,
+                            "novelty": existing.novelty,
+                            "hypothesis_id": existing.id,
+                            "_v22_13_reused": True,
+                        }]
+                        chosen_datasets = existing.dataset_pool or [legacy_anchor]
+                        logger.info(
+                            f"[{node_name}] V-22.13 cross-round reuse: hypothesis_id="
+                            f"{existing.id} (history_len={history_len}/"
+                            f"{HYPOTHESIS_ABANDON_ROUNDS}, status={existing.status}, "
+                            f"statement={existing.statement[:60]!r})"
+                        )
+            except Exception as _v22_13_ex:
+                v22_13_skip_reason = f"path_e_exception:{type(_v22_13_ex).__name__}"
+                logger.warning(
+                    f"[{node_name}] V-22.13 reuse check failed (non-fatal): {_v22_13_ex}"
+                )
+    if hge_level >= 2 and v22_13_skip_reason is not None:
+        # INFO-level so post-hoc grep in celery.log can count path
+        # distribution without DEBUG noise. Each round of every variant=2
+        # task emits exactly one of these.
+        logger.info(
+            f"[{node_name}] V-22.13 skip: reason={v22_13_skip_reason} "
+            f"state_hid_scalar={state.current_hypothesis_id} "
+            f"state_hids_list={state.current_hypothesis_ids or []} "
+            f"task_id={state.task_id}"
+        )
 
     # G — Hypothesis Refinement Loop (2026-05-06): before persisting a fresh
     # LLM-emitted hypothesis, check if there's an unused refined child from
