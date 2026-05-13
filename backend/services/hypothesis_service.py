@@ -160,6 +160,22 @@ class HypothesisService(BaseService):
             if include_proposed
             else [HypothesisStatus.ACTIVE.value, HypothesisStatus.PROMOTED.value]
         )
+        # V-26.45 (2026-05-13): order so PROPOSED-but-untouched hypotheses
+        # win over already-tested ones. Pre-fix used `created_at desc`
+        # alone, which meant a freshly-PROPOSED hypothesis from yesterday
+        # could be starved out of the top-50 window by today's new ones
+        # — and a never-tried PROPOSED row in the older tail was unlikely
+        # to ever be sampled. Two-key sort:
+        #   1. alpha_count = 0 first (asc on a bool: untouched ranks before
+        #      tested) — gives PROPOSED rows preference until they actually
+        #      have evidence.
+        #   2. created_at desc within each bucket so freshness still
+        #      tie-breaks.
+        from sqlalchemy import case as _case
+        untouched_first = _case(
+            (Hypothesis.alpha_count == 0, 0),
+            else_=1,
+        ).label("_untouched_rank")
         stmt = (
             select(Hypothesis)
             .where(
@@ -167,7 +183,7 @@ class HypothesisService(BaseService):
                 Hypothesis.is_active.is_(True),
                 Hypothesis.status.in_(valid_states),
             )
-            .order_by(Hypothesis.created_at.desc())
+            .order_by(untouched_first.asc(), Hypothesis.created_at.desc())
             .limit(limit)
         )
         if kind is not None:
@@ -225,9 +241,23 @@ class HypothesisService(BaseService):
         """→ ABANDONED. Triggered by should_abandon_hypothesis (Plan §B6) —
         N rounds with 0 PASS and HYPOTHESIS-attribution feedback. Once
         abandoned, the hypothesis is excluded from future sampling regardless
-        of is_active."""
+        of is_active.
+
+        V-26.41 (2026-05-13): if `abandon_reason` is already populated
+        (e.g. an earlier regime-freeze, an earlier mark_abandoned call)
+        the new reason is appended with a `|` separator so the original
+        diagnostic isn't lost. The column is `Text` so the 1000-char cap
+        is purely defensive; in practice the rolling log fits.
+        """
         if not reason:
             raise ValueError("abandon_reason required — empty rejection masks debugging")
+        # Compose the new reason, preserving prior entries when present.
+        existing = await self.get_by_id(hypothesis_id)
+        if existing is not None and existing.abandon_reason:
+            prefix = existing.abandon_reason
+            new_reason = (prefix + " | " + reason)[:1000]
+        else:
+            new_reason = reason[:1000]
         stmt = (
             update(Hypothesis)
             .where(
@@ -237,7 +267,7 @@ class HypothesisService(BaseService):
             )
             .values(
                 status=HypothesisStatus.ABANDONED.value,
-                abandon_reason=reason[:1000],  # text column but bound length
+                abandon_reason=new_reason,
             )
         )
         result = await self.db.execute(stmt)
@@ -276,17 +306,31 @@ class HypothesisService(BaseService):
     ) -> bool:
         """Toggle the is_active boolean for regime-triggered freeze (Plan
         v5+ Final §简化冷冻). Does NOT change `status` — a frozen hypothesis
-        is still PROMOTED/ACTIVE, just temporarily skipped by sampling."""
+        is still PROMOTED/ACTIVE, just temporarily skipped by sampling.
+
+        V-26.42 (2026-05-13): freeze/unfreeze reason text is appended to
+        `abandon_reason` because the schema doesn't yet have a dedicated
+        column. The pre-fix version OVERWROTE the field when there was
+        no prior entry — losing the original diagnostic. Now always
+        appends with a clear `[regime-freeze]` / `[regime-unfreeze]`
+        prefix so a downstream reader can grep for the marker AND see
+        every state transition that ever touched the row. When the
+        schema gains a dedicated `lifecycle_events` JSONB column, this
+        helper should move there and stop touching abandon_reason at all.
+        """
         values: Dict[str, Any] = {"is_active": is_active}
         if reason:
             existing = await self.get_by_id(hypothesis_id)
             if existing:
                 tag = "[regime-freeze] " if not is_active else "[regime-unfreeze] "
-                values["abandon_reason"] = (
-                    tag + reason[:900]
-                    if not existing.abandon_reason
-                    else (existing.abandon_reason + " | " + tag + reason[:500])[:1000]
-                )
+                marker = tag + reason
+                # Append-only: never overwrite the prior abandon_reason.
+                prior = existing.abandon_reason or ""
+                if prior:
+                    composed = prior + " | " + marker
+                else:
+                    composed = marker
+                values["abandon_reason"] = composed[:1000]
         stmt = (
             update(Hypothesis)
             .where(Hypothesis.id == hypothesis_id)

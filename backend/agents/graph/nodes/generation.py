@@ -786,9 +786,24 @@ async def node_code_gen(
     # consume it. Fall back to state.fields for legacy single-anchor.
     hypothesis_fields = list(getattr(state, "current_hypothesis_fields", []) or [])
     if hypothesis_fields:
-        # Cap at 60 to keep prompt manageable; hypothesis node already
-        # capped at 80 so this is a soft trim.
-        code_gen_fields = hypothesis_fields[:60]
+        # V-26.46 (2026-05-13): de-dup by field id before the 60-slot trim
+        # so the prompt doesn't waste capacity on the same field appearing
+        # twice (happened when current_hypothesis_datasets shared fields).
+        # Preserves first-seen order so the most-relevant field stays at
+        # the head of the trimmed list.
+        seen_ids: set = set()
+        deduped_fields: list = []
+        for f in hypothesis_fields:
+            fid = (
+                f.get("id") if isinstance(f, dict) else None
+            ) or (
+                f.get("name") if isinstance(f, dict) else str(f)
+            )
+            if not fid or fid in seen_ids:
+                continue
+            seen_ids.add(fid)
+            deduped_fields.append(f)
+        code_gen_fields = deduped_fields[:60]
         logger.info(
             f"[{node_name}] Phase 1 effective fields | "
             f"datasets={getattr(state, 'current_hypothesis_datasets', [])} "

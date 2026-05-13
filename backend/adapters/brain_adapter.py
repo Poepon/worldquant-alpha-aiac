@@ -530,14 +530,41 @@ class BrainAdapter:
         try:
             try:
                 response = await self._request("POST", f"{self.BASE_URL}/simulations", json=sim_payload)
+                # V-26.75 (2026-05-13): 429 used to be a one-shot fail —
+                # the alpha was abandoned and the caller had no signal to
+                # retry. Now we return a 'retryable' marker so the caller
+                # (node_simulate / simulate_batch) can enqueue the alpha
+                # back instead of writing it off as permanently failed.
                 if response.status_code == 429 and "CONCURRENT_SIMULATION_LIMIT_EXCEEDED" in (response.text or ""):
-                    # Slot accounting drift (e.g. counter reset) — back off briefly
-                    # and let outer caller retry. Releasing here avoids deadlock.
                     logger.warning(
                         "[BrainAdapter] 429 CONCURRENT_SIMULATION_LIMIT_EXCEEDED despite slot held; "
-                        "Redis counter may be stale. Releasing and signalling failure."
+                        "Redis counter may be stale. Releasing and signalling retryable failure."
                     )
-                    return {"success": False, "error": "BRAIN concurrent limit exceeded"}
+                    return {
+                        "success": False,
+                        "error": "BRAIN concurrent limit exceeded",
+                        "retryable": True,
+                        "retry_after_sec": 30,
+                    }
+                if response.status_code == 429:
+                    # Non-concurrent 429 (rate limit on the endpoint itself).
+                    # Respect Retry-After if BRAIN sent it; otherwise short
+                    # default. Same retryable signal so caller can backoff.
+                    retry_after = response.headers.get("Retry-After")
+                    try:
+                        retry_after_sec = float(retry_after) if retry_after else 10.0
+                    except (TypeError, ValueError):
+                        retry_after_sec = 10.0
+                    logger.warning(
+                        f"[BrainAdapter] V-26.75 BRAIN sim 429 rate-limit; "
+                        f"retry_after={retry_after_sec}s"
+                    )
+                    return {
+                        "success": False,
+                        "error": f"BRAIN 429 rate limit",
+                        "retryable": True,
+                        "retry_after_sec": retry_after_sec,
+                    }
                 if response.status_code not in [200, 201, 202]:
                     logger.error(f"Brain Simulation Failed [{response.status_code}] | Payload: {json.dumps(sim_payload)} | Response: {response.text}")
                     return {"success": False, "error": f"Creation failed: {response.text}"}

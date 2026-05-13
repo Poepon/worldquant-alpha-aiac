@@ -1529,9 +1529,14 @@ async def node_evaluate(
                     implementation_failures += 1
 
                 try:
-                    # Only record to knowledge base if attribution is confident
-                    # Implementation failures shouldn't teach us about hypotheses
-                    should_record = attribution != "implementation"
+                    # V-26.40 (2026-05-13): only record when attribution is
+                    # confidently HYPOTHESIS or BOTH. Pre-fix used
+                    # `attribution != "implementation"` which let "unknown"
+                    # alphas through, contaminating the KB with feedback we
+                    # couldn't even attribute. classify_attribution returns
+                    # "unknown" precisely when there's no signal — those
+                    # rows should NOT teach the KB anything.
+                    should_record = attribution in ("hypothesis", "both")
 
                     if should_record:
                         await rag_service.record_failure_pattern(
@@ -1546,7 +1551,8 @@ async def node_evaluate(
                         feedback_recorded += 1
                     else:
                         logger.debug(
-                            f"[{node_name}] Skipping knowledge record for implementation failure: "
+                            f"[{node_name}] Skipping knowledge record "
+                            f"(attribution={attribution}): "
                             f"{feedback['alignment_issues'][:2] if feedback.get('alignment_issues') else 'N/A'}"
                         )
                 except Exception as e:
