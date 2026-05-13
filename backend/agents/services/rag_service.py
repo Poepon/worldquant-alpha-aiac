@@ -183,7 +183,34 @@ class RAGService:
     
     def __init__(self, db: AsyncSession):
         self.db = db
-    
+
+    async def _track_retrieval_hit(self, entry_ids: List[int]) -> None:
+        """V-24.D (2026-05-13) — pattern hit tracking.
+
+        Bumps usage_count + updated_at on the entries that were actually
+        selected for return to the LLM (post-filter / post-diversity-greedy).
+        Best-effort: caller swallows exceptions so retrieval never fails.
+
+        Combined with the existing record-time +1 on record_success_pattern
+        and record_failure_pattern, usage_count becomes a unified "pattern
+        activity" metric. updated_at doubles as "last activity time" — the
+        kb_hit_audit.py script flags cold patterns (no activity in 30+
+        days) as pruning candidates.
+
+        L1 anti-collapse (line ~622 in get_recent_pass_examples) already
+        penalises usage_count >= 5, so adding retrieve increments here
+        won't recreate the pre-V-22 collapse loop.
+        """
+        if not entry_ids:
+            return
+        from backend.repositories.knowledge_repository import KnowledgeRepository
+        try:
+            repo = KnowledgeRepository(self.db)
+            await repo.bulk_increment_usage(entry_ids)
+            await self.db.commit()
+        except Exception as e:
+            logger.warning(f"[RAGService] V-24.D hit-track failed (non-fatal): {e}")
+
     async def query(
         self,
         dataset_id: str = None,
@@ -332,9 +359,11 @@ class RAGService:
         scored_patterns.sort(key=lambda x: x['score'], reverse=True)
         
         # Build result list
+        selected_ids: List[int] = []
         for sp in scored_patterns[:limit]:
             entry = sp['entry']
             metadata = sp['metadata']
+            selected_ids.append(entry.id)
             patterns.append({
                 'pattern': entry.pattern,
                 'description': entry.description,
@@ -342,12 +371,15 @@ class RAGService:
                 'metadata': metadata,
                 'match_score': sp['score']
             })
-        
+
+        # V-24.D: hit-track only the entries actually returned to the LLM
+        await self._track_retrieval_hit(selected_ids)
+
         # Log pattern sources for debugging
         if patterns:
             sources = [p.get('metadata', {}).get('source', 'unknown') for p in patterns]
             logger.debug(f"[RAGService] Pattern sources: {sources}")
-        
+
         return patterns
     
     async def _get_failure_pitfalls_enhanced(
@@ -408,9 +440,11 @@ class RAGService:
         
         # Build result
         pitfalls = []
+        selected_ids: List[int] = []
         for sp in scored_pitfalls[:limit]:
             entry = sp['entry']
             metadata = sp['metadata']
+            selected_ids.append(entry.id)
             pitfalls.append({
                 'pattern': entry.pattern,
                 'description': entry.description,
@@ -418,7 +452,10 @@ class RAGService:
                 'severity': metadata.get('severity'),
                 'metadata': metadata
             })
-        
+
+        # V-24.D: hit-track returned pitfalls
+        await self._track_retrieval_hit(selected_ids)
+
         return pitfalls
     
     # Legacy method for backward compatibility
@@ -653,6 +690,9 @@ class RAGService:
         if len(diverse_pick) < limit:
             need = limit - len(diverse_pick)
             diverse_pick.extend(leftover[:need])
+
+        # V-24.D: hit-track final selected entries (post-diversity-greedy)
+        await self._track_retrieval_hit([e.id for e in diverse_pick])
 
         out = []
         for entry in diverse_pick:

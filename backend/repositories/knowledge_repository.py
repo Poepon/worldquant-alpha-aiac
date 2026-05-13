@@ -370,20 +370,31 @@ class KnowledgeRepository(BaseRepository[KnowledgeEntry]):
     async def bulk_increment_usage(self, entry_ids: List[int]) -> int:
         """
         Increment usage count for multiple entries.
-        
+
+        V-24.D (2026-05-13): also bump updated_at via explicit func.now()
+        because SQLAlchemy core `update()` doesn't trigger the column-level
+        onupdate hook (that only fires on ORM session.commit). updated_at
+        thereby doubles as "last activity timestamp" (record OR retrieve),
+        which the kb_hit_audit.py script uses to identify cold patterns
+        (no retrieval in 30+ days = pruning candidate).
+
         Args:
             entry_ids: List of entry IDs
-            
+
         Returns:
             Number of entries updated
         """
         if not entry_ids:
             return 0
-        
+        from sqlalchemy.sql import func as _func
+
         stmt = (
             update(KnowledgeEntry)
             .where(KnowledgeEntry.id.in_(entry_ids))
-            .values(usage_count=KnowledgeEntry.usage_count + 1)
+            .values(
+                usage_count=KnowledgeEntry.usage_count + 1,
+                updated_at=_func.now(),
+            )
         )
         result = await self.db.execute(stmt)
         return result.rowcount
