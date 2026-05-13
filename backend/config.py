@@ -371,6 +371,62 @@ class Settings(BaseSettings):
     DEDUP_PROMPT_T2_LIMIT: int = 20
     DEDUP_PROMPT_T3_LIMIT: int = 15
 
+    # ------------------------------------------------------------------
+    # V-26 Batch 4 (2026-05-13) — magic-number consolidation
+    # ------------------------------------------------------------------
+    # Values lifted from various modules where they were hardcoded. Defaults
+    # match the pre-fix behavior exactly; centralising them lets ops tune
+    # without code edits and lets future audits diff intent vs. live values.
+
+    # V-26.36 — RAG retrieval scoring weights
+    # rag_service._get_success_patterns_enhanced / _get_failure_pitfalls_enhanced
+    # used 100/50/30/20/10/5/40/25 directly in the inner scoring loop. The
+    # ratios are tuned empirically; exposing them lets a future A/B
+    # (e.g. boost dataset match vs hypothesis-family preference) be a config
+    # diff rather than a code commit.
+    RAG_SCORE_DATASET_MATCH: float = 100.0
+    RAG_SCORE_CATEGORY_EXACT: float = 50.0
+    RAG_SCORE_CATEGORY_PARTIAL: float = 30.0
+    RAG_SCORE_REGION_MATCH: float = 20.0
+    RAG_SCORE_REGION_GENERIC: float = 5.0
+    RAG_SCORE_BASE_MULTIPLIER: float = 10.0
+    RAG_SCORE_SHARPE_MULTIPLIER: float = 5.0
+    RAG_SCORE_USAGE_BONUS_CAP: int = 10
+    RAG_SCORE_USAGE_BONUS_PER: float = 0.5
+    RAG_SCORE_HYPOTHESIS_FAMILY_PATTERN: float = 40.0   # V-26.12
+    RAG_SCORE_HYPOTHESIS_FAMILY_PITFALL: float = 25.0
+
+    # V-26.59 — SELF_CORRECT / validate tunables
+    SELF_CORRECT_TEMPERATURE: float = 0.3
+    VALIDATE_DEDUP_SIMILARITY_THRESHOLD: float = 0.90
+
+    # V-26.65 — node_simulate default sim settings (used when smart-settings
+    # bucketing is OFF or for legacy fallback). Keeps the same defaults that
+    # have been in production since the BRAIN integration.
+    SIM_DEFAULT_DELAY: int = 1
+    SIM_DEFAULT_DECAY: int = 4
+    SIM_DEFAULT_NEUTRALIZATION: str = "SUBINDUSTRY"
+
+    # V-26.68 — V-16 suspicion-mode thresholds. The trigger threshold
+    # (was a module-level constant) plus the two heuristics for the
+    # cost-vacuum check.
+    V16_SUSPICION_THRESHOLD: float = 3.0
+    V16_COST_VACUUM_TURNOVER: float = 0.50
+    V16_COST_VACUUM_SHARPE: float = 5.0
+
+    # V-26.83 — IQC audit backfill sweep tunables
+    IQC_AUDIT_BACKFILL_LIMIT: int = 50
+    IQC_AUDIT_BACKFILL_COUNTDOWN_SEC: int = 2
+
+    # V-26.94 — round-level attribution dominance thresholds
+    # (classify_attribution at backend/agents/graph/early_stop.py).
+    ATTRIBUTION_IMPL_DOMINANCE_THRESHOLD: float = 0.75
+    ATTRIBUTION_QUALITY_DOMINANCE_THRESHOLD: float = 0.75
+
+    # V-26.95 — early-stop policy tunables
+    EARLY_STOP_WARMUP_ROUNDS: int = 5
+    EARLY_STOP_PASS_RATE_DROP_RATIO: float = 0.5
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     

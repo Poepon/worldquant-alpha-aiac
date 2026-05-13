@@ -81,8 +81,11 @@ def _check_is_os_consistency(metrics: Dict) -> bool:
 # divide-by-something-tiny throughout the test window).
 
 import re as _re_v16
+from backend.config import settings as _v16_settings
 
-V16_SUSPICION_THRESHOLD: float = 3.0
+# V-26.68 (2026-05-13): V16_SUSPICION_THRESHOLD now sourced from settings.
+# Module-level alias kept so legacy imports (tests, scripts) still find it.
+V16_SUSPICION_THRESHOLD: float = _v16_settings.V16_SUSPICION_THRESHOLD
 
 # Fields that can be 0 (returns on no-trade days, volume on halts, etc.)
 _V16_DIVIDE_RISKY_DENOMS: set = {
@@ -181,7 +184,9 @@ def _v16_check_cost_vacuum(metrics: Dict) -> str | None:
     # >50% turnover + sharpe>5 means the alpha trades aggressively yet still
     # claims abnormal returns. BRAIN cost-models, but the alpha may exploit
     # specific cost-model gaps (e.g., unrealistic instant fills).
-    if turnover > 0.50 and sharpe > 5:
+    # V-26.68: thresholds sourced from settings.
+    if (turnover > _v16_settings.V16_COST_VACUUM_TURNOVER
+            and sharpe > _v16_settings.V16_COST_VACUUM_SHARPE):
         return f"turnover={turnover:.2f} + sharpe={sharpe:.2f} — cost-model insensitivity risk"
     return None
 
@@ -497,13 +502,14 @@ async def node_simulate(
                 results[li] = bucket_results[j] if j < len(bucket_results) else {"success": False, "error": "Missing"}
     else:
         try:
+            # V-26.65 (2026-05-13): sim defaults pulled from settings.
             results = await brain.simulate_batch(
                 expressions=expressions,
                 region=state.region,
                 universe=state.universe,
-                delay=1,
-                decay=4,
-                neutralization="SUBINDUSTRY"
+                delay=_v16_settings.SIM_DEFAULT_DELAY,
+                decay=_v16_settings.SIM_DEFAULT_DECAY,
+                neutralization=_v16_settings.SIM_DEFAULT_NEUTRALIZATION,
             )
         except Exception as e:
             logger.error(f"[{node_name}] Batch Simulate Loop Error: {e}")
@@ -726,9 +732,10 @@ async def node_evaluate(
         brain_eval = evaluate_with_brain_checks(sim_result)
         brain_can_submit = brain_eval.get('can_submit', False)
         brain_failed_checks = brain_eval.get('failed_checks', [])
-        pyramid_info = brain_eval.get('pyramid_info', {})
-        pyramid_multiplier = pyramid_info.get('multiplier', 1.0)
-        
+        # V-26.77 (2026-05-13): removed dead `pyramid_multiplier` extraction —
+        # the variable was assigned and never read. Pyramid bonus is now
+        # handled inside calculate_alpha_score via brain_eval directly.
+
         # Stage 1: Preliminary score WITHOUT correlation
         preliminary_score = calculate_alpha_score(
             sim_result=sim_result,

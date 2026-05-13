@@ -18,6 +18,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from loguru import logger
 
 from backend.models import KnowledgeEntry, DatasetMetadata
+from backend.config import settings as _settings
 # V-26.34 (2026-05-13): module-level binding for the regex-driven operator
 # extractor. extract_operator_chain itself relies on Python's internal
 # re-pattern cache so we don't need to pre-compile here — hoisting the
@@ -457,41 +458,46 @@ class RAGService:
                 continue
             
             score = 0.0
-            
+
+            # V-26.36 (2026-05-13): all scoring weights pulled from settings
+            # so a future ratio tweak is a config diff, not a code edit.
+
             # 1. Dataset match (highest priority)
             entry_dataset = metadata.get('dataset', metadata.get('dataset_id', ''))
             if dataset_id and entry_dataset:
                 if entry_dataset.lower() == dataset_id.lower():
-                    score += 100.0
-            
+                    score += _settings.RAG_SCORE_DATASET_MATCH
+
             # 2. Category match
             entry_categories = metadata.get('dataset_categories', [])
             entry_category = metadata.get('dataset_category', '')
-            
+
             if category:
                 if category in entry_categories:
-                    score += 50.0
+                    score += _settings.RAG_SCORE_CATEGORY_EXACT
                 elif entry_category == category:
-                    score += 50.0
+                    score += _settings.RAG_SCORE_CATEGORY_EXACT
                 elif category in str(entry_category).lower():
-                    score += 30.0
-            
+                    score += _settings.RAG_SCORE_CATEGORY_PARTIAL
+
             # 3. Region match
             entry_regions = metadata.get('regions', [])
             if region:
                 if region in entry_regions:
-                    score += 20.0
+                    score += _settings.RAG_SCORE_REGION_MATCH
                 elif not entry_regions:  # Generic pattern
-                    score += 5.0
-            
+                    score += _settings.RAG_SCORE_REGION_GENERIC
+
             # 4. Base score from metadata
             base_score = metadata.get('score', 0.5)
             expected_sharpe = metadata.get('expected_sharpe', 1.0)
-            score += base_score * 10.0
-            score += min(expected_sharpe, 2.0) * 5.0
-            
+            score += base_score * _settings.RAG_SCORE_BASE_MULTIPLIER
+            score += min(expected_sharpe, 2.0) * _settings.RAG_SCORE_SHARPE_MULTIPLIER
+
             # 5. Usage count bonus (popular patterns)
-            score += min(entry.usage_count or 0, 10) * 0.5
+            score += min(
+                entry.usage_count or 0, _settings.RAG_SCORE_USAGE_BONUS_CAP
+            ) * _settings.RAG_SCORE_USAGE_BONUS_PER
 
             # 6. V-26.12 (2026-05-13) — hypothesis-family preference. The
             # write path tags KB rows with hypothesis_ids; surface that
@@ -505,7 +511,7 @@ class RAGService:
                 if not isinstance(hids, list):
                     hids = [hids]
                 if hypothesis_id in hids:
-                    score += 40.0
+                    score += _settings.RAG_SCORE_HYPOTHESIS_FAMILY_PATTERN
 
             scored_patterns.append({
                 'entry': entry,
@@ -613,7 +619,7 @@ class RAGService:
                 if not isinstance(hids, list):
                     hids = [hids]
                 if hypothesis_id in hids:
-                    score += 25.0
+                    score += _settings.RAG_SCORE_HYPOTHESIS_FAMILY_PITFALL
 
             scored_pitfalls.append({
                 'entry': entry,

@@ -20,6 +20,7 @@ from backend.agents.graph.state import MiningState
 from backend.agents.graph.nodes.base import record_trace, _debug_log
 from backend.agents.services import LLMService
 from backend.agents.prompts import SELF_CORRECT_SYSTEM, SELF_CORRECT_USER, build_self_correct_prompt
+from backend.config import settings as _settings
 
 from validator import ExpressionValidator
 from backend.alpha_semantic_validator import (
@@ -56,8 +57,11 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
     
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
     
-    # Reset deduplicator for this batch
-    batch_dedup = ExpressionDeduplicator(similarity_threshold=0.90)
+    # Reset deduplicator for this batch.
+    # V-26.59 (2026-05-13): similarity_threshold sourced from settings.
+    batch_dedup = ExpressionDeduplicator(
+        similarity_threshold=_settings.VALIDATE_DEDUP_SIMILARITY_THRESHOLD
+    )
     
     updated_alphas = []
     valid_count = 0
@@ -386,10 +390,11 @@ async def node_self_correct(
         )
         
         try:
+            # V-26.59 (2026-05-13): temperature sourced from settings.
             response = await llm_service.call(
                 system_prompt=SELF_CORRECT_SYSTEM,
                 user_prompt=prompt,
-                temperature=0.3,
+                temperature=_settings.SELF_CORRECT_TEMPERATURE,
                 json_mode=True
             )
             

@@ -379,7 +379,10 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
 
 # Cap per sweep so we don't blast BRAIN with a thousand requests if the
 # backlog is huge — the beat re-runs and chews through the queue.
-IQC_AUDIT_BACKFILL_LIMIT = 50
+# V-26.83 (2026-05-13): module-level constant kept as alias for legacy callers
+# (tests / scripts that import the name). Live value resolves from settings.
+from backend.config import settings as _iqc_settings
+IQC_AUDIT_BACKFILL_LIMIT = _iqc_settings.IQC_AUDIT_BACKFILL_LIMIT
 
 
 @celery_app.task(name="backend.tasks.iqc_audit_backfill_sweep")
@@ -438,14 +441,17 @@ async def _iqc_audit_backfill_sweep_async() -> Dict:
                 LIMIT :lim
                 """
             ),
-            {"lim": IQC_AUDIT_BACKFILL_LIMIT},
+            # V-26.83: cap sourced from settings so beat-level tuning doesn't
+            # need a code edit. Aliased module constant keeps imports stable.
+            {"lim": _iqc_settings.IQC_AUDIT_BACKFILL_LIMIT},
         )
         pks = [r[0] for r in rows.all()]
 
+    countdown_sec = _iqc_settings.IQC_AUDIT_BACKFILL_COUNTDOWN_SEC
     for pk in pks:
         try:
             audit_iqc_marginal_for_alpha.apply_async(
-                args=[pk, competition], countdown=2,
+                args=[pk, competition], countdown=countdown_sec,
             )
             enqueued += 1
         except Exception as e:

@@ -21,9 +21,14 @@ from typing import Dict, List, Optional, Tuple
 
 from loguru import logger
 
+from backend.config import settings as _settings
 
-WARMUP_ROUNDS = 5
-PASS_RATE_DROP_RATIO = 0.5  # below 50% of historical median triggers pruning
+
+# V-26.95 (2026-05-13): WARMUP_ROUNDS / PASS_RATE_DROP_RATIO sourced from
+# settings. Module-level constants kept as aliases for tests / scripts that
+# import them by name.
+WARMUP_ROUNDS = _settings.EARLY_STOP_WARMUP_ROUNDS
+PASS_RATE_DROP_RATIO = _settings.EARLY_STOP_PASS_RATE_DROP_RATIO
 
 
 def should_stop_early(
@@ -115,9 +120,10 @@ def classify_attribution(
     total_fail = max(1, syntax_fail_count + simulate_fail_count + quality_fail_count)
     impl_share = (syntax_fail_count + simulate_fail_count) / total_fail
     qual_share = quality_fail_count / total_fail
-    if impl_share >= 0.75:
+    # V-26.94 (2026-05-13): dominance thresholds sourced from settings.
+    if impl_share >= _settings.ATTRIBUTION_IMPL_DOMINANCE_THRESHOLD:
         return "implementation"
-    if qual_share >= 0.75:
+    if qual_share >= _settings.ATTRIBUTION_QUALITY_DOMINANCE_THRESHOLD:
         return "hypothesis"
     return "both"
 
