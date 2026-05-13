@@ -353,17 +353,30 @@ async def node_self_correct(
     
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
     
+    # V-26.57 (2026-05-13): defense-in-depth retry cap. The LangGraph
+    # router (edges.py:route_after_validate) is the primary guard against
+    # infinite SELF_CORRECT loops, but a router bug / graph rewrite would
+    # silently let this node spin. Self-check here so the node owns its
+    # own bound. Also lets unit tests invoke node_self_correct directly
+    # without wiring the full graph.
+    if state.retry_count >= state.max_retries:
+        logger.warning(
+            f"[{node_name}] V-26.57 retry_count={state.retry_count} >= "
+            f"max_retries={state.max_retries}; refusing to attempt further fixes"
+        )
+        return {"retry_count": state.retry_count}
+
     # Identify invalid alphas
     invalid_indices = [
         i for i, a in enumerate(state.pending_alphas)
         if not a.is_valid
     ]
-    
+
     if not invalid_indices:
         logger.info(f"[{node_name}] No alphas need correction")
         return {"retry_count": state.retry_count + 1}
-    
-    logger.info(f"[{node_name}] Starting batch fix | count={len(invalid_indices)} pass={state.retry_count + 1}")
+
+    logger.info(f"[{node_name}] Starting batch fix | count={len(invalid_indices)} pass={state.retry_count + 1}/{state.max_retries}")
     
     # Build allowed fields list
     allowed_fields = []

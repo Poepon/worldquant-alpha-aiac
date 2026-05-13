@@ -37,17 +37,28 @@ from backend.agents.prompts import (
 # Helpers
 # =============================================================================
 
-def _check_is_os_consistency(metrics: Dict) -> bool:
+def _check_is_os_consistency(metrics: Dict, tier: Optional[int] = None) -> bool:
     """V-12: reject alphas whose IS sharpe far exceeds OS sharpe.
 
     Spike (2026-05-02 → 03) revealed train_sharpe values up to 16.2 paired
     with test_sharpe=0 — pure IS overfit. PASS gate must require OS
     consistency for elevated IS sharpe.
 
-    Tiered rules (calibrated against Spike T1 healthy ratio 76% / T2 35%):
+    V-26.76 (2026-05-13): `tier` parameter raises the bar for T3, which
+    is one step from BRAIN submission. T1 keeps the original ratios
+    (exploration tier — false positives cost less than false negatives);
+    T2 keeps default; T3 adds a strict 0.5 floor when IS sharpe is
+    elevated. Caller threads through `state.factor_tier`.
+
+    Tiered rules:
       - is_sharpe < 2:    no OS check (conservative IS already)
-      - 2 <= is_sharpe < 5: require os_sharpe > 0 AND os/is >= 0.3
-      - is_sharpe >= 5:   require os_sharpe > 0 AND os/is >= 0.4
+      - 2 <= is_sharpe < 5: require os_sharpe > 0 AND os/is >= ratio_mid
+      - is_sharpe >= 5:   require os_sharpe > 0 AND os/is >= ratio_high
+
+    Ratios per tier (mid / high):
+      T1: 0.3 / 0.4  (explore — original spike calibration)
+      T2: 0.3 / 0.4
+      T3: 0.4 / 0.5  (strict — closest to submission gate)
 
     OS sharpe sources, in priority order:
       1. metrics["os_sharpe"]           (BRAIN OS-evaluated sharpe)
@@ -65,7 +76,10 @@ def _check_is_os_consistency(metrics: Dict) -> bool:
     if os_sh is None or os_sh <= 0:
         return False
     ratio = os_sh / is_sh if is_sh > 0 else 0
-    threshold = 0.4 if is_sh >= 5 else 0.3
+    if tier == 3:
+        threshold = 0.5 if is_sh >= 5 else 0.4
+    else:
+        threshold = 0.4 if is_sh >= 5 else 0.3
     return ratio >= threshold
 
 
@@ -1008,7 +1022,8 @@ async def node_evaluate(
         # sharpe=2 we need a positive os_sharpe with retention >= 0.3 (or 0.4
         # if sharpe>5). Lower-IS alphas pass without OS check (their own bar
         # is conservative enough).
-        is_overfit_safe = _check_is_os_consistency(metrics)
+        # V-26.76: pass tier so T3 hits the strict 0.4/0.5 floor.
+        is_overfit_safe = _check_is_os_consistency(metrics, tier=tier_cfg["tier"])
 
         hard_gate_pass = (
             sharpe >= sharpe_min
@@ -1441,7 +1456,7 @@ async def node_evaluate(
             # via flip-retry and was wrongly tagged PASS. Apply the same OS-
             # consistency gate here so flip-retry can't smuggle IS-overfit
             # PASSes through.
-            is_overfit_safe = _check_is_os_consistency(flip_metrics)
+            is_overfit_safe = _check_is_os_consistency(flip_metrics, tier=tier_cfg["tier"])
 
             if pass_sharpe and pass_fitness and pass_turnover and sub_universe_ok and is_overfit_safe:
                 # V-16 (2026-05-03): apply same suspicion-mode checks on the

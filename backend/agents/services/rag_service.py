@@ -1192,10 +1192,30 @@ class RAGService:
                 existing.meta_data = existing.meta_data or {}
                 existing.meta_data['success_count'] = existing.meta_data.get('success_count', 0) + 1
                 existing.meta_data['last_success'] = datetime.now().isoformat()
-                # Update running average metrics
+                # V-26.9 (2026-05-13): running-average ALL the metric fields,
+                # not just sharpe. Pre-fix this branch only rolled avg_sharpe;
+                # avg_fitness / avg_turnover / expected_sharpe stayed pinned
+                # at whatever the FIRST hit recorded, so the RAG scorer (which
+                # weighs expected_sharpe at line ~490) ranked stale data.
                 n = existing.meta_data.get('success_count', 1)
-                old_sharpe = existing.meta_data.get('avg_sharpe', 0)
-                existing.meta_data['avg_sharpe'] = (old_sharpe * (n-1) + metrics.get('sharpe', 0)) / n
+                if n < 1:
+                    n = 1
+                for key, raw in (
+                    ("avg_sharpe", metrics.get("sharpe", 0) or 0),
+                    ("avg_fitness", metrics.get("fitness", 0) or 0),
+                    ("avg_turnover", metrics.get("turnover", 0) or 0),
+                    # expected_sharpe is the "pattern's typical sharpe" surfaced
+                    # to the LLM — also a running average of observed sharpes
+                    # so it stays representative.
+                    ("expected_sharpe", metrics.get("sharpe", 0) or 0),
+                ):
+                    try:
+                        old = float(existing.meta_data.get(key, 0) or 0)
+                        existing.meta_data[key] = (old * (n - 1) + float(raw)) / n
+                    except (TypeError, ValueError):
+                        # If old value is non-numeric (legacy bad row), reset
+                        # to the latest observation.
+                        existing.meta_data[key] = float(raw)
                 # Plan v5+ §B8: append every hypothesis that produced this pattern
                 if hypothesis_id is not None:
                     hids = list(existing.meta_data.get('hypothesis_ids') or [])

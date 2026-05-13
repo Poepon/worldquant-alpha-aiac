@@ -417,6 +417,32 @@ async def _incremental_save_alphas(
             hypothesis_id=hypothesis_id,
         ))
         if db_id is not None and alpha.alpha_id:
+            # V-26.90 (2026-05-13): redis-based rate limit so a burst of
+            # 20+ PASS alphas in one cascade phase doesn't dump 20
+            # refresh_can_submit_for_alpha tasks onto celery within the
+            # same second. Each landed alpha tries to claim a 60s slot;
+            # if the slot is held, enqueue is skipped (the previous slot
+            # holder's refresh will pick up this alpha when it sweeps).
+            try:
+                from backend.tasks.redis_pool import get_redis_client
+                cli = get_redis_client()
+                rate_key = "can_submit:enqueue_rate"
+                # Allow up to 6 enqueues per 60s window across all workers.
+                # Sliding count via INCR + EXPIRE; once over 6 the new
+                # alpha falls back to the periodic V-22.12.1 sweep.
+                current = cli.incr(rate_key)
+                if current == 1:
+                    cli.expire(rate_key, 60)
+                if current > 6:
+                    logger.info(
+                        f"[_incremental_save_alphas] V-26.90 can_submit refresh "
+                        f"rate-limited (window count={current}); skipping enqueue "
+                        f"for alpha_id={alpha.alpha_id} — sweep will catch up"
+                    )
+                    continue
+            except Exception as _e:
+                # Fail-open: rate limit unavailable → enqueue as before.
+                logger.debug(f"[_incremental_save_alphas] V-26.90 rate-limit check failed (proceeding): {_e}")
             from backend.tasks.refresh_tasks import enqueue_can_submit_refresh
             enqueue_can_submit_refresh(db_id, alpha.alpha_id, countdown=30)
     return out
@@ -521,6 +547,22 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                     if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
                         continue
                     if not alpha.expression:
+                        continue
+                    # V-26.93 (2026-05-13): skip KB write when no hypothesis
+                    # link is available AND Phase 2 (hypothesis-keyed KB) is
+                    # the active level. Without this guard the KB ends up
+                    # mixing untyped (legacy) rows with hypothesis-tagged
+                    # rows, weakening the V-26.12 family-boost retrieve
+                    # signal. We still allow writes when the active level
+                    # is 0/1 because those tasks legitimately have no
+                    # hypothesis_id and the KB is the only learning signal.
+                    active_level = configurable.get("hypothesis_centric_level") or 0
+                    if active_level >= 2 and current_hypothesis_id is None:
+                        logger.warning(
+                            f"[{node_name}] V-26.93 skip SUCCESS_PATTERN write: "
+                            f"level={active_level} but hypothesis_id=None "
+                            f"for alpha_id={alpha.alpha_id}"
+                        )
                         continue
                     metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
                     try:

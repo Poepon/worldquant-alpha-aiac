@@ -63,7 +63,16 @@ class BrainAdapter:
     # POST /simulations (list payload) so subsequent simulate_batch calls go
     # straight to the single-sim fallback. BRAIN exposes multi-simulation only
     # to Consultant+ accounts; lower tiers still have access to single-sim.
+    #
+    # V-26.25 (2026-05-13): the latch is now stamp+TTL'd. Pre-fix flipping
+    # this to True needed a worker restart to undo — bad if the user
+    # upgraded their BRAIN account during a long-running celery process.
+    # Now `_no_multisim_at` records when the latch flipped and
+    # `simulate_batch` periodically re-probes by attempting multi-sim
+    # again after `_NO_MULTISIM_REPROBE_SEC` elapsed.
     _no_multisim: bool = False
+    _no_multisim_at: Optional[float] = None
+    _NO_MULTISIM_REPROBE_SEC: float = 24 * 3600.0  # 24h
     _SINGLE_SIM_FALLBACK_CONCURRENCY: int = 3
 
     # BRAIN server-side hard limit: <= 3 sims in-flight per account, *across all
@@ -544,7 +553,17 @@ class BrainAdapter:
         # via Redis). Held until terminal status to mirror BRAIN's accounting.
         slot_held = await BrainAdapter._acquire_sim_slot()
         if not slot_held:
-            return {"success": False, "error": "BRAIN sim slot acquire timeout"}
+            # V-26.73 (2026-05-13): mark slot timeouts as retryable so the
+            # caller can re-queue instead of writing the alpha off as
+            # permanently failed. 30s default backoff matches the typical
+            # BRAIN sim duration so the slot has a realistic chance of being
+            # free on retry.
+            return {
+                "success": False,
+                "error": "BRAIN sim slot acquire timeout",
+                "retryable": True,
+                "retry_after_sec": 30,
+            }
 
         try:
             try:
@@ -607,11 +626,24 @@ class BrainAdapter:
         Falls back to bounded-concurrency single simulations when the account
         lacks Consultant-level multi-simulation permission (BRAIN returns 403).
         """
-        # If we've already learned this account can't do multi-sim, skip the probe.
+        # If we've already learned this account can't do multi-sim, skip the
+        # probe — but periodically re-attempt in case the account was upgraded.
         if BrainAdapter._no_multisim:
-            return await self._simulate_via_single(
-                expressions, region, universe, delay, decay,
-                neutralization, truncation, test_period,
+            since_latch = (
+                time.time() - BrainAdapter._no_multisim_at
+                if BrainAdapter._no_multisim_at is not None
+                else BrainAdapter._NO_MULTISIM_REPROBE_SEC + 1
+            )
+            if since_latch < BrainAdapter._NO_MULTISIM_REPROBE_SEC:
+                return await self._simulate_via_single(
+                    expressions, region, universe, delay, decay,
+                    neutralization, truncation, test_period,
+                )
+            # V-26.25: re-probe window elapsed; fall through to attempt
+            # multi-sim once more. If still 403 the latch is re-stamped below.
+            logger.info(
+                f"[BrainAdapter] V-26.25 re-probing multi-sim "
+                f"(latch age={since_latch/3600:.1f}h > {BrainAdapter._NO_MULTISIM_REPROBE_SEC/3600:.0f}h)"
             )
 
         # Construct payload list
@@ -636,9 +668,12 @@ class BrainAdapter:
             # gate so future calls skip the probe, and fall back to single-sim.
             if response.status_code == 403:
                 BrainAdapter._no_multisim = True
+                BrainAdapter._no_multisim_at = time.time()
                 logger.warning(
                     f"Multi-simulation denied (403); switching to single-sim fallback "
                     f"(concurrency={self._SINGLE_SIM_FALLBACK_CONCURRENCY}). "
+                    f"V-26.25 will re-probe in "
+                    f"{self._NO_MULTISIM_REPROBE_SEC/3600:.0f}h. "
                     f"Body: {response.text[:200]}"
                 )
                 return await self._simulate_via_single(
