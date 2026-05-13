@@ -15,8 +15,15 @@ Contains:
 
 from typing import Dict, List, Optional
 
+# V-26.61 (2026-05-13): SELF_CORRECT_SYSTEM is now sourced from
+# prompts.yaml via the PromptLoader, matching the rest of the prompt
+# registry. The hardcoded fallback below keeps the import surface stable
+# for callers (validation node, tests) and guards against YAML load
+# failure — if the loader can't read self_correction.system the live
+# value gracefully falls back to the in-code text.
+from backend.agents.prompts.loader import get_prompt_loader as _get_prompt_loader
 
-SELF_CORRECT_SYSTEM = """You are a code debugger helping to fix alpha expressions.
+_FALLBACK_SELF_CORRECT_SYSTEM = """You are a code debugger helping to fix alpha expressions.
 
 Your role is to:
 1. Diagnose why an expression failed
@@ -51,6 +58,14 @@ Be precise and targeted in your corrections.
 
 When fixing a "Type mismatch: VECTOR field" error, the answer is almost
 always to add vec_avg() around the field, NOT to invent a vec_ts_* operator."""
+
+# Live value: prefer prompts.yaml (single source of truth) but fall back
+# to the Python constant if the YAML didn't load. The fallback is the
+# same text the YAML was seeded with, so behaviour is identical either way.
+SELF_CORRECT_SYSTEM = (
+    _get_prompt_loader().get_system_prompt("self_correction")
+    or _FALLBACK_SELF_CORRECT_SYSTEM
+)
 
 
 OPTIMIZATION_SYSTEM = """You are an alpha researcher helping to improve expression performance.
