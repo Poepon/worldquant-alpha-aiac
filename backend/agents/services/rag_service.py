@@ -413,13 +413,25 @@ class RAGService:
         4. Generic patterns (sorted by usage/score)
         """
         patterns = []
-        
-        # Query all active success patterns
-        query = select(KnowledgeEntry).where(
-            KnowledgeEntry.entry_type == 'SUCCESS_PATTERN',
-            KnowledgeEntry.is_active == True
+
+        # V-26.8 (2026-05-13): SUCCESS_PATTERN pool currently ~180 rows
+        # (audit 2026-05-13). Cap at 800 so this query stays bounded as
+        # the KB grows, and ORDER BY id DESC so newly-recorded patterns
+        # are always in the candidate window for scoring. The Python-side
+        # scorer below ranks across the bounded set; older rows fall out
+        # of the window only when the KB exceeds 800 active SUCCESS rows,
+        # at which point the per-instance retrieve cost was already
+        # dominating mining time.
+        query = (
+            select(KnowledgeEntry)
+            .where(
+                KnowledgeEntry.entry_type == 'SUCCESS_PATTERN',
+                KnowledgeEntry.is_active == True
+            )
+            .order_by(KnowledgeEntry.id.desc())
+            .limit(800)
         )
-        
+
         result = await self.db.execute(query)
         entries = list(result.scalars().all())
 
@@ -535,11 +547,23 @@ class RAGService:
         2. Category-relevant pitfalls
         3. Recent pitfalls
         """
-        query = select(KnowledgeEntry).where(
-            KnowledgeEntry.entry_type == 'FAILURE_PITFALL',
-            KnowledgeEntry.is_active == True
+        # V-26.8 (2026-05-13): FAILURE_PITFALL pool currently ~1660 rows
+        # and growing as feedback accumulates. Pulling the whole table
+        # every retrieve put steady CPU/memory pressure on each mining
+        # round (Python-side scoring across ~1660 dicts × every alpha).
+        # Cap at 800 ORDER BY id DESC so we always see the freshest
+        # mistakes (which are also the ones most likely repeated by the
+        # next LLM batch) while keeping the per-call cost bounded.
+        query = (
+            select(KnowledgeEntry)
+            .where(
+                KnowledgeEntry.entry_type == 'FAILURE_PITFALL',
+                KnowledgeEntry.is_active == True
+            )
+            .order_by(KnowledgeEntry.id.desc())
+            .limit(800)
         )
-        
+
         result = await self.db.execute(query)
         entries = list(result.scalars().all())
 
