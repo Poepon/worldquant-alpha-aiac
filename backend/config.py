@@ -259,12 +259,18 @@ class Settings(BaseSettings):
     # When True, node_simulate runs each candidate through the trained
     # sklearn LogisticRegression and skips alphas with P(PASS) < threshold
     # BEFORE BRAIN simulate. Saves BRAIN concurrent-slot time on
-    # likely-fails. Default OFF (opt-in via .env after model is trained
-    # and reviewed). Threshold 0.05 → keep 99% PASS, skip 2% FAIL (very
-    # conservative). 0.10 → keep 98% PASS, skip 7% FAIL (sweet spot per
-    # AUC=0.813 training run on 2737 historical alphas).
-    ENABLE_PRE_SIMULATE_FILTER: bool = False
-    PRE_SIMULATE_FILTER_THRESHOLD: float = 0.05
+    # likely-fails. Model: AUC=0.813 on 2737 historical alphas (451 PASS).
+    #
+    # V-24.B (2026-05-13): default flipped ON with conservative threshold
+    # 0.10. Threshold table from training run:
+    #   0.05  → 98.9% PASS recall, skips  2.2% FAIL (negligible savings)
+    #   0.10  → 98.0% PASS recall, skips  7.1% FAIL  ← current default
+    #   0.15  → 96.5% PASS recall, skips 17.0% FAIL  ← recommended
+    # Picking 0.10 trades 2pp PASS recall for 7% BRAIN simulate savings
+    # — a safer first rollout than 0.15. Run a week of metrics
+    # (scripts/pre_simulate_filter_audit.py) before bumping to 0.15.
+    ENABLE_PRE_SIMULATE_FILTER: bool = True
+    PRE_SIMULATE_FILTER_THRESHOLD: float = 0.10
     # PR4 — P0 实验结论：BRAIN GET /alphas/{id} 返回冻结的 sim 时 snapshot，不是
     # rolling 重算。所以 node_tier_seed_load 调 BRAIN refresh metrics 是 no-op，
     # 浪费配额。默认关闭；只有当 BRAIN 行为改变（比如未来开放 rolling endpoint）
