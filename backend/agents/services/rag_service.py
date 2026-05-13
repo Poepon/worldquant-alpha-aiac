@@ -9,7 +9,7 @@ Features:
 5. Pattern usage tracking and scoring
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from datetime import datetime
 import re
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -183,6 +183,78 @@ class RAGService:
     
     def __init__(self, db: AsyncSession):
         self.db = db
+        # V-24.C (2026-05-13): cache of active BRAIN op names for the
+        # retrieve-side hallucination filter. Lazy-loaded on first
+        # _filter_hallucinated call within this RAGService instance;
+        # instances are usually per-request so the cache effectively
+        # refreshes each mining round. V-22.8 daily beat still handles
+        # long-term cleanup of bad rows.
+        self._valid_ops_cache: Optional[Set[str]] = None
+        self._retrieve_hallucinated_skipped: int = 0
+
+    async def _get_valid_ops(self) -> Set[str]:
+        """Load active operator whitelist from DB (cached per instance)."""
+        if self._valid_ops_cache is not None:
+            return self._valid_ops_cache
+        from backend.models.metadata import Operator
+        try:
+            rows = (
+                await self.db.execute(
+                    select(Operator.name).where(Operator.is_active == True)  # noqa: E712
+                )
+            ).all()
+            self._valid_ops_cache = {r[0] for r in rows}
+        except Exception as e:
+            logger.warning(f"[RAGService] V-24.C valid_ops load failed (no filter): {e}")
+            self._valid_ops_cache = set()
+        return self._valid_ops_cache
+
+    # Skeleton placeholders that extract_operator_chain regex picks up but
+    # are NOT operators — exclude from whitelist comparison. Same set as
+    # tasks/llm_op_monitor.py V-22.8 sweep.
+    _SKELETON_PLACEHOLDERS: Set[str] = {"field", "num"}
+
+    async def _filter_hallucinated(self, entries: List) -> List:
+        """V-24.C — proactive op-whitelist filter on retrieve side.
+
+        For each KB entry, extract ops from pattern + meta_data.template;
+        if any op isn't in the active BRAIN registry (excluding skeleton
+        placeholders), drop the entry from this round's retrieve result.
+        V-22.8 daily sweep still soft-deactivates these rows; this filter
+        just stops them from reaching the LLM between sweep runs and
+        catches entries written via paths that bypass V-22.3 canonicalize.
+        """
+        if not entries:
+            return entries
+        valid_ops = await self._get_valid_ops()
+        if not valid_ops:
+            return entries  # whitelist unavailable → fail-open
+        from backend.knowledge_extraction import extract_operator_chain
+
+        def _bad(text: str) -> bool:
+            if not text:
+                return False
+            ops = extract_operator_chain(text) or []
+            for o in ops:
+                ol = o.lower()
+                if ol in self._SKELETON_PLACEHOLDERS:
+                    continue
+                if ol not in valid_ops:
+                    return True
+            return False
+
+        kept = []
+        for entry in entries:
+            md = entry.meta_data or {}
+            if _bad(entry.pattern) or _bad(md.get("template") or ""):
+                self._retrieve_hallucinated_skipped += 1
+                logger.debug(
+                    f"[RAGService] V-24.C skip hallucinated entry id={entry.id} "
+                    f"pattern={(entry.pattern or '')[:60]!r}"
+                )
+                continue
+            kept.append(entry)
+        return kept
 
     async def _track_retrieval_hit(self, entry_ids: List[int]) -> None:
         """V-24.D (2026-05-13) — pattern hit tracking.
@@ -301,13 +373,16 @@ class RAGService:
         )
         
         result = await self.db.execute(query)
-        entries = result.scalars().all()
-        
+        entries = list(result.scalars().all())
+
+        # V-24.C: pre-score op-whitelist filter
+        entries = await self._filter_hallucinated(entries)
+
         # Score and sort patterns
         scored_patterns = []
         for entry in entries:
             metadata = entry.meta_data or {}
-            
+
             # Skip region config entries (they're metadata, not patterns)
             if metadata.get('pattern_type') == 'region_config':
                 continue
@@ -403,8 +478,11 @@ class RAGService:
         )
         
         result = await self.db.execute(query)
-        entries = result.scalars().all()
-        
+        entries = list(result.scalars().all())
+
+        # V-24.C: pre-score op-whitelist filter
+        entries = await self._filter_hallucinated(entries)
+
         # Score pitfalls
         scored_pitfalls = []
         severity_weights = {'high': 30, 'medium': 20, 'low': 10}
@@ -573,6 +651,12 @@ class RAGService:
             stmt = stmt.where(KnowledgeEntry.factor_tier == factor_tier)
         result = await self.db.execute(stmt)
         rows = list(result.scalars().all())
+        if not rows:
+            return []
+
+        # V-24.C: pre-everything op-whitelist filter so hallucinated rows
+        # don't waste downstream scoring / diversity-selection budget.
+        rows = await self._filter_hallucinated(rows)
         if not rows:
             return []
 
