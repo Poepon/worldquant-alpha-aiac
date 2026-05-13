@@ -306,14 +306,23 @@ class RAGService:
         L1 anti-collapse (line ~622 in get_recent_pass_examples) already
         penalises usage_count >= 5, so adding retrieve increments here
         won't recreate the pre-V-22 collapse loop.
+
+        V-26.11 (2026-05-13): writes go through an isolated AsyncSession.
+        Pre-fix this used self.db and committed mid-retrieve, which dragged
+        the caller's in-flight transaction across the line — if the alpha
+        INSERT that triggered this retrieve later rolled back, the hit-
+        track was already on disk. Isolated session keeps the bookkeeping
+        write decoupled from the caller's transaction lifetime.
         """
         if not entry_ids:
             return
+        from backend.database import AsyncSessionLocal
         from backend.repositories.knowledge_repository import KnowledgeRepository
         try:
-            repo = KnowledgeRepository(self.db)
-            await repo.bulk_increment_usage(entry_ids)
-            await self.db.commit()
+            async with AsyncSessionLocal() as kb_db:
+                repo = KnowledgeRepository(kb_db)
+                await repo.bulk_increment_usage(entry_ids)
+                await kb_db.commit()
         except Exception as e:
             logger.warning(f"[RAGService] V-24.D hit-track failed (non-fatal): {e}")
 
