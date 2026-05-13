@@ -391,6 +391,25 @@ class BrainAdapter:
             logger.warning(f"Failed to load session from Redis: {e}")
             return False
 
+    async def _invalidate_session_cache(self) -> None:
+        """V-26.24 (2026-05-13): explicitly drop the Redis session cache.
+
+        Pre-fix the auth-failure handler in `_request` re-authenticated
+        and overwrote the Redis cache on success — but if re-auth itself
+        failed (BRAIN auth-endpoint down, credential rotation, etc.) the
+        stale cookies stayed in Redis and the *next* `ensure_session()`
+        cheerfully loaded them again. By deleting the key on first 401
+        we guarantee no other worker (or this worker's next call)
+        recovers the dead session by accident.
+        """
+        try:
+            r = await self._get_redis()
+            await r.delete(self.REDIS_SESSION_KEY)
+            await r.aclose()
+            logger.info("[BrainAdapter] V-26.24 Redis session cache invalidated")
+        except Exception as e:
+            logger.warning(f"[BrainAdapter] V-26.24 cache invalidate failed: {e}")
+
     async def _save_session_to_redis(self, expiry_seconds: int):
         """Save current cookies to Redis with TTL."""
         try:
@@ -1087,6 +1106,10 @@ class BrainAdapter:
             except Exception:
                 fresh = False
             if not fresh:
+                # V-26.24: invalidate Redis cache BEFORE re-auth so that if
+                # `authenticate()` itself fails, the next ensure_session call
+                # can't resurrect the dead session from cache.
+                await self._invalidate_session_cache()
                 try:
                     await self.authenticate()
                 except Exception as e:

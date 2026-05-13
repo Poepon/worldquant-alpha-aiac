@@ -192,8 +192,22 @@ async def _incremental_save_alphas(
     out: List[AlphaResult] = []
     inserted_alpha_ids: List[str] = []  # alpha_ids that successfully landed
     on_conflict_skipped: List[str] = []  # alpha_ids skipped by ON CONFLICT (race / cross-task)
+    skipped_no_alpha_id: List[str] = []  # V-26.92 observability
     for alpha in pending_alphas:
         if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+            continue
+        # V-26.92 (2026-05-13): PASS-status alpha with no alpha_id is a
+        # broken upstream contract — INSERT would store a NULL alpha_id
+        # row (Postgres unique constraint tolerates multiple NULLs) which
+        # we'd then have to clean up manually. Skip with a logger.warning
+        # so the situation is observable but the batch can still land.
+        if not alpha.alpha_id:
+            skipped_no_alpha_id.append(getattr(alpha, "expression", "?")[:60])
+            logger.warning(
+                f"[_incremental_save_alphas] V-26.92 skipping PASS-status "
+                f"alpha with no alpha_id (likely sim returned None): "
+                f"expression={getattr(alpha, 'expression', '?')[:120]!r}"
+            )
             continue
         # V-26.87: cross-task dedup handled by ON CONFLICT below — no more
         # pre-batch SELECT round-trip.
@@ -204,6 +218,16 @@ async def _incremental_save_alphas(
         # in metrics; parse leniently and fall back to a fresh wall-clock
         # for THIS alpha rather than the batch start.
         snapshot_at = _resolve_metrics_snapshot_at(metrics_dict, batch_fallback_at)
+
+        # V-26.89 (2026-05-13): compute fields_used pre-INSERT so it lands
+        # in the same outer commit as the alpha row. Pre-fix wrote it in
+        # a SECOND commit after the alpha INSERT had already committed —
+        # a worker crash between the two left rows with fields_used=NULL
+        # and no scheduled backfill. Now both arrive atomically.
+        try:
+            fields_used_for_insert = _extract_used_fields(alpha.expression) or None
+        except Exception:
+            fields_used_for_insert = None
 
         values_dict = dict(
             task_id=task_id,
@@ -229,6 +253,11 @@ async def _incremental_save_alphas(
             factor_tier=factor_tier,
             parent_alpha_id=alpha.parent_alpha_id,
             metrics_snapshot_at=snapshot_at,
+            # V-26.89: fields_used now part of the same INSERT, atomic
+            # with the rest of the row. Post-commit UPDATE retained below
+            # as a defensive backfill for rows that miss this path (e.g.
+            # legacy code path or partial reconstruction during resume).
+            fields_used=fields_used_for_insert,
             # Phase 2 B4: typed Hypothesis link
             hypothesis_id=hypothesis_id,
         )

@@ -861,10 +861,34 @@ async def node_code_gen(
     
     if response.success and response.parsed and isinstance(response.parsed, dict):
         parsed = response.parsed
-        raw_alphas = parsed.get("alphas", []) or []
+        # V-26.48 (2026-05-13): validate `alphas` is actually a list of dicts
+        # before iterating. LLM output is best-effort JSON; a malformed
+        # response can drop `alphas` as a string, dict, or null which would
+        # throw `AttributeError: 'str' object has no attribute 'get'` deep
+        # inside the loop. Drop malformed entries; skip the whole list if
+        # the wrapper itself isn't iterable.
+        raw_alphas_raw = parsed.get("alphas", [])
+        if not isinstance(raw_alphas_raw, list):
+            logger.warning(
+                f"[{node_name}] V-26.48 LLM response 'alphas' is "
+                f"{type(raw_alphas_raw).__name__}, expected list — discarding"
+            )
+            raw_alphas = []
+        else:
+            raw_alphas = [a for a in raw_alphas_raw if isinstance(a, dict)]
+            if len(raw_alphas) != len(raw_alphas_raw):
+                logger.warning(
+                    f"[{node_name}] V-26.48 dropped "
+                    f"{len(raw_alphas_raw) - len(raw_alphas)} non-dict entries "
+                    f"from LLM 'alphas' list"
+                )
         implementation_notes = parsed.get("implementation_notes", "")
+        if not isinstance(implementation_notes, str):
+            implementation_notes = ""
         alternatives_considered = parsed.get("alternatives_considered", [])
-        
+        if not isinstance(alternatives_considered, list):
+            alternatives_considered = []
+
         for alpha_data in raw_alphas:
             # Handle both old format (hypothesis) and new format (hypothesis_tested)
             hypothesis_text = alpha_data.get("hypothesis_tested", alpha_data.get("hypothesis", ""))

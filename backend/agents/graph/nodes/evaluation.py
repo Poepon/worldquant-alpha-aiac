@@ -619,6 +619,20 @@ async def node_simulate(
                         {"success": False, "error": f"sim_batch_fail_after_retry: {e}"}
                         for _ in bucket_exprs
                     ]
+            # V-26.71 (2026-05-13): alert when BRAIN returns fewer results
+            # than requested. Pre-fix silently filled the missing tail with
+            # `{success: False, error: "Missing"}` so the caller never
+            # noticed the asymmetry. Now we logger.error so the operator
+            # can investigate (truncated BRAIN response, bucket payload
+            # encoding drift, etc.) — the silent fill is preserved so the
+            # workflow still makes forward progress.
+            if len(bucket_results) < len(local_indices):
+                logger.error(
+                    f"[{node_name}] V-26.71 BRAIN returned "
+                    f"{len(bucket_results)} results for {len(local_indices)} "
+                    f"expressions (bucket={settings_key}); padding tail with "
+                    f"Missing failures"
+                )
             for j, li in enumerate(local_indices):
                 results[li] = bucket_results[j] if j < len(bucket_results) else {"success": False, "error": "Missing"}
     else:
@@ -792,6 +806,13 @@ async def node_evaluate(
     prov_cfg = tier_cfg.get("provisional") or {}
     prov_sharpe_min = prov_cfg.get("sharpe_min", sharpe_min)
     prov_fitness_min = prov_cfg.get("fitness_min", 0.6)
+    # V-26.80 (2026-05-13): symmetric provisional turnover band. Pre-fix used
+    # the regular `turnover_min` as lower bound and `prov_turnover_max` as
+    # upper bound, mixing two tiers' policies — a near_pass alpha could
+    # have an upper-loose / lower-tight gate that no PASS path explicitly
+    # asks for. Default to the same min unless the tier override supplies
+    # its own.
+    prov_turnover_min = prov_cfg.get("turnover_min", turnover_min)
     prov_turnover_max = prov_cfg.get("turnover_max", 0.85)
 
     score_pass_threshold = getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8)
@@ -1021,7 +1042,8 @@ async def node_evaluate(
         near_pass = (
             sharpe >= prov_sharpe_min
             and fitness >= prov_fitness_min
-            and turnover_min <= turnover <= prov_turnover_max
+            # V-26.80: symmetric provisional band; see prov_turnover_min above.
+            and prov_turnover_min <= turnover <= prov_turnover_max
             and sub_universe_ok
             and concentrated_ok
             and self_corr_acceptable
@@ -1036,10 +1058,15 @@ async def node_evaluate(
             v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
             hard_flags = [f for f in v16_flags if f.get("severity") == "hard"]
             if v16_flags:
-                # Persist annotations on the alpha's metrics (preserved through
-                # _incremental_save_alphas / workflow.run_with_persistence)
-                if isinstance(alpha.metrics, dict):
-                    alpha.metrics["_v16_suspicion_flags"] = v16_flags
+                # V-26.79 (2026-05-13): detach metrics into a fresh dict
+                # before mutating so we don't write through to the metrics
+                # reference that may be shared upstream (LangGraph state,
+                # earlier nodes that populated this object). Pre-fix did
+                # `alpha.metrics["..."] = ...` directly, propagating the
+                # V-16 annotation back into the input state and confusing
+                # replay / debug tooling.
+                alpha.metrics = dict(alpha.metrics) if isinstance(alpha.metrics, dict) else {}
+                alpha.metrics["_v16_suspicion_flags"] = v16_flags
                 logger.warning(
                     f"[{node_name}] V-16 suspicion mode (sharpe={sharpe:.2f}) | "
                     f"flags={[f['check'] for f in v16_flags]}"
