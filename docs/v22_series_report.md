@@ -329,31 +329,127 @@ a695013  V-22.6.1  drop preprocess wrap
 7f57284  fix      SPECIFIC dataset_strategy 500
 f64fdd4  V-22.6.5  composite final-pool quota
 d490be3  V-22.6.6  protect PV anchors
+af1643d  docs     V-22 series report v1
+a5b91f6  V-22.8   LLM hallucination filter
+be8c6ba  V-22.9   watchdog discrete task revival
 ```
 
-11 commits, ~+1600 LOC backend + ~+700 LOC scripts/docs。
+14 commits, ~+1900 LOC backend + ~+1100 LOC scripts/docs。
 
 ---
 
-## 推荐下次 session 起步
+## 报告补遗 — V-22.8 / V-22.9 + Layer 1 假设检验 (2026-05-13 PM)
 
-1. **Consultant tier 通过日起:**
-   - 重跑 task 535 (SPECIFIC=fundamental6 daily_goal=6),观察 fund composite TIER_WRAP first 5
-   - 跑 IQC marginal audit:fund composite saved alpha 的 Δscore 是否正贡献
-   - 验证 `eps`/`ebit`/`enterprise_value` 是否成 promising_fields 可选
+### V-22.8 — LLM 跨 dataset 幻觉防护
+
+**Spike 数据起源:** Task 534/535 SPECIFIC=fundamental6 round 中 LLM `promising_fields` 偶发包含
+不在 available_fields 列表的字段:`opt8_put_call_ratio_30d` (option dataset),
+`anl4_afv4_cfps_mean` (analyst dataset), `fnd6_debt_to_equity_ratio` (fundamental6 也没此精确名)。
+每个幻觉触发 1-2 BRAIN sim slot 浪费(VALIDATE fail + SELF_CORRECT 重写)。
+
+**修复:** `factor_generation.py:select_t1_strategy_via_llm`
+1. **Prompt-level**: T1_STRATEGY_SYSTEM 加 HARD SUBSET CONSTRAINT,显式列出已观察到的幻觉模式作 anti-pattern
+2. **Code-level post-filter**: 拿 LLM 返回的 `promising_fields` 严格交集到 `available_fields` ID 集,case-insensitive
+3. **Backfill 兜底**: 过滤后 < 5 字段时,从 `_fill_default_with_top_fields` 补齐到 12
+
+**单测 4 个:** drop-hallucinations / preserve-clean / backfill-when-aggressive / case-insensitive
+
+**预期收益:** 每轮省 ~5-10% BRAIN sim throughput,长期减少 SELF_CORRECT KB 污染。
+
+---
+
+### V-22.9 — Watchdog 扩展到 discrete task
+
+**Spike 数据起源:** V-22.6 spike 期间 task 528/529/533/534/535 worker 重启/crash 后全部需手动
+reset+restart。V-19 `watchdog_revive_dead_sessions` 只覆盖 `mining_mode=CONTINUOUS_CASCADE`,
+discrete T1 task 完全失保。
+
+**修复:** `session_watchdog.py`
+1. 在原 CONTINUOUS 扫描后追加第二段 DISCRETE 扫描
+2. CONTINUOUS 用 `last_alpha_persisted_at` 作 heartbeat,DISCRETE 用 `latest trace_step.created_at`
+   (V-19 字段不会被 discrete 路径更新)
+3. 提取公共 `_redispatch_task` 函数,两路径共享 commit/rollback/log
+
+**配置:** 沿用 `CASCADE_WATCHDOG_DEAD_MIN=15` + `CASCADE_WATCHDOG_GRACE_MIN=15`
+
+**预期收益:** discrete T1/T2/T3 task worker crash 后 ≤15min 自动 revive,无需用户介入。
+
+---
+
+### #2 rank_derivative_score 黑名单(免做)
+
+**Layer 1 + 实测验证:**
+- 258 历史 rank_derivative alphas 集中在 2026-04-29 ~ 2026-05-07 cohort
+- 2026-05-07 之后 **0 个新 instance**(7+ 天验证窗口)
+- 0 个 T1 PASS rank_derivative(全 PROV/PASS_PROVISIONAL),T2 propagation 路径已封死
+- V-22.4 dedup blacklist + `_CW_PRONE_PATTERNS` + T1_STRATEGY_SYSTEM HARD AVOID 规则联合已生效
+
+**结论:** 无需新工程,过滤栈已稳定运行。
+
+---
+
+### #4 analyst dataset 深挖 — Layer 1 假设证伪
+
+**Layer 1 数据驱动假设:** submitted 池 22% 是 analyst (sh 1.45 mean, to 0.06 mean),
+mining 池仅 1.6%,看似 "未挖金矿"。
+
+**实测:** Task 536 (SPECIFIC=analyst4 daily_goal=8)
+- 2 rounds × 9-15 candidates = **24 candidates**
+- **0 PASS, 0 can_submit**
+- Best sharpe across 24: **0.96** (远低于 PASS gate 1.25)
+- Mean sharpe ~0.4-0.6,而非 Layer 1 推断的 1.45
+
+**假设证伪原因:**
+- Submitted 池那 2 个 analyst alpha 是 **历史 mining 老结果**(2026 年初),
+  当时 market regime 与字段集都不同
+- 当前 LLM 在 User-tier 选 analyst 字段组合产不出高 sharpe — `anl4_*` 字段大多 VECTOR 类型,
+  需要 `vec_*` 包装,LLM 配对失误率高
+- `anl4_*` 真正高 sharpe 信号在 Consultant-tier 特定字段+特定 vec_ aggregation 上
+
+**结论:** Layer 1 历史数据不一定预测当前可挖性。analyst 深挖**搁置等 Consultant 后再实测**。
+
+---
+
+## V-22 系列推进总览(2 天工作量)
+
+| 版本 | 类型 | LOC | 收益 |
+|---|---|---|---|
+| V-22.5 | safety gate | +90 | 49% 历史 PASS 重新评级 |
+| V-22.6.0 | feature | +650 | 15 composite + classifier 透明 peel |
+| V-22.6.1 | hotfix | +20 | BRAIN 8-op 限规避 |
+| V-22.6.2 | hotfix | +30 | SELF_CORRECT 死循环消除 |
+| V-22.6.3 | feature | +60 | **pk=7810 已提交 +341 Δscore** |
+| V-22.6.4 | prompt | +20 | composite emission +43% |
+| V-22.6.5 | feature | +60 | final-pool quota 33% |
+| V-22.6.6 | bugfix | +90 | PV anchor 防策略误杀 |
+| V-22.7 | bugfix | +50 | BRAIN auth body-marker |
+| V-22.8 | feature | +90 | LLM 幻觉 2 层防御 |
+| V-22.9 | feature | +60 | watchdog 扩 discrete task |
+
+**Total: 11 个独立版本 + 总报告。1 个真实 IQC 提交(pk=7810 xAe6bxrp,Δscore=+341)。**
+
+---
+
+## 推荐下次 session 起步(更新)
+
+1. **Consultant tier 通过日起(高 ROI):**
+   - 重跑 task 535/536 (SPECIFIC=fundamental6 / analyst4),观察 fund/analyst composite 是否解锁
+   - 跑 IQC marginal audit:新落库 alpha 的 Δscore 是否正贡献
+   - 验证 `eps`/`ebit`/`enterprise_value` 是否成 LLM promising_fields 可选
 
 2. **若 V-22.6 fund composite 落库且 +Δscore:**
    - submit 该 alpha 进 IQC
    - 跑 V-22 系列再回归 audit
 
-3. **若仍 0 fund composite:**
-   - 改 composite_fields.yaml 用 fnd6_* prefix 匹配机制(V-22.6.7)
-   - 或扩 DISTILL_CONTEXT 让 LLM 看到所有候选 ingredient 名
-
-4. **Backlog 优化(独立于 tier):**
+3. **Backlog 优化(独立于 tier,中等 ROI):**
    - 修 `_apply_field_filters` 字段池 cap(30 太低,可调 50-80)
    - 8001 phantom socket(重启 OS 释放)
-   - SELF_CORRECT 跨 dataset 幻觉防护
+   - field_interactions V-22.6.3 sibling decay variant
+   - composite_fields.yaml 字段可用性 audit(删 dead-letter composite)
+
+4. **若 fund composite 仍 0:**
+   - 改 composite_fields.yaml 用 fnd6_* prefix 匹配机制(V-22.6.7)
+   - 或扩 DISTILL_CONTEXT 让 LLM 看到所有候选 ingredient 名
 
 ---
 
