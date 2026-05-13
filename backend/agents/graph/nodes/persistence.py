@@ -16,6 +16,34 @@ from backend.agents.graph.nodes.base import record_trace
 from backend.agents.graph.early_stop import should_stop_early, summarise_round
 
 
+# V-26.88 (2026-05-13): module-level singleton AlphaSemanticValidator used
+# only for fields_used extraction (no field/type strictness). The class
+# is heavyweight at construction time — operator registry pulls from the
+# DB-loaded module-level cache, but we still pay attribute-init cost per
+# alpha. Reusing one stateless instance for the "give me used_fields"
+# call drops per-alpha overhead from ~milliseconds to a function call.
+#
+# `_FIELDS_USED_VALIDATOR` is intentionally created with empty fields +
+# no strict checks so it never raises on unknown fields/types — it only
+# walks the AST and returns the field set. Thread-safe because validate()
+# is pure (no instance mutation; it builds a local ValidationResult).
+_FIELDS_USED_VALIDATOR = None  # lazily constructed in _get_fields_used_validator
+
+
+def _get_fields_used_validator():
+    """Return the module-level fields-extraction validator. Lazy init so
+    importing this module doesn't pay validator construction cost when
+    the persistence path isn't used (e.g. in unit tests that mock around it)."""
+    global _FIELDS_USED_VALIDATOR
+    if _FIELDS_USED_VALIDATOR is None:
+        from backend.alpha_semantic_validator import AlphaSemanticValidator
+        _FIELDS_USED_VALIDATOR = AlphaSemanticValidator(
+            fields=[], operators=None,
+            strict_field_check=False, strict_type_check=False,
+        )
+    return _FIELDS_USED_VALIDATOR
+
+
 # =============================================================================
 # V-19.8 RESUME helper — expression-hash dedup for paused-and-resumed sessions
 # =============================================================================
@@ -76,22 +104,18 @@ async def _incremental_save_alphas(
     Returns AlphaResult list with persisted=True + db_id set, so
     workflow.run_with_persistence's batch path skips them.
     """
-    from backend.alpha_semantic_validator import (
-        compute_expression_hash,
-        AlphaSemanticValidator,
-    )
+    from backend.alpha_semantic_validator import compute_expression_hash
     from backend.models import Alpha
 
     # V-17 (2026-05-04): mirrors workflow.run_with_persistence — populate
     # fields_used so cross-dataset analytics work for T2/T3 incremental saves.
+    # V-26.88 (2026-05-13): reuse the module-level validator singleton
+    # instead of constructing a fresh AlphaSemanticValidator per alpha.
     def _extract_used_fields(expr: str) -> list:
         if not expr:
             return []
         try:
-            v = AlphaSemanticValidator(
-                fields=[], operators=None,
-                strict_field_check=False, strict_type_check=False,
-            )
+            v = _get_fields_used_validator()
             return list(v.validate(expr).used_fields)
         except Exception:
             return []
@@ -100,56 +124,31 @@ async def _incremental_save_alphas(
     # for full rationale. One bad row no longer rolls back the whole seed batch.
     from backend.agents.graph.persistence_errors import log_persistence_error
 
-    # V-19.3 (2026-05-06): pre-batch SELECT existing alpha_ids to short-circuit
-    # cross-task duplicates BEFORE the savepoint INSERT. Same rationale as
-    # workflow.run_with_persistence — sign-flip retry can produce expressions
-    # that BRAIN normalizes to an alpha_id another task already owns.
-    from sqlalchemy import select as _sa_select
-    candidate_alpha_ids = [
-        a.alpha_id for a in pending_alphas
-        if a.alpha_id and a.quality_status in ("PASS", "PASS_PROVISIONAL")
-    ]
-    cross_task_dup_ids: set = set()
-    if candidate_alpha_ids:
-        try:
-            r = await db_session.execute(
-                _sa_select(Alpha.alpha_id).where(
-                    Alpha.alpha_id.in_(candidate_alpha_ids)
-                )
-            )
-            cross_task_dup_ids = {row[0] for row in r.fetchall()}
-        except Exception as _e:
-            logger.warning(
-                f"[_incremental_save_alphas] V-19.3 cross-task dedup query failed: {_e}"
-            )
-
-    # V-19.8 (2026-05-10): switch from ORM add()+flush to pg_insert with
-    # ON CONFLICT (alpha_id) DO NOTHING. SAVEPOINT add+flush (ex-V-19.2)
-    # caught IntegrityError per row but still executed an INSERT that PG
-    # rolled back — race window: worker A SELECT pre-checks, worker B
-    # inserts, worker A INSERT triggers IntegrityError. Now PG handles
-    # dedup atomically and returns the new id (or NULL on conflict) via
-    # RETURNING. SAVEPOINT still wraps each row to isolate non-conflict
-    # errors (data type / NOT NULL violations) without aborting the batch.
+    # V-26.87 (2026-05-13): the original V-19.3 pre-check SELECT'd existing
+    # alpha_ids to label cross-task duplicates BEFORE the savepoint INSERT.
+    # That was needed when V-19.2 used ORM add()+flush — IntegrityError raised
+    # late. After V-19.8 switched to pg_insert(...).on_conflict_do_nothing()
+    # the SELECT became redundant: ON CONFLICT handles dedup atomically and
+    # we already log the skipped alpha_ids by inspecting the INSERT result.
+    # Removing the SELECT saves one DB round-trip per batch and closes the
+    # race window the SELECT introduced anyway (worker A SELECTs, worker B
+    # INSERTs, worker A INSERTs -> ON CONFLICT skip — labelling that as a
+    # "cross-task dup" was already misleading).
+    #
+    # We still track cross-task skips for observability: when ON CONFLICT
+    # fires we look at the existing row's task_id (cheap, no extra round-
+    # trip — added to the INSERT path below).
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
     snapshot_at = datetime.utcnow()
     out: List[AlphaResult] = []
     inserted_alpha_ids: List[str] = []  # alpha_ids that successfully landed
-    cross_task_skipped: List[str] = []  # alpha_ids skipped as cross-task dups
-    on_conflict_skipped: List[str] = []  # alpha_ids skipped by ON CONFLICT (race)
+    on_conflict_skipped: List[str] = []  # alpha_ids skipped by ON CONFLICT (race / cross-task)
     for alpha in pending_alphas:
         if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
             continue
-        # V-19.3: cross-task duplicate skip (cheap pre-check based on SELECT)
-        if alpha.alpha_id and alpha.alpha_id in cross_task_dup_ids:
-            cross_task_skipped.append(alpha.alpha_id)
-            logger.info(
-                f"[_incremental_save_alphas] V-19.3 skip cross-task duplicate "
-                f"alpha_id={alpha.alpha_id} (already owned by another task) "
-                f"expr={(alpha.expression or '')[:100]!r}"
-            )
-            continue
+        # V-26.87: cross-task dedup handled by ON CONFLICT below — no more
+        # pre-batch SELECT round-trip.
         metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
         expr_hash = compute_expression_hash(alpha.expression) if alpha.expression else None
 
