@@ -10,7 +10,7 @@ Contains tasks for syncing data from BRAIN platform:
 
 from datetime import datetime, timezone, timedelta
 from typing import Dict
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from loguru import logger
 
 from backend.celery_app import celery_app
@@ -535,6 +535,13 @@ def sync_user_alphas():
                     start_date_iso = MIN_START_DATE.strftime("%Y-%m-%d")
                     logger.info(f"Full Sync: Fetching all alphas since {start_date_iso}")
 
+                # V-23.E (2026-05-13): track regions where submissions were
+                # detected this run. After commit, mark all remaining
+                # unsubmitted can_submit alphas in those regions as stale —
+                # their _iqc_marginal Δscore was computed against an older
+                # portfolio state and is no longer accurate.
+                submission_flip_regions: set = set()
+
                 for stage in stages:
                     offset = 0
                     limit = 100
@@ -548,18 +555,18 @@ def sync_user_alphas():
                         results = alphas_data.get("results", [])
                         if not results:
                             break
-                            
+
                         logger.info(f"Syncing {len(results)} alphas from {stage} (offset {offset})...")
-                        
+
                         for a_data in results:
                             alpha_id = a_data.get("id")
                             if not alpha_id:
                                 continue
-                                
+
                             stmt = select(Alpha).where(Alpha.alpha_id == alpha_id)
                             result = await db.execute(stmt)
                             existing = result.scalar_one_or_none()
-                            
+
                             # Parse dates
                             date_created = _parse_to_beijing(a_data.get("dateCreated"))
                             date_submitted = _parse_to_beijing(a_data.get("dateSubmitted"))
@@ -567,24 +574,71 @@ def sync_user_alphas():
                             settings = a_data.get("settings", {})
                             is_metrics = a_data.get("is", {})
                             os_metrics = a_data.get("os", {}) or {}
-                            
+
                             if existing:
+                                # V-23.E: detect submission flip BEFORE update
+                                # mutates existing.date_submitted
+                                if (
+                                    existing.date_submitted is None
+                                    and date_submitted is not None
+                                ):
+                                    submission_flip_regions.add(existing.region)
                                 _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_metrics, date_submitted)
                                 updated += 1
                             else:
+                                # V-23.E: if BRAIN reports a newly-created
+                                # alpha already submitted (rare but possible
+                                # for off-platform tools), still treat as
+                                # portfolio-state change for that region.
+                                if date_submitted is not None:
+                                    submission_flip_regions.add(settings.get("region"))
                                 new_alpha = _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_created, date_submitted)
                                 db.add(new_alpha)
                                 count += 1
-                        
+
                         await db.commit()
                         logger.info(f"Committed {len(results)} updates/inserts.")
-                        
+
                         offset += limit
                         if offset >= alphas_data.get("count", 0):
                             break
-                
+
+                # V-23.E post-sync stale marking. JSONB jsonb_set semantics:
+                # when _iqc_marginal already exists, set 'stale'=true; when
+                # it doesn't exist, skip (no past audit to invalidate).
+                stale_marked = 0
+                for region in submission_flip_regions:
+                    if not region:
+                        continue
+                    res = await db.execute(
+                        text(
+                            """
+                            UPDATE alphas
+                            SET metrics = jsonb_set(
+                                metrics, '{_iqc_marginal,stale}', 'true'::jsonb
+                            )
+                            WHERE can_submit = true
+                              AND date_submitted IS NULL
+                              AND region = :region
+                              AND metrics ? '_iqc_marginal'
+                              AND COALESCE(
+                                metrics->'_iqc_marginal'->>'stale', 'false'
+                              ) != 'true'
+                            """
+                        ),
+                        {"region": region},
+                    )
+                    stale_marked += res.rowcount or 0
+                if submission_flip_regions:
+                    await db.commit()
+                    logger.info(
+                        f"[V-23.E] stale-marked {stale_marked} unsubmitted "
+                        f"can_submit alphas across regions "
+                        f"{submission_flip_regions} (submission flip detected)"
+                    )
+
                 logger.info(f"Alpha sync complete: {count} new, {updated} updated")
-                return {"new": count, "updated": updated}
+                return {"new": count, "updated": updated, "iqc_stale_marked": stale_marked}
 
     return run_async(_run())
 

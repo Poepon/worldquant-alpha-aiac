@@ -348,6 +348,10 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
                 "delta_pnl": deltas.get("pnl"),
                 "merged_sharpe": (stats.get("after") or {}).get("sharpe"),
                 "merged_fitness": (stats.get("after") or {}).get("fitness"),
+                # V-23.E: explicit fresh-after-audit flag (default false).
+                # sync_user_alphas flips this to true on submission flip;
+                # sweep prioritises stale=true to refresh first.
+                "stale": False,
             }
             await db.execute(
                 update(Alpha).where(Alpha.id == alpha_pk).values(metrics=new_metrics)
@@ -402,15 +406,35 @@ async def _iqc_audit_backfill_sweep_async() -> Dict:
         # is for *submission candidates* only — already-submitted alphas return
         # 400. Filtering them out keeps the sweep idempotent + avoids burning
         # BRAIN call budget on alphas we'd just skip anyway.
+        #
+        # V-23.E (2026-05-13): IQC marginal Δscore is a dynamic snapshot — after
+        # any submission the portfolio state changes and prior audits go stale.
+        # sync_user_alphas marks affected alphas with _iqc_marginal.stale=true.
+        # Sweep picks up stale alphas in addition to never-audited ones, with
+        # priority order: stale > never-audited (re-audit current can_submit
+        # candidates before back-filling old ones). Stale candidates already
+        # have a row in metrics._iqc_marginal so the predicate differs from
+        # the "missing key" predicate — both are unioned below.
         rows = await db.execute(
             _text(
                 """
-                SELECT id FROM alphas
-                WHERE can_submit = true
-                  AND alpha_id IS NOT NULL
-                  AND date_submitted IS NULL
-                  AND (metrics IS NULL OR NOT (metrics ? '_iqc_marginal'))
-                ORDER BY updated_at DESC NULLS LAST
+                SELECT id, audit_priority FROM (
+                    SELECT id, 0 AS audit_priority, updated_at
+                    FROM alphas
+                    WHERE can_submit = true
+                      AND alpha_id IS NOT NULL
+                      AND date_submitted IS NULL
+                      AND metrics ? '_iqc_marginal'
+                      AND (metrics->'_iqc_marginal'->>'stale')::boolean = true
+                    UNION ALL
+                    SELECT id, 1 AS audit_priority, updated_at
+                    FROM alphas
+                    WHERE can_submit = true
+                      AND alpha_id IS NOT NULL
+                      AND date_submitted IS NULL
+                      AND (metrics IS NULL OR NOT (metrics ? '_iqc_marginal'))
+                ) AS pri
+                ORDER BY audit_priority ASC, updated_at DESC NULLS LAST
                 LIMIT :lim
                 """
             ),

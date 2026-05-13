@@ -16,7 +16,7 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import and_, case, func, select
+from sqlalchemy import and_, case, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.agents.graph.tier_thresholds import get_min_seed_count
@@ -68,6 +68,14 @@ class FactorAlpha(BaseModel):
     status: Optional[str] = None  # BRAIN status: ACTIVE / UNSUBMITTED / created
     date_submitted: Optional[datetime] = None
     can_submit: Optional[bool] = None  # NULL = 未检查；True = 可提交；False = 不可提交
+    # V-23.A (2026-05-13): IQC marginal-contribution snapshot from V-22.12
+    # audit pipeline. Dynamic — invalidated on every team submission, marked
+    # stale by sync_user_alphas. Used by frontend as a ranker (not filter),
+    # because Δscore for the same alpha can flip sign as portfolio evolves.
+    iqc_delta_score: Optional[float] = None
+    iqc_delta_sharpe: Optional[float] = None
+    iqc_audited_at: Optional[str] = None
+    iqc_stale: Optional[bool] = None
 
 
 class AlphaListResponse(BaseModel):
@@ -192,7 +200,7 @@ async def list_alphas_by_tier(
     can_submit: Optional[str] = None,  # 'true' | 'false' | 'null' | None (无筛选)
     sort_by: str = Query(
         "created_at",
-        pattern="^(is_sharpe|is_fitness|is_turnover|created_at|metrics_snapshot_at)$",
+        pattern="^(is_sharpe|is_fitness|is_turnover|created_at|metrics_snapshot_at|iqc_delta_score)$",
     ),
     sort_order: str = Query("desc", pattern="^(asc|desc)$"),
     limit: int = Query(50, ge=1, le=500),
@@ -233,13 +241,35 @@ async def list_alphas_by_tier(
 
     total = int((await db.execute(count_base)).scalar() or 0)
 
-    sort_col = getattr(Alpha, sort_by, Alpha.is_sharpe)
-    if sort_order == "desc":
-        base = base.order_by(sort_col.desc().nullslast())
+    if sort_by == "iqc_delta_score":
+        # V-23.A (2026-05-13): sort by IQC marginal Δscore extracted from
+        # JSONB. NULL Δscore (never audited) goes to the end on desc,
+        # leading on asc. Raw SQL ORDER BY since text() doesn't expose
+        # .desc()/.asc() — the NULLS clause is built into the string.
+        nulls_clause = "NULLS LAST" if sort_order == "desc" else "NULLS FIRST"
+        base = base.order_by(
+            text(
+                f"(alphas.metrics->'_iqc_marginal'->>'delta_score')::numeric "
+                f"{sort_order.upper()} {nulls_clause}"
+            )
+        )
     else:
-        base = base.order_by(sort_col.asc().nullsfirst())
+        sort_col = getattr(Alpha, sort_by, Alpha.is_sharpe)
+        if sort_order == "desc":
+            base = base.order_by(sort_col.desc().nullslast())
+        else:
+            base = base.order_by(sort_col.asc().nullsfirst())
 
     rows = (await db.execute(base.limit(limit).offset(offset))).scalars().all()
+
+    def _iqc_from(a) -> dict:
+        iqc = (a.metrics or {}).get("_iqc_marginal") or {}
+        return {
+            "iqc_delta_score": iqc.get("delta_score"),
+            "iqc_delta_sharpe": iqc.get("delta_sharpe"),
+            "iqc_audited_at": iqc.get("audited_at"),
+            "iqc_stale": iqc.get("stale"),
+        }
 
     items = [
         FactorAlpha(
@@ -259,6 +289,7 @@ async def list_alphas_by_tier(
             status=a.status,
             date_submitted=a.date_submitted,
             can_submit=a.can_submit,
+            **_iqc_from(a),
         )
         for a in rows
     ]

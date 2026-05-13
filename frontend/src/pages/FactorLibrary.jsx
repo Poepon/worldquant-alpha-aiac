@@ -181,20 +181,37 @@ function TierAlphaTable({ tier }) {
     submitted: undefined,
     can_submit: undefined,
   })
+  // V-23.A (2026-05-13): sorter state — driven by Table column .sorter=true
+  // clicks. Default created_at desc preserves prior behaviour; clicking the
+  // IQC Δscore header re-ranks the submit queue.
+  const [sorter, setSorter] = useState({
+    field: 'created_at',
+    order: 'descend',
+  })
 
   const queryParams = useMemo(() => {
+    const sortKeyMap = {
+      is_sharpe: 'is_sharpe',
+      is_fitness: 'is_fitness',
+      is_turnover: 'is_turnover',
+      iqc_delta_score: 'iqc_delta_score',
+      created_at: 'created_at',
+      metrics_snapshot_at: 'metrics_snapshot_at',
+    }
+    const sort_by = sortKeyMap[sorter.field] || 'created_at'
+    const sort_order = sorter.order === 'ascend' ? 'asc' : 'desc'
     const out = {
       tier,
       limit: pagination.pageSize,
       offset: (pagination.current - 1) * pagination.pageSize,
-      sort_by: 'created_at',
-      sort_order: 'desc',
+      sort_by,
+      sort_order,
     }
     Object.entries(filters).forEach(([k, v]) => {
       if (v !== undefined && v !== null && v !== '') out[k] = v
     })
     return out
-  }, [tier, pagination, filters])
+  }, [tier, pagination, filters, sorter])
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['factor-library/alphas', queryParams],
@@ -279,6 +296,60 @@ function TierAlphaTable({ tier }) {
           return <Tooltip title="BRAIN is.checks 含 FAIL，未达提交门槛"><Tag color="error">⚠️ 不可提交</Tag></Tooltip>
         }
         return <Tooltip title="未调 BRAIN 检查"><Tag>—</Tag></Tooltip>
+      },
+    },
+    {
+      // V-23.A (2026-05-13): IQC marginal Δscore — *dynamic* signal,
+      // not a quality label. Δscore reflects current portfolio state;
+      // changes on every team submission. Use as ranker, not filter.
+      title: 'IQC Δscore',
+      dataIndex: 'iqc_delta_score',
+      key: 'iqc_delta_score',
+      width: 140,
+      align: 'right',
+      sorter: true,
+      render: (v, row) => {
+        if (v == null) {
+          return (
+            <Tooltip title="尚未审计 IQC marginal contribution">
+              <Text type="secondary">—</Text>
+            </Tooltip>
+          )
+        }
+        const stale = row.iqc_stale === true
+        const sign = v > 0 ? '+' : ''
+        const color = v > 0 ? '#52c41a' : (v < 0 ? '#ff4d4f' : undefined)
+        const audited = row.iqc_audited_at
+          ? new Date(row.iqc_audited_at).toLocaleString()
+          : '—'
+        return (
+          <Tooltip
+            title={
+              <>
+                <div>audited as of {audited}</div>
+                {row.iqc_delta_sharpe != null && (
+                  <div>Δsharpe: {row.iqc_delta_sharpe.toFixed(3)}</div>
+                )}
+                <div style={{ marginTop: 4, fontSize: 11 }}>
+                  IQC marginal Δscore 反映把这个 alpha 加入当前 portfolio 的
+                  累加 score 变化。<strong>Δscore 会随 team 提交其他 alpha
+                  动态变化</strong>。当前为负不代表 alpha 本身没价值。
+                </div>
+              </>
+            }
+          >
+            <Space size={4}>
+              <Text strong style={{ color }}>
+                {sign}{v.toFixed(0)}
+              </Text>
+              {stale && (
+                <Tag color="orange" style={{ marginLeft: 0, fontSize: 10, padding: '0 4px' }}>
+                  stale
+                </Tag>
+              )}
+            </Space>
+          </Tooltip>
+        )
       },
     },
     {
@@ -456,8 +527,19 @@ function TierAlphaTable({ tier }) {
           showSizeChanger: true,
           showTotal: (t) => `共 ${t} 条`,
         }}
-        onChange={(p) => setPagination(p)}
-        scroll={{ x: 1100 }}
+        onChange={(p, _f, s) => {
+          setPagination(p)
+          // s.field is the column dataIndex / key; s.order is 'ascend' | 'descend' | undefined
+          if (s && (s.field || s.columnKey)) {
+            setSorter({
+              field: s.field || s.columnKey,
+              order: s.order || 'descend',
+            })
+          } else {
+            setSorter({ field: 'created_at', order: 'descend' })
+          }
+        }}
+        scroll={{ x: 1240 }}
       />
     </>
   )
