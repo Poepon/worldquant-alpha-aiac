@@ -16,13 +16,24 @@ from typing import Any, Dict, List, Optional
 
 
 class KnowledgeType(Enum):
-    """Type of knowledge."""
+    """Type of knowledge.
+
+    V-26.38 (2026-05-13) deprecation notice:
+      FIELD_INSIGHT / OPERATOR_INSIGHT / DATASET_INSIGHT and the
+      sibling HYPOTHESIS_INSIGHT (declared in the persistence layer)
+      have NO retrieve path. The write path is gated behind
+      settings.WRITE_FIELD_HYPOTHESIS_INSIGHTS=False since V-24.E.
+      Decision (retire vs build retrieve vs defer) due 2026-Q3 —
+      see `docs/v26_38_39_field_insight_deprecation.md`. Do NOT add
+      new write call sites for these types without revisiting that
+      decision.
+    """
     SUCCESS_PATTERN = "success_pattern"  # What worked
     FAILURE_PATTERN = "failure_pattern"  # What didn't work
     OPTIMIZATION_RULE = "optimization_rule"  # How to improve
-    FIELD_INSIGHT = "field_insight"  # Field-specific knowledge
-    OPERATOR_INSIGHT = "operator_insight"  # Operator usage patterns
-    DATASET_INSIGHT = "dataset_insight"  # Dataset-specific knowledge
+    FIELD_INSIGHT = "field_insight"      # DEPRECATED (V-26.38); no retrieve path
+    OPERATOR_INSIGHT = "operator_insight"  # DEPRECATED (V-26.38); no retrieve path
+    DATASET_INSIGHT = "dataset_insight"  # DEPRECATED (V-26.38); no retrieve path
 
 
 @dataclass

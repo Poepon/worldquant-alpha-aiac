@@ -277,6 +277,10 @@ class Settings(BaseSettings):
     # rate — feedback_agent persists them but rag_service has no _get_*_insights
     # path. Disable by default; can be re-enabled if retrieve paths are added
     # later. See feedback_agent.py:1039+ for the write site.
+    #
+    # V-26.38/39 (2026-05-13): formal deprecation track. Decision deadline
+    # 2026-Q3 — retire vs build retrieve vs defer. See
+    # `docs/v26_38_39_field_insight_deprecation.md` for the three options.
     WRITE_FIELD_HYPOTHESIS_INSIGHTS: bool = False
     # PR4 — P0 实验结论：BRAIN GET /alphas/{id} 返回冻结的 sim 时 snapshot，不是
     # rolling 重算。所以 node_tier_seed_load 调 BRAIN refresh metrics 是 no-op，
