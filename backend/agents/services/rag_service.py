@@ -18,6 +18,11 @@ from sqlalchemy.dialects.postgresql import JSONB
 from loguru import logger
 
 from backend.models import KnowledgeEntry, DatasetMetadata
+# V-26.34 (2026-05-13): module-level binding for the regex-driven operator
+# extractor. extract_operator_chain itself relies on Python's internal
+# re-pattern cache so we don't need to pre-compile here — hoisting the
+# import is enough to keep _filter_hallucinated tight in the hot path.
+from backend.knowledge_extraction import extract_operator_chain as _extract_operator_chain
 
 
 # Dataset category mapping for intelligent pattern matching
@@ -191,9 +196,23 @@ class RAGService:
         # long-term cleanup of bad rows.
         self._valid_ops_cache: Optional[Set[str]] = None
         self._retrieve_hallucinated_skipped: int = 0
+        # V-26.35 (2026-05-13): failure counter for the valid_ops load
+        # path. Pre-fix the load silently fell back to empty-set cache
+        # forever after the first failure, leaving every subsequent
+        # retrieve unfiltered. Now we don't poison the cache on failure
+        # — next call re-tries — and surface the failure as ERROR + a
+        # counter so dashboards / alerts can pick it up.
+        self._valid_ops_load_failures: int = 0
 
     async def _get_valid_ops(self) -> Set[str]:
-        """Load active operator whitelist from DB (cached per instance)."""
+        """Load active operator whitelist from DB (cached per instance).
+
+        V-26.35: on load failure, leave the cache as None so a subsequent
+        call re-attempts. The caller (`_filter_hallucinated`) treats an
+        empty set as "filter unavailable" and falls open intentionally —
+        we don't want a single transient DB blip to disable the filter
+        for the rest of this RAGService instance's lifetime.
+        """
         if self._valid_ops_cache is not None:
             return self._valid_ops_cache
         from backend.models.metadata import Operator
@@ -205,8 +224,14 @@ class RAGService:
             ).all()
             self._valid_ops_cache = {r[0] for r in rows}
         except Exception as e:
-            logger.warning(f"[RAGService] V-24.C valid_ops load failed (no filter): {e}")
-            self._valid_ops_cache = set()
+            # V-26.35: ERROR level so monitoring catches it, do NOT cache
+            # the failure (set stays None → next call retries).
+            self._valid_ops_load_failures += 1
+            logger.error(
+                f"[RAGService] V-24.C valid_ops load failed "
+                f"(attempt #{self._valid_ops_load_failures}, filter disabled this call): {e}"
+            )
+            return set()
         return self._valid_ops_cache
 
     # Skeleton placeholders that extract_operator_chain regex picks up but
@@ -223,21 +248,30 @@ class RAGService:
         V-22.8 daily sweep still soft-deactivates these rows; this filter
         just stops them from reaching the LLM between sweep runs and
         catches entries written via paths that bypass V-22.3 canonicalize.
+
+        V-26.34 (2026-05-13): import hoisted out of the per-call body
+        (the Python module cache makes it cheap, but the lookup still
+        showed up in profiles on KB scans of 5k+ rows). The placeholder
+        set is captured once per call instead of an attribute lookup
+        per op. Each entry now scans pattern + template ops once and
+        short-circuits on the first miss — unchanged but documented.
         """
         if not entries:
             return entries
         valid_ops = await self._get_valid_ops()
         if not valid_ops:
-            return entries  # whitelist unavailable → fail-open
-        from backend.knowledge_extraction import extract_operator_chain
+            return entries  # whitelist unavailable → fail-open (V-26.35)
+
+        placeholders = self._SKELETON_PLACEHOLDERS
+        _extract = _extract_operator_chain
 
         def _bad(text: str) -> bool:
             if not text:
                 return False
-            ops = extract_operator_chain(text) or []
+            ops = _extract(text) or []
             for o in ops:
                 ol = o.lower()
-                if ol in self._SKELETON_PLACEHOLDERS:
+                if ol in placeholders:
                     continue
                 if ol not in valid_ops:
                     return True
