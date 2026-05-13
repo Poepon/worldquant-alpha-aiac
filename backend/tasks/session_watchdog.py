@@ -134,6 +134,26 @@ async def _watchdog_revive_async() -> dict:
 async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list) -> None:
     """Common re-dispatch path used by both CONTINUOUS and DISCRETE handlers."""
     try:
+        # V-26.5: evict stale cascade lock before re-dispatch. The original
+        # worker may have died holding the lock (SIGKILL on celery
+        # task_time_limit, OOM, hard crash) — its `finally` never fired
+        # so the 10800s TTL would block the new worker. force_clear is
+        # safe because watchdog only revives tasks whose last_alpha_persisted_at
+        # / latest trace is older than DEAD_THRESHOLD_MIN, i.e. the lock
+        # holder has definitely stopped progressing.
+        try:
+            from backend.tasks.redis_pool import force_clear_cascade_lock
+            cleared = force_clear_cascade_lock(f"cascade_lock:task:{task.id}")
+            if cleared:
+                logger.warning(
+                    f"[watchdog] evicted stale cascade lock for task={task.id} "
+                    f"before revive (original worker presumed dead)"
+                )
+        except Exception as _lock_e:
+            logger.warning(
+                f"[watchdog] cascade lock evict skipped for task={task.id}: {_lock_e}"
+            )
+
         run = ExperimentRun(
             task_id=task.id,
             status="RUNNING",

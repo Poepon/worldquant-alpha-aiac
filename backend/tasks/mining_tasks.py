@@ -71,28 +71,34 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             cascade_lock_key = f"cascade_lock:task:{task_id}"
             cascade_lock_token = self.request.id  # unique per celery dispatch
             cascade_lock_acquired = False
-            _redis_cli = None
+            from backend.tasks.redis_pool import (
+                acquire_cascade_lock,
+                release_cascade_lock,
+                peek_lock_holder,
+            )
             try:
-                import redis as _redis
-                from backend.config import settings as _s
-                _redis_cli = _redis.Redis.from_url(_s.REDIS_URL)
-                cascade_lock_acquired = bool(_redis_cli.set(
+                cascade_lock_acquired = acquire_cascade_lock(
                     cascade_lock_key,
                     cascade_lock_token,
-                    nx=True,
-                    ex=10800,  # 3h TTL safety net for crashed workers
-                ))
-            except Exception as _e:
-                logger.warning(
-                    f"[cascade] redis lock failed (proceeding without): {_e}"
+                    ttl_sec=10800,  # 3h safety net for crashed workers
                 )
-                cascade_lock_acquired = True
+            except Exception as _e:
+                # V-26.27: fail-closed when Redis is unreachable. The previous
+                # behavior set cascade_lock_acquired=True (fail-open) which
+                # allowed duplicate cascade workers to run concurrently —
+                # the exact bug the lock was added to prevent. Better to
+                # skip this dispatch; celery beat / watchdog will retry.
+                logger.error(
+                    f"[cascade] redis lock unreachable, refusing to dispatch "
+                    f"task={task_id} (fail-closed): {_e}"
+                )
+                return {
+                    "skipped": True,
+                    "reason": "redis_unavailable",
+                    "task_id": task_id,
+                }
             if not cascade_lock_acquired:
-                try:
-                    holder = _redis_cli.get(cascade_lock_key) if _redis_cli else None
-                    holder_str = holder.decode() if isinstance(holder, bytes) else str(holder)
-                except Exception:
-                    holder_str = "?"
+                holder_str = peek_lock_holder(cascade_lock_key) or "?"
                 logger.warning(
                     f"[cascade] Task {task_id} already has an active run "
                     f"(redis lock held by {holder_str}); celery_task="
@@ -105,22 +111,11 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                     "lock_holder": holder_str,
                 }
 
-            # Helper to release the cascade lock on exit (acquired above).
-            # Lua-style check-and-delete: only release if WE still hold the
-            # token. If TTL expired and another worker re-acquired with a
-            # different token, leave it alone. Idempotent + no-op safe.
+            # V-26.4: Lua-atomic release. Only deletes the key if it still
+            # holds our token — if our TTL expired and another worker
+            # re-acquired with a different token, this is a no-op.
             def _release_lock():
-                if _redis_cli is None:
-                    return
-                try:
-                    held = _redis_cli.get(cascade_lock_key)
-                    if held is None:
-                        return
-                    held_str = held.decode() if isinstance(held, bytes) else str(held)
-                    if held_str == cascade_lock_token:
-                        _redis_cli.delete(cascade_lock_key)
-                except Exception as _re:
-                    logger.warning(f"[cascade] redis lock release failed (TTL will clean): {_re}")
+                release_cascade_lock(cascade_lock_key, cascade_lock_token)
 
             # Update status to RUNNING
             await db.execute(
