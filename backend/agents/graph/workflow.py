@@ -721,6 +721,17 @@ class MiningWorkflow:
                     hid = getattr(alpha_result, "hypothesis_id", None)
                     if hid is not None:
                         touched_hids.add(hid)
+                # V-26.26 (2026-05-13): also collect hypothesis_ids from the
+                # FAIL path. Previously only generated_alphas (PASS / REJECTED
+                # rows in `alphas` table) triggered refresh_stats — alpha_failures
+                # writes were ignored. Combined with V-26.13 (refresh_stats now
+                # counts alpha_failures), this lets a hypothesis whose attempts
+                # all hit validation / sim errors still advance PROPOSED→ACTIVE
+                # and eventually trigger B6 abandon.
+                for failure in result.get("failures", []):
+                    fhid = getattr(failure, "hypothesis_id", None)
+                    if fhid is not None:
+                        touched_hids.add(fhid)
                 if touched_hids:
                     from backend.services.hypothesis_service import HypothesisService
                     svc = HypothesisService(self.db)

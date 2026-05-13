@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import (
     Alpha,
+    AlphaFailure,
     Hypothesis,
     HypothesisKind,
     HypothesisStatus,
@@ -69,13 +70,25 @@ class HypothesisCreateData:
 
 @dataclass
 class HypothesisStats:
-    """Result of refresh_stats — what got recomputed for one hypothesis."""
+    """Result of refresh_stats — what got recomputed for one hypothesis.
+
+    V-26.13 (2026-05-13): `alpha_count` now counts attempts across both the
+    `alphas` table (PASS / PASS_PROVISIONAL / REJECTED) AND `alpha_failures`
+    (validation / sim errors). Pre-fix only the alphas table was counted,
+    which left a hypothesis with 50 failed-validation attempts at
+    alpha_count=0 — auto_activate_if_eligible never fired and B6 abandon
+    could not trigger. `fail_count` is the alpha_failures subset; surfaced
+    in the dataclass so callers (e.g. should_abandon_hypothesis) can
+    distinguish "no evidence" from "tried but failed". Not persisted yet —
+    schema migration would be needed.
+    """
 
     hypothesis_id: int
     alpha_count: int
     pass_count: int
     sharpe_avg: Optional[float]
     sharpe_max: Optional[float]
+    fail_count: int = 0  # subset of alpha_count, from alpha_failures
 
 
 class HypothesisService(BaseService):
@@ -301,9 +314,13 @@ class HypothesisService(BaseService):
           - B7 batch refresh_all_stats (periodic reconcile)
           - Frontend stats endpoint when stale
         """
-        stmt = (
+        # V-26.13: count Alpha-table attempts and AlphaFailure attempts
+        # separately, then sum into `alpha_count`. The two queries are
+        # independent (no JOIN) — combining them via OUTER JOIN would
+        # multiply rows when both tables have entries.
+        alpha_stmt = (
             select(
-                func.count(Alpha.id).label("alpha_count"),
+                func.count(Alpha.id).label("alpha_attempts"),
                 func.count(
                     case((Alpha.quality_status.in_(["PASS", "PASS_PROVISIONAL"]), 1))
                 ).label("pass_count"),
@@ -312,12 +329,20 @@ class HypothesisService(BaseService):
             )
             .where(Alpha.hypothesis_id == hypothesis_id)
         )
-        result = await self.db.execute(stmt)
-        row = result.one()
-        alpha_count = int(row.alpha_count or 0)
-        pass_count = int(row.pass_count or 0)
-        sharpe_avg = float(row.sharpe_avg) if row.sharpe_avg is not None else None
-        sharpe_max = float(row.sharpe_max) if row.sharpe_max is not None else None
+        alpha_row = (await self.db.execute(alpha_stmt)).one()
+
+        fail_stmt = (
+            select(func.count(AlphaFailure.id).label("fail_attempts"))
+            .where(AlphaFailure.hypothesis_id == hypothesis_id)
+        )
+        fail_row = (await self.db.execute(fail_stmt)).one()
+
+        alpha_attempts = int(alpha_row.alpha_attempts or 0)
+        fail_count = int(fail_row.fail_attempts or 0)
+        alpha_count = alpha_attempts + fail_count
+        pass_count = int(alpha_row.pass_count or 0)
+        sharpe_avg = float(alpha_row.sharpe_avg) if alpha_row.sharpe_avg is not None else None
+        sharpe_max = float(alpha_row.sharpe_max) if alpha_row.sharpe_max is not None else None
 
         await self.db.execute(
             update(Hypothesis)
@@ -335,6 +360,7 @@ class HypothesisService(BaseService):
             pass_count=pass_count,
             sharpe_avg=sharpe_avg,
             sharpe_max=sharpe_max,
+            fail_count=fail_count,
         )
 
     async def refresh_all_stats(

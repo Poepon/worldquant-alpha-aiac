@@ -385,6 +385,116 @@ async def test_refresh_stats_aggregates_alpha_join(session):
 
 
 @pytest.mark.asyncio
+async def test_refresh_stats_counts_alpha_failures_v26_13(session):
+    """V-26.13: alpha_count must include alpha_failures rows so a hypothesis
+    that hit only validation / sim errors still advances PROPOSED→ACTIVE."""
+    from backend.models import MiningTask, ExperimentRun, AlphaFailure
+    svc = HypothesisService(session)
+    h = await svc.create_hypothesis(_data("v26-13-fails-only"))
+    await session.commit()
+
+    task = MiningTask(
+        task_name=f"{_TAG}v2613-task",
+        region="USA", universe="TOP3000",
+        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
+        status="RUNNING", daily_goal=4, max_iterations=2,
+    )
+    session.add(task)
+    await session.flush()
+    run = ExperimentRun(task_id=task.id, status="RUNNING")
+    session.add(run)
+    await session.flush()
+
+    # 3 failures, no Alpha rows at all
+    fails = [
+        AlphaFailure(
+            task_id=task.id, run_id=run.id,
+            expression=f"bad_expr_{i}", error_type="SYNTAX_ERROR",
+            error_message="parse fail", hypothesis_id=h.id,
+        )
+        for i in range(3)
+    ]
+    for f in fails:
+        session.add(f)
+    await session.commit()
+
+    try:
+        stats = await svc.refresh_stats(h.id)
+        await session.commit()
+        # Pre-V-26.13 this asserted alpha_count==0 (FAIL-only path
+        # invisible). Post-fix: 3 attempts visible.
+        assert stats.alpha_count == 3
+        assert stats.fail_count == 3
+        assert stats.pass_count == 0
+        # And auto_activate_if_eligible should now fire on the FAIL-only path
+        activated = await svc.auto_activate_if_eligible(h.id)
+        await session.commit()
+        assert activated is True
+        h_after = await svc.get_by_id(h.id)
+        assert h_after.status == HypothesisStatus.ACTIVE.value
+    finally:
+        await session.execute(delete(AlphaFailure).where(AlphaFailure.hypothesis_id == h.id))
+        await session.execute(delete(ExperimentRun).where(ExperimentRun.id == run.id))
+        await session.execute(text("DELETE FROM mining_tasks WHERE id = :i"), {"i": task.id})
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_refresh_stats_sums_alpha_and_failures_v26_13(session):
+    """V-26.13: when both Alpha and AlphaFailure rows exist, alpha_count
+    sums both. pass_count and sharpe_* still come from Alpha only."""
+    from backend.models import MiningTask, ExperimentRun, AlphaFailure
+    svc = HypothesisService(session)
+    h = await svc.create_hypothesis(_data("v26-13-mixed"))
+    await session.commit()
+
+    task = MiningTask(
+        task_name=f"{_TAG}v2613-mix-task",
+        region="USA", universe="TOP3000",
+        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
+        status="RUNNING", daily_goal=4, max_iterations=2,
+    )
+    session.add(task)
+    await session.flush()
+    run = ExperimentRun(task_id=task.id, status="RUNNING")
+    session.add(run)
+    await session.flush()
+
+    # 2 PASS alphas + 5 failure rows = 7 total attempts
+    alpha_rows = [
+        Alpha(task_id=task.id, run_id=run.id, alpha_id=f"_b7_{uuid.uuid4().hex[:8]}",
+              expression=f"e_pass_{i}", region="USA", universe="TOP3000",
+              quality_status="PASS", is_sharpe=1.5, hypothesis_id=h.id, factor_tier=1)
+        for i in range(2)
+    ]
+    fail_rows = [
+        AlphaFailure(
+            task_id=task.id, run_id=run.id,
+            expression=f"e_fail_{i}", error_type="TIMEOUT",
+            error_message="brain timeout", hypothesis_id=h.id,
+        )
+        for i in range(5)
+    ]
+    for r in alpha_rows + fail_rows:
+        session.add(r)
+    await session.commit()
+
+    try:
+        stats = await svc.refresh_stats(h.id)
+        await session.commit()
+        assert stats.alpha_count == 7  # 2 + 5
+        assert stats.fail_count == 5
+        assert stats.pass_count == 2
+        assert stats.sharpe_max == pytest.approx(1.5)
+    finally:
+        await session.execute(delete(Alpha).where(Alpha.hypothesis_id == h.id))
+        await session.execute(delete(AlphaFailure).where(AlphaFailure.hypothesis_id == h.id))
+        await session.execute(delete(ExperimentRun).where(ExperimentRun.id == run.id))
+        await session.execute(text("DELETE FROM mining_tasks WHERE id = :i"), {"i": task.id})
+        await session.commit()
+
+
+@pytest.mark.asyncio
 async def test_pass_rate_returns_none_when_no_alphas(session):
     svc = HypothesisService(session)
     h = await svc.create_hypothesis(_data("pr-none"))
