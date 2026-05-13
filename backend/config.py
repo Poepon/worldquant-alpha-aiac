@@ -271,6 +271,13 @@ class Settings(BaseSettings):
     # (scripts/pre_simulate_filter_audit.py) before bumping to 0.15.
     ENABLE_PRE_SIMULATE_FILTER: bool = True
     PRE_SIMULATE_FILTER_THRESHOLD: float = 0.10
+
+    # V-24.E (2026-05-13): FIELD_INSIGHT / HYPOTHESIS_INSIGHT writes gated.
+    # kb_hit_audit found 4170 historical rows of these types had 0% retrieve
+    # rate — feedback_agent persists them but rag_service has no _get_*_insights
+    # path. Disable by default; can be re-enabled if retrieve paths are added
+    # later. See feedback_agent.py:1039+ for the write site.
+    WRITE_FIELD_HYPOTHESIS_INSIGHTS: bool = False
     # PR4 — P0 实验结论：BRAIN GET /alphas/{id} 返回冻结的 sim 时 snapshot，不是
     # rolling 重算。所以 node_tier_seed_load 调 BRAIN refresh metrics 是 no-op，
     # 浪费配额。默认关闭；只有当 BRAIN 行为改变（比如未来开放 rolling endpoint）

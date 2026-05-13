@@ -1036,68 +1036,80 @@ class FeedbackAgent:
                     self.db.add(entry)
                     new_entries += 1
             
-            # 3. Store Field Insights (for RAG retrieval)
-            field_insights = analysis.get("field_insights", {})
-            if field_insights:
-                # Store effective fields
-                for field in field_insights.get("effective_fields", []):
-                    field_pattern = f"FIELD_EFFECTIVE:{field}"
-                    if not await self._pattern_exists(field_pattern):
-                        entry = KnowledgeEntry(
-                            entry_type='FIELD_INSIGHT',
-                            pattern=field_pattern,
-                            description=f"字段 {field} 在 {dataset_id} 数据集中表现有效",
-                            meta_data={
-                                'round': iteration,
-                                'dataset_id': dataset_id,
-                                'region': region,
-                                'insight_type': 'effective',
-                                'source': 'evolution_loop'
-                            }
-                        )
-                        self.db.add(entry)
-                        new_entries += 1
-                
-                # Store problematic fields
-                for field in field_insights.get("problematic_fields", []):
-                    field_pattern = f"FIELD_PROBLEMATIC:{field}"
-                    if not await self._pattern_exists(field_pattern):
-                        entry = KnowledgeEntry(
-                            entry_type='FIELD_INSIGHT',
-                            pattern=field_pattern,
-                            description=f"字段 {field} 在 {dataset_id} 数据集中存在问题，建议避免",
-                            meta_data={
-                                'round': iteration,
-                                'dataset_id': dataset_id,
-                                'region': region,
-                                'insight_type': 'problematic',
-                                'source': 'evolution_loop'
-                            }
-                        )
-                        self.db.add(entry)
-                        new_entries += 1
-            
-            # 4. Store Hypothesis Evolution Insights
-            hypothesis_evo = analysis.get("hypothesis_evolution", {})
-            if hypothesis_evo:
-                # Store promising directions
-                for direction in hypothesis_evo.get("promising_directions", []):
-                    hypo_pattern = f"HYPOTHESIS_PROMISING:{direction[:50]}"
-                    if not await self._pattern_exists(hypo_pattern):
-                        entry = KnowledgeEntry(
-                            entry_type='HYPOTHESIS_INSIGHT',
-                            pattern=hypo_pattern,
-                            description=f"投资假设方向值得继续探索: {direction}",
-                            meta_data={
-                                'round': iteration,
-                                'dataset_id': dataset_id,
-                                'region': region,
-                                'direction_type': 'promising',
-                                'source': 'evolution_loop'
-                            }
-                        )
-                        self.db.add(entry)
-                        new_entries += 1
+            # V-24.E (2026-05-13): FIELD_INSIGHT + HYPOTHESIS_INSIGHT writes
+            # are gated behind a default-off flag. kb_hit_audit.py revealed
+            # 100% of 4170 historical rows (708 FIELD + 3462 HYPOTHESIS) had
+            # never been retrieved — they were write-only since the dormant
+            # RD-Agent core path is not wired into rag_service. dataset/field
+            # avoidance + hypothesis lineage are already covered by:
+            #   - field_screener.py field-level reward stats
+            #   - SUCCESS_PATTERN.meta_data.hypothesis_id (B8 lineage)
+            #   - HypothesisService lifecycle status
+            # so blocking these writes only saves DB rows without losing
+            # signal. Toggle settings.WRITE_FIELD_HYPOTHESIS_INSIGHTS=True if
+            # someone wires retrieve paths later.
+            from backend.config import settings as _settings
+            if getattr(_settings, "WRITE_FIELD_HYPOTHESIS_INSIGHTS", False):
+                field_insights = analysis.get("field_insights", {})
+                if field_insights:
+                    for field in field_insights.get("effective_fields", []):
+                        field_pattern = f"FIELD_EFFECTIVE:{field}"
+                        if not await self._pattern_exists(field_pattern):
+                            entry = KnowledgeEntry(
+                                entry_type='FIELD_INSIGHT',
+                                pattern=field_pattern,
+                                description=f"字段 {field} 在 {dataset_id} 数据集中表现有效",
+                                meta_data={
+                                    'round': iteration, 'dataset_id': dataset_id,
+                                    'region': region, 'insight_type': 'effective',
+                                    'source': 'evolution_loop',
+                                },
+                            )
+                            self.db.add(entry)
+                            new_entries += 1
+                    for field in field_insights.get("problematic_fields", []):
+                        field_pattern = f"FIELD_PROBLEMATIC:{field}"
+                        if not await self._pattern_exists(field_pattern):
+                            entry = KnowledgeEntry(
+                                entry_type='FIELD_INSIGHT',
+                                pattern=field_pattern,
+                                description=f"字段 {field} 在 {dataset_id} 数据集中存在问题，建议避免",
+                                meta_data={
+                                    'round': iteration, 'dataset_id': dataset_id,
+                                    'region': region, 'insight_type': 'problematic',
+                                    'source': 'evolution_loop',
+                                },
+                            )
+                            self.db.add(entry)
+                            new_entries += 1
+                hypothesis_evo = analysis.get("hypothesis_evolution", {})
+                if hypothesis_evo:
+                    for direction in hypothesis_evo.get("promising_directions", []):
+                        hypo_pattern = f"HYPOTHESIS_PROMISING:{direction[:50]}"
+                        if not await self._pattern_exists(hypo_pattern):
+                            entry = KnowledgeEntry(
+                                entry_type='HYPOTHESIS_INSIGHT',
+                                pattern=hypo_pattern,
+                                description=f"投资假设方向值得继续探索: {direction}",
+                                meta_data={
+                                    'round': iteration, 'dataset_id': dataset_id,
+                                    'region': region, 'direction_type': 'promising',
+                                    'source': 'evolution_loop',
+                                },
+                            )
+                            self.db.add(entry)
+                            new_entries += 1
+            else:
+                # Log the analysis output for traceability without persisting
+                f_eff = len((analysis.get("field_insights") or {}).get("effective_fields", []))
+                f_prob = len((analysis.get("field_insights") or {}).get("problematic_fields", []))
+                h_dir = len((analysis.get("hypothesis_evolution") or {}).get("promising_directions", []))
+                if f_eff + f_prob + h_dir > 0:
+                    logger.debug(
+                        f"[Feedback] V-24.E gated insights skipped | "
+                        f"effective_fields={f_eff} problematic_fields={f_prob} "
+                        f"promising_directions={h_dir} (set WRITE_FIELD_HYPOTHESIS_INSIGHTS=True to persist)"
+                    )
             
             await self.db.commit()
             logger.info(f"[Feedback] Round learning complete. Added {new_entries} knowledge entries (patterns, pitfalls, field/hypothesis insights).")
