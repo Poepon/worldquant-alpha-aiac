@@ -154,15 +154,43 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
                 f"[watchdog] cascade lock evict skipped for task={task.id}: {_lock_e}"
             )
 
+        # V-26.33 (2026-05-13): inherit the dead ExperimentRun's config /
+        # strategy snapshots so the revival preserves audit lineage. Pre-fix
+        # the new Run started with empty dicts, dropping things like the
+        # cascade variant tag and the experiment_variant from the original
+        # dispatch — making "why did revive change behaviour?" analysis
+        # impossible. Falls back to the previous empty dicts if no prior
+        # Run exists.
+        prior_run = None
+        try:
+            prior_run = (
+                await db.execute(
+                    select(ExperimentRun)
+                    .where(ExperimentRun.task_id == task.id)
+                    .order_by(ExperimentRun.id.desc())
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        except Exception as _e:
+            logger.debug(f"[watchdog] V-26.33 prior-run lookup failed: {_e}")
+        inherited_config = (
+            dict(prior_run.config_snapshot) if (prior_run and isinstance(prior_run.config_snapshot, dict)) else {}
+        )
+        inherited_config["watchdog_revive"] = {
+            "at": now.isoformat(), **reason_payload
+        }
+        if prior_run is not None:
+            inherited_config["watchdog_revive"]["prior_run_id"] = prior_run.id
+        inherited_strategy = (
+            dict(prior_run.strategy_snapshot) if (prior_run and isinstance(prior_run.strategy_snapshot, dict)) else {}
+        )
         run = ExperimentRun(
             task_id=task.id,
             status="RUNNING",
             trigger_source="WATCHDOG_REVIVE",
             celery_task_id=None,
-            config_snapshot={
-                "watchdog_revive": {"at": now.isoformat(), **reason_payload}
-            },
-            strategy_snapshot={},
+            config_snapshot=inherited_config,
+            strategy_snapshot=inherited_strategy,
         )
         db.add(run)
         await db.commit()
@@ -253,6 +281,27 @@ async def _quota_guard_async() -> dict:
             }
 
         # Over threshold — pause all active CONTINUOUS_CASCADE sessions.
+        # V-26.32 (2026-05-13): in-flight BRAIN sims can't be cancelled
+        # server-side, so the PAUSE here only stops the NEXT round from
+        # being scheduled. The in-flight sims (up to 3 per the global
+        # slot counter) keep burning quota until they reach terminal status
+        # — usually 5-10 minutes. Log the current slot count so the
+        # operator sees how many sims will still complete after the
+        # PAUSE before quota actually stops growing.
+        try:
+            from backend.tasks.redis_pool import get_redis_client
+            cli = get_redis_client()
+            inflight_raw = cli.get("brain:concurrent_sims")
+            inflight = int(inflight_raw) if inflight_raw is not None else 0
+        except Exception:
+            inflight = -1
+        logger.warning(
+            f"[quota_guard] V-26.32 PAUSING {{?}} sessions over quota "
+            f"(today_total={cnt} alphas={alpha_cnt} failures={fail_cnt}); "
+            f"BRAIN inflight_sims={inflight} will continue to terminal status "
+            f"before quota growth halts"
+        )
+
         active = (
             await db.execute(
                 select(MiningTask)

@@ -16,9 +16,26 @@ Contains:
 
 import time
 import random
-from typing import Dict, List, Optional
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 from loguru import logger
 from langchain_core.runnables import RunnableConfig
+
+
+# V-26.49 (2026-05-13): proper dataclass for LLM-call failures. Pre-fix used
+# `type('obj', (object,), {...})()` inline which is hard to grep for, hard
+# to extend (new attrs need both call sites updated), and confuses static
+# checkers. Mirrors the live response shape (success / parsed / error) so
+# downstream consumers don't need to special-case the failure object.
+@dataclass
+class _FailedLLMResponse:
+    success: bool = False
+    parsed: Any = None
+    error: str = ""
+
+
+def _failed_llm_response(error: str) -> _FailedLLMResponse:
+    return _FailedLLMResponse(success=False, parsed=None, error=error)
 
 from backend.agents.graph.state import MiningState, AlphaCandidate
 from backend.agents.graph.nodes.base import record_trace, _debug_log
@@ -202,10 +219,10 @@ async def node_distill_context(
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call failed: {llm_err}")
-        response = type('obj', (object,), {'success': False, 'parsed': None, 'error': str(llm_err)})()
-    
+        response = _failed_llm_response(str(llm_err))
+
     duration_ms = int((time.time() - start_time) * 1000)
-    
+
     selected_concepts = []
     reasoning = ""
     focused_fields = []
@@ -850,10 +867,10 @@ async def node_code_gen(
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call exception: {llm_err}")
-        response = type('obj', (object,), {'success': False, 'parsed': None, 'error': str(llm_err)})()
-    
+        response = _failed_llm_response(str(llm_err))
+
     duration_ms = int((time.time() - start_time) * 1000)
-    
+
     # Parse alphas into candidates
     pending_alphas = []
     implementation_notes = ""

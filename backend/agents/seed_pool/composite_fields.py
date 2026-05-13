@@ -97,9 +97,26 @@ TWO_INPUT_TS_OPS: frozenset = frozenset({
 })
 
 
+_LOADED_MTIME: Optional[float] = None  # V-26.51: invalidate cache on file edit
+
+
 def _load() -> List[Dict[str, Any]]:
-    global _LOADED
-    if _LOADED is not None:
+    """Load composite definitions, caching the parsed list.
+
+    V-26.51 (2026-05-13): cache invalidates when the YAML's mtime changes,
+    so dev edits to composite_fields.yaml take effect without a worker
+    restart. Production workers see no behaviour change because the file
+    is read-only there.
+    """
+    global _LOADED, _LOADED_MTIME
+    try:
+        current_mtime = _YAML_PATH.stat().st_mtime
+    except OSError:
+        current_mtime = None
+    if (
+        _LOADED is not None
+        and (current_mtime is None or current_mtime == _LOADED_MTIME)
+    ):
         return _LOADED
     try:
         with _YAML_PATH.open("r", encoding="utf-8") as f:
@@ -109,24 +126,46 @@ def _load() -> List[Dict[str, Any]]:
                 f"[composite_fields] YAML root must be a list, got {type(data).__name__}"
             )
             _LOADED = []
+            _LOADED_MTIME = current_mtime
             return _LOADED
-        _LOADED = [c for c in data if isinstance(c, dict) and c.get("name")]
+        # V-26.54 (2026-05-13): de-dup by `name` so a typo'd YAML can't
+        # produce two composites with the same key and break downstream
+        # bucket maps. Last-write-wins (later entry overrides earlier).
+        deduped: Dict[str, Dict[str, Any]] = {}
+        for c in data:
+            if not isinstance(c, dict):
+                continue
+            name = c.get("name")
+            if not name:
+                continue
+            if name in deduped:
+                logger.warning(
+                    f"[composite_fields] V-26.54 duplicate composite name "
+                    f"{name!r}; overriding previous entry"
+                )
+            deduped[name] = c
+        _LOADED = list(deduped.values())
+        _LOADED_MTIME = current_mtime
         logger.info(
-            f"[composite_fields] loaded {len(_LOADED)} composites from {_YAML_PATH.name}"
+            f"[composite_fields] loaded {len(_LOADED)} composites from {_YAML_PATH.name} "
+            f"(mtime={current_mtime})"
         )
     except FileNotFoundError:
         logger.warning(f"[composite_fields] YAML not found at {_YAML_PATH}; using empty pool")
         _LOADED = []
+        _LOADED_MTIME = current_mtime
     except Exception as e:
         logger.error(f"[composite_fields] failed to load YAML: {e}")
         _LOADED = []
+        _LOADED_MTIME = current_mtime
     return _LOADED
 
 
 def reload() -> None:
     """Force reload from disk (test / hot-reload helper)."""
-    global _LOADED
+    global _LOADED, _LOADED_MTIME
     _LOADED = None
+    _LOADED_MTIME = None
     _load()
 
 
@@ -287,7 +326,17 @@ def generate_composite_t1_candidates(
             for op in ts_op_list
             for w in window_list
         ]
-        random.shuffle(combos)
+        # V-26.53 (2026-05-13): pre-fix used the module-level `random` which
+        # shares Python's global RNG state — mining runs were non-reproducible
+        # because some other code path could perturb the global seed. Use a
+        # deterministic per-composite Random instance keyed on (region,
+        # composite_name) so the same input always produces the same
+        # candidate ordering for a given region. Cascade rounds within a
+        # session still vary across composites; rerunning the same mining
+        # plan replays identically — which is what tests / audits assume.
+        rng_seed = f"{region}|{composite.get('name', '?')}"
+        local_rng = random.Random(rng_seed)
+        local_rng.shuffle(combos)
         out.extend(combos[:max_per_composite])
 
         # V-22.6.3: always emit a ts_decay_linear smoothing variant per composite

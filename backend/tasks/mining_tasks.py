@@ -783,10 +783,17 @@ async def _run_cascade_phase(
     """
     from backend.config import settings
 
-    # 2026-05-11 DIAG (cascade-stuck-T2): file-marker bypassing loguru since
-    # loguru sink stops writing to celery worker logfile after a restart.
-    # Writes to .cascade_phase_diag.log in repo root. Drop after RCA done.
+    # V-26.30 (2026-05-13): cascade-stuck-T2 RCA file-marker downgraded to
+    # env-gated diagnostic. Pre-fix this wrote .cascade_phase_diag.log
+    # unconditionally — useful during the RCA but noisy in production and
+    # impossible to disable without code edits. Now opt-in via env
+    # CASCADE_PHASE_DIAG_FILE=1; default route goes through loguru.
+    import os as _os
+    _phase_diag_enabled = _os.environ.get("CASCADE_PHASE_DIAG_FILE") == "1"
+
     def _phase_diag(msg: str) -> None:
+        if not _phase_diag_enabled:
+            return
         try:
             from datetime import datetime as _dt
             with open(".cascade_phase_diag.log", "a", encoding="utf-8") as _fp:
@@ -893,69 +900,97 @@ async def _run_cascade_phase(
     next_task: "asyncio.Task | None" = None
     next_label = ""
 
-    for i, dataset_id in enumerate(round_plan):
-        # PAUSE check before scheduling next
-        await db.refresh(task)
-        if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-            paused = True
-            for t, label in ((current, current_label), (next_task, next_label)):
-                if t and not t.done():
-                    logger.info(f"[cascade T{tier}] cancelling {label} (paused)")
-                    t.cancel()
-                    try:
-                        await t
-                    except (asyncio.CancelledError, Exception):
-                        pass
-            break
-
-        # SCHEDULE NEXT ROUND BEFORE AWAITING CURRENT — V-20.1 key change.
-        # next_task starts running immediately; while we await current's
-        # SIMULATE step (BRAIN-IO bound), next_task progresses through
-        # LLM stage and queues at the BRAIN slot semaphore.
-        if i + 1 < len(round_plan) and next_task is None:
-            next_task = _spawn(i + 1)
-            next_label = f"R{i+1}-{round_plan[i+1]}"
-
-        # Await current round
-        try:
-            result = await current
-            logger.info(
-                f"[cascade T{tier}] consumed {current_label} "
-                f"alphas={len(result.get('all_alphas', []))} "
-                f"iters={result.get('iterations_completed')}"
+    async def _cancel_remaining():
+        """V-26.29 (2026-05-13): cancel + await any still-running pipeline
+        tasks. The for-loop's normal exit paths handle PAUSED already, but
+        an unhandled exception inside the loop body (db.refresh failure,
+        OOM, etc.) would leave `current`/`next_task` running in background
+        — they'd write rows to the DB after the orchestrator gave up,
+        producing orphan alphas / heartbeat noise. Wrapped around the
+        for-loop in a try/finally so all exits clean up.
+        """
+        for t, label in ((current, current_label), (next_task, next_label)):
+            if t is None or t.done():
+                continue
+            logger.warning(
+                f"[cascade T{tier}] V-26.29 cancelling leaked task {label}"
             )
-        except asyncio.CancelledError:
-            result = {"all_alphas": [], "iterations_completed": 0}
-        except Exception as e:
-            logger.error(f"[cascade T{tier}] {current_label} failed: {e}")
-            result = {"all_alphas": [], "iterations_completed": 0}
+            t.cancel()
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
 
-        rounds_run += int(result.get("iterations_completed") or 0)
-        alphas_added += len(result.get("all_alphas", []))
-        # V-26.3: pass round result so PASS count flows to progress_current.
-        await _stamp_heartbeat(result)
-
-        # Promote next → current; schedule a fresh next if budget remaining
-        current = next_task
-        current_label = next_label
-        next_task = None
-        next_label = ""
-
-        # If pipeline still has work past i+1, immediately schedule i+2 so
-        # there are always 2 rounds in flight (until budget exhausts).
-        if i + 2 < len(round_plan):
+    try:
+        for i, dataset_id in enumerate(round_plan):
+            # PAUSE check before scheduling next
             await db.refresh(task)
             if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
                 paused = True
-                if current and not current.done():
-                    current.cancel()
-                    try:
-                        await current
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                for t, label in ((current, current_label), (next_task, next_label)):
+                    if t and not t.done():
+                        logger.info(f"[cascade T{tier}] cancelling {label} (paused)")
+                        t.cancel()
+                        try:
+                            await t
+                        except (asyncio.CancelledError, Exception):
+                            pass
                 break
-            next_task = _spawn(i + 2)
-            next_label = f"R{i+2}-{round_plan[i+2]}"
+
+            # SCHEDULE NEXT ROUND BEFORE AWAITING CURRENT — V-20.1 key change.
+            # next_task starts running immediately; while we await current's
+            # SIMULATE step (BRAIN-IO bound), next_task progresses through
+            # LLM stage and queues at the BRAIN slot semaphore.
+            if i + 1 < len(round_plan) and next_task is None:
+                next_task = _spawn(i + 1)
+                next_label = f"R{i+1}-{round_plan[i+1]}"
+
+            # Await current round
+            try:
+                result = await current
+                logger.info(
+                    f"[cascade T{tier}] consumed {current_label} "
+                    f"alphas={len(result.get('all_alphas', []))} "
+                    f"iters={result.get('iterations_completed')}"
+                )
+            except asyncio.CancelledError:
+                result = {"all_alphas": [], "iterations_completed": 0}
+            except Exception as e:
+                logger.error(f"[cascade T{tier}] {current_label} failed: {e}")
+                result = {"all_alphas": [], "iterations_completed": 0}
+
+            rounds_run += int(result.get("iterations_completed") or 0)
+            alphas_added += len(result.get("all_alphas", []))
+            # V-26.3: pass round result so PASS count flows to progress_current.
+            await _stamp_heartbeat(result)
+
+            # Promote next → current; schedule a fresh next if budget remaining
+            current = next_task
+            current_label = next_label
+            next_task = None
+            next_label = ""
+
+            # If pipeline still has work past i+1, immediately schedule i+2 so
+            # there are always 2 rounds in flight (until budget exhausts).
+            if i + 2 < len(round_plan):
+                await db.refresh(task)
+                if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+                    paused = True
+                    if current and not current.done():
+                        current.cancel()
+                        try:
+                            await current
+                        except (asyncio.CancelledError, Exception):
+                            pass
+                    break
+                next_task = _spawn(i + 2)
+                next_label = f"R{i+2}-{round_plan[i+2]}"
+    finally:
+        # V-26.29: belt-and-braces cleanup. If an unhandled exception
+        # propagates out of the for-loop body, kill any background tasks
+        # the pipeline scheduled so they don't keep writing rows after the
+        # orchestrator gave up.
+        await _cancel_remaining()
 
     return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
 
@@ -978,8 +1013,13 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
         f"phase={task.cascade_phase or 'T1'} round_idx={task.cascade_round_idx}"
     )
 
-    # 2026-05-11 DIAG (cascade-stuck-T2) — file-marker bypassing loguru
+    # V-26.30: env-gated diagnostic; default OFF in production.
+    import os as _os
+    _outer_diag_enabled = _os.environ.get("CASCADE_PHASE_DIAG_FILE") == "1"
+
     def _outer_diag(msg: str) -> None:
+        if not _outer_diag_enabled:
+            return
         try:
             from datetime import datetime as _dt
             with open(".cascade_phase_diag.log", "a", encoding="utf-8") as _fp:
