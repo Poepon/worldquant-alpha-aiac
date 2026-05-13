@@ -63,11 +63,22 @@ async def node_rag_query(
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
     
     try:
+        # V-26.12: pass current_hypothesis_id (with V-25.C list[0] fallback for
+        # LangGraph scalar drops) so the retrieve path soft-prefers same-family
+        # SUCCESS_PATTERN / FAILURE_PITFALL rows. None when RAG_QUERY runs
+        # before HYPOTHESIS_PROPOSE — the retrieve scoring then ignores the
+        # field and falls back to dataset/category matching.
+        _hid_for_rag = state.current_hypothesis_id
+        if _hid_for_rag is None:
+            _hids_for_rag = state.current_hypothesis_ids or []
+            if _hids_for_rag:
+                _hid_for_rag = _hids_for_rag[0]
         result = await rag_service.query(
             dataset_id=state.dataset_id,
             region=state.region,
             max_patterns=5,
-            max_pitfalls=10
+            max_pitfalls=10,
+            hypothesis_id=_hid_for_rag,
         )
         
         duration_ms = int((time.time() - start_time) * 1000)

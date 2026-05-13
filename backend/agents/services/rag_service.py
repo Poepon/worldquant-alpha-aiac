@@ -288,46 +288,59 @@ class RAGService:
         dataset_id: str = None,
         region: str = None,
         max_patterns: int = 5,
-        max_pitfalls: int = 10
+        max_pitfalls: int = 10,
+        hypothesis_id: int = None,
     ) -> RAGResult:
         """
         Query knowledge base for relevant patterns and pitfalls.
-        
+
         Enhanced with category-aware retrieval:
         1. First try dataset-specific patterns
-        2. Then category-specific patterns  
+        2. Then category-specific patterns
         3. Finally fall back to generic patterns
-        
+
         Args:
             dataset_id: Optional dataset to filter by
             region: Optional region to filter by
             max_patterns: Maximum success patterns to return
             max_pitfalls: Maximum failure pitfalls to return
-            
+            hypothesis_id: V-26.12 (2026-05-13) — when set, KB entries whose
+                meta_data.hypothesis_ids contains this id receive a score
+                boost (same-family preference). Closes the Phase 2 B8 write
+                vs. read asymmetry: the write path
+                (record_success_pattern / record_failure_pattern) already
+                tags entries with hypothesis_id, but the retrieve path
+                ignored the tag entirely. This is a soft preference, not a
+                hard filter — passing it does not collapse the retrieval
+                pool to same-family-only.
+
         Returns:
             RAGResult with patterns, pitfalls, and dataset info
         """
         # Infer category from dataset_id
         category = infer_dataset_category(dataset_id) if dataset_id else "other"
-        
+
         logger.debug(
-            f"[RAGService] Query | dataset={dataset_id} region={region} category={category}"
+            f"[RAGService] Query | dataset={dataset_id} region={region} "
+            f"category={category} hypothesis_id={hypothesis_id}"
         )
-        
+
         # Get success patterns with category awareness
         patterns = await self._get_success_patterns_enhanced(
             dataset_id=dataset_id,
             category=category,
             region=region,
-            limit=max_patterns
+            limit=max_patterns,
+            hypothesis_id=hypothesis_id,
         )
-        
+
         # Get failure pitfalls
         pitfalls = await self._get_failure_pitfalls_enhanced(
             dataset_id=dataset_id,
             category=category,
             region=region,
-            limit=max_pitfalls
+            limit=max_pitfalls,
+            hypothesis_id=hypothesis_id,
         )
         
         # Get dataset info
@@ -353,7 +366,8 @@ class RAGService:
         dataset_id: str = None,
         category: str = "other",
         region: str = None,
-        limit: int = 5
+        limit: int = 5,
+        hypothesis_id: int = None,
     ) -> List[Dict]:
         """
         Get success patterns with intelligent category matching.
@@ -423,7 +437,21 @@ class RAGService:
             
             # 5. Usage count bonus (popular patterns)
             score += min(entry.usage_count or 0, 10) * 0.5
-            
+
+            # 6. V-26.12 (2026-05-13) — hypothesis-family preference. The
+            # write path tags KB rows with hypothesis_ids; surface that
+            # tag here as a soft score boost. Same-family pattern beats
+            # generic dataset/category matches but doesn't dominate them
+            # — caller still gets cross-hypothesis diversity if there
+            # aren't enough same-family rows.
+            if hypothesis_id is not None:
+                hids = metadata.get('hypothesis_ids') or []
+                # Tolerate single-int legacy field
+                if not isinstance(hids, list):
+                    hids = [hids]
+                if hypothesis_id in hids:
+                    score += 40.0
+
             scored_patterns.append({
                 'entry': entry,
                 'metadata': metadata,
@@ -462,7 +490,8 @@ class RAGService:
         dataset_id: str = None,
         category: str = "other",
         region: str = None,
-        limit: int = 10
+        limit: int = 10,
+        hypothesis_id: int = None,
     ) -> List[Dict]:
         """
         Get failure pitfalls with severity-based ranking.
@@ -506,7 +535,19 @@ class RAGService:
             # Prioritize type errors and syntax errors
             if error_type in ['TYPE_ERROR', 'SYNTAX_ERROR', 'SEMANTIC_ERROR']:
                 score += 15.0
-            
+
+            # V-26.12 (2026-05-13) — hypothesis-family soft preference,
+            # symmetric with _get_success_patterns_enhanced. Same-family
+            # pitfalls beat generic ones so the LLM is reminded of mistakes
+            # made under THIS hypothesis specifically (avoiding
+            # ImplementationFault repetition).
+            if hypothesis_id is not None:
+                hids = metadata.get('hypothesis_ids') or []
+                if not isinstance(hids, list):
+                    hids = [hids]
+                if hypothesis_id in hids:
+                    score += 25.0
+
             scored_pitfalls.append({
                 'entry': entry,
                 'metadata': metadata,
