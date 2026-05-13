@@ -448,12 +448,66 @@ async def node_hypothesis(
     cfg = (config.get("configurable", {}) if config else {}) or {}
     hge_level = int(cfg.get("hypothesis_centric_level", 0) or 0)
 
+    # V-22.13 (2026-05-13) — Hypothesis cross-round reuse.
+    # Spike on Phase 3 trigger monitor (2026-05-13 02:04 UTC) revealed:
+    # 105 attribution=hypothesis feedbacks across 14 days, but ZERO
+    # hypotheses ABANDONED. Root cause: node_hypothesis created a fresh
+    # Hypothesis row per round, so each row's history_for_hid had only 1
+    # entry — should_abandon_hypothesis requires ≥3 consecutive entries.
+    # Abandon path was structurally dead.
+    #
+    # Fix: when hge_level >= 2 AND state.current_hypothesis_id is set AND
+    # that hypothesis is still ACTIVE AND its round_history has < N entries,
+    # REUSE it for this round. Same Hypothesis row accumulates rounds; B6
+    # abandon fires at round 3 if pattern is hypothesis-fail × 3.
+    if hge_level >= 2 and state.current_hypothesis_id:
+        try:
+            from backend.database import AsyncSessionLocal
+            from backend.services.hypothesis_service import HypothesisService
+            from backend.agents.graph.early_stop import HYPOTHESIS_ABANDON_ROUNDS
+            history_len = len(
+                (state.hypothesis_round_history or {}).get(
+                    state.current_hypothesis_id, []
+                )
+            )
+            if history_len < HYPOTHESIS_ABANDON_ROUNDS:
+                async with AsyncSessionLocal() as _reuse_db:
+                    svc = HypothesisService(_reuse_db)
+                    existing = await svc.get_by_id(state.current_hypothesis_id)
+                if existing is not None and existing.status in ("ACTIVE", "PROPOSED"):
+                    current_hypothesis_id = existing.id
+                    current_hypothesis_ids = [existing.id]
+                    hypotheses = [{
+                        "idea": existing.statement,
+                        "statement": existing.statement,
+                        "rationale": existing.rationale or "",
+                        "expected_signal": existing.expected_signal or "unknown",
+                        "key_fields": existing.key_fields or [],
+                        "suggested_operators": existing.suggested_operators or [],
+                        "selected_datasets": existing.dataset_pool or [],
+                        "confidence": existing.confidence,
+                        "novelty": existing.novelty,
+                        "hypothesis_id": existing.id,
+                        "_v22_13_reused": True,
+                    }]
+                    chosen_datasets = existing.dataset_pool or [legacy_anchor]
+                    logger.info(
+                        f"[{node_name}] V-22.13 cross-round reuse: hypothesis_id="
+                        f"{existing.id} (history_len={history_len}/"
+                        f"{HYPOTHESIS_ABANDON_ROUNDS}, status={existing.status}, "
+                        f"statement={existing.statement[:60]!r})"
+                    )
+        except Exception as _v22_13_ex:
+            logger.warning(
+                f"[{node_name}] V-22.13 reuse check failed (non-fatal): {_v22_13_ex}"
+            )
+
     # G — Hypothesis Refinement Loop (2026-05-06): before persisting a fresh
     # LLM-emitted hypothesis, check if there's an unused refined child from
     # a recently SUPERSEDED parent (B5 abandon → refine path created it).
     # If found, use that child as the round's primary instead — closes the
     # feedback loop so refinement is actually applied, not just bookkept.
-    if hge_level >= 2:
+    if hge_level >= 2 and current_hypothesis_id is None:
         try:
             from backend.database import AsyncSessionLocal
             from backend.services.hypothesis_service import HypothesisService
