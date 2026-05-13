@@ -1303,7 +1303,12 @@ async def node_evaluate(
             "_brain_can_submit": brain_can_submit,
             "_brain_failed_checks": brain_failed_checks,
             "_brain_pending_checks": brain_eval.get('pending_checks', []),
-            "_pyramid_multiplier": pyramid_multiplier,
+            # V-26.77 follow-up (2026-05-14): pyramid_multiplier was previously
+            # extracted into a local variable then stamped here; the variable
+            # was removed but this stamping line was missed, raising NameError
+            # on every iteration. Read directly from brain_eval to restore the
+            # diagnostic field without resurrecting the dead local.
+            "_pyramid_multiplier": (brain_eval.get('pyramid_info') or {}).get('multiplier', 1.0),
         }
         
         _debug_log("F", "nodes.py:evaluate:alpha_detail", f"Alpha evaluated: {alpha.quality_status}", {
