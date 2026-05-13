@@ -204,7 +204,13 @@ class Settings(BaseSettings):
     # 2 = typed Hypothesis + lifecycle (Phase 2, 9-12 day)
     # 3 = main-loop invert (Phase 3, deferred to Q3 re-evaluation)
     HYPOTHESIS_CENTRIC_LEVEL: int = 0
-    HYPOTHESIS_CENTRIC_CANDIDATE: int = 0   # 50/50 A/B candidate level (>= LEVEL)
+    # V-22.11 (2026-05-13): Phase 2 A/B activation. CANDIDATE=2 enables 50/50
+    # split — new tasks get either legacy (LEVEL=0) or Phase 2 typed
+    # Hypothesis path (LEVEL=2) per task_service.assign_variant. Phase 2 code
+    # (B1-B10) is fully shipped + unit-tested; this flag flips it into the
+    # live mining loop for empirical validation. Per plan v5+ F-5 unidirectional
+    # migration: once stable, bump LEVEL=2 to make Phase 2 default.
+    HYPOTHESIS_CENTRIC_CANDIDATE: int = 2   # 50/50 A/B candidate level (>= LEVEL)
     # Phase 1 cross-dataset hypothesis: how many complementary datasets the
     # LLM is offered alongside the anchor dataset. 0 = single anchor only
     # (legacy behavior). 3 = anchor + 3 others (plan default).
