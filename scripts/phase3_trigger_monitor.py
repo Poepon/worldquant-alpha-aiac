@@ -101,15 +101,22 @@ async def cohort_pass_rate(db, days: int, variant_filter: str) -> dict:
 async def hypothesis_abandon_stats(db, days: int) -> dict:
     """Phase 2 hypothesis lifecycle distribution over last N days.
 
-    Abandon-rate definition (2026-05-13 fix): SUPERSEDED counts toward
-    abandonment. node_hypothesis replacement marks prior hids SUPERSEDED
-    before B6 attribution can accumulate, so the strict ABANDONED column
-    consistently reads 0 even when the system is actively retiring
-    hypotheses. (ABANDONED + SUPERSEDED) / total is the honest signal.
+    V-25.A correction (2026-05-13): exclude V-19.7 zombie-cleanup rows.
+    The 290 SUPERSEDED rows with abandon_reason starting with "V-19.7
+    zombie" came from a one-shot manual transition on 2026-05-06 to
+    clean up pre-V-19.7 multi-sibling rows. Including them gave a fake
+    43.4% retirement signal that has nothing to do with live B6 /
+    G-refine. Real Phase 2 retirement rate is currently 0% — the
+    mechanism has not fired end-to-end in production yet.
+
+    Abandon-rate definition: (ABANDONED + SUPERSEDED) / total, where
+    SUPERSEDED counts toward abandonment because the G-refine loop
+    converts B6 fires into SUPERSEDED (functionally equivalent).
     """
     sql = text(f"""
         SELECT status, count(*) FROM hypotheses
         WHERE created_at > NOW() - INTERVAL '{days} days'
+          AND COALESCE(abandon_reason, '') NOT LIKE 'V-19.7 zombie%'
         GROUP BY status
     """)
     by_status = {}

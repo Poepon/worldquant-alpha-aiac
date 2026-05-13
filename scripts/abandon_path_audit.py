@@ -37,14 +37,28 @@ from backend.agents.graph.early_stop import HYPOTHESIS_ABANDON_ROUNDS
 from backend.database import AsyncSessionLocal
 
 
-async def lifecycle_breakdown(db, days: int) -> dict:
+# V-25.A (2026-05-13): exclude V-19.7 zombie-cleanup rows. Those 290
+# SUPERSEDED rows were a one-shot manual transition on 2026-05-06 — they
+# carry abandon_reason starting with "V-19.7 zombie cleanup". Including
+# them in lifecycle stats produces a fake 43.4% retirement-rate signal
+# that has nothing to do with the live B6 / G-refine pipeline.
+ZOMBIE_REASON_PREFIX = "V-19.7 zombie"
+
+
+async def lifecycle_breakdown(db, days: int, *, exclude_zombies: bool = True) -> dict:
+    extra = (
+        "AND COALESCE(abandon_reason, '') NOT LIKE :zp"
+        if exclude_zombies else ""
+    )
     sql = text(f"""
         SELECT status, COUNT(*) FROM hypotheses
         WHERE created_at > NOW() - INTERVAL '{days} days'
+        {extra}
         GROUP BY status
     """)
+    params = {"zp": f"{ZOMBIE_REASON_PREFIX}%"} if exclude_zombies else {}
     out = {}
-    for row in (await db.execute(sql)).all():
+    for row in (await db.execute(sql, params)).all():
         out[row[0]] = row[1]
     return out
 
@@ -127,37 +141,129 @@ async def b6_qualified_count(db, days: int) -> dict:
     return out
 
 
+async def linkage_breakdown(db, days: int) -> dict:
+    """V-25.A — 3-way orphan classification using status semantics.
+
+    Key insight: status itself is the "was tried" signal. mark_active
+    only flips PROPOSED → ACTIVE when B5 sees alpha_count > 0 in the
+    round — i.e. code_gen produced ≥1 candidate. So:
+
+      ACTIVE → at minimum the candidates were generated; whether they
+              FAILed at validate / simulate is captured in
+              alpha_failures (which currently has no hypothesis_id —
+              see V-25.B), so we can't count failed-but-tried alphas
+              directly. ACTIVE+no_pass = "tried, all failed validation
+              / simulation / quality — mining noise, not a bug".
+      PROMOTED → ≥1 PASS reached alphas table.
+      PROPOSED → mark_active never fired = 0 candidates generated for
+                this hid. This is the "never_tried" bucket — usually
+                V-22.13 reuse failure replacing it before code_gen ran.
+      ABANDONED → B6 should_abandon fired (currently 0 in live data)
+      SUPERSEDED → G-refine fired (currently 0 in live data after
+                  excluding V-19.7 zombies)
+    """
+    sql = text(f"""
+        WITH base AS (
+            SELECT h.id AS hid, h.status
+            FROM hypotheses h
+            WHERE h.created_at > NOW() - INTERVAL '{days} days'
+              AND COALESCE(h.abandon_reason, '') NOT LIKE :zp
+        ),
+        pass_link AS (
+            SELECT hypothesis_id AS hid, COUNT(*) AS n
+            FROM alphas
+            WHERE hypothesis_id IS NOT NULL
+              AND quality_status IN ('PASS', 'PASS_PROVISIONAL')
+            GROUP BY hypothesis_id
+        )
+        SELECT
+            base.status,
+            COUNT(*) FILTER (WHERE COALESCE(pass_link.n, 0) > 0)
+                AS linked_with_pass,
+            COUNT(*) FILTER (
+                WHERE base.status = 'ACTIVE'
+                  AND COALESCE(pass_link.n, 0) = 0
+            ) AS tried_no_pass,
+            COUNT(*) FILTER (
+                WHERE base.status = 'PROPOSED'
+            ) AS never_tried,
+            COUNT(*) AS total
+        FROM base
+        LEFT JOIN pass_link ON pass_link.hid = base.hid
+        GROUP BY base.status
+        ORDER BY total DESC
+    """)
+    rows = (await db.execute(sql, {"zp": f"{ZOMBIE_REASON_PREFIX}%"})).all()
+    return [dict(r._mapping) for r in rows]
+
+
 async def main(days: int) -> None:
     print(f"=== V-24.A Hypothesis abandon path audit (last {days}d) ===\n")
     print(f"HYPOTHESIS_ABANDON_ROUNDS = {HYPOTHESIS_ABANDON_ROUNDS}\n")
+    print(f"V-25.A: V-19.7 zombie-cleanup rows (one-shot 2026-05-06)\n"
+          f"        EXCLUDED from lifecycle and linkage stats below.\n")
 
     async with AsyncSessionLocal() as db:
         lifecycle = await lifecycle_breakdown(db, days)
+        lifecycle_raw = await lifecycle_breakdown(db, days, exclude_zombies=False)
         clusters = await hypothesis_alpha_clusters(db, days)
         chains = await supersede_chain_depth(db, days)
         qualified = await b6_qualified_count(db, days)
+        linkage = await linkage_breakdown(db, days)
 
     # 1. Status breakdown
     total = sum(lifecycle.values()) or 1
-    print("## Lifecycle status distribution")
+    total_raw = sum(lifecycle_raw.values()) or 1
+    zombies = total_raw - total
+    print("## Lifecycle status distribution (excl. V-19.7 zombies)")
     for s in ("PROPOSED", "ACTIVE", "PROMOTED", "SUPERSEDED", "ABANDONED"):
         n = lifecycle.get(s, 0)
+        n_raw = lifecycle_raw.get(s, 0)
         pct = n / total * 100
-        print(f"  {s:12s} {n:4d}  ({pct:5.1f}%)")
-    print(f"  {'TOTAL':12s} {total:4d}")
+        suffix = f"  [+{n_raw - n} zombie]" if n_raw != n else ""
+        print(f"  {s:12s} {n:4d}  ({pct:5.1f}%){suffix}")
+    print(f"  {'TOTAL':12s} {total:4d}  (excluded {zombies} V-19.7 zombies)")
     print()
 
-    # 2. Retirement breakdown (the metric Trigger 2 actually uses)
+    # 1b. V-25.A linkage breakdown — distinguish tried-no-pass vs never-tried
+    print("## Alpha linkage by status (V-25.A — orphan composition)")
+    print(f"  {'status':<12s} {'with_PASS':>10s} {'tried_no_PASS':>14s} "
+          f"{'never_tried':>12s} {'total':>7s}")
+    for row in linkage:
+        st = row["status"]
+        if st == "ABANDONED":
+            continue  # all zombies, excluded
+        print(
+            f"  {st:<12s} {row['linked_with_pass']:>10d} "
+            f"{row['tried_no_pass']:>14d} {row['never_tried']:>12d} "
+            f"{row['total']:>7d}"
+        )
+    print(f"\n  legend:")
+    print(f"    with_PASS    = hypothesis produced ≥1 PASS alpha (PROMOTED expected)")
+    print(f"    tried_no_PASS = pending_alphas was non-empty but 0 made it to alphas table")
+    print(f"                   — typical of ACTIVE with all-FAIL rounds (mining noise,")
+    print(f"                   NOT a bug). FAIL alphas live in alpha_failures which has")
+    print(f"                   no hypothesis_id column (see V-25.B).")
+    print(f"    never_tried  = hypothesis created then immediately replaced before any")
+    print(f"                   alpha attempt (V-22.13 reuse failure — real bug, V-25.C)")
+    print()
+
+    # 2. Retirement breakdown — V-25.A: excludes V-19.7 zombies that
+    # were previously inflating this to 43.4%. Real B6/G-refine retirement
+    # rate is 0% (mechanism never fired end-to-end in production).
     abandoned = lifecycle.get("ABANDONED", 0)
     superseded = lifecycle.get("SUPERSEDED", 0)
     retired = abandoned + superseded
-    print("## Retirement composition (Trigger 2 numerator)")
+    print("## Retirement composition (Trigger 2 numerator, excl. zombies)")
     print(f"  ABANDONED (direct):     {abandoned:4d}")
     print(f"  SUPERSEDED (via refine):{superseded:4d}")
     print(f"  Total retired:          {retired:4d} ({retired/total*100:5.1f}%)")
     if retired:
         super_share = superseded / retired * 100
         print(f"  G-refine share of retirements: {super_share:.1f}%")
+    else:
+        print(f"  ⚠ 0 retirements in live data — B6 / G-refine mechanism not")
+        print(f"  firing end-to-end. Previous '43.4%' was V-19.7 zombie cleanup.")
     print()
 
     # 3. Chain depth — proxy for "B6 fired multiple times on same lineage"
@@ -217,16 +323,9 @@ async def main(days: int) -> None:
     # 6. Recommendation
     print("## Recommendation")
     if abandoned == 0 and superseded > 0:
-        print("  ✅ B6 mechanism IS working — every fire converts to SUPERSEDED")
-        print("    via G-refine loop. Trigger 2 retirement formula is correct.")
-        print()
-        print("  Secondary finding — orphan rate by creation date:")
-        print("    pre-2026-05-06 buckets show high orphan % (V-19.7 multi-sibling")
-        print("    bug); recent buckets should be <30% if V-19.7 is holding.")
-        print()
-        print("  If you want non-zero ABANDONED:")
-        print("    - Disable G-refine for control experiments (compare both)")
-        print("    - Lower refine_chain_depth ceiling so deep chains abandon")
+        # Should not reach here after V-25.A zombie filter unless G-refine
+        # actually starts producing SUPERSEDED rows in production.
+        print("  ✅ B6 mechanism producing real SUPERSEDED — G-refine working.")
     elif abandoned == 0 and superseded == 0:
         print("  ⚠ Neither ABANDONED nor SUPERSEDED fires. Possible causes:")
         print("    - Hypothesis lifecycle short-circuits before B6 sees it")
