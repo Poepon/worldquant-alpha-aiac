@@ -1018,8 +1018,21 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
             except Exception as _es:
                 logger.warning(f"[cascade] ensure_session at phase boundary failed: {_es}")
 
-            # Resume: if cascade_phase is None or invalid, start at T1
+            # Resume: if cascade_phase is None or invalid, start at T1.
+            # V-26.28 (2026-05-13): if the column holds an unrecognized value
+            # (manual DB edit, future enum extension that this worker doesn't
+            # know about) all three phase branches below silently no-op and
+            # the `while True` becomes a busy loop. Normalize to T1 with a
+            # WARNING so the situation is observable.
             current_phase = task.cascade_phase or "T1"
+            if current_phase not in {"T1", "T2", "T3"}:
+                logger.warning(
+                    f"[cascade] task={task.id} V-26.28 unrecognized cascade_phase="
+                    f"{task.cascade_phase!r}; resetting to T1"
+                )
+                current_phase = "T1"
+                task.cascade_phase = "T1"
+                await db.commit()
             _outer_diag(f"loop_top current_phase={current_phase} round_idx={task.cascade_round_idx}")
 
             # ============================================================

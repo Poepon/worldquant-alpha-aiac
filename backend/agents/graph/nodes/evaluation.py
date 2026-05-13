@@ -112,35 +112,121 @@ _V16_LOOKAHEAD_FIELDS: tuple = (
 # parameter mining
 _V16_STANDARD_WINDOWS: set = {1, 2, 3, 5, 10, 15, 20, 30, 60, 90, 120, 240, 480, 1200}
 
-_V16_DIVIDE_RE = _re_v16.compile(r"divide\s*\(\s*[^,()]+,\s*([a-zA-Z_][\w]*)\s*\)")
 _V16_TS_WINDOW_RE = _re_v16.compile(r"\bts_\w+\s*\([^,()]+,\s*(\d+)\b")
 
 
+def _extract_divide_denominators(expression: str) -> list:
+    """V-26.69 (2026-05-13): paren-balanced extraction of the 2nd
+    argument to every `divide(...)` call in `expression`.
+
+    Pre-fix the V-16 divide check used a flat regex
+    `divide\\(\\s*[^,()]+,\\s*([a-zA-Z_]\\w*)\\s*\\)` which only matched a
+    bare identifier denominator — anything nested (`divide(x, ts_mean(returns, 5))`
+    or arithmetic compounds) was invisible. Now we walk paren depth so
+    the denominator's full sub-expression is captured and any risky
+    field token inside is detected.
+    """
+    out = []
+    n = len(expression)
+    i = 0
+    while i < n:
+        idx = expression.find("divide(", i)
+        if idx == -1:
+            break
+        # Position cursor inside divide('s arg list; depth=0 means at the
+        # comma/close-paren that matches this divide call.
+        depth = 0
+        j = idx + len("divide(")
+        comma_idx = -1
+        while j < n:
+            c = expression[j]
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == "," and depth == 0:
+                comma_idx = j
+                break
+            j += 1
+        if comma_idx == -1:
+            i = idx + 1
+            continue
+        # Walk to matching close-paren of this divide(...)
+        depth2 = 0
+        k = comma_idx + 1
+        while k < n:
+            c = expression[k]
+            if c == "(":
+                depth2 += 1
+            elif c == ")":
+                if depth2 == 0:
+                    break
+                depth2 -= 1
+            k += 1
+        denom_expr = expression[comma_idx + 1:k].strip()
+        if denom_expr:
+            out.append(denom_expr)
+        i = idx + 1
+    return out
+
+
 def _v16_check_divide_by_zero(expression: str) -> str | None:
-    """Risk 1: divide() with denominator that may be 0 on some dates."""
+    """Risk 1: divide() with denominator that may be 0 on some dates.
+
+    V-26.69: now extracts the full denominator sub-expression and checks
+    whether any risky field name appears as a token inside it. Catches
+    `divide(x, ts_mean(returns, 5))` and arithmetic-compound denominators
+    that the original shallow regex missed.
+    """
     if not expression:
         return None
-    for m in _V16_DIVIDE_RE.finditer(expression):
-        denom = m.group(1).lower()
-        if denom in _V16_DIVIDE_RISKY_DENOMS:
-            return f"divide(_, {denom}) — denominator can be 0"
+    denoms = _extract_divide_denominators(expression)
+    if not denoms:
+        return None
+    for denom_expr in denoms:
+        low = denom_expr.lower()
+        for risky in _V16_DIVIDE_RISKY_DENOMS:
+            if _re_v16.search(rf"\b{_re_v16.escape(risky)}\b", low):
+                return f"divide(_, …{risky}…) — denominator can be 0"
     return None
 
 
 def _v16_check_lookahead(expression: str) -> str | None:
-    """Risk 2: announcement-type fields must be ts_delay-wrapped."""
+    """Risk 2: announcement-type fields must be ts_delay-wrapped.
+
+    V-26.70 (2026-05-13): pre-fix used `find` + `rfind` index comparison
+    which counted ts_delay anywhere before the field — including a
+    sibling `ts_delay(other_field, 1)` that's not actually wrapping the
+    announcement field. Now we require both the field-presence check
+    AND the ts_delay-wrap check to use whole-token (\\b...\\b) regex so:
+
+      - `actual_eps_value_quarterly` doesn't trigger the
+        `actual_eps_value` rule (substring false positive)
+      - sibling ts_delay calls don't satisfy the direct-wrap requirement
+        (the original false negative)
+    """
     if not expression:
         return None
     el = expression.lower()
     for field in _V16_LOOKAHEAD_FIELDS:
-        if field not in el:
+        field_re = _re_v16.escape(field)
+        # V-26.70: `field` is treated as a token-prefix — the announcement
+        # field family includes suffixed variants like
+        # `actual_eps_value_quarterly`. Word boundary on the LEFT only;
+        # right side allows any word-char continuation. This is the same
+        # token a direct ts_delay wrap must reference.
+        token_re = rf"\b{field_re}\w*"
+        if not _re_v16.search(token_re, el):
             continue
-        # ts_delay must wrap the field. Heuristic: ts_delay( appears at
-        # smaller index than the field's first occurrence in same nesting.
-        idx_field = el.find(field)
-        idx_delay = el.rfind("ts_delay", 0, idx_field)
-        if idx_delay == -1:
-            return f"announcement field '{field}' used without ts_delay wrapping"
+        # ts_delay must directly wrap a token in the same family.
+        if _re_v16.search(rf"ts_delay\s*\(\s*{token_re}", el):
+            continue
+        return (
+            f"announcement field '{field}' used without ts_delay direct-wrap "
+            f"(sibling ts_delay does not mitigate lookahead)"
+        )
     return None
 
 
@@ -332,12 +418,25 @@ async def node_simulate(
         indices_to_simulate = valid_indices
     
     # Helper to merge dedup_skel_buf into state.recent_dedup_skeletons,
-    # de-duped, last-N retained (insertion-order preserved). Cap from
-    # settings.DEDUP_BLACKLIST_CAP (default 50, V-22.4 made configurable).
+    # de-duped, last-N retained. Cap from settings.DEDUP_BLACKLIST_CAP.
+    #
+    # V-26.72 (2026-05-13): pre-fix used `dict.fromkeys(merged)` which
+    # preserves the FIRST occurrence of each key. When a skeleton already
+    # in the older `state.recent_dedup_skeletons` reappeared in the new
+    # `dedup_skel_buf`, the position stayed at the old (front) location.
+    # After the `[-cap:]` slice the recurring skeleton fell out of the
+    # window first, even though it was just hit again — defeating the
+    # "freshest N" intent. `ordered.pop` then re-insert implements
+    # move-to-end on duplicate so recurring skeletons stay protected.
     def _merge_dedup_skels() -> list[str]:
         cap = int(getattr(settings, "DEDUP_BLACKLIST_CAP", 50) or 50)
-        merged = list(state.recent_dedup_skeletons or []) + dedup_skel_buf
-        return list(dict.fromkeys(merged))[-cap:]
+        ordered: Dict[str, None] = {}
+        for s in (state.recent_dedup_skeletons or []):
+            ordered[s] = None
+        for s in dedup_skel_buf:
+            ordered.pop(s, None)
+            ordered[s] = None
+        return list(ordered.keys())[-cap:]
 
     if not indices_to_simulate:
         logger.warning(f"[{node_name}] All expressions already in DB")

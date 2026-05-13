@@ -861,11 +861,26 @@ async def node_code_gen(
             else:
                 explanation = explanation_raw
             
+            # V-26.50 (2026-05-13): LLM output sometimes has expected_sharpe
+            # as a string, NaN, or absurd magnitude (the field is user-facing
+            # context in downstream prompts so a junk value pollutes the loop).
+            # Clip to a sane range, drop non-numerics.
+            raw_es = alpha_data.get("expected_sharpe")
+            sanitized_es: Optional[float]
+            try:
+                v = float(raw_es) if raw_es is not None else None
+                if v is None or v != v:  # NaN check
+                    sanitized_es = None
+                else:
+                    sanitized_es = max(-5.0, min(10.0, v))
+            except (TypeError, ValueError):
+                sanitized_es = None
+
             candidate = AlphaCandidate(
                 expression=alpha_data.get("expression", ""),
                 hypothesis=hypothesis_text,
                 explanation=explanation,
-                expected_sharpe=alpha_data.get("expected_sharpe")
+                expected_sharpe=sanitized_es,
             )
             
             # Attach additional metadata for tracking

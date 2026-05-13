@@ -44,6 +44,47 @@ def _get_fields_used_validator():
     return _FIELDS_USED_VALIDATOR
 
 
+def _resolve_metrics_snapshot_at(metrics_dict: Dict, fallback: datetime) -> datetime:
+    """V-26.91: pick the best available timestamp for when this alpha's
+    metrics were actually produced.
+
+    Order of preference:
+      1. metrics["dateModified"] — BRAIN echoes this on the alpha resource.
+      2. metrics["sim_completed_at"] — set by some retry paths.
+      3. fresh `datetime.utcnow()` — better than batch-start but still
+         a few seconds late for early-bucket alphas.
+      4. `fallback` — only used when steps 1-3 all fail unexpectedly.
+
+    Returns a naive UTC datetime (matches the existing column shape).
+    """
+    if not isinstance(metrics_dict, dict):
+        return fallback
+    for key in ("dateModified", "sim_completed_at"):
+        raw = metrics_dict.get(key)
+        if not raw:
+            continue
+        # Tolerate datetime, ISO-8601 string, or epoch number.
+        if isinstance(raw, datetime):
+            return raw.replace(tzinfo=None)
+        if isinstance(raw, (int, float)):
+            try:
+                return datetime.utcfromtimestamp(float(raw))
+            except (OverflowError, OSError, ValueError):
+                continue
+        if isinstance(raw, str):
+            try:
+                # Trim 'Z' suffix; datetime.fromisoformat accepts the rest.
+                s = raw[:-1] if raw.endswith("Z") else raw
+                dt = datetime.fromisoformat(s)
+                return dt.replace(tzinfo=None)
+            except ValueError:
+                continue
+    try:
+        return datetime.utcnow()
+    except Exception:
+        return fallback
+
+
 # =============================================================================
 # V-19.8 RESUME helper — expression-hash dedup for paused-and-resumed sessions
 # =============================================================================
@@ -140,7 +181,14 @@ async def _incremental_save_alphas(
     # trip — added to the INSERT path below).
     from sqlalchemy.dialects.postgresql import insert as pg_insert
 
-    snapshot_at = datetime.utcnow()
+    # V-26.91 (2026-05-13): pre-fix used one wall-clock for the whole
+    # batch, which collapsed the per-alpha sim completion times into the
+    # moment the batch crossed _incremental_save_alphas. Cascade phases
+    # span minutes; later auditing of "when did this alpha actually
+    # complete simulating" lost that precision. We now prefer BRAIN's
+    # `dateModified` from the alpha metrics (set by simulate response)
+    # and fall back to per-alpha wall-clock at persist time.
+    batch_fallback_at = datetime.utcnow()
     out: List[AlphaResult] = []
     inserted_alpha_ids: List[str] = []  # alpha_ids that successfully landed
     on_conflict_skipped: List[str] = []  # alpha_ids skipped by ON CONFLICT (race / cross-task)
@@ -151,6 +199,11 @@ async def _incremental_save_alphas(
         # pre-batch SELECT round-trip.
         metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
         expr_hash = compute_expression_hash(alpha.expression) if alpha.expression else None
+
+        # V-26.91: per-alpha snapshot_at. BRAIN's dateModified is ISO-string
+        # in metrics; parse leniently and fall back to a fresh wall-clock
+        # for THIS alpha rather than the batch start.
+        snapshot_at = _resolve_metrics_snapshot_at(metrics_dict, batch_fallback_at)
 
         values_dict = dict(
             task_id=task_id,
