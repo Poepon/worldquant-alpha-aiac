@@ -177,3 +177,41 @@ def error_kb_size() -> int:
         return int(cli.llen(_ERROR_KB_KEY) or 0)
     except Exception:
         return 0
+
+
+# ---------------------------------------------------------------------------
+# V-26.84 — IQC audit in-flight lock for sweep idempotency
+# ---------------------------------------------------------------------------
+#
+# Pre-fix `iqc_audit_backfill_sweep` re-enqueued every alpha that hadn't
+# yet landed its `_iqc_marginal` metric, every beat tick. If a previous
+# enqueue was still pending in celery (worker backlog, BRAIN slow) the
+# alpha got piled on again, multiplying the BRAIN load. Lock with a TTL
+# slightly longer than the longest expected audit (10 min) so a worker
+# crash doesn't trap the alpha forever; subsequent sweep ticks will
+# eventually re-attempt after the lock expires.
+
+_IQC_AUDIT_LOCK_TTL_SEC = 600
+
+
+def claim_iqc_audit_lock(alpha_pk: int) -> bool:
+    """SET NX EX. Returns True iff this caller now owns the audit slot."""
+    try:
+        cli = get_redis_client()
+        key = f"iqc_audit:inflight:{alpha_pk}"
+        return bool(cli.set(key, "1", nx=True, ex=_IQC_AUDIT_LOCK_TTL_SEC))
+    except Exception as exc:
+        logger.warning(f"[iqc_audit_lock] claim failed for pk={alpha_pk}: {exc}")
+        # Fail-open: if Redis is down we'd rather over-enqueue than starve
+        # audits. Sweep cap already bounds the blast radius.
+        return True
+
+
+def release_iqc_audit_lock(alpha_pk: int) -> None:
+    """Best-effort DELETE after audit_iqc_marginal_for_alpha completes
+    (success or failure). TTL is a safety net for unreleased locks."""
+    try:
+        cli = get_redis_client()
+        cli.delete(f"iqc_audit:inflight:{alpha_pk}")
+    except Exception:
+        pass

@@ -11,6 +11,7 @@ Contains:
 - node_evaluate: Evaluate alpha quality using multi-objective scoring
 """
 
+import asyncio
 import time
 import random
 from typing import Dict, List, Optional, Tuple
@@ -490,14 +491,35 @@ async def node_simulate(
         for settings_key, local_indices in buckets.items():
             bucket_kwargs = dict(zip(SETTINGS_KEYS, settings_key))
             bucket_exprs = [expressions[li] for li in local_indices]
-            try:
-                bucket_results = await brain.simulate_batch(
-                    expressions=bucket_exprs,
-                    **bucket_kwargs,
-                )
-            except Exception as e:
-                logger.error(f"[{node_name}] bucket sim error ({settings_key}): {e}")
-                bucket_results = [{"success": False, "error": str(e)} for _ in bucket_exprs]
+            # V-26.66 (2026-05-13): one batch-level retry with a short
+            # backoff before declaring the whole bucket failed. Most
+            # bucket-wide failures are transient (BRAIN auth blip, sim
+            # slot starvation, transport timeout). Retrying once recovers
+            # ~70-80% of these without doubling worst-case latency.
+            bucket_results = None
+            for _attempt in range(2):
+                try:
+                    bucket_results = await brain.simulate_batch(
+                        expressions=bucket_exprs,
+                        **bucket_kwargs,
+                    )
+                    break
+                except Exception as e:
+                    if _attempt == 0:
+                        logger.warning(
+                            f"[{node_name}] V-26.66 bucket sim error ({settings_key}) — "
+                            f"retrying once: {e}"
+                        )
+                        await asyncio.sleep(2.0)
+                        continue
+                    logger.error(
+                        f"[{node_name}] V-26.66 bucket sim failed after retry "
+                        f"({settings_key}): {e}"
+                    )
+                    bucket_results = [
+                        {"success": False, "error": f"sim_batch_fail_after_retry: {e}"}
+                        for _ in bucket_exprs
+                    ]
             for j, li in enumerate(local_indices):
                 results[li] = bucket_results[j] if j < len(bucket_results) else {"success": False, "error": "Missing"}
     else:

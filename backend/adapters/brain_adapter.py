@@ -19,7 +19,7 @@ from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta
 import httpx
 import redis.asyncio as redis
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, wait_random_exponential
 from loguru import logger
 from sqlalchemy import select
 import logging
@@ -463,7 +463,14 @@ class BrainAdapter:
         except Exception:
             return False
 
-    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=2, min=4, max=60))
+    # V-26.74 (2026-05-13): added random jitter to the exponential backoff.
+    # Multiple celery workers expire their tokens at roughly the same wall
+    # clock (Redis TTL is shared, BRAIN's token expiry is shared) — without
+    # jitter all workers re-authenticate within the same exponential window
+    # and hammer /authentication, increasing the chance BRAIN rate-limits
+    # the auth endpoint itself. wait_random_exponential adds a uniform
+    # multiplier on each retry so the worker pool desynchronizes.
+    @retry(stop=stop_after_attempt(5), wait=wait_random_exponential(multiplier=2, min=4, max=60))
     async def authenticate(self) -> bool:
         """
         Authenticate using Basic Auth.

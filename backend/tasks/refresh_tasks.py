@@ -357,6 +357,12 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
                 update(Alpha).where(Alpha.id == alpha_pk).values(metrics=new_metrics)
             )
             await db.commit()
+            # V-26.84: release sweep-side inflight lock on successful audit.
+            try:
+                from backend.tasks.redis_pool import release_iqc_audit_lock
+                release_iqc_audit_lock(alpha_pk)
+            except Exception:
+                pass
             return {
                 "alpha_pk": alpha_pk,
                 "competition": competition,
@@ -365,6 +371,42 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
             }
     except Exception as e:
         logger.warning(f"[audit_iqc_marginal] alpha_pk={alpha_pk} failed: {e}")
+        # V-26.86 (2026-05-13): increment a per-alpha failure counter so the
+        # sweep can stop re-queuing alphas that BRAIN consistently rejects
+        # (HTTP 400 on weird alpha_id, 500 server side, etc.). Filter is
+        # applied in _iqc_audit_backfill_sweep_async via the
+        # `_iqc_marginal.audit_failures` JSONB path.
+        try:
+            from sqlalchemy import select, update as _u
+            from backend.database import AsyncSessionLocal
+            from backend.models import Alpha
+            async with AsyncSessionLocal() as fail_db:
+                cur_metrics = (
+                    await fail_db.execute(
+                        select(Alpha.metrics).where(Alpha.id == alpha_pk)
+                    )
+                ).scalar_one_or_none() or {}
+                m = dict(cur_metrics) if isinstance(cur_metrics, dict) else {}
+                iqc = dict(m.get("_iqc_marginal") or {})
+                iqc["audit_failures"] = int(iqc.get("audit_failures") or 0) + 1
+                iqc["last_error"] = str(e)[:200]
+                m["_iqc_marginal"] = iqc
+                await fail_db.execute(
+                    _u(Alpha).where(Alpha.id == alpha_pk).values(metrics=m)
+                )
+                await fail_db.commit()
+        except Exception as _failed_to_bump:
+            logger.warning(
+                f"[audit_iqc_marginal] V-26.86 failure-counter bump failed: {_failed_to_bump}"
+            )
+        finally:
+            # V-26.84: release sweep-side inflight lock so next sweep tick
+            # can re-enqueue (subject to retry-count filter applied there).
+            try:
+                from backend.tasks.redis_pool import release_iqc_audit_lock
+                release_iqc_audit_lock(alpha_pk)
+            except Exception:
+                pass
         return {"alpha_pk": alpha_pk, "error": str(e)}
 
 
@@ -418,6 +460,11 @@ async def _iqc_audit_backfill_sweep_async() -> Dict:
         # candidates before back-filling old ones). Stale candidates already
         # have a row in metrics._iqc_marginal so the predicate differs from
         # the "missing key" predicate — both are unioned below.
+        # V-26.86 (2026-05-13): exclude alphas with audit_failures >= 3 so
+        # the sweep stops re-burning BRAIN budget on consistently-failing
+        # IDs. The counter is stamped in _audit_iqc_marginal_async's
+        # except block.
+        max_failures = 3
         rows = await db.execute(
             _text(
                 """
@@ -429,6 +476,7 @@ async def _iqc_audit_backfill_sweep_async() -> Dict:
                       AND date_submitted IS NULL
                       AND metrics ? '_iqc_marginal'
                       AND (metrics->'_iqc_marginal'->>'stale')::boolean = true
+                      AND COALESCE((metrics->'_iqc_marginal'->>'audit_failures')::int, 0) < :max_fail
                     UNION ALL
                     SELECT id, 1 AS audit_priority, updated_at
                     FROM alphas
@@ -443,12 +491,22 @@ async def _iqc_audit_backfill_sweep_async() -> Dict:
             ),
             # V-26.83: cap sourced from settings so beat-level tuning doesn't
             # need a code edit. Aliased module constant keeps imports stable.
-            {"lim": _iqc_settings.IQC_AUDIT_BACKFILL_LIMIT},
+            {"lim": _iqc_settings.IQC_AUDIT_BACKFILL_LIMIT, "max_fail": max_failures},
         )
         pks = [r[0] for r in rows.all()]
 
+    # V-26.84 (2026-05-13): claim a Redis in-flight lock per alpha_pk
+    # before enqueueing. Prevents this sweep tick from piling another
+    # celery task on top of an audit that's still running from the
+    # previous tick. Lock TTL is 10min (longer than worst-case audit) so
+    # if the worker crashes mid-audit the sweep will eventually retry.
+    from backend.tasks.redis_pool import claim_iqc_audit_lock
     countdown_sec = _iqc_settings.IQC_AUDIT_BACKFILL_COUNTDOWN_SEC
+    skipped_inflight = 0
     for pk in pks:
+        if not claim_iqc_audit_lock(pk):
+            skipped_inflight += 1
+            continue
         try:
             audit_iqc_marginal_for_alpha.apply_async(
                 args=[pk, competition], countdown=countdown_sec,
@@ -460,6 +518,10 @@ async def _iqc_audit_backfill_sweep_async() -> Dict:
             )
     logger.info(
         f"[iqc_audit_backfill_sweep] enqueued={enqueued} "
-        f"competition={competition}"
+        f"skipped_inflight={skipped_inflight} competition={competition}"
     )
-    return {"enqueued": enqueued, "competition": competition}
+    return {
+        "enqueued": enqueued,
+        "skipped_inflight": skipped_inflight,
+        "competition": competition,
+    }

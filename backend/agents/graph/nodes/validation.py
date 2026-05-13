@@ -228,22 +228,36 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
 _ERROR_KNOWLEDGE_BASE: List[Dict] = []
 
 
+import re as _re_categorize
+
+# V-26.55 (2026-05-13): match category keywords on word boundaries so
+# tokens like "matrix_norm" or "vec_matrix" don't pull every error into
+# the "type_error" bucket regardless of the actual failure mode. The KB
+# pivots on category for "similar errors" retrieval, so mis-classification
+# leaks irrelevant correction examples to SELF_CORRECT.
+_CATEGORY_PATTERNS = (
+    ("field_name",     _re_categorize.compile(r"\b(field|unknown)\b", _re_categorize.IGNORECASE)),
+    ("syntax",         _re_categorize.compile(r"\b(syntax|parse)\b",  _re_categorize.IGNORECASE)),
+    ("operator_usage", _re_categorize.compile(r"\b(operator|function)\b", _re_categorize.IGNORECASE)),
+    ("type_error",     _re_categorize.compile(r"\b(type|matrix|vector)\b", _re_categorize.IGNORECASE)),
+    ("duplicate",      _re_categorize.compile(r"\b(duplicate)\b", _re_categorize.IGNORECASE)),
+)
+
+
 def _categorize_error(error_message: str) -> str:
-    """Categorize error type for knowledge matching."""
-    error_lower = error_message.lower() if error_message else ""
-    
-    if "field" in error_lower or "unknown" in error_lower:
-        return "field_name"
-    elif "syntax" in error_lower or "parse" in error_lower:
-        return "syntax"
-    elif "operator" in error_lower or "function" in error_lower:
-        return "operator_usage"
-    elif "type" in error_lower or "matrix" in error_lower or "vector" in error_lower:
-        return "type_error"
-    elif "duplicate" in error_lower:
-        return "duplicate"
-    else:
+    """Categorize error type for knowledge matching.
+
+    V-26.55: previously used substring `in` which collapsed any error
+    that contained "matrix"/"vector" anywhere (including field names
+    like `matrix_norm`) into "type_error". Now uses `\\b...\\b` regex
+    so the keyword must be a whole token.
+    """
+    if not error_message:
         return "other"
+    for label, pat in _CATEGORY_PATTERNS:
+        if pat.search(error_message):
+            return label
+    return "other"
 
 
 def _find_similar_errors(
