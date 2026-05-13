@@ -90,4 +90,14 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.monitor_llm_op_hallucinations",
         "schedule": crontab(hour=6, minute=30),
     },
+    # V-22.12.1 (2026-05-13): fallback sweep for IQC marginal audits.
+    # The V-22.12 enqueue inside refresh_can_submit_for_alpha can miss alphas
+    # that flipped can_submit=true via other paths (BRAIN sync, broker outage,
+    # pre-V-22.12 worker). Sweep runs every 30 minutes, capped at 50 alphas
+    # per sweep, and enqueues audits idempotently (alphas with
+    # metrics._iqc_marginal are skipped).
+    "iqc-audit-backfill-sweep": {
+        "task": "backend.tasks.iqc_audit_backfill_sweep",
+        "schedule": 1800,   # every 30 minutes
+    },
 }

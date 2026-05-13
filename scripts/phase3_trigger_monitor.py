@@ -13,8 +13,12 @@ Trigger conditions (all must hold):
      cohort for usable signal.
 
   2. **Phase 2 hypothesis abandon rate in [30%, 50%]**
-     ABANDONED / total ratio. < 30% = LLM假设太宽松,什么都不淘汰;
-     > 50% = Phase 2 prompt 有问题或 abandon 阈值过严.
+     (ABANDONED + SUPERSEDED) / total ratio. SUPERSEDED is functionally
+     equivalent to abandon — node_hypothesis replaces a previous hid with
+     a new one and the prior gets marked SUPERSEDED rather than ABANDONED.
+     B6's "ABANDONED only" view drops to 0 because the upstream
+     replacement path fires before B6 attribution can accumulate.
+     < 30% = LLM 假设太宽松,什么都不淘汰; > 50% = prompt 问题或阈值过严.
 
   3. **Cross-dataset alpha ratio ≥ 30%**
      Alphas linked to a hypothesis whose dataset_pool has ≥ 2 entries
@@ -95,7 +99,14 @@ async def cohort_pass_rate(db, days: int, variant_filter: str) -> dict:
 
 
 async def hypothesis_abandon_stats(db, days: int) -> dict:
-    """Phase 2 hypothesis lifecycle distribution over last N days."""
+    """Phase 2 hypothesis lifecycle distribution over last N days.
+
+    Abandon-rate definition (2026-05-13 fix): SUPERSEDED counts toward
+    abandonment. node_hypothesis replacement marks prior hids SUPERSEDED
+    before B6 attribution can accumulate, so the strict ABANDONED column
+    consistently reads 0 even when the system is actively retiring
+    hypotheses. (ABANDONED + SUPERSEDED) / total is the honest signal.
+    """
     sql = text(f"""
         SELECT status, count(*) FROM hypotheses
         WHERE created_at > NOW() - INTERVAL '{days} days'
@@ -107,10 +118,16 @@ async def hypothesis_abandon_stats(db, days: int) -> dict:
         by_status[row[0]] = row[1]
         total += row[1]
     abandoned = by_status.get("ABANDONED", 0)
+    superseded = by_status.get("SUPERSEDED", 0)
+    retired = abandoned + superseded
     return {
         "total": total,
         "by_status": by_status,
-        "abandon_rate": (abandoned / total) if total else 0.0,
+        "abandoned_only": abandoned,
+        "superseded_only": superseded,
+        "retired_total": retired,
+        "abandon_rate": (retired / total) if total else 0.0,
+        "abandon_rate_strict": (abandoned / total) if total else 0.0,
     }
 
 
@@ -137,21 +154,32 @@ async def cross_dataset_ratio(db, days: int) -> dict:
 
 async def iqc_marginal_positive_rate(db, days: int) -> dict:
     """V-22.12: of can_submit=True alphas audited, what fraction has
-    metrics._iqc_marginal.delta_score > 0?"""
+    metrics._iqc_marginal.delta_score > 0?
+
+    Returns mean/median delta_score for cohort visibility — even when 0%
+    positive, the magnitude tells us how badly the can_submit gate is
+    calibrated vs actual portfolio impact.
+    """
     sql = text(f"""
         SELECT
             count(*) as audited_n,
-            count(*) FILTER (WHERE (metrics->'_iqc_marginal'->>'delta_score')::numeric > 0) as positive_n
+            count(*) FILTER (WHERE (metrics->'_iqc_marginal'->>'delta_score')::numeric > 0) as positive_n,
+            avg((metrics->'_iqc_marginal'->>'delta_score')::numeric) as mean_delta,
+            percentile_disc(0.5) within group (
+                order by (metrics->'_iqc_marginal'->>'delta_score')::numeric
+            ) as median_delta
         FROM alphas
         WHERE created_at > NOW() - INTERVAL '{days} days'
           AND metrics ? '_iqc_marginal'
     """)
     row = (await db.execute(sql)).first()
-    audited, positive = row[0], row[1]
+    audited, positive, mean_d, median_d = row[0], row[1], row[2], row[3]
     return {
         "audited_n": audited,
         "positive_n": positive,
         "positive_rate": (positive / audited) if audited else 0.0,
+        "mean_delta_score": float(mean_d) if mean_d is not None else None,
+        "median_delta_score": float(median_d) if median_d is not None else None,
     }
 
 
@@ -169,6 +197,9 @@ async def main() -> int:
         cohort_a = await cohort_pass_rate(
             db, UPLIFT_SUSTAIN_DAYS, variant_filter="= '2'",
         )
+        # 2026-05-13 fix: exclude variant='1' (Phase 1 cross-dataset gradient,
+        # 05-06~08 window) from the LEVEL=0 cohort. Including it conflates
+        # Phase 1 vs Phase 2 with Phase 2 vs legacy, biasing the uplift.
         cohort_b = await cohort_pass_rate(
             db, UPLIFT_SUSTAIN_DAYS,
             variant_filter="IS NULL OR t.config->>'hypothesis_centric_variant' = '0'",
@@ -186,6 +217,7 @@ async def main() -> int:
     trigger_1 = cohort_n_ok and uplift_pp >= UPLIFT_PP_THRESHOLD
 
     abandon_rate = hypo_stats["abandon_rate"]
+    abandon_rate_strict = hypo_stats["abandon_rate_strict"]
     abandon_total = hypo_stats["total"]
     trigger_2 = abandon_total >= COHORT_MIN_N and ABANDON_LO <= abandon_rate <= ABANDON_HI
 
@@ -235,8 +267,15 @@ async def main() -> int:
         lines.append(f"| {s} | {hypo_stats['by_status'].get(s, 0)} |")
     lines.extend([
         f"",
-        f"**Abandon rate: {abandon_rate*100:.1f}%** "
+        f"**Retirement rate (ABANDONED + SUPERSEDED): "
+        f"{abandon_rate*100:.1f}%** "
         f"(target range [{ABANDON_LO*100:.0f}%, {ABANDON_HI*100:.0f}%])",
+        f"",
+        f"  - ABANDONED only: {hypo_stats['abandoned_only']} "
+        f"({abandon_rate_strict*100:.1f}%) — strict B6 path",
+        f"  - SUPERSEDED only: {hypo_stats['superseded_only']} — replaced by "
+        f"node_hypothesis upstream (functionally retired)",
+        f"  - Retired total: {hypo_stats['retired_total']} / {abandon_total}",
         f"",
         f"Trigger 2: {emoji_for(trigger_2)}",
         "",
@@ -253,8 +292,17 @@ async def main() -> int:
         f"Auto-audited alphas (V-22.12): {iqc_n}",
         f"+Δscore: {iqc['positive_n']}",
         f"Positive rate: {iqc_rate*100:.1f}%",
+        (
+            f"mean Δscore: {iqc['mean_delta_score']:+.1f}  "
+            f"median: {iqc['median_delta_score']:+.1f}"
+        ) if iqc.get("mean_delta_score") is not None else "Δscore: insufficient data",
         f"",
         f"Sufficient signal (n ≥ 10): {emoji_for(iqc_signal, gating=False)}",
+        (
+            "\n⚠ All audited alphas have Δscore ≤ 0 — the can_submit gate "
+            "approves alphas that hurt the IQC portfolio. **Gate calibration "
+            "is the real bottleneck**, not Phase 3."
+        ) if iqc_n >= 10 and iqc["positive_n"] == 0 else "",
         "",
         "## Recommendation",
         "",
@@ -279,7 +327,9 @@ async def main() -> int:
             )
         if not trigger_2:
             unmet.append(
-                f"- Trigger 2: abandon rate {abandon_rate*100:.1f}% outside "
+                f"- Trigger 2: retirement rate {abandon_rate*100:.1f}% "
+                f"(ABANDONED={hypo_stats['abandoned_only']} "
+                f"+ SUPERSEDED={hypo_stats['superseded_only']}) outside "
                 f"[{ABANDON_LO*100:.0f}%, {ABANDON_HI*100:.0f}%] "
                 f"(or n={hypo_stats['total']} < {COHORT_MIN_N})"
             )
@@ -303,9 +353,26 @@ async def main() -> int:
 
     # Console summary
     print(f"Trigger 1 (PASS uplift):       {emoji_for(trigger_1)}  {uplift_pp:+.1f} pp (A:{cohort_a['alpha_n']}, B:{cohort_b['alpha_n']})")
-    print(f"Trigger 2 (abandon rate):       {emoji_for(trigger_2)}  {abandon_rate*100:.1f}% (n={hypo_stats['total']})")
+    print(
+        f"Trigger 2 (retirement rate):    {emoji_for(trigger_2)}  "
+        f"{abandon_rate*100:.1f}% "
+        f"(ABANDONED={hypo_stats['abandoned_only']} + "
+        f"SUPERSEDED={hypo_stats['superseded_only']}, n={hypo_stats['total']})"
+    )
     print(f"Trigger 3 (cross-dataset):      {emoji_for(trigger_3)}  {cross_ratio*100:.1f}% (n={cross_total})")
-    print(f"Trigger 4 (IQC +Δscore, obs.):  {emoji_for(iqc_signal, gating=False)}  {iqc_rate*100:.1f}% (n={iqc_n})")
+    iqc_delta_str = (
+        f"mean={iqc['mean_delta_score']:+.0f} median={iqc['median_delta_score']:+.0f}"
+        if iqc.get("mean_delta_score") is not None else "no data"
+    )
+    print(
+        f"Trigger 4 (IQC +Δscore, obs.):  {emoji_for(iqc_signal, gating=False)}  "
+        f"{iqc_rate*100:.1f}% (n={iqc_n}, {iqc_delta_str})"
+    )
+    if iqc_n >= 10 and iqc["positive_n"] == 0:
+        print(
+            "  ⚠ can_submit gate ≠ IQC value-add — gate approves alphas that "
+            "hurt the portfolio. Re-calibration > Phase 3."
+        )
     print()
     print(f"Overall: {'✅ Phase 3 READY' if all_pass else '⏳ Phase 3 NOT YET'}")
     print(f"Report: {md_path}")

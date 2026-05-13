@@ -362,3 +362,74 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
     except Exception as e:
         logger.warning(f"[audit_iqc_marginal] alpha_pk={alpha_pk} failed: {e}")
         return {"alpha_pk": alpha_pk, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# V-22.12.1 (2026-05-13) — IQC audit beat fallback sweep
+# ---------------------------------------------------------------------------
+# The V-22.12 enqueue lives inside refresh_can_submit_for_alpha. Anything that
+# flipped can_submit=True without going through that path (sync_user_alphas
+# back-fill, pre-V-22.12 workers, broker outage etc.) never enqueues an audit.
+# Sweep periodically picks up the stragglers so the dataset trends toward
+# fully-audited regardless of how an alpha became submittable.
+
+# Cap per sweep so we don't blast BRAIN with a thousand requests if the
+# backlog is huge — the beat re-runs and chews through the queue.
+IQC_AUDIT_BACKFILL_LIMIT = 50
+
+
+@celery_app.task(name="backend.tasks.iqc_audit_backfill_sweep")
+def iqc_audit_backfill_sweep() -> Dict:
+    """Beat-driven sweep enqueuing IQC marginal audits for can_submit=true
+    alphas missing the _iqc_marginal metric. Idempotent: alphas already
+    audited are skipped by the WHERE clause.
+    """
+    return run_async(_iqc_audit_backfill_sweep_async())
+
+
+async def _iqc_audit_backfill_sweep_async() -> Dict:
+    from sqlalchemy import text as _text
+    from backend.config import settings
+    from backend.database import AsyncSessionLocal
+
+    competition = getattr(settings, "IQC_AUTO_AUDIT_COMPETITION", "IQC2026S1")
+    if not competition:
+        return {"skipped": True, "reason": "IQC_AUTO_AUDIT_COMPETITION empty"}
+
+    enqueued = 0
+    async with AsyncSessionLocal() as db:
+        # date_submitted filter: BRAIN's before-and-after-performance endpoint
+        # is for *submission candidates* only — already-submitted alphas return
+        # 400. Filtering them out keeps the sweep idempotent + avoids burning
+        # BRAIN call budget on alphas we'd just skip anyway.
+        rows = await db.execute(
+            _text(
+                """
+                SELECT id FROM alphas
+                WHERE can_submit = true
+                  AND alpha_id IS NOT NULL
+                  AND date_submitted IS NULL
+                  AND (metrics IS NULL OR NOT (metrics ? '_iqc_marginal'))
+                ORDER BY updated_at DESC NULLS LAST
+                LIMIT :lim
+                """
+            ),
+            {"lim": IQC_AUDIT_BACKFILL_LIMIT},
+        )
+        pks = [r[0] for r in rows.all()]
+
+    for pk in pks:
+        try:
+            audit_iqc_marginal_for_alpha.apply_async(
+                args=[pk, competition], countdown=2,
+            )
+            enqueued += 1
+        except Exception as e:
+            logger.warning(
+                f"[iqc_audit_backfill_sweep] enqueue failed for alpha_pk={pk}: {e}"
+            )
+    logger.info(
+        f"[iqc_audit_backfill_sweep] enqueued={enqueued} "
+        f"competition={competition}"
+    )
+    return {"enqueued": enqueued, "competition": competition}
