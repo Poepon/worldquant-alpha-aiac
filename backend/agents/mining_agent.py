@@ -229,6 +229,12 @@ class MiningAgent:
         showed strategy.avoid_fields included PV after a 0-PASS round, which
         stripped close/cap/vwap from state.fields, causing 5 V-22.6 composite
         candidates to fail VALIDATE with "Field 'close' not found in dataset".
+
+        V-22.10 (2026-05-13): bump neutral-bucket cap 30 → 60. fundamental6
+        has 886 fields; with old cap=30 LLM only saw 9 PV + 21 fund — far
+        too narrow given DISTILL_CONTEXT then picks "General" category that
+        further trims. Bumping to 60 lets LLM see 9 PV + 51 fund without
+        ballooning prompt token cost meaningfully (~ +1.5KB).
         """
         # V-22.6.6 protected anchors — mirror _UNIVERSAL_PV_FIELDS in
         # mining_tasks.py. Kept inline rather than imported to avoid the
@@ -265,7 +271,8 @@ class MiningAgent:
                 and (f.get("id") or f.get("name")) not in avoid_set
             ]
             # PV anchors always at front, then screened, then capped others.
-            return pv_anchors + screened + others[:20]
+            # V-22.10: bumped cap 20→40 for screened path
+            return pv_anchors + screened + others[:40]
 
         # Otherwise, use preferred/avoid logic
         preferred = []
@@ -280,7 +287,8 @@ class MiningAgent:
                 neutral.append(f)
 
         # PV anchors first (always), then preferred, then capped neutral.
-        return pv_anchors + preferred + neutral[:30]
+        # V-22.10: bumped neutral cap 30→60
+        return pv_anchors + preferred + neutral[:60]
     
     async def _collect_iteration_alphas(
         self, 

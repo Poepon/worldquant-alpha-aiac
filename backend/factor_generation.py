@@ -337,6 +337,15 @@ def expand_t1_strategy(
             region=region,
             max_per_template=1,
         )
+        # V-22.6.3+ (2026-05-13) — also emit ts_decay_linear(., 4) sibling
+        # per pair candidate. Same rationale as V-22.6.3 composite decay:
+        # halves turnover with minimal sharpe loss, raising can_submit-rate.
+        # pk=7822 (vwap-open variant + decay) was the first PASS+can_submit
+        # alpha from a non-yaml pair template — proving pair × decay path
+        # produces real submittable alphas. The decay sibling each pair gets
+        # its own bucket so stratified_sample doesn't drown them.
+        decay_enabled = bool(getattr(_settings, "COMPOSITE_T1_AUTO_DECAY_WRAPPER", False))
+        decay_d = int(getattr(_settings, "COMPOSITE_T1_AUTO_DECAY_VALUE", 4))
         for p in pairs:
             candidates.append({
                 "expression": p["expression"],
@@ -347,10 +356,19 @@ def expand_t1_strategy(
                 "op": f"pair_{p['template_id']}",
                 "window": 0,
             })
+            if decay_enabled:
+                candidates.append({
+                    "expression": f"ts_decay_linear({p['expression']}, {decay_d})",
+                    "field": "_pair_" + ",".join(p["field_pair"]),
+                    "op": f"pair_decay{decay_d}_{p['template_id']}",
+                    "window": decay_d,
+                })
         if pairs:
+            decay_n = sum(1 for c in candidates if str(c.get("op", "")).startswith(f"pair_decay{decay_d}_"))
             logger.info(
                 f"[factor_generation] #2 field-pair candidates appended: "
-                f"{len(pairs)} from {len(strategy.promising_fields)} fields"
+                f"{len(pairs)} bare + {decay_n} decay = {len(pairs) + decay_n} "
+                f"from {len(strategy.promising_fields)} fields"
             )
     except Exception as _pair_e:
         logger.warning(

@@ -104,5 +104,5 @@ class TestPVProtected:
         # All 9 PV present
         for pv in ("close", "open", "high", "low", "vwap", "volume", "cap", "returns", "adv20"):
             assert pv in ids
-        # And output size = PV count (9) + neutral cap (30) — total ≤ 39
-        assert len(out) <= 50
+        # V-22.10: neutral cap raised 30 → 60; PV count (9) + cap (60) ≤ 80
+        assert len(out) <= 80
