@@ -139,15 +139,27 @@ class AlphaFailure(SQLAlchemyBase):
     task_id = Column(Integer, ForeignKey("mining_tasks.id"), nullable=True)
     trace_step_id = Column(Integer, ForeignKey("trace_steps.id"), nullable=True)
     run_id = Column(Integer, ForeignKey("experiment_runs.id"), nullable=True)
-    
+
     expression = Column(Text, nullable=True)
     error_type = Column(String(100), nullable=True)  # SYNTAX_ERROR, FIELD_NOT_FOUND, TIMEOUT
     error_message = Column(Text, nullable=True)
     raw_response = Column(Text, nullable=True)
-    
+
+    # V-25.B (2026-05-13): typed Hypothesis link for FAIL alphas. Mirrors
+    # Alpha.hypothesis_id so B5 attribution can span PASS + FAIL rows
+    # via the same key. NULL for legacy rows (pre-migration) and for
+    # non-Phase-2 paths. ON DELETE SET NULL so hypothesis cleanup never
+    # cascades into failure rows we may need for forensic audit.
+    hypothesis_id = Column(
+        Integer,
+        ForeignKey("hypotheses.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
     # For feedback analysis
     is_analyzed = Column(Boolean, default=False)
-    
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

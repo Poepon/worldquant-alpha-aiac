@@ -80,6 +80,12 @@ class FailureRecord(BaseModel):
     error_type: str
     error_message: str
     trace_step_id: Optional[int] = None
+    # V-25.B (2026-05-13): typed Hypothesis link for FAIL alphas. Mirrors
+    # AlphaResult.hypothesis_id (set by node_save_results from
+    # state.current_hypothesis_id). Lets B5/B6 attribution span PASS + FAIL
+    # via the same hypothesis_id key; previously FAIL alphas were
+    # attribution-orphaned (alpha_failures had no hypothesis_id column).
+    hypothesis_id: Optional[int] = None
 
 
 class TraceStepData(BaseModel):

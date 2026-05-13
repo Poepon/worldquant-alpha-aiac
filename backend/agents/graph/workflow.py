@@ -604,6 +604,11 @@ class MiningWorkflow:
                         expression=failure.expression[:2000] if failure.expression else None,
                         error_type=failure.error_type,
                         error_message=failure.error_message[:500] if failure.error_message else None,
+                        # V-25.B (2026-05-13): typed Hypothesis link.
+                        # persistence.py FailureRecord.hypothesis_id carries
+                        # the resolved scalar (with list[0] fallback) so the
+                        # FK is consistent with the PASS-path Alpha.hypothesis_id.
+                        hypothesis_id=getattr(failure, "hypothesis_id", None),
                     )
                     async with self.db.begin_nested():
                         self.db.add(fail_record)

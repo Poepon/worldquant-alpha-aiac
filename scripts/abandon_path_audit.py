@@ -142,25 +142,21 @@ async def b6_qualified_count(db, days: int) -> dict:
 
 
 async def linkage_breakdown(db, days: int) -> dict:
-    """V-25.A — 3-way orphan classification using status semantics.
+    """V-25.A — 3-way orphan classification.
 
-    Key insight: status itself is the "was tried" signal. mark_active
-    only flips PROPOSED → ACTIVE when B5 sees alpha_count > 0 in the
-    round — i.e. code_gen produced ≥1 candidate. So:
+    V-25.B (2026-05-13): alpha_failures now has a hypothesis_id column, so
+    we can directly count failed attempts per hypothesis instead of relying
+    on status as a proxy. tried_no_pass now means "alpha_failures has
+    ≥1 row for this hid AND alphas has 0 PASS for it" — exact attribution
+    rather than status-inferred. Pre-V-25.B FAIL rows have NULL hypothesis_id
+    so they'll show up as never_tried under this query; status fallback
+    still distinguishes those cases.
 
-      ACTIVE → at minimum the candidates were generated; whether they
-              FAILed at validate / simulate is captured in
-              alpha_failures (which currently has no hypothesis_id —
-              see V-25.B), so we can't count failed-but-tried alphas
-              directly. ACTIVE+no_pass = "tried, all failed validation
-              / simulation / quality — mining noise, not a bug".
-      PROMOTED → ≥1 PASS reached alphas table.
-      PROPOSED → mark_active never fired = 0 candidates generated for
-                this hid. This is the "never_tried" bucket — usually
-                V-22.13 reuse failure replacing it before code_gen ran.
-      ABANDONED → B6 should_abandon fired (currently 0 in live data)
-      SUPERSEDED → G-refine fired (currently 0 in live data after
-                  excluding V-19.7 zombies)
+      PROMOTED + with_pass     → produced ≥1 PASS alpha (success path)
+      ACTIVE + tried_no_pass   → had FAILs but 0 PASS (mining noise, normal)
+      PROPOSED                 → mark_active never fired (V-22.13 reuse bug,
+                                 see V-25.C)
+      ABANDONED / SUPERSEDED  → currently 0 in live data (excl. zombies)
     """
     sql = text(f"""
         WITH base AS (
@@ -175,21 +171,33 @@ async def linkage_breakdown(db, days: int) -> dict:
             WHERE hypothesis_id IS NOT NULL
               AND quality_status IN ('PASS', 'PASS_PROVISIONAL')
             GROUP BY hypothesis_id
+        ),
+        fail_link AS (
+            SELECT hypothesis_id AS hid, COUNT(*) AS n
+            FROM alpha_failures
+            WHERE hypothesis_id IS NOT NULL
+            GROUP BY hypothesis_id
         )
         SELECT
             base.status,
             COUNT(*) FILTER (WHERE COALESCE(pass_link.n, 0) > 0)
                 AS linked_with_pass,
             COUNT(*) FILTER (
-                WHERE base.status = 'ACTIVE'
-                  AND COALESCE(pass_link.n, 0) = 0
+                WHERE COALESCE(pass_link.n, 0) = 0
+                  AND (
+                    COALESCE(fail_link.n, 0) > 0
+                    OR base.status = 'ACTIVE'
+                  )
             ) AS tried_no_pass,
             COUNT(*) FILTER (
-                WHERE base.status = 'PROPOSED'
+                WHERE COALESCE(pass_link.n, 0) = 0
+                  AND COALESCE(fail_link.n, 0) = 0
+                  AND base.status = 'PROPOSED'
             ) AS never_tried,
             COUNT(*) AS total
         FROM base
         LEFT JOIN pass_link ON pass_link.hid = base.hid
+        LEFT JOIN fail_link ON fail_link.hid = base.hid
         GROUP BY base.status
         ORDER BY total DESC
     """)

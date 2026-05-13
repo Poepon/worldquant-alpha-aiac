@@ -518,7 +518,12 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
             expression=alpha.expression,
             error_type=err_type,
             error_message=err_msg,
-            details={"metrics": alpha.metrics, "hypothesis": alpha.hypothesis}
+            details={"metrics": alpha.metrics, "hypothesis": alpha.hypothesis},
+            # V-25.B (2026-05-13): hypothesis link for FAIL alphas. Uses
+            # the same resolved current_hypothesis_id (scalar with list[0]
+            # fallback for LangGraph propagation drops, identical to the
+            # PASS path above).
+            hypothesis_id=current_hypothesis_id,
         )
         fail_batch.append(rec)
     
