@@ -612,6 +612,20 @@ def sync_user_alphas():
                 submission_flip_regions: set = set()
 
                 for stage in stages:
+                    # V-27.14: the incremental anchor (start_date_iso) is on
+                    # date_created, but V-23.E needs to catch date_submitted
+                    # flips (NULL→set). An alpha created 30 days ago but
+                    # submitted yesterday falls outside the created-window →
+                    # BRAIN drops it from the listing → submission_flip_regions
+                    # misses it → IQC Δscore staleness never fires. OS-stage
+                    # alphas are exactly the ones that flip (submit moves an
+                    # alpha to OS) and there are only tens-to-hundreds of them
+                    # — pull the OS stage in FULL while IS (the high-volume
+                    # mining output) stays incremental.
+                    effective_start = (
+                        start_date_iso if stage == "IS"
+                        else MIN_START_DATE.strftime("%Y-%m-%d")
+                    )
                     offset = 0
                     limit = 100
                     while True:
@@ -619,7 +633,7 @@ def sync_user_alphas():
                             limit=limit,
                             offset=offset,
                             stage=stage,
-                            start_date=start_date_iso
+                            start_date=effective_start
                         )
                         results = alphas_data.get("results", [])
                         if not results:

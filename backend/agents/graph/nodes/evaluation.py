@@ -686,11 +686,27 @@ async def node_simulate(
         current = updated_alphas[idx]
         updated = current.model_copy()
         
-        updated.is_simulated = True
         updated.simulation_success = res.get("success", False)
         updated.alpha_id = res.get("alpha_id")
         updated.metrics = res.get("metrics", {}) or {}
         updated.simulation_error = res.get("error")
+
+        # V-27.61: a retryable failure (429 / slot-acquire timeout / stale
+        # slot counter — brain_adapter.simulate_alpha returns retryable=True
+        # for these) is TRANSIENT, not a verdict on the alpha. Keep
+        # is_simulated=False and tag the metrics so node_evaluate holds it at
+        # PENDING instead of burying it as a terminal FAIL that pollutes the
+        # KB + failure_feedback_queue. (Full re-enqueue carrying the
+        # expression into a later round needs the mining main loop's
+        # cooperation — tracked as backlog, see V-27 RCA.)
+        if res.get("retryable"):
+            updated.is_simulated = False
+            updated.metrics = {
+                "_sim_retryable": True,
+                "_retry_after_sec": res.get("retry_after_sec"),
+            }
+        else:
+            updated.is_simulated = True
 
         # A1: stamp smart-settings metadata into metrics for audit / KB insight
         if smart_enabled and i in smart_settings_per_idx:
@@ -864,10 +880,22 @@ async def node_evaluate(
         # regardless of any earlier transient status. Metrics are missing, so
         # gates are unverifiable.
         if not alpha.is_simulated or not alpha.simulation_success:
+            # V-27.61: a retryable sim failure (429 / slot timeout / stale
+            # counter) is transient — don't bury it as a terminal FAIL,
+            # which would pollute the KB and the failure_feedback_queue.
+            # Leave quality_status at PENDING: it's neither counted as a
+            # fail nor persisted (node_save_results only writes PASS / PROV);
+            # mining moves on with a fresh expression next round.
+            if isinstance(alpha.metrics, dict) and alpha.metrics.get("_sim_retryable"):
+                logger.info(
+                    f"[{node_name}] retryable sim failure held at PENDING "
+                    f"(not FAIL) | expr={(alpha.expression or '')[:60]}"
+                )
+                continue
             alpha.quality_status = "FAIL"
             fail_count += 1
             continue
-        
+
         metrics = alpha.metrics or {}
         
         train_sharpe_val = metrics.get("train_sharpe")
