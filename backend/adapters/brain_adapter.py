@@ -59,20 +59,23 @@ class BrainAdapter:
     _cached_password: Optional[str] = None
     _credentials_loaded: bool = False
 
-    # Multi-simulation permission gate. Set to True after first 403 from
+    # Multi-simulation permission gate. Latched after first 403 from
     # POST /simulations (list payload) so subsequent simulate_batch calls go
     # straight to the single-sim fallback. BRAIN exposes multi-simulation only
     # to Consultant+ accounts; lower tiers still have access to single-sim.
     #
-    # V-26.25 (2026-05-13): the latch is now stamp+TTL'd. Pre-fix flipping
-    # this to True needed a worker restart to undo — bad if the user
-    # upgraded their BRAIN account during a long-running celery process.
-    # Now `_no_multisim_at` records when the latch flipped and
-    # `simulate_batch` periodically re-probes by attempting multi-sim
-    # again after `_NO_MULTISIM_REPROBE_SEC` elapsed.
-    _no_multisim: bool = False
-    _no_multisim_at: Optional[float] = None
-    _NO_MULTISIM_REPROBE_SEC: float = 24 * 3600.0  # 24h
+    # V-26.25 (2026-05-13): the latch is stamp+TTL'd so a worker restart
+    # isn't needed to undo it after a BRAIN account upgrade.
+    #
+    # V-27.94/118 (2026-05-14): the latch lives in Redis, NOT a class
+    # attribute. The old `_no_multisim` / `_no_multisim_at` were per-process
+    # — each worker latched independently, so a 403 learned by one worker
+    # didn't stop the others and the re-probe fired N×workers times instead
+    # of once. The Redis key's TTL IS the re-probe window: key present ⇒
+    # latched & warm; key absent (never set OR TTL expired) ⇒ (re-)probe.
+    # Aligns with _SLOT_COUNTER_KEY's cross-process Redis design.
+    _NO_MULTISIM_KEY: str = "brain:no_multisim"
+    _NO_MULTISIM_REPROBE_SEC: float = 24 * 3600.0  # 24h — also the Redis key TTL
     _SINGLE_SIM_FALLBACK_CONCURRENCY: int = 3
 
     # BRAIN server-side hard limit: <= 3 sims in-flight per account, *across all
@@ -626,24 +629,23 @@ class BrainAdapter:
         Falls back to bounded-concurrency single simulations when the account
         lacks Consultant-level multi-simulation permission (BRAIN returns 403).
         """
-        # If we've already learned this account can't do multi-sim, skip the
-        # probe — but periodically re-attempt in case the account was upgraded.
-        if BrainAdapter._no_multisim:
-            since_latch = (
-                time.time() - BrainAdapter._no_multisim_at
-                if BrainAdapter._no_multisim_at is not None
-                else BrainAdapter._NO_MULTISIM_REPROBE_SEC + 1
-            )
-            if since_latch < BrainAdapter._NO_MULTISIM_REPROBE_SEC:
-                return await self._simulate_via_single(
-                    expressions, region, universe, delay, decay,
-                    neutralization, truncation, test_period,
-                )
-            # V-26.25: re-probe window elapsed; fall through to attempt
-            # multi-sim once more. If still 403 the latch is re-stamped below.
-            logger.info(
-                f"[BrainAdapter] V-26.25 re-probing multi-sim "
-                f"(latch age={since_latch/3600:.1f}h > {BrainAdapter._NO_MULTISIM_REPROBE_SEC/3600:.0f}h)"
+        # V-27.94/118: cross-process multi-sim latch via Redis. Key present
+        # ⇒ account known to lack multi-sim permission, latch still warm
+        # (TTL = re-probe window) → straight to single-sim fallback. Key
+        # absent ⇒ never latched OR TTL expired → fall through and
+        # (re-)probe multi-sim; a 403 re-latches the key below. Redis errors
+        # are non-fatal — on failure we fall through and probe (safe default).
+        try:
+            _slot_redis = await self._get_slot_redis()
+            _latched = await _slot_redis.exists(self._NO_MULTISIM_KEY)
+        except Exception as _redis_e:
+            logger.warning(f"[BrainAdapter] multi-sim latch read failed: {_redis_e}")
+            _slot_redis = None
+            _latched = False
+        if _latched:
+            return await self._simulate_via_single(
+                expressions, region, universe, delay, decay,
+                neutralization, truncation, test_period,
             )
 
         # Construct payload list
@@ -667,8 +669,20 @@ class BrainAdapter:
             # Account is not Consultant-level — multi-sim is blocked. Latch the
             # gate so future calls skip the probe, and fall back to single-sim.
             if response.status_code == 403:
-                BrainAdapter._no_multisim = True
-                BrainAdapter._no_multisim_at = time.time()
+                # V-27.94/118: latch in Redis with TTL = re-probe window
+                # (cross-process; replaces the per-process class attr). Key
+                # auto-expires after _NO_MULTISIM_REPROBE_SEC → next call
+                # naturally re-probes.
+                if _slot_redis is not None:
+                    try:
+                        await _slot_redis.set(
+                            self._NO_MULTISIM_KEY, str(time.time()),
+                            ex=int(self._NO_MULTISIM_REPROBE_SEC),
+                        )
+                    except Exception as _redis_e:
+                        logger.warning(
+                            f"[BrainAdapter] multi-sim latch write failed: {_redis_e}"
+                        )
                 logger.warning(
                     f"Multi-simulation denied (403); switching to single-sim fallback "
                     f"(concurrency={self._SINGLE_SIM_FALLBACK_CONCURRENCY}). "

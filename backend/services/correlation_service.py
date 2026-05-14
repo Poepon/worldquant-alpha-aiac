@@ -679,11 +679,23 @@ class CorrelationService:
     def save_crisis_snapshot(self, region: str, payload: Dict) -> Path:
         """Persist crisis stress-test output to disk for the UI / audit log."""
         path = CACHE_DIR / f"crisis_corr_{region}.json"
+        # V-27.130: atomic write — the 06:30 beat and a user-triggered
+        # GET /crisis-summary?refresh=1 can both write crisis_corr_{region}.json
+        # concurrently while load_crisis_snapshot reads it. A direct open("w")
+        # leaves a half-written JSON visible to the reader (json.load throws,
+        # gets swallowed, UI shows empty). tmp-then-rename makes the swap
+        # atomic on POSIX and Windows (Path.replace).
+        tmp = path.with_suffix(path.suffix + ".tmp")
         try:
-            with path.open("w", encoding="utf-8") as f:
+            with tmp.open("w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2, default=str)
+            tmp.replace(path)
         except Exception as e:
             logger.error(f"[CorrelationService] Failed to save crisis snapshot {path}: {e}")
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
         return path
 
     def load_crisis_snapshot(self, region: str) -> Optional[Dict]:
