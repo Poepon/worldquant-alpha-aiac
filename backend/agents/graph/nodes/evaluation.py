@@ -392,6 +392,18 @@ async def node_simulate(
     # round so the LLM stops re-generating the same narrow neighborhood.
     dedup_skel_buf: list[str] = []
 
+    # V-27.81: in-flight simulate dedup. Redis slots claimed below are
+    # released after the batch completes (and on every early return); the
+    # 900s TTL is the crash safety net. Imports kept out of the try block
+    # so _release_claimed_slots stays callable even if DB dedup raises.
+    claimed_sim_slots: list = []
+    _dedup_lock_on = getattr(settings, "SIMULATE_DEDUP_LOCK_ENABLED", True)
+    from backend.alpha_semantic_validator import compute_expression_hash
+    from backend.tasks.redis_pool import (
+        claim_simulate_slot,
+        release_simulate_slot,
+    )
+
     try:
         from backend.database import AsyncSessionLocal
         from backend.selection_strategy import filter_unsimulated_expressions
@@ -407,9 +419,7 @@ async def node_simulate(
         new_expr_set = set(new_exprs)
         for idx in valid_indices:
             expr = state.pending_alphas[idx].expression
-            if expr in new_expr_set:
-                indices_to_simulate.append(idx)
-            else:
+            if expr not in new_expr_set:
                 db_duplicates += 1
                 state.pending_alphas[idx].simulation_error = "DB duplicate: already simulated"
                 state.pending_alphas[idx].is_simulated = True
@@ -421,6 +431,30 @@ async def node_simulate(
                         dedup_skel_buf.append(sk)
                 except Exception:
                     pass
+                continue
+            # V-27.81: in-flight dedup — another worker may already be
+            # simulating this same (hash, region, universe) right now.
+            # Claim a Redis slot; if we can't, treat it exactly like a DB
+            # duplicate so we don't burn a BRAIN slot on the concurrent
+            # re-simulate.
+            if _dedup_lock_on and expr:
+                _h = compute_expression_hash(expr)
+                if not claim_simulate_slot(_h, state.region, state.universe):
+                    db_duplicates += 1
+                    state.pending_alphas[idx].simulation_error = (
+                        "in-flight duplicate: concurrent simulate"
+                    )
+                    state.pending_alphas[idx].is_simulated = True
+                    state.pending_alphas[idx].simulation_success = False
+                    try:
+                        sk = _expr_to_skel(expr or "", max_depth=3)
+                        if sk:
+                            dedup_skel_buf.append(sk)
+                    except Exception:
+                        pass
+                    continue
+                claimed_sim_slots.append((_h, state.region, state.universe))
+            indices_to_simulate.append(idx)
 
         logger.info(
             f"[{node_name}] DB dedup: {db_duplicates} duplicates skipped, "
@@ -451,6 +485,14 @@ async def node_simulate(
             ordered.pop(s, None)
             ordered[s] = None
         return list(ordered.keys())[-cap:]
+
+    def _release_claimed_slots() -> None:
+        # V-27.81: release every in-flight simulate slot this node claimed —
+        # called after the batch completes and before every early return.
+        # The 900s TTL is the crash safety net if this is somehow missed.
+        for _slot in claimed_sim_slots:
+            release_simulate_slot(*_slot)
+        claimed_sim_slots.clear()
 
     if not indices_to_simulate:
         logger.warning(f"[{node_name}] All expressions already in DB")
@@ -510,6 +552,7 @@ async def node_simulate(
             indices_to_simulate = keep_after_skel
             if not indices_to_simulate:
                 logger.warning(f"[{node_name}] All candidates dropped by portfolio dedup")
+                _release_claimed_slots()
                 return {
                     "pending_alphas": state.pending_alphas,
                     "recent_dedup_skeletons": _merge_dedup_skels(),
@@ -560,6 +603,7 @@ async def node_simulate(
         logger.warning(
             f"[{node_name}] All expressions filtered by pre-simulate classifier"
         )
+        _release_claimed_slots()
         return {
             "pending_alphas": state.pending_alphas,
             "recent_dedup_skeletons": _merge_dedup_skels(),
@@ -720,7 +764,11 @@ async def node_simulate(
             success_count += 1
 
         updated_alphas[idx] = updated
-    
+
+    # V-27.81: batch done — release every in-flight simulate slot we claimed
+    # (covers both simulated and post-claim-filtered expressions).
+    _release_claimed_slots()
+
     failed_errors = [
         {"expr": expressions[i][:80], "error": results[i].get("error", "unknown")[:200]}
         for i in range(len(results)) if not results[i].get("success")
@@ -1484,6 +1532,17 @@ async def node_evaluate(
         # GrMeLOg3 with task 81/83). Now we pre-filter to save BRAIN quota
         # AND avoid the doomed INSERT.
         flip_dedup_skipped = 0
+        # V-27.81: in-flight simulate dedup for flip-retry. Slots claimed in
+        # the dedup loop below are released after the simulate loop.
+        flip_claimed_slots: list = []
+        _flip_dedup_lock_on = getattr(settings, "SIMULATE_DEDUP_LOCK_ENABLED", True)
+        from backend.alpha_semantic_validator import (
+            compute_expression_hash as _flip_expr_hash,
+        )
+        from backend.tasks.redis_pool import (
+            claim_simulate_slot as _flip_claim_slot,
+            release_simulate_slot as _flip_release_slot,
+        )
         try:
             from backend.database import AsyncSessionLocal as _ASL
             from backend.selection_strategy import filter_unsimulated_expressions as _flt
@@ -1496,14 +1555,26 @@ async def node_evaluate(
             kept_candidates = []
             for o in flip_candidates:
                 fexpr = f"multiply(-1, {o.expression})"
-                if fexpr in _new_flipped_set:
-                    kept_candidates.append(o)
-                else:
+                if fexpr not in _new_flipped_set:
                     flip_dedup_skipped += 1
                     logger.info(
                         f"[{node_name}] V-19.3 flip-retry skip — flipped expr already "
                         f"in DB: {fexpr[:100]!r}"
                     )
+                    continue
+                # V-27.81: in-flight dedup — skip if another worker is
+                # already simulating this flipped expression right now.
+                if _flip_dedup_lock_on:
+                    _fh = _flip_expr_hash(fexpr)
+                    if not _flip_claim_slot(_fh, state.region, state.universe):
+                        flip_dedup_skipped += 1
+                        logger.info(
+                            f"[{node_name}] V-27.81 flip-retry skip — flipped "
+                            f"expr in-flight on another worker: {fexpr[:100]!r}"
+                        )
+                        continue
+                    flip_claimed_slots.append((_fh, state.region, state.universe))
+                kept_candidates.append(o)
             flip_candidates = kept_candidates
             if flip_dedup_skipped:
                 logger.info(
@@ -1636,6 +1707,12 @@ async def node_evaluate(
                 f"[{node_name}] flip-retry result: orig_sharpe={orig.metrics.get('sharpe'):.2f} "
                 f"→ flipped_sharpe={new_sharpe:.2f} status={new_alpha.quality_status}"
             )
+
+        # V-27.81: flip-retry batch done — release every in-flight simulate
+        # slot claimed in the dedup loop above (covers simulated, failed, and
+        # mid-loop-continue'd flipped expressions). TTL is the crash net.
+        for _flip_slot in flip_claimed_slots:
+            _flip_release_slot(*_flip_slot)
 
     duration_ms = int((time.time() - start_time) * 1000)
     

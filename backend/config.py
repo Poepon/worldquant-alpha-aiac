@@ -458,6 +458,12 @@ class Settings(BaseSettings):
     # (pre-fix behaviour).
     HYPOTHESIS_REUSE_TERMINAL_GUARD_ENABLED: bool = True
 
+    # V-27.81 — Redis in-flight lock to stop two workers simulating the same
+    # (expression_hash, region, universe) between filter_unsimulated_
+    # expressions' SELECT and brain.simulate_alpha (a wasted BRAIN slot).
+    # Off → skip the lock, fall back to pure DB dedup (pre-fix behaviour).
+    SIMULATE_DEDUP_LOCK_ENABLED: bool = True
+
     # V-27.108 — failure-pitfall scoring weights (failure side of V-26.36;
     # the success side is already config'd as RAG_SCORE_*).
     RAG_PITFALL_SEVERITY_HIGH: int = 30

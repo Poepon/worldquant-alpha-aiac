@@ -380,3 +380,53 @@ def release_iqc_audit_lock(alpha_pk: int) -> None:
         cli.delete(f"iqc_audit:inflight:{alpha_pk}")
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# V-27.81 — simulate dedup in-flight lock
+# ---------------------------------------------------------------------------
+#
+# filter_unsimulated_expressions (selection_strategy.py) SELECTs which
+# expression hashes already exist in `alphas`, but between that SELECT and
+# the actual brain.simulate_alpha() call another worker can simulate the
+# same (hash, region, universe) — both burn a BRAIN slot for one alpha.
+# This lock makes "I'm about to simulate this expression" visible across
+# workers: SET NX EX before simulate, DELETE after (success or failure);
+# the TTL reclaims it if the worker dies mid-simulate.
+
+_SIMULATE_DEDUP_LOCK_TTL_SEC = 900  # > slowest single BRAIN simulate
+
+
+def _simulate_lock_key(expr_hash: str, region: str, universe: str) -> str:
+    return f"sim_dedup:{region}:{universe}:{expr_hash}"
+
+
+def claim_simulate_slot(expr_hash: str, region: str, universe: str) -> bool:
+    """SET NX EX. Returns True iff this caller now owns the simulate slot
+    for (expr_hash, region, universe).
+
+    Fail-OPEN on Redis error (returns True == pre-V-27.81 behaviour): a Redis
+    outage must never block simulation. The `alpha_id` unique constraint
+    still bounds data correctness if a duplicate slips through."""
+    try:
+        cli = get_redis_client()
+        return bool(
+            cli.set(
+                _simulate_lock_key(expr_hash, region, universe),
+                "1", nx=True, ex=_SIMULATE_DEDUP_LOCK_TTL_SEC,
+            )
+        )
+    except Exception as exc:
+        logger.warning(f"[sim_dedup_lock] claim failed (fail-open): {exc}")
+        return True
+
+
+def release_simulate_slot(expr_hash: str, region: str, universe: str) -> None:
+    """Best-effort DELETE after simulate completes (success OR failure).
+    TTL is the safety net for an unreleased slot."""
+    try:
+        get_redis_client().delete(
+            _simulate_lock_key(expr_hash, region, universe)
+        )
+    except Exception:
+        pass
