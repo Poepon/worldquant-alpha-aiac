@@ -496,6 +496,21 @@ class AlphaService(BaseService):
                 corr, src = await corr_svc.get_with_fallback(
                     alpha.alpha_id, region=alpha.region
                 )
+                # V-27.126 followup: BRAIN_PENDING means the corr job is still
+                # computing (corr is None). Distinct from UNKNOWN ("could not
+                # measure") — here we genuinely will know soon, so refuse now
+                # and let the caller retry rather than submitting blind into a
+                # possibly-high corr that would waste the slot.
+                if src == CorrSource.BRAIN_PENDING:
+                    return {
+                        "submitted": False,
+                        "reason": (
+                            "self_corr 仍在 BRAIN 侧计算中(corr pending)— "
+                            "稍后重试"
+                        ),
+                        "self_corr_source": src,
+                        "retryable": True,
+                    }
                 # src=UNKNOWN → corr is None → inconclusive, do NOT block.
                 if src != CorrSource.UNKNOWN and corr is not None and corr >= 0.7:
                     return {

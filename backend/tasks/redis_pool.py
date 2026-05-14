@@ -24,6 +24,7 @@ Three reasons this lives in its own module:
 from __future__ import annotations
 
 import json
+import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -75,6 +76,24 @@ else
     tok = cur
 end
 if tok == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end
+"""
+
+# Lua: CAS-EXPIRE — extend the TTL only if the stored value's token still
+# matches ours. Same decode logic as _RELEASE_LUA_V2 (v2 JSON or legacy bare
+# string). Returns 1 if the TTL was reset, 0 if the key vanished or is held
+# by someone else. V-27.1 followup: lets a live long-running worker renew its
+# lock at every round boundary instead of letting a fixed TTL expire under it.
+_RENEW_LUA_V2 = """
+local cur = redis.call('get', KEYS[1])
+if cur == false then return 0 end
+local tok
+local ok, decoded = pcall(cjson.decode, cur)
+if ok and type(decoded) == 'table' and decoded.token ~= nil then
+    tok = decoded.token
+else
+    tok = cur
+end
+if tok == ARGV[1] then return redis.call('expire', KEYS[1], tonumber(ARGV[2])) else return 0 end
 """
 
 # Lua: unconditionally overwrite the value and reset the TTL, returning the
@@ -173,6 +192,29 @@ def release_cascade_lock(key: str, token: str) -> bool:
             f"[cascade-lock] Lua release failed for key={key}: {exc} "
             f"(TTL will reclaim eventually)"
         )
+        return False
+
+
+def renew_cascade_lock(key: str, token: str, ttl_sec: int) -> bool:
+    """V-27.1 followup: extend the lock TTL iff `token` still owns it
+    (server-side Lua CAS-EXPIRE). Returns True iff the TTL was renewed.
+
+    Why this exists: CASCADE_LOCK_TTL_SEC defaults to 3h but a
+    CONTINUOUS_CASCADE worker runs indefinitely. Without renewal the lock
+    expires under a perfectly healthy worker, which then self-terminates on
+    the next round-boundary ownership check (MISSING) — and worse, the
+    watchdog can take over the freed lock while the old worker is still
+    mid-round. Call this at every round boundary alongside the ownership
+    check.
+
+    Swallows Redis errors → False: the ownership check that runs alongside
+    is the real safety gate; a transient Redis blip here must not crash a
+    live worker."""
+    try:
+        cli = get_redis_client()
+        return bool(cli.eval(_RENEW_LUA_V2, 1, key, token, int(ttl_sec)))
+    except Exception as exc:
+        logger.warning(f"[cascade-lock] renew failed for key={key}: {exc}")
         return False
 
 
@@ -401,32 +443,50 @@ def _simulate_lock_key(expr_hash: str, region: str, universe: str) -> str:
     return f"sim_dedup:{region}:{universe}:{expr_hash}"
 
 
-def claim_simulate_slot(expr_hash: str, region: str, universe: str) -> bool:
-    """SET NX EX. Returns True iff this caller now owns the simulate slot
-    for (expr_hash, region, universe).
+def claim_simulate_slot(
+    expr_hash: str, region: str, universe: str
+) -> Optional[str]:
+    """SET NX EX with a per-claim random token. Returns the token string iff
+    this caller now owns the simulate slot for (expr_hash, region, universe),
+    or None if another worker already holds it.
 
-    Fail-OPEN on Redis error (returns True == pre-V-27.81 behaviour): a Redis
-    outage must never block simulation. The `alpha_id` unique constraint
-    still bounds data correctness if a duplicate slips through."""
+    V-27.81 followup: the slot value used to be a constant "1", so
+    release_simulate_slot was a blind DELETE — if this slot's 900s TTL
+    expired and another worker re-claimed, the original worker's release
+    would delete the new holder's slot (the V-26.4 blind-delete pattern).
+    The token lets release do a Lua CAS instead. Callers must keep the
+    returned token and hand it back to release_simulate_slot.
+
+    Fail-OPEN on Redis error (returns a token == pre-V-27.81 "proceed"
+    behaviour): a Redis outage must never block simulation. The `alpha_id`
+    unique constraint still bounds data correctness if a duplicate slips
+    through. The returned token is unusable (the SET never landed) but
+    release's CAS will simply no-op, which is harmless."""
+    token = uuid.uuid4().hex
     try:
         cli = get_redis_client()
-        return bool(
-            cli.set(
-                _simulate_lock_key(expr_hash, region, universe),
-                "1", nx=True, ex=_SIMULATE_DEDUP_LOCK_TTL_SEC,
-            )
+        got = cli.set(
+            _simulate_lock_key(expr_hash, region, universe),
+            token, nx=True, ex=_SIMULATE_DEDUP_LOCK_TTL_SEC,
         )
+        return token if got else None
     except Exception as exc:
         logger.warning(f"[sim_dedup_lock] claim failed (fail-open): {exc}")
-        return True
+        return token
 
 
-def release_simulate_slot(expr_hash: str, region: str, universe: str) -> None:
-    """Best-effort DELETE after simulate completes (success OR failure).
-    TTL is the safety net for an unreleased slot."""
+def release_simulate_slot(
+    expr_hash: str, region: str, universe: str, token: str
+) -> None:
+    """Best-effort CAS release after simulate completes (success OR failure).
+    Deletes the slot only if it still holds `token` (server-side Lua), so a
+    worker whose TTL already expired and was re-claimed by someone else does
+    not delete the new holder's slot. TTL is the safety net for an
+    unreleased slot."""
     try:
-        get_redis_client().delete(
-            _simulate_lock_key(expr_hash, region, universe)
+        get_redis_client().eval(
+            _RELEASE_LUA_V2, 1,
+            _simulate_lock_key(expr_hash, region, universe), token,
         )
     except Exception:
         pass

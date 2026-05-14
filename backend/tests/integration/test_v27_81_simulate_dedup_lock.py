@@ -49,16 +49,38 @@ def slot_key():
 
 class TestSimulateSlotLock:
     def test_claim_first_succeeds(self, slot_key):
-        assert claim_simulate_slot(*slot_key) is True
+        # V-27.81 followup: claim now returns a per-claim token string (or
+        # None when the slot is already held) instead of a bare bool.
+        token = claim_simulate_slot(*slot_key)
+        assert isinstance(token, str) and token
 
     def test_claim_second_fails(self, slot_key):
-        assert claim_simulate_slot(*slot_key) is True
-        assert claim_simulate_slot(*slot_key) is False
+        assert claim_simulate_slot(*slot_key) is not None
+        assert claim_simulate_slot(*slot_key) is None
 
     def test_claim_after_release_succeeds(self, slot_key):
-        assert claim_simulate_slot(*slot_key) is True
-        release_simulate_slot(*slot_key)
-        assert claim_simulate_slot(*slot_key) is True
+        token = claim_simulate_slot(*slot_key)
+        assert token is not None
+        release_simulate_slot(*slot_key, token)
+        assert claim_simulate_slot(*slot_key) is not None
+
+    def test_release_is_cas_token_scoped(self, slot_key):
+        # V-27.81 followup: release is a Lua CAS, not a blind DELETE. A
+        # worker whose slot TTL expired and was re-claimed by someone else
+        # must NOT delete the new holder's slot when it finally releases.
+        stale_token = claim_simulate_slot(*slot_key)
+        assert stale_token is not None
+        # Simulate TTL expiry + another worker re-claiming the same slot.
+        get_redis_client().delete(_simulate_lock_key(*slot_key))
+        new_token = claim_simulate_slot(*slot_key)
+        assert new_token is not None and new_token != stale_token
+        # The original worker releases with its now-stale token — no-op.
+        release_simulate_slot(*slot_key, stale_token)
+        # The new holder's slot must still be held.
+        assert claim_simulate_slot(*slot_key) is None
+        # And the rightful owner can still release it.
+        release_simulate_slot(*slot_key, new_token)
+        assert claim_simulate_slot(*slot_key) is not None
 
     def test_key_distinct_per_triple(self):
         k1 = _simulate_lock_key("h1", "USA", "TOP3000")
@@ -68,8 +90,9 @@ class TestSimulateSlotLock:
         assert len({k1, k2, k3, k4}) == 4
 
     def test_claim_fail_open_on_redis_error(self, monkeypatch):
-        # SAFETY: a Redis outage must NOT block simulation — claim returns
-        # True (== pre-V-27.81 behaviour) so the worker proceeds.
+        # SAFETY: a Redis outage must NOT block simulation — claim returns a
+        # (locally-generated, unusable) token == pre-V-27.81 "proceed"
+        # behaviour so the worker proceeds. release's CAS later no-ops.
         import backend.tasks.redis_pool as rp
 
         class _BoomClient:
@@ -77,7 +100,7 @@ class TestSimulateSlotLock:
                 raise ConnectionError("redis down")
 
         monkeypatch.setattr(rp, "get_redis_client", lambda: _BoomClient())
-        assert claim_simulate_slot("h", "USA", "TOP3000") is True
+        assert claim_simulate_slot("h", "USA", "TOP3000") is not None
 
 
 # ---------------------------------------------------------------------------
@@ -128,12 +151,22 @@ def _patch_node_simulate_deps(monkeypatch, *, claim_results):
     monkeypatch.setattr(
         "backend.database.AsyncSessionLocal", lambda: _FakeSession()
     )
+    # Disable the portfolio two-factor dedup — it's an independent filter
+    # (V-26.77) that would otherwise eat generic skeletons like rank(FIELD)
+    # and confound this test's claim/simulate accounting.
+    monkeypatch.setattr(
+        "backend.agents.seed_pool.portfolio_skeletons.get_portfolio_skeleton_index",
+        lambda region: None,
+    )
     claim_calls: list = []
 
     def _fake_claim(h, r, u):
         claim_calls.append((h, r, u))
         idx = len(claim_calls) - 1
-        return claim_results[idx] if idx < len(claim_results) else True
+        ok = claim_results[idx] if idx < len(claim_results) else True
+        # V-27.81 followup: claim returns a token string on success / None on
+        # contention, mirroring the real primitive.
+        return f"tok{idx}" if ok else None
 
     monkeypatch.setattr(
         "backend.tasks.redis_pool.claim_simulate_slot", _fake_claim

@@ -870,10 +870,24 @@ def _verify_cascade_ownership(lock_key: str, token: str, *, where: str) -> bool:
     """
     if not getattr(settings, "CASCADE_LOCK_TAKEOVER_ENABLED", True):
         return True
-    from backend.tasks.redis_pool import verify_lock_ownership
+    from backend.tasks.redis_pool import renew_cascade_lock, verify_lock_ownership
     state = verify_lock_ownership(lock_key, token)
     if state in ("OWNED", "UNKNOWN"):
-        if state == "UNKNOWN":
+        if state == "OWNED":
+            # V-27.1 followup: renew the TTL at every round boundary. The lock
+            # TTL (CASCADE_LOCK_TTL_SEC, default 3h) is shorter than a
+            # CONTINUOUS_CASCADE worker's lifetime — without renewal a healthy
+            # long-running worker lets the lock expire under it, then
+            # self-terminates (MISSING) on the next boundary, and the watchdog
+            # can take over the freed lock mid-round (a fresh double-run path).
+            _ttl = getattr(settings, "CASCADE_LOCK_TTL_SEC", 10800)
+            if not renew_cascade_lock(lock_key, token, _ttl):
+                logger.warning(
+                    f"[cascade-ownership] {where}: lock renew returned 0 "
+                    f"(redis blip or token mismatch) — continuing; the next "
+                    f"boundary check will catch a genuine loss"
+                )
+        elif state == "UNKNOWN":
             logger.warning(
                 f"[cascade-ownership] {where}: redis UNKNOWN — continuing "
                 f"(a transient error must not self-terminate a live worker)"
