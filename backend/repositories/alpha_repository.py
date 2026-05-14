@@ -372,7 +372,9 @@ class AlphaRepository(BaseRepository[Alpha]):
             )
             query = query.where(Alpha.dataset_id.in_(ds_subq))
 
-        query = query.limit(limit)
+        # Order by recency so the limit keeps the most recent samples — the
+        # baseline should reflect recent attempts, not an arbitrary DB-order slice.
+        query = query.order_by(Alpha.date_created.desc()).limit(limit)
 
         result = await self.db.execute(query)
         return [float(v) for v in result.scalars().all() if v is not None]
