@@ -209,12 +209,12 @@ def should_abandon_hypothesis(
         f"0 PASS and attribution=HYPOTHESIS — signal direction does "
         f"not survive validation"
     )
-    # Visible at default INFO so persistence.py's downstream branch
-    # (refine → SUPERSEDED vs direct ABANDONED) is traceable.
+    # Visible at default INFO so persistence.py's terminal branch is
+    # traceable. V-27.B: G-refine downstream removed — abandon is now
+    # always terminal (persistence.py goes straight to mark_abandoned).
     logger.info(
         f"[B6 abandon-trigger] hid={hypothesis_id} rounds=[{rounds_str}] "
-        f"reason={reason!r} — downstream may convert to SUPERSEDED via "
-        f"G-refine loop"
+        f"reason={reason!r} — hypothesis will be marked ABANDONED"
     )
     return True, reason
 

@@ -252,31 +252,8 @@ async def test_mark_abandoned_requires_reason(session):
         await svc.mark_abandoned(h.id, reason="")
 
 
-@pytest.mark.asyncio
-async def test_mark_superseded_requires_child_link(session):
-    svc = HypothesisService(session)
-    parent = await svc.create_hypothesis(_data("parent"))
-    await session.commit()
-    # Child WITHOUT parent_hypothesis_id ref → should reject
-    bad_child = await svc.create_hypothesis(_data("bad-child"))
-    await session.commit()
-    with pytest.raises(ValueError):
-        await svc.mark_superseded(parent.id, bad_child.id)
-
-
-@pytest.mark.asyncio
-async def test_mark_superseded_succeeds_with_proper_lineage(session):
-    svc = HypothesisService(session)
-    parent = await svc.create_hypothesis(_data("super-parent"))
-    await session.commit()
-    child = await svc.create_hypothesis(_data(
-        "super-child", parent_hypothesis_id=parent.id,
-    ))
-    await session.commit()
-
-    assert await svc.mark_superseded(parent.id, child.id) is True
-    await session.commit()
-    assert (await svc.get_by_id(parent.id)).status == HypothesisStatus.SUPERSEDED.value
+# V-27.B (2026-05-14): test_mark_superseded_* removed — mark_superseded
+# and the G-refine loop it served were deleted (never fired in production).
 
 
 @pytest.mark.asyncio

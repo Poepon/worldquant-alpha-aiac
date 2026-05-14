@@ -98,7 +98,10 @@ class HypothesisStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"          # has ≥1 alpha (any quality_status)
     PROMOTED = "PROMOTED"      # has ≥1 PASS alpha; kept long-term for KB
     ABANDONED = "ABANDONED"    # should_abandon_hypothesis triggered
-    SUPERSEDED = "SUPERSEDED"  # replaced by child hypothesis
+    # V-27.B (2026-05-14): SUPERSEDED is no longer written — the G-refine
+    # loop (abandon → refine into a child) was removed (never fired in
+    # production). Kept for enum/schema stability; no new rows get it.
+    SUPERSEDED = "SUPERSEDED"  # deprecated — was: replaced by child hypothesis
 
 
 class HypothesisKind(str, enum.Enum):

@@ -98,6 +98,9 @@ class Hypothesis(SQLAlchemyBase):
         ForeignKey("alphas.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # V-27.B (2026-05-14): parent_hypothesis_id is no longer written — the
+    # G-refine loop (the only writer) was removed (never fired: 0/673 rows
+    # had a parent). Column + FK kept for schema stability; no migration.
     parent_hypothesis_id = Column(
         Integer,
         ForeignKey("hypotheses.id", ondelete="SET NULL"),

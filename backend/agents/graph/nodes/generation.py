@@ -587,49 +587,12 @@ async def node_hypothesis(
             f"task_id={state.task_id}"
         )
 
-    # G — Hypothesis Refinement Loop (2026-05-06): before persisting a fresh
-    # LLM-emitted hypothesis, check if there's an unused refined child from
-    # a recently SUPERSEDED parent (B5 abandon → refine path created it).
-    # If found, use that child as the round's primary instead — closes the
-    # feedback loop so refinement is actually applied, not just bookkept.
-    if hge_level >= 2 and current_hypothesis_id is None:
-        try:
-            from backend.database import AsyncSessionLocal
-            from backend.services.hypothesis_service import HypothesisService
-            experiment_variant = cfg.get("experiment_variant")
-            async with AsyncSessionLocal() as _check_db:
-                svc = HypothesisService(_check_db)
-                refined = await svc.find_unused_refined(
-                    region=state.region,
-                    experiment_variant=str(experiment_variant) if experiment_variant is not None else None,
-                )
-                if refined is not None:
-                    current_hypothesis_id = refined.id
-                    current_hypothesis_ids = [refined.id]
-                    # Synthesize a hypothesis dict for downstream nodes that
-                    # expect the LLM-shape (key_fields / suggested_operators /
-                    # selected_datasets). Refined hypothesis statement +
-                    # rationale are what matter; the rest can be empty.
-                    hypotheses = [{
-                        "idea": refined.statement,
-                        "statement": refined.statement,
-                        "rationale": refined.rationale or "",
-                        "expected_signal": refined.expected_signal or "unknown",
-                        "key_fields": refined.key_fields or [],
-                        "suggested_operators": refined.suggested_operators or [],
-                        "selected_datasets": refined.dataset_pool or [],
-                        "confidence": refined.confidence,
-                        "novelty": refined.novelty,
-                        "hypothesis_id": refined.id,
-                        "_g_refined": True,  # marker for trace
-                    }]
-                    chosen_datasets = refined.dataset_pool or [legacy_anchor]
-                    logger.info(
-                        f"[{node_name}] G refine reuse: hypothesis_id={refined.id} "
-                        f"(parent={refined.parent_hypothesis_id}, statement={refined.statement[:60]!r})"
-                    )
-        except Exception as _g_ex:
-            logger.warning(f"[{node_name}] G refine pickup failed (non-fatal): {_g_ex}")
+    # V-27.B (2026-05-14): the G-refine pickup block (reuse a SUPERSEDED
+    # parent's unused refined child) was removed — the G-refine loop never
+    # fired in production (V-26.14: 0/673 hypotheses had a parent), so
+    # find_unused_refined always returned None. node_hypothesis now has two
+    # hge_level>=2 paths: V-22.13 cross-round reuse (above) + fresh LLM
+    # generation (below).
 
     if hge_level >= 2 and hypotheses and current_hypothesis_id is None:
         # V-19.7 (2026-05-06) zombie-ACTIVE prevention: persist ONLY the

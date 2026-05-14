@@ -278,28 +278,11 @@ class HypothesisService(BaseService):
             return True
         return False
 
-    async def mark_superseded(
-        self, hypothesis_id: int, child_hypothesis_id: int,
-    ) -> bool:
-        """Hypothesis replaced by a refined child (Plan v5+ §B5 refine
-        action). Records the lineage via child.parent_hypothesis_id and
-        flips parent.status to SUPERSEDED."""
-        # Verify child references the parent
-        child = await self.get_by_id(child_hypothesis_id)
-        if child is None:
-            raise ValueError(f"child hypothesis {child_hypothesis_id} not found")
-        if child.parent_hypothesis_id != hypothesis_id:
-            raise ValueError(
-                f"child {child_hypothesis_id} does not reference parent "
-                f"{hypothesis_id} (has parent_hypothesis_id={child.parent_hypothesis_id})"
-            )
-        stmt = (
-            update(Hypothesis)
-            .where(Hypothesis.id == hypothesis_id)
-            .values(status=HypothesisStatus.SUPERSEDED.value)
-        )
-        result = await self.db.execute(stmt)
-        return (result.rowcount or 0) > 0
+    # V-27.B (2026-05-14): mark_superseded removed — the G-refine loop
+    # (abandon → refine into a SUPERSEDED child) never fired in production
+    # (V-26.14: 0/673 hypotheses had a parent). HypothesisStatus.SUPERSEDED
+    # + Hypothesis.parent_hypothesis_id are kept (schema unchanged) but no
+    # longer written.
 
     async def set_active_flag(
         self, hypothesis_id: int, is_active: bool, reason: Optional[str] = None,
@@ -432,64 +415,10 @@ class HypothesisService(BaseService):
     # Helper queries
     # ------------------------------------------------------------------
 
-    async def find_unused_refined(
-        self,
-        *,
-        region: str,
-        experiment_variant: Optional[str] = None,
-        ttl_minutes: int = 60,
-    ) -> Optional[Hypothesis]:
-        """G — Hypothesis Refinement Loop pickup query.
-
-        Finds a PROPOSED hypothesis whose parent was SUPERSEDED (i.e. the
-        parent was abandoned-then-refined into this child) and which has
-        not yet received any alpha rows. node_hypothesis uses this to reuse
-        a refined hypothesis at the start of a new round instead of asking
-        LLM for a fresh one.
-
-        Filters:
-          - status = PROPOSED (no rounds yet)
-          - parent.status = SUPERSEDED (parent was refined-into)
-          - region matches
-          - experiment_variant matches (None = entries without variant tag)
-          - is_active=True (not regime-frozen)
-          - created within last ttl_minutes (avoid stale picks)
-          - no alphas linked yet
-
-        Returns the most recent matching child, or None.
-        """
-        from sqlalchemy import select as _sel, exists as _exists, and_, or_
-        from datetime import datetime, timedelta
-        from backend.models import Alpha as _A
-
-        cutoff = datetime.utcnow() - timedelta(minutes=ttl_minutes)
-        # Subquery: parent must be SUPERSEDED
-        parent_alias = Hypothesis.__table__.alias("parent")
-
-        stmt = (
-            _sel(Hypothesis)
-            .join(
-                parent_alias,
-                Hypothesis.parent_hypothesis_id == parent_alias.c.id,
-            )
-            .where(
-                Hypothesis.status == HypothesisStatus.PROPOSED.value,
-                parent_alias.c.status == HypothesisStatus.SUPERSEDED.value,
-                Hypothesis.region == region,
-                Hypothesis.is_active.is_(True),
-                Hypothesis.created_at >= cutoff,
-                ~_exists().where(_A.hypothesis_id == Hypothesis.id),
-            )
-            .order_by(Hypothesis.created_at.desc())
-            .limit(1)
-        )
-        if experiment_variant is None:
-            stmt = stmt.where(Hypothesis.experiment_variant.is_(None))
-        else:
-            stmt = stmt.where(Hypothesis.experiment_variant == experiment_variant)
-
-        result = await self.db.execute(stmt)
-        return result.scalar_one_or_none()
+    # V-27.B (2026-05-14): find_unused_refined removed — it was the
+    # node_hypothesis pickup query for G-refine'd children, but the
+    # G-refine loop never produced any (no parent.status=SUPERSEDED rows
+    # ever existed), so this query always returned None.
 
     async def rounds_active(self, hypothesis_id: int) -> int:
         """Plan v5+ §Phase 3 prep — count rounds this hypothesis has been
