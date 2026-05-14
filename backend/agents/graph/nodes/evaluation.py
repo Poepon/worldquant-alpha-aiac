@@ -1294,7 +1294,22 @@ async def node_evaluate(
             "_score": round(score, 4),
             "_preliminary_score": round(preliminary_score, 4),
             "_prod_corr": round(prod_corr, 4) if prod_corr else None,
-            "_self_corr": round(self_corr, 4) if self_corr else None,
+            # V-26.77 follow-up #2 (2026-05-14): falsy guard `if self_corr`
+            # collapsed 0.0 -> None, masking BOTH "BRAIN cache miss" (src=
+            # unknown) AND "actually uncorrelated" (src=local/brain, 0.0).
+            # Audit work for alpha 8003: a local-source 0.5669 happened
+            # to be falsy-truthy and stored; later 0.0-unknown overwrote
+            # it. New rule: store the value when the source is trusted
+            # ('local' or 'brain'), regardless of magnitude; store None
+            # only when the source is 'unknown' / 'tier_skipped' / 'skipped'.
+            # `_self_corr_source` is now stamped alongside so a reader can
+            # distinguish "uncorrelated alpha" from "no signal".
+            "_self_corr": (
+                round(self_corr, 4)
+                if self_corr_source in ("local", "brain")
+                else None
+            ),
+            "_self_corr_source": self_corr_source,
             "_corr_checked": needs_corr_check,
             "_should_optimize": should_opt,
             "_optimize_reason": opt_reason,
