@@ -15,8 +15,9 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy import and_, case, func, select, text
+from sqlalchemy import Float, and_, case, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.agents.graph.tier_thresholds import get_min_seed_count
@@ -68,6 +69,13 @@ class FactorAlpha(BaseModel):
     status: Optional[str] = None  # BRAIN status: ACTIVE / UNSUBMITTED / created
     date_submitted: Optional[datetime] = None
     can_submit: Optional[bool] = None  # NULL = 未检查；True = 可提交；False = 不可提交
+    # V-26.77 follow-up #6: locally-measured self-correlation against the OS
+    # pool. can_submit=True is NOT sufficient — BRAIN's SELF_CORRELATION often
+    # sits PENDING while the local PnL matrix already shows the alpha is a
+    # near-duplicate. self_corr_source ∈ {local, brain, unknown}; a value with
+    # source unknown means "not measured", NOT "uncorrelated".
+    self_corr: Optional[float] = None
+    self_corr_source: Optional[str] = None
     # V-23.A (2026-05-13): IQC marginal-contribution snapshot from V-22.12
     # audit pipeline. Dynamic — invalidated on every team submission, marked
     # stale by sync_user_alphas. Used by frontend as a ranker (not filter),
@@ -189,7 +197,7 @@ async def get_stats(db: AsyncSession = Depends(get_db)) -> StatsResponse:
 
 @router.get("/alphas", response_model=AlphaListResponse)
 async def list_alphas_by_tier(
-    tier: int = Query(..., ge=1, le=3),
+    tier: Optional[int] = Query(None, ge=1, le=3),
     region: Optional[str] = None,
     dataset_id: Optional[str] = None,
     quality_status: Optional[str] = None,
@@ -198,6 +206,7 @@ async def list_alphas_by_tier(
     expression_search: Optional[str] = None,
     submitted: Optional[bool] = None,  # True = 已提交, False = 未提交, None = 不筛选
     can_submit: Optional[str] = None,  # 'true' | 'false' | 'null' | None (无筛选)
+    submittable: Optional[bool] = None,  # True = "可提交" tab 口径(见下)
     sort_by: str = Query(
         "created_at",
         pattern="^(is_sharpe|is_fitness|is_turnover|created_at|metrics_snapshot_at|iqc_delta_score)$",
@@ -207,11 +216,22 @@ async def list_alphas_by_tier(
     offset: int = Query(0, ge=0),
     db: AsyncSession = Depends(get_db),
 ) -> AlphaListResponse:
-    """Paginated alpha list filtered to a tier. Used by FactorLibrary tab tables."""
-    base = select(Alpha).where(Alpha.factor_tier == tier)
-    count_base = select(func.count(Alpha.id)).where(Alpha.factor_tier == tier)
+    """Paginated alpha list. Used by FactorLibrary tab tables.
+
+    `tier` is optional — omit it for the cross-tier "可提交" / "已提交" tabs.
+
+    `submittable=true` is the "可提交" tab filter: can_submit=True AND not yet
+    submitted AND the locally-measured self_corr is either below 0.7 or has
+    never been measured. The self_corr clause is what stops the tab from being
+    flooded with can_submit=True alphas that are actually near-duplicates of
+    the OS pool (BRAIN's SELF_CORRELATION check often lags behind in PENDING).
+    """
+    base = select(Alpha)
+    count_base = select(func.count(Alpha.id))
 
     conds = []
+    if tier is not None:
+        conds.append(Alpha.factor_tier == tier)
     if region:
         conds.append(Alpha.region == region)
     if dataset_id:
@@ -234,6 +254,15 @@ async def list_alphas_by_tier(
         conds.append(Alpha.can_submit.is_(False))
     elif can_submit == "null":
         conds.append(Alpha.can_submit.is_(None))
+    if submittable is True:
+        # "可提交" tab: can_submit=True + not submitted + self_corr safe-or-unmeasured.
+        # _self_corr lives in the metrics JSONB; ->>'_self_corr' is SQL NULL
+        # both when the key is absent and when its JSON value is null, so the
+        # IS NULL branch correctly covers "never measured".
+        _self_corr = Alpha.metrics["_self_corr"].astext.cast(Float)
+        conds.append(Alpha.can_submit.is_(True))
+        conds.append(Alpha.date_submitted.is_(None))
+        conds.append(or_(_self_corr < 0.7, _self_corr.is_(None)))
 
     if conds:
         base = base.where(and_(*conds))
@@ -289,6 +318,8 @@ async def list_alphas_by_tier(
             status=a.status,
             date_submitted=a.date_submitted,
             can_submit=a.can_submit,
+            self_corr=(a.metrics or {}).get("_self_corr"),
+            self_corr_source=(a.metrics or {}).get("_self_corr_source"),
             **_iqc_from(a),
         )
         for a in rows
@@ -445,4 +476,68 @@ async def refresh_can_submit_batch(
         fail_count=fail_n,
         skipped=skipped,
         sampled_failures=sampled_failures,
+    )
+
+
+class IqcRefreshResponse(BaseModel):
+    enqueued: int
+    competition: str
+    message: str
+
+
+@router.post("/refresh-iqc", response_model=IqcRefreshResponse)
+async def refresh_iqc_batch(
+    scope: str = Query("submittable", pattern="^(submittable|all_can_submit)$"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Enqueue IQC marginal-contribution re-audits for the 可提交 tab.
+
+    IQC Δscore is dynamic — it shifts every time the team submits another
+    alpha — so the 可提交 tab surfaces it as a (red-when-negative) column
+    rather than a hard filter, and this endpoint lets the user re-audit on
+    demand. Each audit runs as a fire-and-forget Celery task
+    (audit_iqc_marginal_for_alpha) that writes back to
+    alpha.metrics._iqc_marginal; this call returns immediately with the
+    enqueued count and the frontend refetches the table after a short delay.
+
+    scope:
+      - submittable (default): can_submit=True + unsubmitted + self_corr<0.7|null
+      - all_can_submit: every can_submit=True + unsubmitted alpha
+    """
+    from backend.config import settings
+    from backend.tasks.refresh_tasks import audit_iqc_marginal_for_alpha
+
+    competition = settings.IQC_AUTO_AUDIT_COMPETITION or "IQC2026S1"
+
+    q = select(Alpha.id).where(
+        Alpha.can_submit.is_(True),
+        Alpha.date_submitted.is_(None),
+    )
+    if scope == "submittable":
+        _self_corr = Alpha.metrics["_self_corr"].astext.cast(Float)
+        q = q.where(or_(_self_corr < 0.7, _self_corr.is_(None)))
+    q = q.order_by(Alpha.is_sharpe.desc().nullslast()).limit(limit)
+    ids = [r[0] for r in (await db.execute(q)).all()]
+
+    enqueued = 0
+    for i, aid in enumerate(ids):
+        try:
+            # Stagger by 2s so the batch doesn't burst BRAIN's
+            # before-and-after-performance endpoint.
+            audit_iqc_marginal_for_alpha.apply_async(
+                args=[aid, competition], countdown=i * 2,
+            )
+            enqueued += 1
+        except Exception as e:
+            logger.warning(f"[refresh-iqc] enqueue failed for alpha_pk={aid}: {e}")
+
+    eta = enqueued * 2
+    return IqcRefreshResponse(
+        enqueued=enqueued,
+        competition=competition,
+        message=(
+            f"已触发 {enqueued} 个 IQC 审计（错开排队，约 {eta}s 内完成）；"
+            f"稍后刷新表格查看更新后的 Δscore"
+        ),
     )

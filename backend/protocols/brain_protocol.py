@@ -580,15 +580,37 @@ class BrainProtocol(Protocol):
     ) -> Dict[str, Any]:
         """
         Get user's alphas with pagination.
-        
+
         Args:
             limit: Maximum number of results
             offset: Pagination offset
             stage: Filter by alpha stage
             search: Search query
             start_date: Filter by creation date
-            
+
         Returns:
             Dict with 'results' list and 'count' total
+        """
+        ...
+
+    async def submit_alpha(
+        self,
+        alpha_id: str,
+        max_polls: int = 60,
+    ) -> Dict[str, Any]:
+        """
+        Submit an alpha to BRAIN for evaluation.
+
+        POSTs /alphas/{id}/submit which kicks off an async job; while the
+        response carries a Retry-After header the call polls GET on the same
+        path until terminal.
+
+        Args:
+            alpha_id: BRAIN alpha id to submit
+            max_polls: upper bound on Retry-After poll iterations
+
+        Returns:
+            Dict {success: bool, status_code: int, body: dict|str, polls: int}.
+            Never raises — transport/parse errors collapse to success=False.
         """
         ...

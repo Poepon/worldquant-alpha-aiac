@@ -459,19 +459,23 @@ async def node_simulate(
             "recent_dedup_skeletons": _merge_dedup_skels(),
         }
 
-    # Pre-simulate self-corr check (2026-05-09): drop candidates whose
-    # skeleton matches an already-submitted alpha — they would fail BRAIN's
-    # server-side self-correlation gate at submission, so simulating wastes
-    # BRAIN config quota. Cheap O(1) hashset lookup, runs before the
-    # ML-based filter below. Cache loaded from
-    # backend/data/correlation_cache/submitted_portfolio_{region}.json.
+    # Pre-simulate self-corr check (2026-05-09; V-26.77 follow-up #4
+    # 2026-05-14): drop candidates that are near-certain duplicates of an
+    # already-submitted alpha so BRAIN sim quota isn't burnt on a
+    # submission-time SELF_CORRELATION FAIL. Two-factor match required —
+    # skeleton + fields set + numerics within ±20% — because the
+    # skeleton-only check over-matches (e.g. `group_rank(divide(FIELD,
+    # FIELD), FIELD)` collapses every two-field ratio into one bucket
+    # regardless of which financial dimensions they encode). Cache loaded
+    # from backend/data/correlation_cache/submitted_portfolio_{region}.json.
     try:
         from backend.agents.seed_pool.portfolio_skeletons import (
-            get_portfolio_skeleton_set,
+            find_portfolio_match,
+            get_portfolio_skeleton_index,
         )
         from backend.knowledge_extraction import expression_to_skeleton
-        portfolio_skels = get_portfolio_skeleton_set(state.region)
-        if portfolio_skels:
+        portfolio_index = get_portfolio_skeleton_index(state.region)
+        if portfolio_index:
             keep_after_skel: list[int] = []
             skel_dups = 0
             for idx in indices_to_simulate:
@@ -480,10 +484,16 @@ async def node_simulate(
                     sk = expression_to_skeleton(expr, max_depth=3)
                 except Exception:
                     sk = None
-                if sk and sk in portfolio_skels:
+                matched_aid = (
+                    find_portfolio_match(expr, sk, portfolio_index)
+                    if sk
+                    else None
+                )
+                if matched_aid:
                     skel_dups += 1
                     state.pending_alphas[idx].simulation_error = (
-                        f"portfolio skeleton duplicate (self-corr risk): {sk[:60]}"
+                        f"portfolio near-duplicate (self-corr risk) of "
+                        f"{matched_aid}: skeleton+fields+numerics match"
                     )
                     state.pending_alphas[idx].is_simulated = True
                     state.pending_alphas[idx].simulation_success = False
@@ -493,19 +503,19 @@ async def node_simulate(
                     keep_after_skel.append(idx)
             if skel_dups:
                 logger.info(
-                    f"[{node_name}] portfolio-skel dedup: {skel_dups} candidates "
-                    f"matched submitted skeletons (saved BRAIN sims), "
+                    f"[{node_name}] portfolio two-factor dedup: {skel_dups} "
+                    f"candidates were near-duplicates (saved BRAIN sims), "
                     f"{len(keep_after_skel)} remain"
                 )
             indices_to_simulate = keep_after_skel
             if not indices_to_simulate:
-                logger.warning(f"[{node_name}] All candidates dropped by portfolio-skel dedup")
+                logger.warning(f"[{node_name}] All candidates dropped by portfolio dedup")
                 return {
                     "pending_alphas": state.pending_alphas,
                     "recent_dedup_skeletons": _merge_dedup_skels(),
                 }
     except Exception as e:
-        logger.warning(f"[{node_name}] portfolio-skel dedup failed, proceeding: {e}")
+        logger.warning(f"[{node_name}] portfolio dedup failed, proceeding: {e}")
 
     # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier filter.
     # When ENABLE_PRE_SIMULATE_FILTER=True, predict P(PASS) per candidate
@@ -942,9 +952,16 @@ async def node_evaluate(
             self_corr_source = "unknown"
             if correlation_service is not None:
                 try:
-                    self_corr, self_corr_source = await correlation_service.get_with_fallback(
+                    _corr_raw, self_corr_source = await correlation_service.get_with_fallback(
                         alpha.alpha_id, region=state.region
                     )
+                    # get_with_fallback returns None for source="unknown"
+                    # (V-26.77 follow-up #5: the service no longer fakes 0.0
+                    # for "not measured"). Keep self_corr numeric for the
+                    # score / hard_gate arithmetic below — self_corr_verified
+                    # (derived from source) is what actually gates PASS, so a
+                    # 0.0 placeholder here is inert when source is unknown.
+                    self_corr = _corr_raw if _corr_raw is not None else 0.0
                 except Exception as e:
                     logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
                     self_corr_source = "unknown"

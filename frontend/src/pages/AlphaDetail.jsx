@@ -387,6 +387,29 @@ export default function AlphaDetail() {
               <Descriptions.Item label="Fitness">
                 {metrics.fitness?.toFixed(2) || '--'}
               </Descriptions.Item>
+              <Descriptions.Item label="Self-corr">
+                {(() => {
+                  const v = metrics._self_corr
+                  const src = metrics._self_corr_source
+                  if (v == null) {
+                    return (
+                      <AntTooltip title="本地 OS PnL cache 未命中且未走 BRAIN 兜底,提交前请刷新 cache 或人工核对">
+                        <Tag color="default">unknown</Tag>
+                      </AntTooltip>
+                    )
+                  }
+                  const color = v >= 0.7 ? 'red' : v >= 0.5 ? 'orange' : 'green'
+                  const srcColor = src === 'local' ? 'cyan' : src === 'brain' ? 'blue' : 'default'
+                  return (
+                    <Space size={4}>
+                      <Tag color={color}>{v.toFixed(4)}</Tag>
+                      <AntTooltip title={src === 'local' ? '本地 OS PnL cache 实测' : src === 'brain' ? 'BRAIN /correlations/SELF API' : '来源未知'}>
+                        <Tag color={srcColor}>{src || '?'}</Tag>
+                      </AntTooltip>
+                    </Space>
+                  )
+                })()}
+              </Descriptions.Item>
             </Descriptions>
           </Card>
 

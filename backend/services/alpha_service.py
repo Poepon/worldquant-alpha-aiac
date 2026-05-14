@@ -79,6 +79,8 @@ class AlphaListItem:
     margin: Optional[float]
     fitness: Optional[float]
     created_at: Optional[datetime]
+    self_corr: Optional[float] = None
+    self_corr_source: Optional[str] = None
 
 
 @dataclass
@@ -219,7 +221,18 @@ class AlphaService(BaseService):
         margin = None
         if alpha.is_metrics and isinstance(alpha.is_metrics, dict):
             margin = alpha.is_metrics.get("margin")
-        
+
+        # V-26.77 follow-up #3: surface locally-measured self_corr + its
+        # provenance so list views can tag alphas with the BRAIN/local/unknown
+        # trust source (see CorrelationService.get_with_fallback). The value
+        # is None when source not in {local, brain} per the writing contract
+        # in agents/graph/nodes/evaluation.py.
+        self_corr = None
+        self_corr_source = None
+        if alpha.metrics and isinstance(alpha.metrics, dict):
+            self_corr = alpha.metrics.get("_self_corr")
+            self_corr_source = alpha.metrics.get("_self_corr_source")
+
         return AlphaListItem(
             id=alpha.id,
             alpha_id=alpha.alpha_id,
@@ -237,6 +250,8 @@ class AlphaService(BaseService):
             margin=margin,
             fitness=alpha.is_fitness,
             created_at=alpha.date_created or alpha.created_at,
+            self_corr=self_corr,
+            self_corr_source=self_corr_source,
         )
     
     # =========================================================================
@@ -296,7 +311,17 @@ class AlphaService(BaseService):
         if not detail:
             return None
 
-        ok, failed, pending = compute_can_submit(detail)
+        # V-26.77 follow-up #3: pipe the locally-measured self_corr through so
+        # PENDING BRAIN SELF_CORRELATION can't whitewash an alpha that we
+        # already know is correlated with the OS pool. Only trusted sources
+        # (local cache / BRAIN /correlations/SELF) participate — `unknown`
+        # cache-miss values fall back to BRAIN's verdict.
+        existing_metrics = alpha.metrics or {}
+        ok, failed, pending = compute_can_submit(
+            detail,
+            local_self_corr=existing_metrics.get("_self_corr"),
+            local_self_corr_source=existing_metrics.get("_self_corr_source"),
+        )
         if ok is None:
             return None
 
@@ -319,6 +344,109 @@ class AlphaService(BaseService):
             "failed_checks": failed,
             "pending_checks": pending,
         }
+
+    async def submit_alpha(
+        self,
+        alpha_pk: int,
+        brain_adapter=None,
+        skip_precheck: bool = False,
+    ) -> Dict[str, Any]:
+        """Submit an alpha to BRAIN for evaluation.
+
+        Pre-flight gates (mirror scripts/submit_alpha.py — submit is
+        irreversible and burns BRAIN quota, so every gate runs before the
+        POST):
+          1. alpha exists and has a BRAIN alpha_id
+          2. not already submitted (date_submitted IS NULL)
+          3. can_submit is True
+          4. self_corr precheck — refuse when locally/BRAIN-measured corr
+             >= 0.7 (BRAIN would reject; submitting wastes a slot). An
+             "unknown" precheck is inconclusive and does NOT block — the
+             submit proceeds and BRAIN makes the final call.
+
+        On BRAIN success, stamps alpha.date_submitted and refreshes the
+        portfolio-skeleton cache so the mining loop stops re-generating the
+        just-submitted shape.
+
+        Returns {submitted: bool, reason: str, self_corr?, self_corr_source?,
+        brain?} — submitted=False with a human-readable reason on any gate
+        failure or BRAIN rejection. Never raises for gate failures.
+        """
+        alpha = await self.alpha_repo.get_by_id(alpha_pk)
+        if not alpha:
+            return {"submitted": False, "reason": "alpha not found"}
+        if not alpha.alpha_id:
+            return {"submitted": False, "reason": "alpha has no BRAIN alpha_id"}
+        if alpha.date_submitted is not None:
+            return {
+                "submitted": False,
+                "reason": f"already submitted at {alpha.date_submitted}",
+            }
+        if alpha.can_submit is not True:
+            return {
+                "submitted": False,
+                "reason": f"can_submit={alpha.can_submit} — must be True before submit",
+            }
+
+        own_adapter = brain_adapter is None
+        if own_adapter:
+            from backend.adapters.brain_adapter import BrainAdapter
+            brain_adapter = BrainAdapter()
+            await brain_adapter.__aenter__()
+
+        try:
+            if not skip_precheck:
+                from backend.services.correlation_service import CorrelationService
+                corr_svc = CorrelationService(brain_adapter)
+                corr, src = await corr_svc.get_with_fallback(
+                    alpha.alpha_id, region=alpha.region or "USA"
+                )
+                # src="unknown" → corr is None → inconclusive, do NOT block.
+                if src != "unknown" and corr is not None and corr >= 0.7:
+                    return {
+                        "submitted": False,
+                        "reason": (
+                            f"self_corr {corr:.3f} >= 0.7 ({src}) — BRAIN would "
+                            f"reject; submitting would waste a slot"
+                        ),
+                        "self_corr": corr,
+                        "self_corr_source": src,
+                    }
+
+            result = await brain_adapter.submit_alpha(alpha.alpha_id)
+            if not result.get("success"):
+                body = result.get("body")
+                msg = (
+                    (body.get("message") or body.get("error") or str(body))
+                    if isinstance(body, dict)
+                    else str(body)
+                )
+                return {
+                    "submitted": False,
+                    "reason": f"BRAIN rejected (status {result.get('status_code')}): {msg}",
+                    "brain": result,
+                }
+
+            # success — stamp date_submitted
+            from datetime import datetime, timezone
+            alpha.date_submitted = datetime.now(timezone.utc)
+            await self.db.commit()
+
+            # Post-submit: refresh portfolio-skeleton cache (DB-only, ~10ms)
+            # so the T1 strategy prompt stops nudging the LLM toward the shape
+            # we just submitted. Non-fatal.
+            try:
+                from backend.agents.seed_pool.portfolio_skeletons import (
+                    refresh_portfolio_from_db,
+                )
+                await refresh_portfolio_from_db(region=alpha.region or "USA")
+            except Exception as e:
+                logger.warning(f"[submit_alpha] skeleton cache refresh failed: {e}")
+
+            return {"submitted": True, "reason": "ok", "brain": result}
+        finally:
+            if own_adapter:
+                await brain_adapter.__aexit__(None, None, None)
 
     async def get_marginal_contribution(
         self,

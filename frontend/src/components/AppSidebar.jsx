@@ -4,7 +4,6 @@ import { Layout, Menu } from 'antd'
 import {
   DashboardOutlined,
   ThunderboltOutlined,
-  ExperimentOutlined,
   SettingOutlined,
   RocketOutlined,
   DatabaseOutlined,
@@ -24,11 +23,6 @@ const menuItems = [
     key: '/tasks',
     icon: <ThunderboltOutlined />,
     label: '任务管理',
-  },
-  {
-    key: '/alphas',
-    icon: <ExperimentOutlined />,
-    label: '因子实验室',
   },
   {
     key: '/factor-library',

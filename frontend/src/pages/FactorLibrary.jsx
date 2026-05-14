@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState, useMemo } from 'react'
 import {
   Row,
@@ -17,12 +17,16 @@ import {
   Space,
   Tooltip,
   Empty,
+  Popconfirm,
+  message,
 } from 'antd'
 import {
   ArrowRightOutlined,
   EyeOutlined,
   ApartmentOutlined,
   ReloadOutlined,
+  CloudUploadOutlined,
+  SyncOutlined,
 } from '@ant-design/icons'
 import {
   LineChart,
@@ -170,7 +174,40 @@ function PromotionChart({ days = 30 }) {
 }
 
 
-function TierAlphaTable({ tier }) {
+// Self-correlation cell — shared by every table mode. A null value means
+// "never measured" (NOT "uncorrelated"); colour bands mirror the 0.7 BRAIN
+// gate so the 可提交 tab reads at a glance.
+function SelfCorrCell({ value, source }) {
+  if (value == null) {
+    return (
+      <Tooltip title="本地 OS PnL 未实测自相关性（≠ 不相关）">
+        <Tag>未测</Tag>
+      </Tooltip>
+    )
+  }
+  const color = value >= 0.7 ? 'red' : value >= 0.5 ? 'orange' : 'green'
+  const srcColor = source === 'local' ? 'cyan' : source === 'brain' ? 'blue' : 'default'
+  return (
+    <Space size={2}>
+      <Tag color={color}>{value.toFixed(3)}</Tag>
+      <Tooltip
+        title={
+          source === 'local'
+            ? '本地 OS PnL 矩阵实测'
+            : source === 'brain'
+              ? 'BRAIN /correlations/SELF'
+              : '来源未知'
+        }
+      >
+        <Tag color={srcColor}>{source || '?'}</Tag>
+      </Tooltip>
+    </Space>
+  )
+}
+
+
+// mode: 'tier' (needs tier prop) | 'submittable' | 'submitted'
+function AlphaTable({ tier, mode = 'tier' }) {
   const navigate = useNavigate()
   const [pagination, setPagination] = useState({ current: 1, pageSize: 20 })
   const [filters, setFilters] = useState({
@@ -181,13 +218,12 @@ function TierAlphaTable({ tier }) {
     submitted: undefined,
     can_submit: undefined,
   })
-  // V-23.A (2026-05-13): sorter state — driven by Table column .sorter=true
-  // clicks. Default created_at desc preserves prior behaviour; clicking the
-  // IQC Δscore header re-ranks the submit queue.
   const [sorter, setSorter] = useState({
     field: 'created_at',
     order: 'descend',
   })
+  const [submittingId, setSubmittingId] = useState(null)
+  const [refreshingIqc, setRefreshingIqc] = useState(false)
 
   const queryParams = useMemo(() => {
     const sortKeyMap = {
@@ -201,17 +237,19 @@ function TierAlphaTable({ tier }) {
     const sort_by = sortKeyMap[sorter.field] || 'created_at'
     const sort_order = sorter.order === 'ascend' ? 'asc' : 'desc'
     const out = {
-      tier,
       limit: pagination.pageSize,
       offset: (pagination.current - 1) * pagination.pageSize,
       sort_by,
       sort_order,
     }
+    if (mode === 'tier') out.tier = tier
+    else if (mode === 'submittable') out.submittable = true
+    else if (mode === 'submitted') out.submitted = true
     Object.entries(filters).forEach(([k, v]) => {
       if (v !== undefined && v !== null && v !== '') out[k] = v
     })
     return out
-  }, [tier, pagination, filters, sorter])
+  }, [tier, mode, pagination, filters, sorter])
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['factor-library/alphas', queryParams],
@@ -222,6 +260,39 @@ function TierAlphaTable({ tier }) {
   const items = data?.items ?? []
   const total = data?.total ?? 0
 
+  const handleSubmit = async (row) => {
+    setSubmittingId(row.id)
+    try {
+      const res = await api.submitAlpha(row.id)
+      if (res.submitted) {
+        message.success(`#${row.id} 已提交到 BRAIN`)
+      } else {
+        message.error(`#${row.id} 未提交：${res.reason}`)
+      }
+    } catch (e) {
+      message.error(`提交请求失败：${e?.response?.data?.detail || e.message}`)
+    } finally {
+      setSubmittingId(null)
+      refetch()
+    }
+  }
+
+  const handleRefreshIqc = async () => {
+    setRefreshingIqc(true)
+    try {
+      const res = await api.refreshFactorIqc({ scope: 'submittable' })
+      message.success(res.message)
+      // IQC audits run as staggered Celery tasks; wait for the batch to
+      // drain (≈ enqueued × 2s) before refetching, capped at 30s.
+      const delay = Math.min((res.enqueued || 0) * 2000 + 3000, 30000)
+      setTimeout(() => refetch(), delay)
+    } catch (e) {
+      message.error(`刷新 IQC 失败：${e?.response?.data?.detail || e.message}`)
+    } finally {
+      setRefreshingIqc(false)
+    }
+  }
+
   const columns = [
     {
       title: 'ID',
@@ -231,6 +302,18 @@ function TierAlphaTable({ tier }) {
         <a onClick={() => navigate(`/alphas/${id}`)}>#{id}</a>
       ),
     },
+    // Cross-tier modes need the tier column since rows mix T1/T2/T3.
+    ...(mode !== 'tier'
+      ? [
+          {
+            title: 'Tier',
+            dataIndex: 'factor_tier',
+            width: 70,
+            render: (t) =>
+              t ? <Tag color={TIER_COLORS[t]}>T{t}</Tag> : <Text type="secondary">—</Text>,
+          },
+        ]
+      : []),
     {
       title: '表达式',
       dataIndex: 'expression',
@@ -264,6 +347,12 @@ function TierAlphaTable({ tier }) {
       width: 90,
       align: 'right',
       render: (v) => (v != null ? v.toFixed(2) : '—'),
+    },
+    {
+      title: 'Self-corr',
+      dataIndex: 'self_corr',
+      width: 140,
+      render: (v, row) => <SelfCorrCell value={v} source={row.self_corr_source} />,
     },
     {
       title: '状态',
@@ -363,7 +452,7 @@ function TierAlphaTable({ tier }) {
       width: 140,
       ellipsis: true,
     },
-    ...(tier > 1
+    ...(mode === 'tier' && tier > 1
       ? [
           {
             title: '父 alpha',
@@ -396,7 +485,8 @@ function TierAlphaTable({ tier }) {
     {
       title: '操作',
       key: 'actions',
-      width: 180,
+      width: mode === 'submittable' ? 200 : 180,
+      fixed: 'right',
       render: (_, row) => (
         <Space size={4}>
           <Button
@@ -406,7 +496,7 @@ function TierAlphaTable({ tier }) {
           >
             详情
           </Button>
-          {tier < 3 && row.quality_status === 'PASS' && (
+          {mode === 'tier' && tier < 3 && row.quality_status === 'PASS' && (
             <Tooltip
               title={`基于此 ${tier === 1 ? 'T1' : 'T2'} 种子派生 T${tier + 1}`}
             >
@@ -423,6 +513,34 @@ function TierAlphaTable({ tier }) {
                 派生 T{tier + 1}
               </Button>
             </Tooltip>
+          )}
+          {mode === 'submittable' && (
+            <Popconfirm
+              title="提交到 BRAIN？"
+              description={
+                <div style={{ maxWidth: 280 }}>
+                  #{row.id} 将提交到 BRAIN 评估。
+                  <br />
+                  <Text type="danger">此操作不可逆且消耗提交配额。</Text>
+                  <br />
+                  服务端会再次校验 can_submit 与 self_corr&lt;0.7。
+                </div>
+              }
+              okText="确认提交"
+              cancelText="取消"
+              okButtonProps={{ danger: true }}
+              onConfirm={() => handleSubmit(row)}
+            >
+              <Button
+                size="small"
+                type="primary"
+                danger
+                icon={<CloudUploadOutlined />}
+                loading={submittingId === row.id}
+              >
+                提交
+              </Button>
+            </Popconfirm>
           )}
         </Space>
       ),
@@ -470,33 +588,39 @@ function TierAlphaTable({ tier }) {
             setFilters((f) => ({ ...f, min_sharpe: v }))
           }
         />
-        <Select
-          allowClear
-          placeholder="提交状态"
-          style={{ width: 130 }}
-          value={filters.submitted}
-          onChange={(v) =>
-            setFilters((f) => ({ ...f, submitted: v }))
-          }
-          options={[
-            { value: true, label: '已提交' },
-            { value: false, label: '未提交' },
-          ]}
-        />
-        <Select
-          allowClear
-          placeholder="可提交性"
-          style={{ width: 140 }}
-          value={filters.can_submit}
-          onChange={(v) =>
-            setFilters((f) => ({ ...f, can_submit: v }))
-          }
-          options={[
-            { value: 'true', label: '✅ 可提交' },
-            { value: 'false', label: '⚠️ 不可提交' },
-            { value: 'null', label: '未检查' },
-          ]}
-        />
+        {/* submitted / can_submit 筛选器只在「按 Tier 浏览」模式有意义 —
+            可提交 / 已提交 tab 已经在 query 层强制了这两个口径。 */}
+        {mode === 'tier' && (
+          <>
+            <Select
+              allowClear
+              placeholder="提交状态"
+              style={{ width: 130 }}
+              value={filters.submitted}
+              onChange={(v) =>
+                setFilters((f) => ({ ...f, submitted: v }))
+              }
+              options={[
+                { value: true, label: '已提交' },
+                { value: false, label: '未提交' },
+              ]}
+            />
+            <Select
+              allowClear
+              placeholder="可提交性"
+              style={{ width: 140 }}
+              value={filters.can_submit}
+              onChange={(v) =>
+                setFilters((f) => ({ ...f, can_submit: v }))
+              }
+              options={[
+                { value: 'true', label: '✅ 可提交' },
+                { value: 'false', label: '⚠️ 不可提交' },
+                { value: 'null', label: '未检查' },
+              ]}
+            />
+          </>
+        )}
         <Search
           placeholder="表达式包含..."
           allowClear
@@ -515,6 +639,28 @@ function TierAlphaTable({ tier }) {
           刷新
         </Button>
       </Space>
+      {mode === 'submittable' && (
+        <div style={{ marginBottom: 12 }}>
+          <Space align="start">
+            <Button
+              icon={<ReloadOutlined />}
+              loading={refreshingIqc}
+              onClick={handleRefreshIqc}
+            >
+              刷新 IQC Δscore
+            </Button>
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              「可提交」口径：can_submit=true 且未提交 且本地 self_corr&lt;0.7（或未测）。
+              self_corr≥0.7 的已知高相关 alpha 已被排除。
+              <br />
+              <Text type="warning" style={{ fontSize: 12 }}>
+                ⚠ 提交前还要看 IQC Δscore 列：负值（红）= 加入 portfolio 会拉低
+                team score，不应提交。Δscore 随 team 提交动态变化，点左侧按钮重新审计。
+              </Text>
+            </Text>
+          </Space>
+        </div>
+      )}
       <Table
         rowKey="id"
         size="small"
@@ -529,7 +675,6 @@ function TierAlphaTable({ tier }) {
         }}
         onChange={(p, _f, s) => {
           setPagination(p)
-          // s.field is the column dataIndex / key; s.order is 'ascend' | 'descend' | undefined
           if (s && (s.field || s.columnKey)) {
             setSorter({
               field: s.field || s.columnKey,
@@ -539,7 +684,7 @@ function TierAlphaTable({ tier }) {
             setSorter({ field: 'created_at', order: 'descend' })
           }
         }}
-        scroll={{ x: 1240 }}
+        scroll={{ x: 1400 }}
       />
     </>
   )
@@ -547,6 +692,9 @@ function TierAlphaTable({ tier }) {
 
 
 export default function FactorLibrary() {
+  const queryClient = useQueryClient()
+  const [syncing, setSyncing] = useState(false)
+
   const { data: stats } = useQuery({
     queryKey: ['factor-library/stats'],
     queryFn: api.getFactorLibraryStats,
@@ -556,11 +704,47 @@ export default function FactorLibrary() {
   const tiers = stats?.tiers ?? []
   const tierMap = Object.fromEntries(tiers.map((t) => [t.tier, t]))
 
+  // Sync Alphas from BRAIN — moved here from the retired 因子实验室 page.
+  // It's a background Celery job, so invalidate the factor-library queries
+  // a couple seconds later to pick up the newly synced rows.
+  const handleSync = async () => {
+    setSyncing(true)
+    try {
+      const res = await api.syncAlphas()
+      message.success(`Sync started: ${res.message}`)
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey: ['factor-library/stats'] })
+        queryClient.invalidateQueries({ queryKey: ['factor-library/alphas'] })
+      }, 2000)
+    } catch (error) {
+      message.error('Sync failed: ' + error.message)
+    } finally {
+      setSyncing(false)
+    }
+  }
+
   return (
     <div>
-      <Title level={3}>
-        <ApartmentOutlined /> 因子库（T1 / T2 / T3）
-      </Title>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          marginBottom: 8,
+        }}
+      >
+        <Title level={3} style={{ margin: 0 }}>
+          <ApartmentOutlined /> 因子库（T1 / T2 / T3）
+        </Title>
+        <Button
+          type="primary"
+          icon={<SyncOutlined spin={syncing} />}
+          onClick={handleSync}
+          loading={syncing}
+        >
+          Sync Alphas
+        </Button>
+      </div>
       {stats?.last_refreshed_at && (
         <Text type="secondary" style={{ display: 'block', marginBottom: 16 }}>
           Last refreshed: {new Date(stats.last_refreshed_at).toLocaleString()}
@@ -583,17 +767,52 @@ export default function FactorLibrary() {
 
       <Card style={{ marginTop: 16 }}>
         <Tabs
-          defaultActiveKey="1"
-          items={[1, 2, 3].map((t) => ({
-            key: String(t),
-            label: (
-              <Space>
-                <Tag color={TIER_COLORS[t]}>T{t}</Tag>
-                {TIER_LABELS[t]}
-              </Space>
-            ),
-            children: <TierAlphaTable tier={t} />,
-          }))}
+          defaultActiveKey="browse"
+          items={[
+            {
+              key: 'browse',
+              label: (
+                <Space>
+                  <ApartmentOutlined />
+                  按 Tier 浏览
+                </Space>
+              ),
+              children: (
+                <Tabs
+                  defaultActiveKey="1"
+                  items={[1, 2, 3].map((t) => ({
+                    key: String(t),
+                    label: (
+                      <Space>
+                        <Tag color={TIER_COLORS[t]}>T{t}</Tag>
+                        {TIER_LABELS[t]}
+                      </Space>
+                    ),
+                    children: <AlphaTable tier={t} mode="tier" />,
+                  }))}
+                />
+              ),
+            },
+            {
+              key: 'submittable',
+              label: (
+                <Space>
+                  <CloudUploadOutlined />
+                  <Tag color="green">可提交</Tag>
+                </Space>
+              ),
+              children: <AlphaTable mode="submittable" />,
+            },
+            {
+              key: 'submitted',
+              label: (
+                <Space>
+                  <Tag color="blue">已提交</Tag>
+                </Space>
+              ),
+              children: <AlphaTable mode="submitted" />,
+            },
+          ]}
         />
       </Card>
     </div>

@@ -203,6 +203,14 @@ const api = {
     return data
   },
 
+  // Submit an alpha to BRAIN. Server runs pre-flight gates (can_submit,
+  // not-already-submitted, self_corr < 0.7); a gate failure comes back as
+  // { submitted: false, reason } with HTTP 200, not an error.
+  submitAlpha: async (id) => {
+    const { data } = await client.post(`/alphas/${id}/submit`)
+    return data
+  },
+
   refreshCanSubmitBatch: async (params = {}) => {
     const { data } = await client.post('/factor-library/refresh-can-submit', null, { params })
     return data
@@ -221,6 +229,13 @@ const api = {
 
   getFactorLibraryAlphas: async (params = {}) => {
     const { data } = await client.get('/factor-library/alphas', { params })
+    return data
+  },
+
+  // Re-audit IQC marginal Δscore for the 可提交 tab. Fire-and-forget — the
+  // backend enqueues Celery audits and the table is refetched after a delay.
+  refreshFactorIqc: async (params = {}) => {
+    const { data } = await client.post('/factor-library/refresh-iqc', null, { params })
     return data
   },
 

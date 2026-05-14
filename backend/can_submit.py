@@ -20,6 +20,16 @@ be labelled `can_submit=True` until someone notices. A logger.warning
 surfaces unknown result types so the issue is observable; the verdict
 keeps the conservative fall-back of treating unknowns as non-FAIL
 because BRAIN's contract today is "non-FAIL ⇒ submittable".
+
+V-26.77 follow-up #3 (2026-05-14): callers can now pass the locally
+measured self-correlation as `local_self_corr` (+ source). When the
+source is trusted (`local` / `brain`) and the value is at/above
+`local_self_corr_threshold` (default 0.7) we synthesise a
+`LOCAL_SELF_CORRELATION` failed check and force `can_submit=False`. This
+closes a gap where BRAIN's SELF_CORRELATION sometimes reports PENDING
+(non-blocking) even though we already measured the alpha is heavily
+correlated with the existing OS pool — submitting that alpha wastes a
+slot. Untrusted sources (`unknown` / None) leave the verdict to BRAIN.
 """
 from __future__ import annotations
 
@@ -46,20 +56,37 @@ def _extract_is_checks(brain_alpha: Dict[str, Any]) -> List[Dict[str, Any]]:
     return checks if isinstance(checks, list) else []
 
 
+LOCAL_SELF_CORR_DEMOTE_THRESHOLD = 0.7
+_TRUSTED_LOCAL_SELF_CORR_SOURCES: Set[str] = {"local", "brain"}
+
+
 def compute_can_submit(
     brain_alpha: Optional[Dict[str, Any]],
+    local_self_corr: Optional[float] = None,
+    local_self_corr_source: Optional[str] = None,
+    local_self_corr_threshold: float = LOCAL_SELF_CORR_DEMOTE_THRESHOLD,
 ) -> Tuple[Optional[bool], List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Decide whether an alpha satisfies all BRAIN submission gates.
 
     Args:
         brain_alpha: The full JSON returned by BRAIN GET /alphas/{id}, or None
             if the call failed (treated as "unknown" — return None).
+        local_self_corr: optional locally-measured self correlation (max corr
+            against the OS alpha pool). Only acted on when source is trusted.
+        local_self_corr_source: where the value came from. Only `"local"` or
+            `"brain"` (the CorrelationService three-tier resolver) are trusted
+            for the demote — `"unknown"` / cache-miss leaves it to BRAIN.
+        local_self_corr_threshold: corr >= this forces demote. Default 0.7
+            matches BRAIN's SELF_CORRELATION gate.
 
     Returns:
         (can_submit, failed_checks, pending_checks) where
           - can_submit = True/False/None (V-26.81: None ≠ False; see module
-            docstring). True iff no FAIL/ERROR results in the checks array.
-          - failed_checks = list of {name, value, limit, ...} for FAIL/ERROR items
+            docstring). True iff no FAIL/ERROR results in the checks array
+            AND the trusted local self-corr (if any) is below the threshold.
+          - failed_checks = list of {name, value, limit, ...} for FAIL/ERROR
+            items; includes a synthetic LOCAL_SELF_CORRELATION entry when the
+            local demote fires.
           - pending_checks = list of {name, ...} for PENDING items
     """
     if brain_alpha is None:
@@ -89,6 +116,19 @@ def compute_can_submit(
                     f"{result!r} on check name={c.get('name')!r}; treating "
                     f"as non-FAIL but please verify BRAIN API contract"
                 )
+
+    if (
+        local_self_corr is not None
+        and local_self_corr_source in _TRUSTED_LOCAL_SELF_CORR_SOURCES
+        and local_self_corr >= local_self_corr_threshold
+    ):
+        failed.append({
+            "name": "LOCAL_SELF_CORRELATION",
+            "result": "FAIL",
+            "value": float(local_self_corr),
+            "limit": float(local_self_corr_threshold),
+            "source": local_self_corr_source,
+        })
 
     return (len(failed) == 0), failed, pending
 

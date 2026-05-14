@@ -52,7 +52,9 @@ class AlphaListItem(BaseModel):
     fitness: Optional[float] = None
     created_at: Optional[datetime] = None
     date_created: Optional[datetime] = None
-    
+    self_corr: Optional[float] = None
+    self_corr_source: Optional[str] = None
+
     class Config:
         from_attributes = True
 
@@ -261,6 +263,36 @@ async def refresh_can_submit(
             message="BRAIN 调用失败或 alpha 缺少 alpha_id；can_submit 未更新"
         )
     return CanSubmitRefreshResponse(**result)
+
+
+class SubmitResponse(BaseModel):
+    submitted: bool
+    reason: str
+    self_corr: Optional[float] = None
+    self_corr_source: Optional[str] = None
+
+
+@router.post("/{alpha_id}/submit", response_model=SubmitResponse)
+async def submit_alpha_to_brain(
+    alpha_id: int,
+    service: AlphaService = Depends(get_alpha_service),
+):
+    """Submit an alpha to BRAIN for evaluation.
+
+    Pre-flight gates run server-side (AlphaService.submit_alpha): the alpha
+    must have a BRAIN alpha_id, must not already be submitted, can_submit
+    must be True, and the local self-correlation precheck must be < 0.7.
+    Any gate failure returns submitted=false with a human-readable reason
+    (HTTP 200, not an error) so the UI can show it inline. Submit is
+    irreversible and consumes BRAIN quota.
+    """
+    result = await service.submit_alpha(alpha_id)
+    return SubmitResponse(
+        submitted=result.get("submitted", False),
+        reason=result.get("reason", "unknown"),
+        self_corr=result.get("self_corr"),
+        self_corr_source=result.get("self_corr_source"),
+    )
 
 
 class MarginalContributionDelta(BaseModel):

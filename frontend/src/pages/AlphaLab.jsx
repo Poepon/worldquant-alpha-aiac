@@ -212,6 +212,26 @@ export default function AlphaLab() {
       width: 100,
       render: (val) => (val != null ? `${(val * 10000).toFixed(2)}‱` : '-'),
     },
+    {
+      title: 'Self-corr',
+      key: 'self_corr',
+      width: 120,
+      render: (_, record) => {
+        const v = record.self_corr
+        const src = record.self_corr_source
+        if (v == null) {
+          return <Tag color="default">unknown</Tag>
+        }
+        const color = v >= 0.7 ? 'red' : v >= 0.5 ? 'orange' : 'green'
+        const srcColor = src === 'local' ? 'cyan' : src === 'brain' ? 'blue' : 'default'
+        return (
+          <Space size={4}>
+            <Tag color={color}>{v.toFixed(3)}</Tag>
+            <Tag color={srcColor}>{src || '?'}</Tag>
+          </Space>
+        )
+      },
+    },
   ]
 
   return (

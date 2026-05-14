@@ -213,9 +213,39 @@ class CorrelationService:
             offset += limit
         return out
 
-    async def _fetch_pnl_series(self, alpha_id: str) -> pd.Series:
-        payload = await self.brain.get_alpha_pnl(alpha_id)
-        return _pnl_records_to_series(payload, alpha_id)
+    async def _fetch_pnl_series(
+        self, alpha_id: str, max_attempts: int = 3
+    ) -> pd.Series:
+        """Fetch + parse an alpha's PnL series, retrying transient failures.
+
+        BRAIN's /alphas/{id}/recordsets/pnl occasionally returns an empty
+        payload under burst (rate-limit soft-fail) — at the parse layer this
+        is indistinguishable from an alpha that genuinely has no PnL. Before
+        this retry loop, a single transient empty response would propagate
+        all the way up to `get_with_fallback` returning ("unknown"), and the
+        caller (evaluation node) would mark the alpha self_corr-unverified
+        forever — even though a retry would have measured it. Retrying with
+        backoff recovers the transient case; a still-empty result after
+        `max_attempts` is treated as genuinely empty by the caller.
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(max_attempts):
+            try:
+                payload = await self.brain.get_alpha_pnl(alpha_id)
+                series = _pnl_records_to_series(payload, alpha_id)
+                if not series.empty:
+                    return series
+            except Exception as e:
+                last_exc = e
+                logger.debug(
+                    f"[CorrelationService] PnL fetch attempt "
+                    f"{attempt + 1}/{max_attempts} failed for {alpha_id}: {e}"
+                )
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(1.5 * (attempt + 1))
+        if last_exc is not None:
+            raise last_exc
+        return pd.Series(dtype="float64", name=alpha_id)
 
     async def refresh_os_alpha_cache(
         self,
@@ -287,28 +317,33 @@ class CorrelationService:
         alpha_id: str,
         region: str,
         alpha_pnl_series: Optional[pd.Series] = None,
-    ) -> Tuple[float, str]:
+    ) -> Tuple[Optional[float], str]:
         """Compute max self-correlation against cached OS alphas.
 
         Returns: (corr_value, source) where source ∈ {"local", "empty"}.
-        Caller should branch on source for fallback.
+        - source="local": corr_value is a real float measured against the pool.
+        - source="empty": corr_value is **None** — the value could NOT be
+          measured (no cache / no PnL / insufficient overlap / all-NaN). The
+          old contract returned 0.0 here, which downstream gates could not
+          distinguish from "measured and genuinely uncorrelated". Callers MUST
+          branch on source, never trust a 0.0.
         """
         cache = self._load_cache(region)
         if not cache or not cache.get("alpha_ids"):
-            return 0.0, "empty"
+            return None, "empty"
 
         if alpha_pnl_series is None:
             alpha_pnl_series = await self._fetch_pnl_series(alpha_id)
         if alpha_pnl_series.empty:
-            return 0.0, "empty"
+            return None, "empty"
 
         target_returns = _series_to_returns(alpha_pnl_series)
         if len(target_returns.dropna()) < MIN_OVERLAP_DAYS:
             logger.debug(
                 f"[CorrelationService] {alpha_id} has {len(target_returns.dropna())} "
-                f"days < {MIN_OVERLAP_DAYS}; treat as 0.0 (insufficient sample)"
+                f"days < {MIN_OVERLAP_DAYS}; cannot measure (insufficient sample)"
             )
-            return 0.0, "empty"
+            return None, "empty"
 
         os_returns = cache["pnls"].apply(
             lambda col: col - col.ffill().shift(1), axis=0
@@ -321,13 +356,15 @@ class CorrelationService:
             os_returns = os_returns.drop(columns=[alpha_id])
 
         if os_returns.shape[1] == 0:
-            return 0.0, "empty"
+            return None, "empty"
 
         corrs = os_returns.corrwith(target_returns)
-        max_corr = float(corrs.max(skipna=True))
+        max_corr = corrs.max(skipna=True)
         if pd.isna(max_corr):
-            max_corr = 0.0
-        return max_corr, "local"
+            # Every pairwise corr was NaN — no overlapping observations with
+            # any pool member. Not measurable; do NOT report 0.0.
+            return None, "empty"
+        return float(max_corr), "local"
 
     # ------------------------------------------------------------------
     # Public entry: three-tier fallback
@@ -337,17 +374,20 @@ class CorrelationService:
         self,
         alpha_id: str,
         region: str = "USA",
-    ) -> Tuple[float, str]:
+    ) -> Tuple[Optional[float], str]:
         """Three-tier resolver. Returns (corr, source).
 
         source values:
-          - "local"   — computed from local PnL cache (preferred)
-          - "brain"   — via BRAIN /correlations/SELF API
-          - "unknown" — both failed; caller should NOT treat as PASS
+          - "local"   — corr is a real float from the local PnL cache (preferred)
+          - "brain"   — corr is a real float from BRAIN /correlations/SELF API
+          - "unknown" — corr is **None**; both tiers failed. Caller MUST NOT
+            treat this as PASS or as "uncorrelated" — it means "not measured".
+            The old contract returned 0.0 here, which silently looked like a
+            safe alpha to any `corr < threshold` check.
         """
         try:
             corr, src = await self.calc_self_corr(alpha_id, region)
-            if src == "local":
+            if src == "local" and corr is not None:
                 return corr, "local"
         except Exception as e:
             logger.warning(f"[CorrelationService] local calc failed for {alpha_id}: {e}")
@@ -359,7 +399,7 @@ class CorrelationService:
         except Exception as e:
             logger.warning(f"[CorrelationService] BRAIN /correlations/SELF failed for {alpha_id}: {e}")
 
-        return 0.0, "unknown"
+        return None, "unknown"
 
     # ------------------------------------------------------------------
     # Crisis-window stress test

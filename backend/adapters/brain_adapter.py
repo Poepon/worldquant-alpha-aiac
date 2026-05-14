@@ -1326,6 +1326,56 @@ class BrainAdapter:
             logger.warning(f"[BrainAdapter] get_alpha({alpha_id}) failed: {e}")
             return {}
 
+    async def submit_alpha(self, alpha_id: str, max_polls: int = 60) -> Dict:
+        """POST /alphas/{id}/submit then poll on Retry-After until terminal.
+
+        Mirrors ace_lib.submit_alpha + scripts/submit_alpha.py. BRAIN's submit
+        endpoint kicks off an async job: the initial POST returns with a
+        Retry-After header while the job runs; we GET the same path until the
+        header disappears, at which point status 200 = accepted, anything
+        else = rejected (body carries the reason).
+
+        Never raises — transport/parse errors collapse to success=False so the
+        caller (AlphaService.submit_alpha) can surface a clean reason. Submit
+        is irreversible and consumes BRAIN quota; callers MUST run pre-flight
+        gates (can_submit / self_corr precheck) before calling this.
+
+        Returns: {success, status_code, body, polls}.
+        """
+        try:
+            resp = await self._safe_api_call("POST", f"/alphas/{alpha_id}/submit")
+        except Exception as e:
+            logger.warning(f"[BrainAdapter] submit_alpha({alpha_id}) POST failed: {e}")
+            return {"success": False, "status_code": 0, "body": str(e), "polls": 0}
+
+        polls = 0
+        while polls < max_polls:
+            retry_after = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+            if not retry_after:
+                break
+            try:
+                await asyncio.sleep(float(retry_after))
+            except (TypeError, ValueError):
+                await asyncio.sleep(2.0)
+            try:
+                resp = await self._safe_api_call("GET", f"/alphas/{alpha_id}/submit")
+            except Exception as e:
+                logger.warning(f"[BrainAdapter] submit_alpha({alpha_id}) poll failed: {e}")
+                return {"success": False, "status_code": 0, "body": str(e), "polls": polls}
+            polls += 1
+
+        body_text = resp.text or ""
+        try:
+            body = resp.json() if body_text else {}
+        except Exception:
+            body = body_text
+        return {
+            "success": resp.status_code == 200,
+            "status_code": resp.status_code,
+            "body": body,
+            "polls": polls,
+        }
+
     async def get_before_and_after_performance(
         self,
         alpha_id: str,

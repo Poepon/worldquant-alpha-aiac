@@ -5,7 +5,6 @@ import AppHeader from './components/AppHeader'
 import Dashboard from './pages/Dashboard'
 import TaskManagement from './pages/TaskManagement'
 import TaskDetail from './pages/TaskDetail'
-import AlphaLab from './pages/AlphaLab'
 import AlphaDetail from './pages/AlphaDetail'
 import FactorLibrary from './pages/FactorLibrary'
 import CrisisStressTest from './pages/CrisisStressTest'
@@ -26,7 +25,8 @@ function App() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/tasks" element={<TaskManagement />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
-            <Route path="/alphas" element={<AlphaLab />} />
+            {/* 因子实验室已并入因子库；/alphas 列表页重定向，详情页保留 */}
+            <Route path="/alphas" element={<Navigate to="/factor-library" replace />} />
             <Route path="/alphas/:id" element={<AlphaDetail />} />
             <Route path="/factor-library" element={<FactorLibrary />} />
             <Route path="/correlation" element={<CrisisStressTest />} />
