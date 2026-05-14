@@ -152,9 +152,13 @@ flip-only(原方向持续证伪、符号翻转持续有效)现在会被正确 AB
 abandon 一个 flip-productive hypothesis 时,自动提出其**反向假设**
 (statement 取反 + 继承因子/数据集)喂回 hypothesis 池。
 
-属独立增强(非 V-27 审查项、非 bug),需设计"反向假设"的生成方式
-(LLM 改写 statement vs 模板取反)+ 防自循环(反向假设再被 flip 不应
-无限套娃)。**待排期**,价值中高、成本中。
+**已排期** —— 实施 plan 见 `docs/plan_inverted_hypothesis.md`(2026-05-15,
+Plan agent 调研后产出)。5 个 phase ~4 day,7 个设计决策已拍板(LLM 改写
+反向 statement + `is_inverted` 列防套娃 + 复用 `parent_hypothesis_id` +
+触发点在 `_process_hypothesis_feedback` mark_abandoned 后 + kill-switch)。
+**Phase 0 须先做**:确认 sampler 是否复用 `list_active` 的 DB 行(plan 里
+唯一未验证假设)。另有 3 项需用户拍板:跨 task 可见性 / `confidence` 降档
+幅度 / 是否额外效果标记 —— 见 plan "需用户拍板"段。
 
 ---
 
@@ -179,7 +183,7 @@ abandon 一个 flip-productive hypothesis 时,自动提出其**反向假设**
 2. ~~**B 段 TOCTOU**(V-27.45 / 81)~~ — ✅ 已闭环(2026-05-14,commit `d472660` / `3999720`;审查 followup `305fdbb`)
 3. ~~**C 段**(8 项落地 + 3 项核实不做)~~ — ✅ 已闭环(2026-05-14,commit `813ce6b` / `b9720f4`;审查 followup `305fdbb`)
 4. ~~**D 段**(2 项落地 + 4 项核实不做)~~ — ✅ 已闭环(2026-05-14,commit `77f26ec`;审查 followup `305fdbb`)
-5. **F 段** — A–D 段实现的代码审查发现:savepoint 粒度(`6e2c689`)+ flip-only attribution(2026-05-15 方案 1)已闭环;剩 V-27.1 claim 时序(独立小修,最低优先)+ 衍生增强"反向假设自动提出"(独立增强,待排期)
+5. **F 段** — A–D 段实现的代码审查发现:savepoint 粒度(`6e2c689`)+ flip-only attribution(2026-05-15 方案 1)已闭环;剩 V-27.1 claim 时序(独立小修,最低优先)+ 衍生增强"反向假设自动提出"(已排期,plan 见 `docs/plan_inverted_hypothesis.md`,~4 day,Phase 0 待先做)
 6. **E 段** — 数十条 🟡/🟢 tech-debt,**维持不单独排期**(opportunistic 顺带清理,或专门 sprint)
 
-A–D 段实现 + 审查 followup 已闭环;backlog 余 F 段:V-27.1 claim 时序(低优先)+ 反向假设自动提出(待排期)+ E 段(性质上不排期)。
+A–D 段实现 + 审查 followup 已闭环;backlog 余 F 段:V-27.1 claim 时序(低优先)+ 反向假设自动提出(已排期,plan 已出)+ E 段(性质上不排期)。
