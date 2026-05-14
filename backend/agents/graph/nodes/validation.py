@@ -27,6 +27,7 @@ from backend.alpha_semantic_validator import (
     AlphaSemanticValidator,
     ExpressionDeduplicator,
 )
+from backend.static_alpha_checks import run_static_suspicion_checks
 
 # Initialize Validators (Singleton-ish)
 _VALIDATOR = ExpressionValidator()
@@ -69,6 +70,10 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
     semantic_errors = []
     duplicate_count = 0
     type_warnings = []
+    # V-P0: static suspicion checks moved pre-simulate. block = HARD look-ahead
+    # invalidations routed to SELF_CORRECT; warn = SOFT divide/overfit annotations.
+    static_block_count = 0
+    static_warn_count = 0
     
     logger.info(f"[{node_name}] Starting batch validation | count={len(state.pending_alphas)}")
     
@@ -145,7 +150,40 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                             error = "; ".join(sem_result.errors[:2])
                             warnings.extend(sem_result.errors)
                             semantic_errors.extend(sem_result.errors[:2])
-                            
+
+                        # Step 4: static suspicion checks (V-P0 2026-05-15).
+                        # Look-ahead bias / divide-by-zero / overfit-window are
+                        # expression-only — moved here from node_evaluate so a
+                        # bad expression never burns a BRAIN sim, with no
+                        # sharpe>3 gate. HARD (look-ahead) invalidates → routes
+                        # to SELF_CORRECT; SOFT (divide / overfit) annotate as
+                        # warnings only and still simulate.
+                        static_flags = run_static_suspicion_checks(expression)
+                        if static_flags:
+                            soft = [f for f in static_flags if f["severity"] == "soft"]
+                            hard = [f for f in static_flags if f["severity"] == "hard"]
+                            for f in soft:
+                                warnings.append(f"[{f['check']}] {f['evidence']}")
+                            if soft:
+                                type_warnings.extend(
+                                    f"[{f['check']}] {f['evidence']}" for f in soft
+                                )
+                                static_warn_count += len(soft)
+                            if hard:
+                                hard_msg = "; ".join(
+                                    f"{f['check']}: {f['evidence']}" for f in hard
+                                )
+                                static_block_count += len(hard)
+                                if is_valid:
+                                    is_valid = False
+                                    error = hard_msg
+                                    semantic_errors.append(hard_msg)
+                                else:
+                                    # already invalidated upstream — keep the
+                                    # first error, surface look-ahead as extra
+                                    # context for SELF_CORRECT.
+                                    warnings.append(f"[also] {hard_msg}")
+
             except Exception as e:
                 is_valid = False
                 error = f"Validation Exception: {str(e)}"
@@ -194,6 +232,8 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
             "valid_count": valid_count,
             "invalid_count": len(updated_alphas) - valid_count,
             "duplicate_count": duplicate_count,
+            "static_block_count": static_block_count,
+            "static_warn_count": static_warn_count,
             "type_warnings": type_warnings[:5],
             "failures": [
                 {"expression": a.expression[:100], "error": a.validation_error}

@@ -95,167 +95,25 @@ def _check_is_os_consistency(metrics: Dict, tier: Optional[int] = None) -> bool:
 # that survive V-12 because train AND test both look strong (e.g., perfect
 # divide-by-something-tiny throughout the test window).
 
-import re as _re_v16
 from backend.config import settings as _v16_settings
 
 # V-26.68 (2026-05-13): V16_SUSPICION_THRESHOLD now sourced from settings.
 # Module-level alias kept so legacy imports (tests, scripts) still find it.
 V16_SUSPICION_THRESHOLD: float = _v16_settings.V16_SUSPICION_THRESHOLD
 
-# Fields that can be 0 (returns on no-trade days, volume on halts, etc.)
-_V16_DIVIDE_RISKY_DENOMS: set = {
-    "returns", "volume", "amount",
-    # Fundamental fields can be 0 / negative for distressed firms
-    "net_income", "fnd6_newa2v1300_ni",
-    "ebit", "fnd6_newa2v1300_oiadp",
-    "total_equity", "fnd6_newa1v1300_ceq",
-    # Synthetic-zero risks
-    "high", "low",  # rare but high==low on illiquid
-}
-
-# Fields that arrive at announcement boundary; need ts_delay wrapping
-_V16_LOOKAHEAD_FIELDS: tuple = (
-    "actual_eps_value", "actual_sales_value",
-    "actual_cashflow_per_share_value",
-    "actual_dividend_value",
-    # Earnings-event fields
-    "fam_earn_date", "fam_earn_announce",
+# V-P0 (2026-05-15): the three expression-only V-16 checks (divide-by-zero,
+# look-ahead bias, overfit-window) moved to backend/static_alpha_checks.py so
+# they can run pre-simulate inside node_validate — a bad expression should
+# never burn a BRAIN sim, and look-ahead bias must be caught regardless of the
+# sharpe>3 suspicion gate below. Re-export shims keep legacy imports (tests,
+# scripts) working under the old names; new code should import from
+# backend.static_alpha_checks directly.
+from backend.static_alpha_checks import (  # noqa: E402
+    check_divide_by_zero as _v16_check_divide_by_zero,
+    check_lookahead_bias as _v16_check_lookahead,
+    check_overfit_window as _v16_check_overfit_window,
+    _extract_divide_denominators,
 )
-
-# Standard rolling-window sizes — anything outside is suspicious of
-# parameter mining
-_V16_STANDARD_WINDOWS: set = {1, 2, 3, 5, 10, 15, 20, 30, 60, 90, 120, 240, 480, 1200}
-
-_V16_TS_WINDOW_RE = _re_v16.compile(r"\bts_\w+\s*\([^,()]+,\s*(\d+)\b")
-
-
-def _extract_divide_denominators(expression: str) -> list:
-    """V-26.69 (2026-05-13): paren-balanced extraction of the 2nd
-    argument to every `divide(...)` call in `expression`.
-
-    Pre-fix the V-16 divide check used a flat regex
-    `divide\\(\\s*[^,()]+,\\s*([a-zA-Z_]\\w*)\\s*\\)` which only matched a
-    bare identifier denominator — anything nested (`divide(x, ts_mean(returns, 5))`
-    or arithmetic compounds) was invisible. Now we walk paren depth so
-    the denominator's full sub-expression is captured and any risky
-    field token inside is detected.
-    """
-    out = []
-    n = len(expression)
-    i = 0
-    while i < n:
-        idx = expression.find("divide(", i)
-        if idx == -1:
-            break
-        # Position cursor inside divide('s arg list; depth=0 means at the
-        # comma/close-paren that matches this divide call.
-        depth = 0
-        j = idx + len("divide(")
-        comma_idx = -1
-        while j < n:
-            c = expression[j]
-            if c == "(":
-                depth += 1
-            elif c == ")":
-                if depth == 0:
-                    break
-                depth -= 1
-            elif c == "," and depth == 0:
-                comma_idx = j
-                break
-            j += 1
-        if comma_idx == -1:
-            i = idx + 1
-            continue
-        # Walk to matching close-paren of this divide(...)
-        depth2 = 0
-        k = comma_idx + 1
-        while k < n:
-            c = expression[k]
-            if c == "(":
-                depth2 += 1
-            elif c == ")":
-                if depth2 == 0:
-                    break
-                depth2 -= 1
-            k += 1
-        denom_expr = expression[comma_idx + 1:k].strip()
-        if denom_expr:
-            out.append(denom_expr)
-        i = idx + 1
-    return out
-
-
-def _v16_check_divide_by_zero(expression: str) -> str | None:
-    """Risk 1: divide() with denominator that may be 0 on some dates.
-
-    V-26.69: now extracts the full denominator sub-expression and checks
-    whether any risky field name appears as a token inside it. Catches
-    `divide(x, ts_mean(returns, 5))` and arithmetic-compound denominators
-    that the original shallow regex missed.
-    """
-    if not expression:
-        return None
-    denoms = _extract_divide_denominators(expression)
-    if not denoms:
-        return None
-    for denom_expr in denoms:
-        low = denom_expr.lower()
-        for risky in _V16_DIVIDE_RISKY_DENOMS:
-            if _re_v16.search(rf"\b{_re_v16.escape(risky)}\b", low):
-                return f"divide(_, …{risky}…) — denominator can be 0"
-    return None
-
-
-def _v16_check_lookahead(expression: str) -> str | None:
-    """Risk 2: announcement-type fields must be ts_delay-wrapped.
-
-    V-26.70 (2026-05-13): pre-fix used `find` + `rfind` index comparison
-    which counted ts_delay anywhere before the field — including a
-    sibling `ts_delay(other_field, 1)` that's not actually wrapping the
-    announcement field. Now we require both the field-presence check
-    AND the ts_delay-wrap check to use whole-token (\\b...\\b) regex so:
-
-      - `actual_eps_value_quarterly` doesn't trigger the
-        `actual_eps_value` rule (substring false positive)
-      - sibling ts_delay calls don't satisfy the direct-wrap requirement
-        (the original false negative)
-    """
-    if not expression:
-        return None
-    el = expression.lower()
-    for field in _V16_LOOKAHEAD_FIELDS:
-        field_re = _re_v16.escape(field)
-        # V-26.70: `field` is treated as a token-prefix — the announcement
-        # field family includes suffixed variants like
-        # `actual_eps_value_quarterly`. Word boundary on the LEFT only;
-        # right side allows any word-char continuation. This is the same
-        # token a direct ts_delay wrap must reference.
-        token_re = rf"\b{field_re}\w*"
-        if not _re_v16.search(token_re, el):
-            continue
-        # ts_delay must directly wrap a token in the same family.
-        if _re_v16.search(rf"ts_delay\s*\(\s*{token_re}", el):
-            continue
-        return (
-            f"announcement field '{field}' used without ts_delay direct-wrap "
-            f"(sibling ts_delay does not mitigate lookahead)"
-        )
-    return None
-
-
-def _v16_check_overfit_window(expression: str) -> str | None:
-    """Risk 5: ts_op uses non-standard window size suggesting parameter mining."""
-    if not expression:
-        return None
-    weird = []
-    for m in _V16_TS_WINDOW_RE.finditer(expression):
-        n = int(m.group(1))
-        if n > 1 and n not in _V16_STANDARD_WINDOWS:
-            weird.append(n)
-    if weird:
-        return f"ts_op uses non-standard windows {weird} (standard: 5/10/20/60/120/240)"
-    return None
 
 
 def _v16_check_outliers(metrics: Dict) -> list:
@@ -293,7 +151,7 @@ def _v16_check_cost_vacuum(metrics: Dict) -> str | None:
 
 
 def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
-    """V-16: full 6-risk audit when is_sharpe > V16_SUSPICION_THRESHOLD.
+    """V-16: metric-dependent risk audit when is_sharpe > V16_SUSPICION_THRESHOLD.
 
     Returns list[dict] with shape:
       {"check": str, "severity": "hard" | "soft" | "info", "evidence": str}
@@ -304,6 +162,13 @@ def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
       info — manual-only, e.g. survivorship bias
 
     Returns [] when sharpe ≤ threshold.
+
+    V-P0 (2026-05-15): the three expression-only checks (Risk 1 divide-by-zero,
+    Risk 2 look-ahead bias, Risk 5 overfit-window) moved to node_validate via
+    backend/static_alpha_checks.py — they need no metrics and should run
+    pre-simulate. Only the metric-dependent checks remain here: Risk 3
+    survivorship (info), Risk 4 cost-vacuum, Risk 6 outlier metrics. The
+    `expression` parameter is kept for signature stability of the call sites.
     """
     flags: list = []
     if not isinstance(metrics, dict):
@@ -311,16 +176,6 @@ def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
     sharpe = metrics.get("sharpe") or 0
     if sharpe <= V16_SUSPICION_THRESHOLD:
         return flags
-
-    # Risk 1: divide by zero
-    flag = _v16_check_divide_by_zero(expression)
-    if flag:
-        flags.append({"check": "divide_by_zero", "severity": "soft", "evidence": flag})
-
-    # Risk 2: lookahead bias
-    flag = _v16_check_lookahead(expression)
-    if flag:
-        flags.append({"check": "lookahead_bias", "severity": "hard", "evidence": flag})
 
     # Risk 3: survivorship bias — system-level, manual review only
     flags.append({
@@ -333,11 +188,6 @@ def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
     flag = _v16_check_cost_vacuum(metrics)
     if flag:
         flags.append({"check": "cost_vacuum", "severity": "hard", "evidence": flag})
-
-    # Risk 5: overfit window
-    flag = _v16_check_overfit_window(expression)
-    if flag:
-        flags.append({"check": "overfit_window", "severity": "soft", "evidence": flag})
 
     # Risk 6: data-anomaly outliers
     for outlier_msg in _v16_check_outliers(metrics):
