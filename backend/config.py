@@ -345,6 +345,18 @@ class Settings(BaseSettings):
     MEDIUM_TEST_PERIOD: str = "P1Y0M"
     FULL_TEST_PERIOD: str = "P2Y0M"
     MAX_FULL_EVALS_PER_BATCH: int = 10
+
+    # P0: Baseline + Nσ-residual screening (docs/alphagbm_skills_research_2026-05-15.md).
+    # Fits a (hypothesis-family × dataset × region) performance baseline and
+    # annotates each alpha with its residual sigma. Soft signal only — affects
+    # optimization priority, never the PASS/FAIL hard gates. Opt-in.
+    BASELINE_SCREEN_ENABLED: bool = False  # Opt-in feature
+    BASELINE_METRIC: str = "sharpe"        # in-memory metrics dict key to score
+    BASELINE_MIN_SAMPLES: int = 30         # min cell samples to trust a baseline
+    BASELINE_DISCOVERY_SIGMA: float = 2.0  # residual >= this -> DISCOVERY
+    BASELINE_BELOW_SIGMA: float = -1.0     # residual <= this -> BELOW
+    BASELINE_LOOKBACK_DAYS: int = 120      # history window for cell samples
+    BASELINE_SAMPLE_LIMIT: int = 2000      # cap on samples fetched per cell
     
     # Evolution Strategy Defaults
     DEFAULT_TEMPERATURE: float = 0.7

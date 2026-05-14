@@ -717,7 +717,16 @@ class MiningAgent:
                     "metrics": metrics,
                     "reason": reason
                 })
-        
+
+        # P0 baseline screening: spend the optimization budget first on alphas
+        # that genuinely beat their (hypothesis-family × dataset) cell baseline.
+        # baseline_residual_sigma is a soft signal — it only reorders the top-5
+        # cut here, it never gates PASS/FAIL. Missing annotation sorts as 0.0.
+        candidates.sort(
+            key=lambda c: (c.get("metrics") or {}).get("baseline_residual_sigma") or 0.0,
+            reverse=True,
+        )
+
         return candidates[:5]  # Limit to top 5
     
     async def _evolve_strategy(

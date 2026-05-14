@@ -1728,6 +1728,105 @@ async def node_evaluate(
             for _flip_slot in flip_claimed_slots:
                 _flip_release_slot(*_flip_slot)
 
+    # P0: baseline + Nσ-residual screening (docs/alphagbm_skills_research_2026-05-15.md).
+    # Annotates each successfully-simulated alpha with its residual against the
+    # (hypothesis-family × dataset × region) grid baseline. SOFT SIGNAL ONLY —
+    # never touches quality_status / hard_gate / near_pass / submission gates;
+    # the residual is consumed downstream by _identify_optimization_candidates
+    # to prioritise the optimization budget. Opt-in via BASELINE_SCREEN_ENABLED.
+    # The whole block is best-effort: any failure leaves alphas un-annotated and
+    # evaluation proceeds exactly as before.
+    baseline_discoveries = 0
+    baseline_below = 0
+    baseline_insufficient = 0
+    if getattr(settings, "BASELINE_SCREEN_ENABLED", False):
+        try:
+            from backend.agents.services.baseline_provider import BaselineProvider
+            from backend.baseline_screener import (
+                BELOW,
+                DISCOVERY,
+                INSUFFICIENT_DATA,
+                classify_residual,
+                residual_sigma,
+            )
+
+            # expected_signal = hypothesis family tag. Prefer the in-state
+            # hypothesis dict; fall back to the typed Hypothesis row; else
+            # "unknown" (which simply yields insufficient-data cells).
+            expected_signal = "unknown"
+            for _h in (state.hypotheses or []):
+                if isinstance(_h, dict) and _h.get("expected_signal"):
+                    expected_signal = _h["expected_signal"]
+                    break
+            if expected_signal == "unknown" and getattr(state, "current_hypothesis_id", None):
+                try:
+                    from backend.database import AsyncSessionLocal
+                    from backend.models import Hypothesis as _Hyp
+                    async with AsyncSessionLocal() as _db:
+                        _row = await _db.get(_Hyp, state.current_hypothesis_id)
+                        if _row and _row.expected_signal:
+                            expected_signal = _row.expected_signal
+                except Exception:
+                    pass
+
+            # category_resolver: dataset_id -> category for the coarse fallback,
+            # built from field metadata already in state; defaults to the
+            # round's dataset_category when a per-dataset mapping isn't present.
+            _cat_map = {}
+            for _f in (state.fields or []):
+                if isinstance(_f, dict):
+                    _ds = _f.get("dataset_id")
+                    _cat = _f.get("category") or _f.get("dataset_category")
+                    if _ds and _cat:
+                        _cat_map[_ds] = _cat
+            _default_cat = getattr(state, "dataset_category", None) or None
+
+            def _resolve_category(ds_id):
+                return _cat_map.get(ds_id) or _default_cat
+
+            provider = BaselineProvider(
+                metric_col="is_sharpe",
+                category_resolver=_resolve_category,
+            )
+            metric_key = getattr(settings, "BASELINE_METRIC", "sharpe")
+            discovery_sigma = getattr(settings, "BASELINE_DISCOVERY_SIGMA", 2.0)
+            below_sigma = getattr(settings, "BASELINE_BELOW_SIGMA", -1.0)
+
+            for i, alpha in enumerate(updated_alphas):
+                if not (alpha.is_simulated and alpha.simulation_success):
+                    continue
+                metrics = alpha.metrics if isinstance(alpha.metrics, dict) else {}
+                metric_val = metrics.get(metric_key)
+                stats = await provider.get_baseline(
+                    expected_signal, state.dataset_id, state.region
+                )
+                sigma = residual_sigma(metric_val, stats)
+                cls = classify_residual(sigma, discovery_sigma, below_sigma)
+                # Detach metrics before mutating so we don't write through to a
+                # dict shared with the LangGraph input state (see V-26.79).
+                alpha.metrics = dict(metrics)
+                alpha.metrics["baseline_residual_sigma"] = (
+                    round(sigma, 4) if sigma is not None else None
+                )
+                alpha.metrics["baseline_cell"] = stats.cell_key
+                alpha.metrics["baseline_n"] = stats.count
+                alpha.metrics["baseline_class"] = cls
+                updated_alphas[i] = alpha
+                if cls == DISCOVERY:
+                    baseline_discoveries += 1
+                elif cls == BELOW:
+                    baseline_below += 1
+                elif cls == INSUFFICIENT_DATA:
+                    baseline_insufficient += 1
+
+            logger.info(
+                f"[{node_name}] baseline screen | discoveries={baseline_discoveries} "
+                f"below={baseline_below} insufficient={baseline_insufficient} "
+                f"signal={expected_signal}"
+            )
+        except Exception as e:
+            logger.warning(f"[{node_name}] baseline screen skipped (error): {e}")
+
     duration_ms = int((time.time() - start_time) * 1000)
     
     _debug_log("E", "nodes.py:evaluate:result", "Evaluation complete", {
@@ -1870,6 +1969,9 @@ async def node_evaluate(
             "flip_retry_count": flip_retry_count,
             "flip_retry_pass": flip_retry_pass,
             "flip_retry_prov": flip_retry_prov,
+            "baseline_discoveries": baseline_discoveries,
+            "baseline_below": baseline_below,
+            "baseline_insufficient": baseline_insufficient,
             "details": eval_details[:20]
         },
         duration_ms,
