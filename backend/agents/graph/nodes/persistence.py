@@ -987,9 +987,15 @@ async def _process_hypothesis_feedback(
             # task_id FK) must NOT abort the V-19.6 lifecycle transitions
             # below. On failure the abandon decision degrades to "no round
             # detail" — safe, it just won't false-abandon.
-            try:
-                async with _hdb.begin_nested():
-                    for hid in hids:
+            #
+            # V-27.92 followup (savepoint 粒度): one SAVEPOINT *per hid*,
+            # not one shared across all hids. A failure on hid N used to
+            # roll back the already-succeeded upserts for hids 0..N-1 too;
+            # now each hid degrades independently. The V-19.6 lifecycle
+            # transitions below sit outside every savepoint, unaffected.
+            for hid in hids:
+                try:
+                    async with _hdb.begin_nested():
                         await svc.upsert_round_stats(
                             hypothesis_id=hid,
                             task_id=task_id,
@@ -1006,11 +1012,12 @@ async def _process_hypothesis_feedback(
                             attribution_reason=attribution_reason,
                             best_sharpe=best_sharpe,
                         )
-            except Exception as _rs_ex:
-                logger.warning(
-                    f"[B5] hypothesis_round_stats upsert failed (non-fatal, "
-                    f"abandon decision degrades to no-detail): {_rs_ex}"
-                )
+                except Exception as _rs_ex:
+                    logger.warning(
+                        f"[B5] hypothesis_round_stats upsert failed for "
+                        f"hid={hid} (non-fatal, this hid's abandon decision "
+                        f"degrades to no-detail): {_rs_ex}"
+                    )
             await _hdb.flush()
 
             for hid in hids:

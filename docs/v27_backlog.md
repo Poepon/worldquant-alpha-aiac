@@ -134,15 +134,16 @@ submit gate/jsonb/beat),**3 项核实后不做**。
 `305fdbb` 修掉(见上方各段 followup)。以下 3 项审查时明确**转后续**,
 未在本轮动 —— 都不是会崩溃的回归,但应排期。
 
-| 项 | File | 现象 | 根治方向 |
+| 项 | File | 现象 | 根治方向 / 状态 |
 |---|---|---|---|
-| **V-27.92 savepoint 粒度** | `agents/graph/nodes/persistence.py` `_process_hypothesis_feedback` | 一轮多个 hid 共用**一个** `begin_nested()` savepoint —— 第 2 个 hid 的 `upsert_round_stats` 失败回滚,会连带回滚第 1 个已成功的 upsert,放大单 hid 失败的丢数据面 | savepoint 移进 `for hid` 循环内,逐 hid 隔离 |
-| **V-27.92 flip-only 轮 attribution 隐身** | `persistence.py` attribution + `should_abandon` | 一轮全是 flip 产物时 `real_alphas=[]`、`alpha_count=0`:V-27.68 guard 挡住 abandon、`mark_active` 因 count=0 不触发 —— hypothesis 实际产出了 flip alpha 却既不 active 也不计入,RCA 方案 A 第 4 点"flip 产物 attribution 单独标"未实现 | flip-only 轮单独标 attribution / 给 hypothesis 一个 flip-active 状态 |
+| ~~**V-27.92 savepoint 粒度**~~ | `agents/graph/nodes/persistence.py` `_process_hypothesis_feedback` | 一轮多个 hid 共用**一个** `begin_nested()` savepoint —— 第 2 个 hid 的 `upsert_round_stats` 失败回滚,会连带回滚第 1 个已成功的 upsert,放大单 hid 失败的丢数据面 | ✅ 已闭环(2026-05-15,commit `5fa75c4`)—— savepoint + try/except 移进 `for hid` 循环内,逐 hid 独立降级;34 个 V-27.92/B5-B6 测试通过 |
+| **V-27.92 flip-only 轮 attribution 隐身** | `persistence.py` attribution + `should_abandon` | 一轮全是 flip 产物时 `real_alphas=[]`、`alpha_count=0`:V-27.68 guard 挡住 abandon、`mark_active` 因 count=0 不触发 —— hypothesis 实际产出了 flip alpha 却既不 active 也不计入,RCA 方案 A 第 4 点"flip 产物 attribution 单独标"未实现 | flip-only 轮单独标 attribution / 给 hypothesis 一个 flip-active 状态(**待拍语义方向**) |
 | **V-27.1 claim 时序** | `tasks/session_watchdog.py` + `tasks/mining_tasks.py` claim 路径 | watchdog `db.commit()` → `takeover_cascade_lock` 顺序下,若 `config_snapshot` 因任何原因没落库,新 worker `_handed_token=None` 走 normal acquire 撞 takeover 锁 → 直接当 duplicate 退出,task 无人跑直到 3h TTL | 先确保 config_snapshot 持久化再 takeover,或 normal-acquire 失败时检查 holder lineage 是否 `WATCHDOG_TAKEOVER` 并认领 |
 
-前两项归属 V-27.92 状态机簇,建议与该簇的后续迭代一起做;V-27.1 claim
-时序是独立小修,优先级低于前两项(触发需 config_snapshot 落库失败这一
-本就罕见的前提)。
+savepoint 粒度已作 quick-win 闭环。剩 2 项:flip-only attribution 归属
+V-27.92 状态机簇、卡在一个语义决策(待拍方向后并入该簇后续);V-27.1
+claim 时序是独立小修,优先级最低(触发需 config_snapshot 落库失败这一
+本就罕见的前提),不专门排期、碰相关代码时顺带。
 
 ---
 
@@ -167,7 +168,7 @@ submit gate/jsonb/beat),**3 项核实后不做**。
 2. ~~**B 段 TOCTOU**(V-27.45 / 81)~~ — ✅ 已闭环(2026-05-14,commit `d472660` / `3999720`;审查 followup `305fdbb`)
 3. ~~**C 段**(8 项落地 + 3 项核实不做)~~ — ✅ 已闭环(2026-05-14,commit `813ce6b` / `b9720f4`;审查 followup `305fdbb`)
 4. ~~**D 段**(2 项落地 + 4 项核实不做)~~ — ✅ 已闭环(2026-05-14,commit `77f26ec`;审查 followup `305fdbb`)
-5. **F 段** — A–D 段实现的代码审查发现的 3 项遗留,**应排期**:V-27.92 savepoint 粒度 + flip-only attribution(并入 V-27.92 状态机簇后续)、V-27.1 claim 时序(独立小修,低优先)
+5. **F 段** — A–D 段实现的代码审查发现:savepoint 粒度已 quick-win 闭环(`5fa75c4`);剩 flip-only attribution(待拍语义方向,并入 V-27.92 簇后续)、V-27.1 claim 时序(独立小修,最低优先)
 6. **E 段** — 数十条 🟡/🟢 tech-debt,**维持不单独排期**(opportunistic 顺带清理,或专门 sprint)
 
-A–D 段实现 + 审查 followup 已闭环;backlog 余 F 段(3 项应排期)+ E 段(性质上不排期)。
+A–D 段实现 + 审查 followup 已闭环;backlog 余 F 段 2 项(flip-only attribution 待语义决策 + V-27.1 claim 时序低优先)+ E 段(性质上不排期)。
