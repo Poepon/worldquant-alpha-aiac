@@ -27,7 +27,7 @@ from langchain_core.runnables import RunnableConfig
 from loguru import logger
 from sqlalchemy import select
 
-from backend.agents.graph.nodes.base import record_trace
+from backend.agents.graph.nodes.base import record_trace, resolve_db
 from backend.agents.graph.state import AlphaCandidate, MiningState
 from backend.agents.graph.tier_thresholds import get_min_seed_count, get_tier_thresholds
 from backend.agents.services.llm_service import get_llm_service
@@ -373,9 +373,9 @@ async def node_tier_wrap_one(
         seed_hid = seed.get("hypothesis_id")
         if seed_hid is not None:
             try:
-                from backend.database import AsyncSessionLocal as _ASL
                 from backend.models import Hypothesis as _H
-                async with _ASL() as _hdb:
+                # V-27.D: pure read — reuse the workflow-injected db_session.
+                async with resolve_db(config) as _hdb:
                     _h = await _hdb.get(_H, seed_hid)
                     if _h is not None:
                         hypothesis_signal = _h.expected_signal

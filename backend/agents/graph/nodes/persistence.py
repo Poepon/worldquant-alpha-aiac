@@ -12,7 +12,7 @@ from loguru import logger
 from langchain_core.runnables import RunnableConfig
 
 from backend.agents.graph.state import MiningState, AlphaResult, FailureRecord
-from backend.agents.graph.nodes.base import record_trace
+from backend.agents.graph.nodes.base import record_trace, resolve_db
 from backend.agents.graph.early_stop import should_stop_early, summarise_round
 
 
@@ -711,6 +711,9 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                 # mining_agent.run_mining_iteration injects this; legacy callers
                 # leave it None and fall back to heuristic.
                 llm_service=configurable.get("llm_service"),
+                # V-27.D: pass config so the B5 statement read can reuse the
+                # injected db_session via resolve_db.
+                config=config,
             )
         except Exception as _ex:
             logger.warning(
@@ -759,6 +762,7 @@ async def _process_hypothesis_feedback(
     history_so_far: Dict[int, List[Dict]],
     trace_service=None,
     llm_service=None,
+    config=None,
 ) -> Dict[int, List[Dict]]:
     """Round-level lifecycle update for every hypothesis proposed this round.
 
@@ -833,7 +837,10 @@ async def _process_hypothesis_feedback(
     hypothesis_statement = None
     if llm_service is not None and primary_hid is not None:
         try:
-            async with AsyncSessionLocal() as _qdb:
+            # V-27.D: pure read — reuse the workflow-injected db_session
+            # when present. The lifecycle WRITES below keep self-opening
+            # their own AsyncSessionLocal (transaction isolation, intended).
+            async with resolve_db(config) as _qdb:
                 from backend.models import Hypothesis as _H
                 _row = await _qdb.get(_H, primary_hid)
                 if _row is not None:

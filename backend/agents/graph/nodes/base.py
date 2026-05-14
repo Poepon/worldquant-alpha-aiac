@@ -5,11 +5,13 @@ Contains:
 - Debug logging helper
 - Trace recording helper
 - Experiment tracking imports
+- resolve_db: injected-db-session-aware context manager
 """
 
 import json
 import time
 import os
+from contextlib import asynccontextmanager
 from typing import Dict, Optional
 from loguru import logger
 
@@ -18,6 +20,33 @@ from backend.agents.graph.state import (
     add_trace_step,
 )
 from backend.agents.services.trace_service import TraceService, TraceStepRecord
+
+
+# =============================================================================
+# DB SESSION RESOLUTION
+# =============================================================================
+
+@asynccontextmanager
+async def resolve_db(config):
+    """V-27.D: yield the workflow-injected db_session when one is available
+    (caller owns its lifecycle — we do NOT close it), else self-open an
+    AsyncSessionLocal and close it on exit.
+
+    Lets read-only node DB access stop spawning a fresh connection per call
+    when a session is already in scope. Use ONLY for pure reads — writes that
+    must be transaction-isolated from the caller (KB / hypothesis persistence)
+    should keep self-opening their own AsyncSessionLocal explicitly.
+    """
+    injected = (
+        (config.get("configurable", {}) or {}).get("db_session")
+        if config else None
+    )
+    if injected is not None:
+        yield injected
+    else:
+        from backend.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as db:
+            yield db
 
 
 # =============================================================================

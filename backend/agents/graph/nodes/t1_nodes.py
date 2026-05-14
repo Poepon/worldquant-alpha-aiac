@@ -17,7 +17,7 @@ from typing import Dict
 from langchain_core.runnables import RunnableConfig
 from loguru import logger
 
-from backend.agents.graph.nodes.base import record_trace
+from backend.agents.graph.nodes.base import record_trace, resolve_db
 from backend.agents.graph.state import AlphaCandidate, MiningState
 from backend.agents.services.llm_service import get_llm_service
 from backend.config import settings
@@ -63,10 +63,10 @@ async def node_t1_strategy_select(
         # Pre-cache miss → fetch union ourselves
         try:
             from backend.tasks.mining_tasks import _get_dataset_fields
-            from backend.database import AsyncSessionLocal
             seen_ids: set = set()
             unioned: list = []
-            async with AsyncSessionLocal() as _db:
+            # V-27.D: pure read — reuse the workflow-injected db_session.
+            async with resolve_db(config) as _db:
                 for ds in chosen_dsets:
                     try:
                         ds_fields = await _get_dataset_fields(_db, ds, state.region, state.universe)

@@ -38,7 +38,7 @@ def _failed_llm_response(error: str) -> _FailedLLMResponse:
     return _FailedLLMResponse(success=False, parsed=None, error=error)
 
 from backend.agents.graph.state import MiningState, AlphaCandidate
-from backend.agents.graph.nodes.base import record_trace, _debug_log
+from backend.agents.graph.nodes.base import record_trace, _debug_log, resolve_db
 from backend.agents.services import LLMService, RAGService
 from backend.agents.prompts import (
     ALPHA_GENERATION_SYSTEM,
@@ -442,9 +442,10 @@ async def node_hypothesis(
     if chosen_datasets and (len(chosen_datasets) > 1 or chosen_datasets[0] != legacy_anchor):
         try:
             from backend.tasks.mining_tasks import _get_dataset_fields
-            from backend.database import AsyncSessionLocal
             seen_ids: set = set()
-            async with AsyncSessionLocal() as _db:
+            # V-27.D: pure read — reuse the workflow-injected db_session
+            # when present instead of always self-opening a connection.
+            async with resolve_db(config) as _db:
                 for ds in chosen_datasets:
                     try:
                         ds_fields = await _get_dataset_fields(_db, ds, state.region, state.universe)
@@ -732,8 +733,8 @@ async def node_code_gen(
     recent_pass_examples = []
     try:
         from backend.agents.services.rag_service import RAGService
-        from backend.database import AsyncSessionLocal
-        async with AsyncSessionLocal() as _db:
+        # V-27.D: pure read — reuse the workflow-injected db_session if present.
+        async with resolve_db(config) as _db:
             _rag = RAGService(_db)
             recent_pass_examples = await _rag.get_recent_pass_examples(
                 region=state.region,
