@@ -504,9 +504,21 @@ class AlphaService(BaseService):
 
                 return {"submitted": True, "reason": "ok", "brain": result}
             finally:
+                # V-27.123 followup: CAS release, not a blind DELETE. The
+                # BRAIN submit poll (max_polls=60) can run long enough to
+                # approach the 300s lock TTL — past expiry another worker
+                # may hold a fresh lock under the same key, and a blind
+                # delete would evict *their* lock. Lua check-and-delete
+                # only removes the key if it still holds our token.
                 if _redis is not None:
                     try:
-                        await _redis.delete(_lock_key)
+                        await _redis.eval(
+                            "if redis.call('get', KEYS[1]) == ARGV[1] then "
+                            "return redis.call('del', KEYS[1]) else return 0 end",
+                            1,
+                            _lock_key,
+                            str(alpha_pk),
+                        )
                     except Exception:
                         pass
 
