@@ -347,13 +347,23 @@ async def node_hypothesis(
     # Higher exploration -> higher temperature for more diverse hypotheses
     temperature = 0.7 + (exploration_weight * 0.3)  # Range: 0.7 - 1.0
     
-    response = await llm_service.call(
-        system_prompt=HYPOTHESIS_SYSTEM,
-        user_prompt=prompt,
-        temperature=temperature,
-        json_mode=True
-    )
-    
+    # V-27.31: node_distill_context / node_code_gen already wrap their
+    # llm_service.call in try/except → _failed_llm_response (V-26.49).
+    # node_hypothesis — the most critical of the three generation nodes —
+    # was a bare call: an LLM timeout / network blip / JSON-mode error threw
+    # straight out of the node, crashing the whole workflow.run(). Degrade
+    # gracefully like the sibling nodes.
+    try:
+        response = await llm_service.call(
+            system_prompt=HYPOTHESIS_SYSTEM,
+            user_prompt=prompt,
+            temperature=temperature,
+            json_mode=True
+        )
+    except Exception as llm_err:
+        logger.error(f"[{node_name}] LLM call exception: {llm_err}")
+        response = _failed_llm_response(str(llm_err))
+
     duration_ms = int((time.time() - start_time) * 1000)
     
     hypotheses = []

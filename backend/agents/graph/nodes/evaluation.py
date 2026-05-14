@@ -1657,6 +1657,20 @@ async def node_evaluate(
                     # rows should NOT teach the KB anything.
                     should_record = attribution in ("hypothesis", "both")
 
+                    # V-27.97: symmetric guard with record_success_pattern
+                    # (persistence.py V-26.93). When hypothesis-keyed KB is
+                    # the active level (>=2) but no hypothesis link is
+                    # available, skip the write rather than poison the
+                    # FAILURE_PITFALL pool with hypothesis_id=None rows —
+                    # success pool got this guard, failure pool didn't.
+                    active_level = cfg.get("hypothesis_centric_level") or 0
+                    if should_record and active_level >= 2 and current_hypothesis_id is None:
+                        logger.warning(
+                            f"[{node_name}] V-27.97 skip FAILURE_PITFALL write: "
+                            f"level={active_level} but hypothesis_id=None"
+                        )
+                        should_record = False
+
                     if should_record:
                         await rag_service.record_failure_pattern(
                             expression=feedback["expression"],

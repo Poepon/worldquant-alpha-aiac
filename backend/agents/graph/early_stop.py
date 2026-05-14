@@ -176,18 +176,31 @@ def should_abandon_hypothesis(
 
     last_n = history_for_hid[-n_rounds:]
     pass_counts = [(e.get("pass_count", 0) or 0) for e in last_n]
+    alpha_counts = [(e.get("alpha_count", 0) or 0) for e in last_n]
     attrs = [e.get("attribution") for e in last_n]
     rounds_str = ",".join(str(e.get("round_index", "?")) for e in last_n)
     has_any_pass = any(p > 0 for p in pass_counts)
     has_non_hypothesis_attr = any(a != "hypothesis" for a in attrs)
+    # V-27.68: a round that generated 0 alphas never actually *tested* the
+    # hypothesis (LLM/codegen hiccup, all-dedup round, …) — counting it as a
+    # "0 PASS failure round" would abandon a hypothesis the workflow never
+    # gave a fair shot. Pre-fix this was only avoided as a side effect of
+    # classify_attribution returning "unknown" on alpha_count==0; make it an
+    # explicit guard reading the alpha_count the round entry already carries.
+    has_empty_round = any(c == 0 for c in alpha_counts)
 
-    if has_any_pass or has_non_hypothesis_attr:
+    if has_any_pass or has_non_hypothesis_attr or has_empty_round:
         # Window satisfied N but condition didn't fire — log why so
         # abandon_path_audit can quantify the attribution distribution.
+        skip_reason = (
+            "has_pass" if has_any_pass
+            else "non_hypothesis_attr" if has_non_hypothesis_attr
+            else "empty_round"
+        )
         logger.debug(
             f"[B6 abandon-skip] hid={hypothesis_id} rounds=[{rounds_str}] "
-            f"pass_counts={pass_counts} attrs={attrs} "
-            f"reason={'has_pass' if has_any_pass else 'non_hypothesis_attr'}"
+            f"pass_counts={pass_counts} alpha_counts={alpha_counts} "
+            f"attrs={attrs} reason={skip_reason}"
         )
         return False, None
 

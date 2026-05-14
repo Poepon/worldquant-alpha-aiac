@@ -559,6 +559,12 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                         continue
                     if not alpha.expression:
                         continue
+                    # V-27.73: symmetric with _incremental_save_alphas'
+                    # `not alpha.alpha_id` skip (V-26.92). A sim that returned
+                    # None has no alpha_id — it can't enter the alphas table,
+                    # so it must NOT enter the KB SUCCESS_PATTERN pool either.
+                    if not alpha.alpha_id:
+                        continue
                     # V-26.93 (2026-05-13): skip KB write when no hypothesis
                     # link is available AND Phase 2 (hypothesis-keyed KB) is
                     # the active level. Without this guard the KB ends up
