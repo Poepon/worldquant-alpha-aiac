@@ -21,6 +21,51 @@ from backend.services.correlation_service import CorrelationService
 from backend.tasks import run_async
 
 
+@celery_app.task(name="backend.tasks.refresh_portfolio_skeletons_all")
+def refresh_portfolio_skeletons_all():
+    """V-27.147 beat fallback: refresh the portfolio-skeleton cache for every
+    region with submitted alphas.
+
+    AlphaService.submit_alpha refreshes this cache inline on each successful
+    submit, but that refresh is best-effort — if it raised (DB blip, etc.)
+    the cache could go stale indefinitely and the T1 strategy prompt would
+    keep nudging the LLM toward an already-submitted shape. This beat sweep
+    is the safety net. Per-region try/except so one failure doesn't skip
+    the rest.
+    """
+    logger.info("[refresh_portfolio_skeletons] V-27.147 beat sweep starting")
+
+    async def _run():
+        from backend.agents.seed_pool.portfolio_skeletons import (
+            refresh_portfolio_from_db,
+        )
+        results: Dict[str, object] = {}
+        async with AsyncSessionLocal() as db:
+            regions = (
+                await db.execute(
+                    select(Alpha.region)
+                    .where(Alpha.date_submitted.isnot(None))
+                    .where(Alpha.region.isnot(None))
+                    .distinct()
+                )
+            ).scalars().all()
+        for region in regions:
+            try:
+                n = await refresh_portfolio_from_db(region=region)
+                results[region] = n
+                logger.info(
+                    f"[refresh_portfolio_skeletons] {region}: {n} skeleton rows"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[refresh_portfolio_skeletons] {region} failed: {e}"
+                )
+                results[region] = f"error: {e}"
+        return {"refreshed": results}
+
+    return run_async(_run())
+
+
 @celery_app.task(name="backend.tasks.refresh_os_correlation_cache")
 def refresh_os_correlation_cache():
     """Refresh OS-alpha PnL cache + metrics for all major regions (scheduled).

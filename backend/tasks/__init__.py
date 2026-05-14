@@ -37,6 +37,7 @@ from backend.tasks.sync_tasks import (
     sync_fields_from_brain,
     sync_user_alphas,
     refresh_os_correlation_cache,
+    refresh_portfolio_skeletons_all,
 )
 # PR2: tier-system refresh beat
 from backend.tasks.refresh_tasks import refresh_kb_referenced_alphas
@@ -72,6 +73,8 @@ __all__ = [
     "sync_fields_from_brain",
     "sync_user_alphas",
     "refresh_os_correlation_cache",
+    # V-27.147: portfolio-skeleton cache refresh beat fallback
+    "refresh_portfolio_skeletons_all",
     # PR2: tier system
     "refresh_kb_referenced_alphas",
     # V-22.12: IQC marginal audit hook

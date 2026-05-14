@@ -464,6 +464,12 @@ class Settings(BaseSettings):
     # Off → skip the lock, fall back to pure DB dedup (pre-fix behaviour).
     SIMULATE_DEDUP_LOCK_ENABLED: bool = True
 
+    # V-27.127 — submit gate-3: when can_submit=False but the ONLY failing
+    # checks are self-correlation, defer to the live self_corr precheck
+    # (gate-4) instead of hard-blocking on the stale verdict. Off → gate-3
+    # hard-blocks on any can_submit != True (pre-fix behaviour).
+    SUBMIT_GATE_LIVE_SELF_CORR_OVERRIDE: bool = True
+
     # V-27.108 — failure-pitfall scoring weights (failure side of V-26.36;
     # the success side is already config'd as RAG_SCORE_*).
     RAG_PITFALL_SEVERITY_HIGH: int = 30

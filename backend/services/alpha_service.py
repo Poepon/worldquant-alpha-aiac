@@ -325,18 +325,29 @@ class AlphaService(BaseService):
         if ok is None:
             return None
 
-        alpha.can_submit = ok
-        new_metrics = dict(alpha.metrics or {})
-        new_metrics["_brain_can_submit"] = ok
-        new_metrics["_brain_failed_checks"] = failed
-        new_metrics["_brain_pending_checks"] = pending
-        alpha.metrics = new_metrics
-        # Force JSONB column re-write — SQLAlchemy doesn't auto-detect mutation
-        # on a plain dict assignment when the JSONB type is the same identity;
-        # reassignment + flag_modified is the safe pattern.
-        from sqlalchemy.orm.attributes import flag_modified
-        flag_modified(alpha, "metrics")
+        # V-27.140: SQL in-place JSONB merge instead of read-modify-write of
+        # the whole column. Two workers each doing dict(alpha.metrics) → edit
+        # → reassign would have the later commit clobber the earlier one's
+        # unrelated keys (IQC backfill, evaluation, …). `metrics || patch`
+        # is an atomic shallow merge — only the three _brain_* keys are
+        # touched, every other key survives concurrent writers.
+        from sqlalchemy import cast as _sql_cast, update as _sql_update
+        from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
+        from backend.models import Alpha as _Alpha
 
+        _patch = {
+            "_brain_can_submit": ok,
+            "_brain_failed_checks": failed,
+            "_brain_pending_checks": pending,
+        }
+        await self.db.execute(
+            _sql_update(_Alpha)
+            .where(_Alpha.id == alpha_pk)
+            .values(
+                can_submit=ok,
+                metrics=_Alpha.metrics.op("||")(_sql_cast(_patch, _PG_JSONB)),
+            )
+        )
         await self.db.commit()
 
         return {
@@ -396,10 +407,35 @@ class AlphaService(BaseService):
                 "reason": f"already submitted at {alpha.date_submitted}",
             }
         if alpha.can_submit is not True:
-            return {
-                "submitted": False,
-                "reason": f"can_submit={alpha.can_submit} — must be True before submit",
-            }
+            # V-27.127: can_submit=False may be a STALE verdict — a self_corr
+            # demote that has since dropped below threshold should not block
+            # submit forever. If the ONLY failing checks are self-correlation
+            # (LOCAL_SELF_CORRELATION / SELF_CORRELATION), defer to gate-4's
+            # LIVE precheck below instead of hard-blocking here. Any non-
+            # self-corr FAIL still hard-blocks. can_submit is None ("no BRAIN
+            # signal", not "tested & stale") is NOT overridable.
+            from backend.config import settings as _cfg
+            _failed = (alpha.metrics or {}).get("_brain_failed_checks") or []
+            _self_corr_names = {"LOCAL_SELF_CORRELATION", "SELF_CORRELATION"}
+            _only_self_corr = bool(_failed) and all(
+                isinstance(f, dict) and f.get("name") in _self_corr_names
+                for f in _failed
+            )
+            _override = (
+                alpha.can_submit is False
+                and _only_self_corr
+                and getattr(_cfg, "SUBMIT_GATE_LIVE_SELF_CORR_OVERRIDE", True)
+            )
+            if not _override:
+                return {
+                    "submitted": False,
+                    "reason": f"can_submit={alpha.can_submit} — must be True before submit",
+                }
+            logger.info(
+                f"[submit_alpha] V-27.127 can_submit=False but only self-corr "
+                f"checks failed — deferring to gate-4 live precheck for "
+                f"alpha {alpha_pk}"
+            )
         # V-27.139: a missing region would otherwise be precheck'd against
         # the USA OS pool, producing a meaningless corr for a non-USA alpha.
         # Refuse rather than guess.
@@ -486,9 +522,15 @@ class AlphaService(BaseService):
                         "brain": result,
                     }
 
-                # success — stamp date_submitted
-                from datetime import datetime, timezone
-                alpha.date_submitted = datetime.now(timezone.utc)
+                # success — stamp date_submitted. V-27.127 followup: the
+                # alphas.date_submitted column is TIMESTAMP WITHOUT TIME ZONE,
+                # so a tz-aware value trips asyncpg's naive/aware subtraction
+                # error. Use a naive UTC timestamp (matches the column + the
+                # ExperimentRun.finished_at convention elsewhere). This path
+                # was previously unreachable for can_submit!=True alphas —
+                # V-27.127's gate-3 override now lets them through.
+                from datetime import datetime
+                alpha.date_submitted = datetime.utcnow()
                 await self.db.commit()
 
                 # Post-submit: refresh portfolio-skeleton cache (DB-only,
