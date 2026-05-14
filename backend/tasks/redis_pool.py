@@ -23,6 +23,8 @@ Three reasons this lives in its own module:
 """
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from typing import Optional
 
 import redis
@@ -50,35 +52,121 @@ def get_redis_client() -> redis.Redis:
     return redis.Redis(connection_pool=_pool)
 
 
-# Lua: only DELETE if the stored value still matches our token.
-# Returns 1 if deleted, 0 if the key vanished or held a different token.
-# `redis.call` runs atomically inside the server, so there is no window
-# between the GET-compare and the DEL where another worker can sneak in.
-_RELEASE_LUA = """
-if redis.call('get', KEYS[1]) == ARGV[1] then
-    return redis.call('del', KEYS[1])
+# V-27.1: the lock value is now a structured JSON blob instead of a bare
+# token string:
+#   {"token", "run_id", "worker_pid", "acquired_at", "lineage", "v": 2}
+# `token` is still the CAS identity; the rest is diagnostic only (under
+# Celery --pool=solo a pid can't prove liveness, so it's log-only). A bare
+# string left by a pre-V-27.1 worker is treated as an implicit v1 token —
+# every lock-read path goes through _decode_lock_value for compatibility.
+
+# Lua: only DELETE if the stored value's token still matches ours. Decodes
+# the JSON value; a value that isn't our JSON shape is treated wholesale as
+# a legacy token. `redis.call` runs atomically server-side, so there's no
+# window between the GET-compare and the DEL where another worker sneaks in.
+_RELEASE_LUA_V2 = """
+local cur = redis.call('get', KEYS[1])
+if cur == false then return 0 end
+local tok
+local ok, decoded = pcall(cjson.decode, cur)
+if ok and type(decoded) == 'table' and decoded.token ~= nil then
+    tok = decoded.token
 else
-    return 0
+    tok = cur
 end
+if tok == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end
+"""
+
+# Lua: unconditionally overwrite the value and reset the TTL, returning the
+# previous raw value ('' when the key didn't exist). Used by the watchdog to
+# atomically *take over* a lock instead of force_clear + re-acquire — which
+# left a falsely-presumed-dead worker free to keep running while the
+# replacement grabbed the freed lock (the V-27.1 race).
+_TAKEOVER_LUA = """
+local prev = redis.call('get', KEYS[1])
+redis.call('set', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+if prev == false then return '' else return prev end
 """
 
 
-def acquire_cascade_lock(key: str, token: str, ttl_sec: int) -> bool:
+def _encode_lock_value(
+    token: str,
+    *,
+    run_id: Optional[int] = None,
+    worker_pid: Optional[int] = None,
+    lineage: str = "WORKER",
+) -> str:
+    """Serialize a structured (v2) lock value. `token` stays the CAS
+    identity; run_id / worker_pid / acquired_at / lineage are diagnostic."""
+    return json.dumps(
+        {
+            "token": token,
+            "run_id": run_id,
+            "worker_pid": worker_pid,
+            "acquired_at": datetime.now(timezone.utc).isoformat(),
+            "lineage": lineage,
+            "v": 2,
+        }
+    )
+
+
+def _decode_lock_value(raw) -> Optional[dict]:
+    """Normalize a raw redis lock value into a dict carrying at least
+    'token'. Returns None if `raw` is None. Handles three shapes:
+
+      - v2 JSON dict with a 'token' field      → parsed dict as-is
+      - legacy bare string (pre-V-27.1, v1)    → {'token': raw, 'v': 1, ...}
+      - JSON but not our shape (no 'token')    → treated as legacy, the
+                                                 whole raw string is token
+
+    This is the single backward-compatibility choke point — every path
+    that reads a lock value must go through it."""
+    if raw is None:
+        return None
+    s = raw.decode() if isinstance(raw, (bytes, bytearray)) else str(raw)
+    try:
+        obj = json.loads(s)
+    except (ValueError, TypeError):
+        return {"token": s, "v": 1, "lineage": "LEGACY"}
+    if isinstance(obj, dict) and obj.get("token") is not None:
+        return obj
+    return {"token": s, "v": 1, "lineage": "LEGACY"}
+
+
+def acquire_cascade_lock(
+    key: str,
+    token: str,
+    ttl_sec: int,
+    *,
+    run_id: Optional[int] = None,
+    worker_pid: Optional[int] = None,
+) -> bool:
     """SET NX EX. Returns True on acquisition, False if another worker
     already holds it. Raises on Redis errors so callers can decide
-    whether to fail-closed (V-26.27)."""
+    whether to fail-closed (V-26.27).
+
+    V-27.1: the stored value is now a structured JSON blob (see
+    _encode_lock_value); `token` remains the CAS identity."""
     cli = get_redis_client()
-    return bool(cli.set(key, token, nx=True, ex=ttl_sec))
+    value = _encode_lock_value(
+        token, run_id=run_id, worker_pid=worker_pid, lineage="WORKER"
+    )
+    return bool(cli.set(key, value, nx=True, ex=ttl_sec))
 
 
 def release_cascade_lock(key: str, token: str) -> bool:
     """Atomic check-and-delete using server-side Lua. Returns True iff
-    we actually held the lock and just released it. Swallows redis-side
-    exceptions (TTL will clean up); raising here would break the
-    caller's ``finally``."""
+    we actually held the lock (token match, v2 or legacy value) and just
+    released it. Swallows redis-side exceptions (TTL will clean up);
+    raising here would break the caller's ``finally``.
+
+    V-27.1: after a watchdog takeover this is a deliberate no-op — the
+    old worker calls release with its stale token, the Lua CAS sees the
+    new watchdog token and returns 0 without deleting. The old worker
+    cannot clobber the replacement's lock."""
     try:
         cli = get_redis_client()
-        result = cli.eval(_RELEASE_LUA, 1, key, token)
+        result = cli.eval(_RELEASE_LUA_V2, 1, key, token)
         return bool(result)
     except Exception as exc:
         logger.warning(
@@ -89,9 +177,12 @@ def release_cascade_lock(key: str, token: str) -> bool:
 
 
 def force_clear_cascade_lock(key: str) -> bool:
-    """Watchdog-only: DELETE regardless of token. Use when reviving a
-    task whose original worker is presumed dead and we need to evict
-    the stale lock so the replacement worker can ``acquire`` cleanly.
+    """DEPRECATED (V-27.1): unconditional DELETE regardless of token.
+
+    The watchdog no longer calls this — it now uses takeover_cascade_lock
+    for an atomic ownership transfer (force_clear + re-acquire was the
+    V-27.1 double-run race). Kept for the CASCADE_LOCK_TAKEOVER_ENABLED
+    flag-off path and as a manual ops escape hatch.
 
     Returns True if the key existed and was removed."""
     try:
@@ -102,15 +193,89 @@ def force_clear_cascade_lock(key: str) -> bool:
         return False
 
 
-def peek_lock_holder(key: str) -> Optional[str]:
-    """Read the current lock holder token (for logging). None if Redis
-    is unreachable or the key is absent."""
+def takeover_cascade_lock(
+    key: str,
+    new_token: str,
+    ttl_sec: int,
+    *,
+    run_id: Optional[int] = None,
+    worker_pid: Optional[int] = None,
+) -> dict:
+    """Watchdog-only: atomically overwrite the lock value with `new_token`
+    regardless of who (or what format) held it before, and reset the TTL.
+    Replaces the force_clear + re-acquire two-step that let a falsely-
+    presumed-dead worker keep running while a replacement acquired the
+    freed lock (V-27.1).
+
+    Returns {"ok": bool, "prev": dict|None, "created": bool}:
+      - ok      : the takeover SET succeeded
+      - prev    : decoded previous lock value (None if the key was absent)
+      - created : True if there was no prior key
+
+    Swallows Redis errors → {"ok": False, ...} so the watchdog can log and
+    continue its revive sweep rather than crash."""
+    try:
+        cli = get_redis_client()
+        value = _encode_lock_value(
+            new_token,
+            run_id=run_id,
+            worker_pid=worker_pid,
+            lineage="WATCHDOG_TAKEOVER",
+        )
+        prev_raw = cli.eval(_TAKEOVER_LUA, 1, key, value, int(ttl_sec))
+        # Lua returns '' (empty string) when there was no prior key.
+        if prev_raw in (b"", "", None):
+            return {"ok": True, "prev": None, "created": True}
+        return {
+            "ok": True,
+            "prev": _decode_lock_value(prev_raw),
+            "created": False,
+        }
+    except Exception as exc:
+        logger.warning(f"[cascade-lock] takeover failed for key={key}: {exc}")
+        return {"ok": False, "prev": None, "created": False}
+
+
+def verify_lock_ownership(key: str, token: str) -> str:
+    """Check whether `token` still owns the lock at `key`. Returns:
+
+      - "OWNED"   : stored value's token matches `token`
+      - "LOST"    : the key holds a different token (taken over)
+      - "MISSING" : the key does not exist (TTL expired / cleared)
+      - "UNKNOWN" : Redis was unreachable
+
+    SAFETY FLOOR (V-27.1): the caller MUST NOT treat "UNKNOWN" as "LOST".
+    A Redis blip must never make a live worker self-terminate — if every
+    cascade worker self-killed on a transient Redis error that would be
+    strictly worse than the original double-run bug."""
     try:
         cli = get_redis_client()
         held = cli.get(key)
-        if held is None:
-            return None
-        return held.decode() if isinstance(held, bytes) else str(held)
+    except Exception as exc:
+        logger.warning(
+            f"[cascade-lock] ownership check failed for key={key}: {exc} "
+            f"(returning UNKNOWN — caller must keep running)"
+        )
+        return "UNKNOWN"
+    if held is None:
+        return "MISSING"
+    decoded = _decode_lock_value(held)
+    if decoded and decoded.get("token") == token:
+        return "OWNED"
+    return "LOST"
+
+
+def peek_lock_holder(key: str) -> Optional[dict]:
+    """Read + decode the current lock value (for logging / diagnostics).
+    Returns the structured dict (see _decode_lock_value), or None if Redis
+    is unreachable or the key is absent.
+
+    V-27.1: return type changed from Optional[str] to Optional[dict] —
+    callers that want the bare token should read ``(holder or {}).get('token')``."""
+    try:
+        cli = get_redis_client()
+        held = cli.get(key)
+        return _decode_lock_value(held)
     except Exception:
         return None
 

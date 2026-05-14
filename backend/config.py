@@ -130,10 +130,23 @@ class Settings(BaseSettings):
     CASCADE_PAUSE_POLL_SEC: float = 1.0    # 主循环每 round 末检查 PAUSED 间隔
 
     # V-19.7 watchdog + BRAIN quota guard.
-    CASCADE_WATCHDOG_DEAD_MIN: int = 15      # last_alpha_persisted_at < NOW()-N → dead
+    # V-27.1: DEAD_MIN 15→25 — a live worker can legitimately go 15+ min
+    # without a heartbeat (long BRAIN multi-sim, slow LLM, all-dedup round).
+    # The lock-takeover fix roots out the race; the wider window is a cheap
+    # probability cushion that just reduces how often a falsely-presumed-dead
+    # worker overlaps the replacement by one round.
+    CASCADE_WATCHDOG_DEAD_MIN: int = 25      # last_alpha_persisted_at < NOW()-N → dead
     CASCADE_WATCHDOG_GRACE_MIN: int = 15     # task.created_at > NOW()-N → skip (start-up grace)
     BRAIN_DAILY_SIMULATE_LIMIT: int = 1000   # consultant 估算 — 实际由 BRAIN 决定
     BRAIN_QUOTA_PAUSE_PCT: float = 0.9       # 达 90% 自动 pause CONTINUOUS_CASCADE
+
+    # V-27.1 cascade-lock takeover. The watchdog atomically takes over the
+    # lock (new token) instead of force_clear + re-acquire; the cascade main
+    # loop self-checks lock ownership at every round boundary and exits
+    # gracefully if taken over. Flag off → revert to force_clear + no
+    # ownership self-check (kill-switch for the new self-exit path).
+    CASCADE_LOCK_TAKEOVER_ENABLED: bool = True
+    CASCADE_LOCK_TTL_SEC: int = 10800        # cascade lock TTL — shared by acquire + watchdog takeover
 
     # V-20 (2026-05-10) round-pipeline. While round N's SIMULATE blocks on
     # BRAIN (~5 min, IO-bound), round N+1's LLM/CODE_GEN/VALIDATE runs in an

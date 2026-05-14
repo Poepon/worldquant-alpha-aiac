@@ -27,6 +27,7 @@ Two beat-driven Celery tasks:
 """
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from loguru import logger
@@ -173,25 +174,39 @@ async def _recently_revived(db, task_id: int, cutoff: datetime) -> bool:
 async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list) -> None:
     """Common re-dispatch path used by both CONTINUOUS and DISCRETE handlers."""
     try:
-        # V-26.5: evict stale cascade lock before re-dispatch. The original
-        # worker may have died holding the lock (SIGKILL on celery
-        # task_time_limit, OOM, hard crash) — its `finally` never fired
-        # so the 10800s TTL would block the new worker. force_clear is
-        # safe because watchdog only revives tasks whose last_alpha_persisted_at
-        # / latest trace is older than DEAD_THRESHOLD_MIN, i.e. the lock
-        # holder has definitely stopped progressing.
-        try:
-            from backend.tasks.redis_pool import force_clear_cascade_lock
-            cleared = force_clear_cascade_lock(f"cascade_lock:task:{task.id}")
-            if cleared:
+        # V-27.1: cascade lock handling. Only CONTINUOUS_CASCADE tasks hold a
+        # cascade lock; discrete tasks acquire none, so skip them entirely.
+        #
+        # Takeover path (flag on): pre-generate a takeover token now. The
+        # atomic takeover itself runs AFTER the new ExperimentRun is created
+        # (so run.id lands in the lock value) but BEFORE the worker is
+        # dispatched. The token is threaded to the new worker via
+        # config_snapshot["cascade_lock_token"] — the worker CLAIMS this lock
+        # instead of acquiring a fresh one, and the old (possibly still-alive)
+        # worker's release becomes a CAS no-op + its next round-boundary
+        # ownership self-check sees LOST and exits. This roots out the V-27.1
+        # double-run race that force_clear + re-acquire introduced (V-26.5).
+        #
+        # Flag-off path: revert to the pre-V-27.1 force_clear + re-acquire.
+        is_cascade = reason_payload.get("kind") == "CONTINUOUS_CASCADE"
+        takeover_enabled = getattr(settings, "CASCADE_LOCK_TAKEOVER_ENABLED", True)
+        lock_key = f"cascade_lock:task:{task.id}"
+        takeover_token = None
+        if is_cascade and takeover_enabled:
+            takeover_token = "watchdog-takeover:" + uuid.uuid4().hex
+        elif is_cascade:
+            try:
+                from backend.tasks.redis_pool import force_clear_cascade_lock
+                cleared = force_clear_cascade_lock(lock_key)
+                if cleared:
+                    logger.warning(
+                        f"[watchdog] evicted stale cascade lock for task={task.id} "
+                        f"before revive (takeover flag off; original worker presumed dead)"
+                    )
+            except Exception as _lock_e:
                 logger.warning(
-                    f"[watchdog] evicted stale cascade lock for task={task.id} "
-                    f"before revive (original worker presumed dead)"
+                    f"[watchdog] cascade lock evict skipped for task={task.id}: {_lock_e}"
                 )
-        except Exception as _lock_e:
-            logger.warning(
-                f"[watchdog] cascade lock evict skipped for task={task.id}: {_lock_e}"
-            )
 
         # V-26.33 (2026-05-13): inherit the dead ExperimentRun's config /
         # strategy snapshots so the revival preserves audit lineage. Pre-fix
@@ -220,6 +235,11 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
         }
         if prior_run is not None:
             inherited_config["watchdog_revive"]["prior_run_id"] = prior_run.id
+        # V-27.1: hand the pre-generated takeover token to the new worker so
+        # it claims the lock (verify_lock_ownership) rather than acquiring a
+        # fresh one. Absent → the worker takes the normal acquire path.
+        if takeover_token is not None:
+            inherited_config["cascade_lock_token"] = takeover_token
         inherited_strategy = (
             dict(prior_run.strategy_snapshot) if (prior_run and isinstance(prior_run.strategy_snapshot, dict)) else {}
         )
@@ -234,6 +254,35 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
         db.add(run)
         await db.commit()
         await db.refresh(run)
+
+        # V-27.1: atomic lock takeover — overwrite whatever the (possibly
+        # still-alive) old worker holds with our token + reset the TTL. Done
+        # after run creation so run.id lands in the lock value for diagnostics,
+        # and before dispatch so the lock is already ours when the worker
+        # comes up to claim it.
+        if takeover_token is not None:
+            try:
+                from backend.tasks.redis_pool import takeover_cascade_lock
+                ttl = getattr(settings, "CASCADE_LOCK_TTL_SEC", 10800)
+                res = takeover_cascade_lock(
+                    lock_key, takeover_token, ttl, run_id=run.id
+                )
+                if res.get("ok"):
+                    prev = res.get("prev") or {}
+                    logger.warning(
+                        f"[watchdog] took over cascade lock for task={task.id} "
+                        f"(prev_token={prev.get('token', '<none>')} "
+                        f"created={res.get('created')})"
+                    )
+                else:
+                    logger.warning(
+                        f"[watchdog] cascade lock takeover failed for task={task.id} "
+                        f"— new worker will fall back to acquire on a MISSING lock"
+                    )
+            except Exception as _lock_e:
+                logger.warning(
+                    f"[watchdog] cascade lock takeover skipped for task={task.id}: {_lock_e}"
+                )
 
         from backend.tasks import run_mining_task
         celery_task = run_mining_task.delay(task.id, run.id)
