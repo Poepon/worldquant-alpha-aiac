@@ -84,16 +84,25 @@ submit gate/jsonb/beat),**3 项核实后不做**。
 
 ---
 
-## D. 性能 / 半成品 / 低触发脆弱性
+## D. ✅ 已闭环 — 性能 / 低触发脆弱性(2026-05-14)
 
-| 项 | File | 现象 | 备注 |
+6 项中 **2 项落地**(commit `77f26ec`),**4 项核实后不做**。
+
+### 已落地(2 项)
+
+| 项 | File | 落地方案 | commit |
 |---|---|---|---|
-| **V-27.154** | `routers/factor_library.py` `list_alphas_by_tier` | `submittable` 过滤每行对 `metrics->>'_self_corr'` 做 JSONB 提取 + 双 cast,无表达式索引 — 当前数据量小不致命,随表增长全表扫 | 加 `metrics->>'_self_corr'` 的表达式索引,或物化成 alpha 表的列 |
-| **V-27.155** | `routers/factor_library.py` `refresh_iqc_batch` | `countdown=i*2` 按 i 递增、`eta=enqueued*2` 用成功数 — enqueue 失败时 eta 与实际最后任务的 countdown 不一致 | 用 `i` 算 eta,或忽略(罕见) |
-| **V-27.160** | `evaluation.py` crisis-window 评估节点 | crisis stress test 跑了 N×N 计算,结果只塞进 `metrics._crisis_correlations`,唯一出口是 AlphaDetail 一张卡片 — 既不 gate `quality_status` 也不进 submittable 过滤 | **产品决策**:crisis corr 要不要影响提交判定?定了再实施 |
-| **V-27.132 / 133** | `portfolio_skeletons.py` `_NUM_RE` | 数字提取位置对齐非语义、负号 `a-1` vs `subtract(a,1)` 抽出符号相反 | 实际 mining 表达式全函数式(无中缀),且双因子 match 要 fields 集合也全等才命中 — 真实误配概率低,**低优先** |
-| **V-27.72** | `correlation_service` / `brain_adapter` 用 redis | 同步 redis client 在 async 路径里调用,阻塞 event loop —— **非本次引入**(既有代码),量小未致命 | 迁 `redis.asyncio`,或确认调用频次低到可接受 |
-| **V-27.93** | node 自开 `AsyncSessionLocal()` | 阶段 D 收敛了纯读位点,但仍保留的写位点 + 未注入 config 的节点各自开 session,高并发 round 下连接池压力 | 观察连接池指标;必要时调 pool size 或进一步收敛 |
+| **V-27.154** | `routers/factor_library.py` `list_alphas_by_tier` / `refresh_iqc_batch` | migration `8100862bcef9` 加 `ix_alphas_submittable_self_corr` —— 对 `((metrics->>'_self_corr')::float)` 的 PARTIAL 表达式索引,WHERE 匹配两处共同的 `can_submit IS TRUE AND date_submitted IS NULL` 过滤前缀 | `77f26ec` |
+| **V-27.155** | `routers/factor_library.py` `refresh_iqc_batch` | `eta` 从 `enqueued*2` 改为 `last_countdown`(跟踪最后成功入队任务的真实 `i*2`)—— enqueue 失败时 `i` 超出 `enqueued`,旧 eta 低估实际排队时间 | `77f26ec` |
+
+### 核实后不做(4 项)
+
+| 项 | 判定 |
+|---|---|
+| **V-27.72** `correlation_service` / `brain_adapter` 用 redis | **已核实已解决** —— `brain_adapter.py` 已全用 `redis.asyncio`,`correlation_service.py` 根本不用 redis,`redis_pool.py` 同步 client 只在 Celery worker 进程跑(无 event loop,不阻塞)。 |
+| **V-27.160** crisis-window | crisis corr 要不要 gate `quality_status` / submittable 是**产品决策**,非代码问题。待产品定方向后再实施。 |
+| **V-27.93** node 自开 `AsyncSessionLocal()` | backlog 标为「观察连接池指标」的观察项,无明确代码修复点。 |
+| **V-27.132 / 133** `portfolio_skeletons._NUM_RE` | 真实误配概率极低(mining 表达式全函数式、双因子 match 要 fields 集合全等),backlog 自标低优先;需引入 tokenizer,性价比低。 |
 
 ---
 
@@ -117,4 +126,7 @@ submit gate/jsonb/beat),**3 项核实后不做**。
 1. ~~**A 段**(V-27.1 / V-27.92)~~ — ✅ 已闭环(2026-05-14,commit `73dee3f` / `98a6f8d`)
 2. ~~**B 段 TOCTOU**(V-27.45 / 81)~~ — ✅ 已闭环(2026-05-14,commit `d472660` / `3999720`)
 3. ~~**C 段**(8 项落地 + 3 项核实不做)~~ — ✅ 已闭环(2026-05-14,commit `813ce6b` / `b9720f4`)
-4. **D / E 段** — 低优先,opportunistic 或专门 sprint,现为剩余项
+4. ~~**D 段**(2 项落地 + 4 项核实不做)~~ — ✅ 已闭环(2026-05-14,commit `77f26ec`)
+5. **E 段** — 数十条 🟡/🟢 tech-debt,**维持不单独排期**(opportunistic 顺带清理,或专门 sprint)
+
+A–D 段已全部处理完毕;backlog 仅余 E 段(性质上不排期)。
