@@ -431,6 +431,32 @@ class Settings(BaseSettings):
     EARLY_STOP_WARMUP_ROUNDS: int = 5
     EARLY_STOP_PASS_RATE_DROP_RATIO: float = 0.5
 
+    # V-27.108 — failure-pitfall scoring weights (failure side of V-26.36;
+    # the success side is already config'd as RAG_SCORE_*).
+    RAG_PITFALL_SEVERITY_HIGH: int = 30
+    RAG_PITFALL_SEVERITY_MEDIUM: int = 20
+    RAG_PITFALL_SEVERITY_LOW: int = 10
+    RAG_PITFALL_SEVERITY_DEFAULT: int = 15
+    RAG_PITFALL_CATEGORY_MATCH: float = 20.0
+    RAG_PITFALL_ERROR_TYPE_BONUS: float = 15.0
+
+    # V-27.116 — record_success_pattern quality-score formula weights.
+    RAG_SUCCESS_SCORE_SHARPE_WEIGHT: float = 0.6
+    RAG_SUCCESS_SCORE_FITNESS_WEIGHT: float = 0.3
+    RAG_SUCCESS_SCORE_TURNOVER_WEIGHT: float = 0.1
+    RAG_SUCCESS_SCORE_SHARPE_DENOM: float = 2.0
+    RAG_SUCCESS_SCORE_FITNESS_DENOM: float = 1.5
+    RAG_SUCCESS_SCORE_TURNOVER_THRESHOLD: float = 0.7
+
+    # V-27.148 — crisis-window date ranges (was a module constant in
+    # correlation_service.py). Add a new crisis event here — no code change.
+    CRISIS_WINDOWS: dict = {
+        "covid_2020": ["2020-02-20", "2020-04-30"],
+        "rate_shock_2022": ["2022-01-03", "2022-06-30"],
+        "svb_2023": ["2023-02-15", "2023-04-15"],
+        "tariff_2025": ["2025-04-01", "2025-05-31"],
+    }
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     

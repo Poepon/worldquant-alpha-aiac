@@ -31,6 +31,7 @@ import pandas as pd
 from loguru import logger
 
 from backend.adapters.brain_adapter import BrainAdapter
+from backend.config import settings
 
 # Cache lives under repo data dir; .gitignore should exclude it.
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "correlation_cache"
@@ -51,24 +52,15 @@ CACHE_TTL_HOURS = 24
 # ---------------------------------------------------------------------------
 # Crisis windows for stress-testing pairwise correlation.
 #
-# Selection criteria (see plan):
-#   1. Distinct regime character — each window stresses a different failure
-#      mode (liquidity, rates, sector contagion, geopolitics) so a strategy
-#      that survives one but not another is informative.
-#   2. >= ~30 trading days to keep per-window corr noise reasonable.
-#   3. Falls inside the BRAIN PnL history typically available for OS alphas
-#      (older crises are silently skipped per-alpha when data is missing).
+# V-27.148: the date ranges now live in config.py (settings.CRISIS_WINDOWS)
+# so a new crisis event can be added without a code change + redeploy.
+# Selection criteria (see plan): distinct regime character (each window
+# stresses a different failure mode — liquidity / rates / sector contagion /
+# geopolitics); >= ~30 trading days; inside the BRAIN PnL history typically
+# available for OS alphas. Values are [start, end] ISO date pairs; the
+# in-file references use rng[0]/rng[1] so list-vs-tuple is irrelevant.
 # ---------------------------------------------------------------------------
-CRISIS_WINDOWS: Dict[str, Tuple[str, str]] = {
-    # Liquidity crash — almost everything goes correlated → 1.
-    "covid_2020": ("2020-02-20", "2020-04-30"),
-    # Rate-shock / inflation regime change — kills growth/duration factors.
-    "rate_shock_2022": ("2022-01-03", "2022-06-30"),
-    # SVB regional-banking contagion — sector cross-correlation spike.
-    "svb_2023": ("2023-02-15", "2023-04-15"),
-    # Tariff shock — most recent geopolitical/policy uncertainty event.
-    "tariff_2025": ("2025-04-01", "2025-05-31"),
-}
+CRISIS_WINDOWS = settings.CRISIS_WINDOWS
 
 # Per-window overlap floor. Crisis windows are inherently shorter than the
 # 4-year lookback so the 60-day default would reject everything. 20 trading

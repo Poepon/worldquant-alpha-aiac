@@ -37,16 +37,3 @@ def route_after_validate(state: MiningState) -> Literal["simulate", "self_correc
     return "simulate"
 
 
-# =============================================================================
-# EDGE: Error Check
-# =============================================================================
-
-def route_check_error(state: MiningState) -> Literal["continue", "error"]:
-    """
-    Check if there's a critical error that should stop execution.
-    """
-    if state.should_stop or state.error:
-        logger.warning(f"[Edge] route_check_error -> error: {state.error}")
-        return "error"
-    
-    return "continue"

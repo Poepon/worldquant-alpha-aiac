@@ -706,25 +706,6 @@ async def node_hypothesis(
     }
 
 
-# Backward compatible helper - select exploration fields
-def _select_exploration_fields(
-    target_fields: List[Dict],
-    all_fields: List[Dict],
-    count: int = 3
-) -> List[Dict]:
-    """
-    Select fields for exploration that are not in the target set.
-    
-    This helps ensure diversity and prevents tunnel vision.
-    """
-    remaining_fields = [f for f in all_fields if f not in target_fields]
-    if len(remaining_fields) >= count:
-        return random.sample(remaining_fields, count)
-    elif len(all_fields) > count:
-        return random.sample(all_fields, min(count, len(all_fields)))
-    return all_fields
-
-
 # =============================================================================
 # NODE: Code Generation
 # =============================================================================

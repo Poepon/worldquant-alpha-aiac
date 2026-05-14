@@ -585,29 +585,33 @@ class RAGService:
         # V-24.C: pre-score op-whitelist filter
         entries = await self._filter_hallucinated(entries)
 
-        # Score pitfalls
+        # Score pitfalls (V-27.108: weights config'd — failure side of V-26.36)
         scored_pitfalls = []
-        severity_weights = {'high': 30, 'medium': 20, 'low': 10}
-        
+        severity_weights = {
+            'high': _settings.RAG_PITFALL_SEVERITY_HIGH,
+            'medium': _settings.RAG_PITFALL_SEVERITY_MEDIUM,
+            'low': _settings.RAG_PITFALL_SEVERITY_LOW,
+        }
+
         for entry in entries:
             metadata = entry.meta_data or {}
             score = 0.0
-            
+
             # Severity weight
             severity = metadata.get('severity', 'medium')
-            score += severity_weights.get(severity, 15)
-            
+            score += severity_weights.get(severity, _settings.RAG_PITFALL_SEVERITY_DEFAULT)
+
             # Category relevance
             pitfall_category = metadata.get('dataset_category', '')
             if category and pitfall_category:
                 if category == pitfall_category:
-                    score += 20.0
-            
+                    score += _settings.RAG_PITFALL_CATEGORY_MATCH
+
             # Error type relevance
             error_type = metadata.get('error_type', '')
             # Prioritize type errors and syntax errors
             if error_type in ['TYPE_ERROR', 'SYNTAX_ERROR', 'SEMANTIC_ERROR']:
-                score += 15.0
+                score += _settings.RAG_PITFALL_ERROR_TYPE_BONUS
 
             # V-26.12 (2026-05-13) — hypothesis-family soft preference,
             # symmetric with _get_success_patterns_enhanced. Same-family
@@ -649,38 +653,6 @@ class RAGService:
         await self._track_retrieval_hit(selected_ids)
 
         return pitfalls
-    
-    # Legacy method for backward compatibility
-    async def _get_success_patterns(
-        self,
-        dataset_id: str = None,
-        region: str = None,
-        limit: int = 5
-    ) -> List[Dict]:
-        """Legacy method - redirects to enhanced version."""
-        category = infer_dataset_category(dataset_id) if dataset_id else "other"
-        return await self._get_success_patterns_enhanced(
-            dataset_id=dataset_id,
-            category=category,
-            region=region,
-            limit=limit
-        )
-    
-    # Legacy method for backward compatibility
-    async def _get_failure_pitfalls(
-        self,
-        dataset_id: str = None,
-        region: str = None,
-        limit: int = 10
-    ) -> List[Dict]:
-        """Legacy method - redirects to enhanced version."""
-        category = infer_dataset_category(dataset_id) if dataset_id else "other"
-        return await self._get_failure_pitfalls_enhanced(
-            dataset_id=dataset_id,
-            category=category,
-            region=region,
-            limit=limit
-        )
     
     async def get_field_blacklist(self, region: str = None) -> List[str]:
         """Get list of blacklisted fields."""
@@ -1049,22 +1021,6 @@ class RAGService:
         )
         return True
 
-    async def increment_pattern_usage(self, pattern: str) -> bool:
-        """Increment usage count for a pattern (called on successful use)."""
-        query = select(KnowledgeEntry).where(
-            KnowledgeEntry.pattern == pattern,
-            KnowledgeEntry.is_active == True
-        )
-        result = await self.db.execute(query)
-        entry = result.scalar_one_or_none()
-        
-        if entry:
-            entry.usage_count += 1
-            logger.debug(f"[RAGService] Incremented usage | pattern={pattern}")
-            return True
-        
-        return False
-    
     # =========================================================================
     # P0-fix-1: Knowledge Feedback Loop - Write patterns back to KB
     # =========================================================================
@@ -1260,8 +1216,15 @@ class RAGService:
 
                     description = f"Sharpe: {sharpe:.2f}, Fitness: {fitness:.2f}, Turnover: {turnover:.2f}"
 
-                    # Calculate a quality score
-                    score = min(1.0, (sharpe / 2.0) * 0.6 + (fitness / 1.5) * 0.3 + max(0, (0.7 - turnover)) * 0.1)
+                    # Calculate a quality score (V-27.116: weights config'd)
+                    score = min(1.0, (
+                        (sharpe / _settings.RAG_SUCCESS_SCORE_SHARPE_DENOM)
+                        * _settings.RAG_SUCCESS_SCORE_SHARPE_WEIGHT
+                        + (fitness / _settings.RAG_SUCCESS_SCORE_FITNESS_DENOM)
+                        * _settings.RAG_SUCCESS_SCORE_FITNESS_WEIGHT
+                        + max(0, (_settings.RAG_SUCCESS_SCORE_TURNOVER_THRESHOLD - turnover))
+                        * _settings.RAG_SUCCESS_SCORE_TURNOVER_WEIGHT
+                    ))
 
                     new_entry = KnowledgeEntry(
                         pattern=skeleton,

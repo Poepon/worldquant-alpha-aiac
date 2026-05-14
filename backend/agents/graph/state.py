@@ -3,10 +3,9 @@ LangGraph State Definitions
 Strongly typed state using Pydantic for the mining workflow
 """
 
-from typing import List, Dict, Optional, Any, Annotated
+from typing import List, Dict, Optional, Any
 from pydantic import BaseModel, Field
 from datetime import datetime
-from operator import add
 
 
 # =============================================================================
@@ -282,14 +281,6 @@ class MiningState(BaseModel):
 # =============================================================================
 # STATE UPDATE HELPERS
 # =============================================================================
-
-def merge_state(state: MiningState, updates: Dict) -> Dict:
-    """
-    Create a partial state update dict.
-    Used in node functions to return updates.
-    """
-    return updates
-
 
 def add_trace_step(
     state: MiningState,
