@@ -1395,8 +1395,15 @@ class BrainAdapter:
             return self._get_common_operators()
 
     async def get_alpha_pnl(self, alpha_id: str) -> Dict:
+        # V-27.128: go through _safe_api_call (like get_alpha) so cross-process
+        # rate-limit cooldowns + retries apply. The old _request path had no
+        # rate-limit handling and `except: return {}` silently swallowed 429s
+        # as empty payloads — indistinguishable from an alpha with genuinely
+        # no PnL, so a rate-limited fetch looked like real emptiness upstream.
         try:
-            response = await self._request("GET", f"{self.BASE_URL}/alphas/{alpha_id}/recordsets/pnl")
+            response = await self._safe_api_call(
+                "GET", f"/alphas/{alpha_id}/recordsets/pnl"
+            )
             return response.json() if response.status_code == 200 else {}
         except Exception:
             return {}
@@ -1488,7 +1495,10 @@ class BrainAdapter:
         except Exception:
             body = body_text
         return {
-            "success": resp.status_code == 200,
+            # V-27.102: accept any 2xx, not just 200 — BRAIN returns 200
+            # today, but a future 201/202 async-accept must not be misread
+            # as a rejection.
+            "success": 200 <= resp.status_code < 300,
             "status_code": resp.status_code,
             "body": body,
             "polls": polls,

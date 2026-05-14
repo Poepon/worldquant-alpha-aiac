@@ -14,14 +14,17 @@ def test_corr_source_str_compat():
     # StrEnum — old `== "local"` comparisons in callers stay valid.
     assert CorrSource.LOCAL == "local"
     assert CorrSource.BRAIN == "brain"
+    assert CorrSource.BRAIN_PENDING == "brain_pending"
     assert CorrSource.UNKNOWN == "unknown"
     assert CorrSource.LOCAL in ("local", "brain")
     assert CorrSource.UNKNOWN != CorrSource.LOCAL
     # str() / f-string render the value (matters for log lines + JSONB).
     assert str(CorrSource.LOCAL) == "local"
     assert f"{CorrSource.UNKNOWN}" == "unknown"
-    # the three members are exhaustive
-    assert {s.value for s in CorrSource} == {"local", "brain", "unknown"}
+    # V-27.126 added BRAIN_PENDING — members are exhaustive
+    assert {s.value for s in CorrSource} == {
+        "local", "brain", "brain_pending", "unknown"
+    }
 
 
 @pytest.mark.asyncio

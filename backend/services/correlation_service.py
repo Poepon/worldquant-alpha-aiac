@@ -51,6 +51,10 @@ class CorrSource(StrEnum):
     """
     LOCAL = "local"      # measured from the local OS PnL matrix (preferred)
     BRAIN = "brain"      # from BRAIN /correlations/SELF API
+    # V-27.126: BRAIN accepted the request but corr is still computing
+    # (max=None). Distinct from UNKNOWN ("could not measure") — a caller that
+    # can wait may retry. corr value is still None.
+    BRAIN_PENDING = "brain_pending"
     UNKNOWN = "unknown"  # not measured — cache miss / no PnL / both tiers failed
 
 # Cache lives under repo data dir; .gitignore should exclude it.
@@ -230,8 +234,18 @@ class CorrelationService:
                 break
             for a in results:
                 # filter to region (BRAIN /alphas listing returns mixed regions)
-                if a.get("settings", {}).get("region") == region:
-                    out.append(a["id"])
+                if a.get("settings", {}).get("region") != region:
+                    continue
+                # V-27.157: a BRAIN listing item occasionally lacks `id` —
+                # skip it rather than KeyError-crash the whole OS sync.
+                aid = a.get("id")
+                if aid is None:
+                    logger.warning(
+                        f"[CorrelationService] OS alpha listing item missing "
+                        f"`id`, skipping: {str(a)[:160]}"
+                    )
+                    continue
+                out.append(aid)
             if len(results) < limit:
                 break
             offset += limit
@@ -267,8 +281,16 @@ class CorrelationService:
                 )
             if attempt < max_attempts - 1:
                 await asyncio.sleep(1.5 * (attempt + 1))
+        # V-27.129: unify both failure paths — "3× exception" and "3× empty"
+        # now both return an empty Series. PnL being unreachable is an
+        # expected boundary (BRAIN rate-limit soft-fail / genuinely no PnL);
+        # callers already handle empty Series, and raising here forced them
+        # onto a second code path. Downgrade the last exception to a warning.
         if last_exc is not None:
-            raise last_exc
+            logger.warning(
+                f"[CorrelationService] PnL fetch for {alpha_id} failed all "
+                f"{max_attempts} attempts: {last_exc} — returning empty series"
+            )
         return pd.Series(dtype="float64", name=alpha_id)
 
     async def refresh_os_alpha_cache(
@@ -402,9 +424,12 @@ class CorrelationService:
     ) -> Tuple[Optional[float], CorrSource]:
         """Three-tier resolver. Returns (corr, source) where source ∈ CorrSource.
 
-          - CorrSource.LOCAL   — corr is a real float from the local PnL cache
-          - CorrSource.BRAIN   — corr is a real float from BRAIN /correlations/SELF
-          - CorrSource.UNKNOWN — corr is **None**; both tiers failed. Caller
+          - CorrSource.LOCAL         — corr is a real float from the local PnL cache
+          - CorrSource.BRAIN         — corr is a real float from BRAIN /correlations/SELF
+          - CorrSource.BRAIN_PENDING — corr is **None**; BRAIN accepted the
+            request but the correlation is still computing (V-27.126). Distinct
+            from UNKNOWN — a caller that can wait may retry.
+          - CorrSource.UNKNOWN       — corr is **None**; both tiers failed. Caller
             MUST NOT treat this as PASS or as "uncorrelated" — it means "not
             measured". The old contract returned 0.0, which silently looked
             like a safe alpha to any `corr < threshold` check.
@@ -418,8 +443,14 @@ class CorrelationService:
 
         try:
             res = await self.brain.check_correlation(alpha_id, check_type="SELF")
-            if isinstance(res, dict) and res.get("max") is not None:
-                return float(res["max"]), CorrSource.BRAIN
+            if isinstance(res, dict):
+                if res.get("max") is not None:
+                    return float(res["max"]), CorrSource.BRAIN
+                # V-27.126: well-formed dict but max=None — BRAIN accepted the
+                # request and the correlation job is still computing. Report
+                # BRAIN_PENDING (not UNKNOWN) so a caller that can wait may
+                # retry. submit_alpha's gate-4 is None-safe for both.
+                return None, CorrSource.BRAIN_PENDING
         except Exception as e:
             logger.warning(f"[CorrelationService] BRAIN /correlations/SELF failed for {alpha_id}: {e}")
 
