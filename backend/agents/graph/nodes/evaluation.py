@@ -798,7 +798,15 @@ async def node_evaluate(
 
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
 
-    updated_alphas = state.pending_alphas.copy()
+    # V-27.63 / V-27.62: state.pending_alphas.copy() is a SHALLOW list copy —
+    # each element is still the SAME object as state.pending_alphas[i], so the
+    # quality_status writes (FAIL/PASS/PASS_PROVISIONAL/OPTIMIZE) AND the
+    # metrics-dict writes (_v16_suspicion_flags / _brain_actionable_fails on
+    # the near_pass path) below punch straight through into the LangGraph
+    # input state, corrupting it for replay / interrupt-resume. node_simulate
+    # already guards this with model_copy(); node_evaluate mutates both
+    # top-level fields and the nested metrics dict, so it needs a DEEP copy.
+    updated_alphas = [a.model_copy(deep=True) for a in state.pending_alphas]
     pass_count = 0
     fail_count = 0
     optimize_count = 0

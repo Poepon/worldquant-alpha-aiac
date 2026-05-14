@@ -994,9 +994,16 @@ class RAGService:
         SUCCESS at IS-PASS time, now we tag it with the BRAIN-side verdict
         so future few-shot retrieval can surface "this looked great but
         BRAIN rejected on fitness/CW" — the LLM steers away.
+
+        V-27.93 (2026-05-14): the mutate + commit runs on an isolated
+        AsyncSession, not the caller's `self.db`. Before this, the in-method
+        `self.db.commit()` dragged the caller's in-flight transaction across
+        the commit line — an alpha INSERT that later rolled back could leave
+        a KB row referencing a now-nonexistent alpha_id.
         """
         from backend.knowledge_extraction import expression_to_skeleton
         from sqlalchemy.orm.attributes import flag_modified
+        from backend.database import AsyncSessionLocal
 
         if not expression:
             return False
@@ -1005,31 +1012,33 @@ class RAGService:
         except Exception:
             return False
 
-        stmt = select(KnowledgeEntry).where(
-            KnowledgeEntry.pattern == skeleton,
-            KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
-            KnowledgeEntry.is_active == True,
-        )
-        result = await self.db.execute(stmt)
-        entry = result.scalar_one_or_none()
-        if entry is None:
-            return False
+        async with AsyncSessionLocal() as kb_db:
+            stmt = select(KnowledgeEntry).where(
+                KnowledgeEntry.pattern == skeleton,
+                KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
+                KnowledgeEntry.is_active == True,
+            )
+            result = await kb_db.execute(stmt)
+            entry = result.scalar_one_or_none()
+            if entry is None:
+                return False
 
-        md = entry.meta_data or {}
-        md["brain_can_submit"] = can_submit
-        # Keep only check name to avoid bloating meta_data
-        md["brain_failed_checks"] = [
-            {"name": c.get("name"), "result": c.get("result")}
-            for c in (failed_checks or [])
-            if c.get("name")
-        ]
-        md["brain_check_at"] = datetime.now().isoformat()
-        entry.meta_data = md
-        flag_modified(entry, "meta_data")
-        await self.db.commit()
+            md = entry.meta_data or {}
+            md["brain_can_submit"] = can_submit
+            # Keep only check name to avoid bloating meta_data
+            md["brain_failed_checks"] = [
+                {"name": c.get("name"), "result": c.get("result")}
+                for c in (failed_checks or [])
+                if c.get("name")
+            ]
+            md["brain_check_at"] = datetime.now().isoformat()
+            entry.meta_data = md
+            flag_modified(entry, "meta_data")
+            await kb_db.commit()
+            fail_n = len(md["brain_failed_checks"])
         logger.info(
             f"[RAGService] V-22 brain_status updated | skeleton={skeleton[:50]} "
-            f"can_submit={can_submit} fails={len(md['brain_failed_checks'])}"
+            f"can_submit={can_submit} fails={fail_n}"
         )
         return True
 
@@ -1070,93 +1079,99 @@ class RAGService:
         Called after evaluation identifies a failed alpha.
         """
         from backend.knowledge_extraction import expression_to_skeleton, extract_operator_chain
-        
+        from backend.database import AsyncSessionLocal
+
         try:
             # Extract pattern skeleton (structural, not specific)
             skeleton = expression_to_skeleton(expression)
             op_chain = extract_operator_chain(expression)
-            
+
             # Infer category from dataset_id
             category = infer_dataset_category(dataset_id) if dataset_id else "other"
-            
-            # Check if similar pattern already exists
-            existing = await self._find_similar_pitfall(skeleton, region)
-            
-            if existing:
-                # Update existing pattern's failure count
-                existing.meta_data = existing.meta_data or {}
-                existing.meta_data['failure_count'] = existing.meta_data.get('failure_count', 0) + 1
-                existing.meta_data['last_failure'] = datetime.now().isoformat()
-                if metrics:
-                    existing.meta_data['avg_sharpe'] = metrics.get('sharpe', 0)
-                # Plan v5+ §B8: track every hypothesis that hit this pattern.
-                # Use a deduped list so RAG retrieval can do "patterns this
-                # hypothesis family has tripped" queries.
-                if hypothesis_id is not None:
-                    hids = list(existing.meta_data.get('hypothesis_ids') or [])
-                    if hypothesis_id not in hids:
-                        hids.append(hypothesis_id)
-                    existing.meta_data['hypothesis_ids'] = hids
-                # F-5: variant tag preserved as-is on first record (don't
-                # overwrite — different variants get different KB entries
-                # via _find_similar_pitfall already returning per-skeleton).
-                from sqlalchemy.orm.attributes import flag_modified
-                flag_modified(existing, 'meta_data')
-                logger.debug(f"[RAGService] Updated existing pitfall | skeleton={skeleton[:50]}")
-            else:
-                # Create new pitfall entry
-                description = self._generate_pitfall_description(error_type, metrics, op_chain)
-                
-                # Determine severity based on error type
-                severity = 'medium'
-                if error_type in ['TYPE_ERROR', 'SYNTAX_ERROR', 'SEMANTIC_ERROR']:
-                    severity = 'high'
-                elif error_type in ['LOW_SHARPE', 'HIGH_TURNOVER']:
+
+            # V-27.93: isolated session — the KB write must not ride on the
+            # caller's (evaluation/persistence node) in-flight transaction.
+            # An alpha INSERT that later rolls back must not leave a
+            # FAILURE_PITFALL row referencing a non-existent alpha.
+            async with AsyncSessionLocal() as kb_db:
+                # Check if similar pattern already exists
+                existing = await self._find_similar_pitfall(skeleton, region, db=kb_db)
+
+                if existing:
+                    # Update existing pattern's failure count
+                    existing.meta_data = existing.meta_data or {}
+                    existing.meta_data['failure_count'] = existing.meta_data.get('failure_count', 0) + 1
+                    existing.meta_data['last_failure'] = datetime.now().isoformat()
+                    if metrics:
+                        existing.meta_data['avg_sharpe'] = metrics.get('sharpe', 0)
+                    # Plan v5+ §B8: track every hypothesis that hit this pattern.
+                    # Use a deduped list so RAG retrieval can do "patterns this
+                    # hypothesis family has tripped" queries.
+                    if hypothesis_id is not None:
+                        hids = list(existing.meta_data.get('hypothesis_ids') or [])
+                        if hypothesis_id not in hids:
+                            hids.append(hypothesis_id)
+                        existing.meta_data['hypothesis_ids'] = hids
+                    # F-5: variant tag preserved as-is on first record (don't
+                    # overwrite — different variants get different KB entries
+                    # via _find_similar_pitfall already returning per-skeleton).
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(existing, 'meta_data')
+                    logger.debug(f"[RAGService] Updated existing pitfall | skeleton={skeleton[:50]}")
+                else:
+                    # Create new pitfall entry
+                    description = self._generate_pitfall_description(error_type, metrics, op_chain)
+
+                    # Determine severity based on error type
                     severity = 'medium'
-                elif error_type == 'NEGATIVE_SIGNAL':
-                    severity = 'low'  # Can be fixed by sign flip
-                # P0: BRAIN-side checks 是 submit 前的硬门槛，触发即等价于"不可提交"
-                elif error_type in ['CONCENTRATED_WEIGHT', 'LOW_SUB_UNIVERSE_SHARPE',
-                                    'HIGH_PROD_CORRELATION', 'HIGH_SELF_CORRELATION']:
-                    severity = 'high'
-                
-                new_entry = KnowledgeEntry(
-                    pattern=skeleton,
-                    description=description,
-                    entry_type='FAILURE_PITFALL',
-                    is_active=True,
-                    usage_count=0,
-                    meta_data={
-                        'source': 'feedback_loop',
-                        'region': region,
-                        'dataset': dataset_id,
-                        'dataset_category': category,
-                        'error_type': error_type,
-                        'severity': severity,
-                        'operator_chain': op_chain[:5] if op_chain else [],
-                        'example_expression': expression[:200],
-                        'failure_count': 1,
-                        'sharpe': metrics.get('sharpe', 0) if metrics else 0,
-                        'fitness': metrics.get('fitness', 0) if metrics else 0,
-                        'turnover': metrics.get('turnover', 0) if metrics else 0,
-                        'created_at': datetime.now().isoformat(),
-                        # Plan v5+ §B8: typed Hypothesis reference for KB
-                        # learning unit upgrade (alpha,hypothesis,...) instead
-                        # of (alpha,dataset,...).
-                        'hypothesis_id': hypothesis_id,
-                        'hypothesis_ids': [hypothesis_id] if hypothesis_id is not None else [],
-                        'experiment_variant': experiment_variant,
-                    }
-                )
-                self.db.add(new_entry)
-                logger.info(f"[RAGService] Created new pitfall | skeleton={skeleton[:50]} error={error_type} category={category}")
-            
-            await self.db.commit()
+                    if error_type in ['TYPE_ERROR', 'SYNTAX_ERROR', 'SEMANTIC_ERROR']:
+                        severity = 'high'
+                    elif error_type in ['LOW_SHARPE', 'HIGH_TURNOVER']:
+                        severity = 'medium'
+                    elif error_type == 'NEGATIVE_SIGNAL':
+                        severity = 'low'  # Can be fixed by sign flip
+                    # P0: BRAIN-side checks 是 submit 前的硬门槛，触发即等价于"不可提交"
+                    elif error_type in ['CONCENTRATED_WEIGHT', 'LOW_SUB_UNIVERSE_SHARPE',
+                                        'HIGH_PROD_CORRELATION', 'HIGH_SELF_CORRELATION']:
+                        severity = 'high'
+
+                    new_entry = KnowledgeEntry(
+                        pattern=skeleton,
+                        description=description,
+                        entry_type='FAILURE_PITFALL',
+                        is_active=True,
+                        usage_count=0,
+                        meta_data={
+                            'source': 'feedback_loop',
+                            'region': region,
+                            'dataset': dataset_id,
+                            'dataset_category': category,
+                            'error_type': error_type,
+                            'severity': severity,
+                            'operator_chain': op_chain[:5] if op_chain else [],
+                            'example_expression': expression[:200],
+                            'failure_count': 1,
+                            'sharpe': metrics.get('sharpe', 0) if metrics else 0,
+                            'fitness': metrics.get('fitness', 0) if metrics else 0,
+                            'turnover': metrics.get('turnover', 0) if metrics else 0,
+                            'created_at': datetime.now().isoformat(),
+                            # Plan v5+ §B8: typed Hypothesis reference for KB
+                            # learning unit upgrade (alpha,hypothesis,...) instead
+                            # of (alpha,dataset,...).
+                            'hypothesis_id': hypothesis_id,
+                            'hypothesis_ids': [hypothesis_id] if hypothesis_id is not None else [],
+                            'experiment_variant': experiment_variant,
+                        }
+                    )
+                    kb_db.add(new_entry)
+                    logger.info(f"[RAGService] Created new pitfall | skeleton={skeleton[:50]} error={error_type} category={category}")
+
+                await kb_db.commit()
             return True
-            
+
         except Exception as e:
+            # async-with rolled the isolated session back already.
             logger.error(f"[RAGService] Failed to record pitfall | error={e}")
-            await self.db.rollback()
             return False
     
     async def record_success_pattern(
@@ -1175,120 +1190,130 @@ class RAGService:
         Called when an alpha passes all quality thresholds.
         """
         from backend.knowledge_extraction import expression_to_skeleton, extract_operator_chain
-        
+        from backend.database import AsyncSessionLocal
+
         try:
             skeleton = expression_to_skeleton(expression)
             op_chain = extract_operator_chain(expression)
-            
+
             # Infer category from dataset_id
             category = infer_dataset_category(dataset_id) if dataset_id else "other"
-            
-            # Check if similar pattern exists
-            existing = await self._find_similar_success(skeleton, region)
-            
-            if existing:
-                # Update existing pattern
-                existing.usage_count += 1
-                existing.meta_data = existing.meta_data or {}
-                existing.meta_data['success_count'] = existing.meta_data.get('success_count', 0) + 1
-                existing.meta_data['last_success'] = datetime.now().isoformat()
-                # V-26.9 (2026-05-13): running-average ALL the metric fields,
-                # not just sharpe. Pre-fix this branch only rolled avg_sharpe;
-                # avg_fitness / avg_turnover / expected_sharpe stayed pinned
-                # at whatever the FIRST hit recorded, so the RAG scorer (which
-                # weighs expected_sharpe at line ~490) ranked stale data.
-                n = existing.meta_data.get('success_count', 1)
-                if n < 1:
-                    n = 1
-                for key, raw in (
-                    ("avg_sharpe", metrics.get("sharpe", 0) or 0),
-                    ("avg_fitness", metrics.get("fitness", 0) or 0),
-                    ("avg_turnover", metrics.get("turnover", 0) or 0),
-                    # expected_sharpe is the "pattern's typical sharpe" surfaced
-                    # to the LLM — also a running average of observed sharpes
-                    # so it stays representative.
-                    ("expected_sharpe", metrics.get("sharpe", 0) or 0),
-                ):
-                    try:
-                        old = float(existing.meta_data.get(key, 0) or 0)
-                        existing.meta_data[key] = (old * (n - 1) + float(raw)) / n
-                    except (TypeError, ValueError):
-                        # If old value is non-numeric (legacy bad row), reset
-                        # to the latest observation.
-                        existing.meta_data[key] = float(raw)
-                # Plan v5+ §B8: append every hypothesis that produced this pattern
-                if hypothesis_id is not None:
-                    hids = list(existing.meta_data.get('hypothesis_ids') or [])
-                    if hypothesis_id not in hids:
-                        hids.append(hypothesis_id)
-                    existing.meta_data['hypothesis_ids'] = hids
-                from sqlalchemy.orm.attributes import flag_modified
-                flag_modified(existing, 'meta_data')
-                logger.info(f"[RAGService] Updated success pattern | skeleton={skeleton[:50]}")
-            else:
-                # Create new success pattern with full category info
-                sharpe = metrics.get('sharpe', 0)
-                fitness = metrics.get('fitness', 0)
-                turnover = metrics.get('turnover', 0)
-                
-                description = f"Sharpe: {sharpe:.2f}, Fitness: {fitness:.2f}, Turnover: {turnover:.2f}"
-                
-                # Calculate a quality score
-                score = min(1.0, (sharpe / 2.0) * 0.6 + (fitness / 1.5) * 0.3 + max(0, (0.7 - turnover)) * 0.1)
-                
-                new_entry = KnowledgeEntry(
-                    pattern=skeleton,
-                    description=description,
-                    entry_type='SUCCESS_PATTERN',
-                    is_active=True,
-                    usage_count=1,
-                    meta_data={
-                        'source': 'feedback_loop',
-                        'region': region,
-                        'regions': [region] if region else [],
-                        'dataset': dataset_id,
-                        'dataset_category': category,
-                        'dataset_categories': [category],
-                        'operator_chain': op_chain[:5] if op_chain else [],
-                        'example_expression': expression[:200],
-                        'alpha_id': alpha_id,
-                        'success_count': 1,
-                        'avg_sharpe': sharpe,
-                        'avg_fitness': fitness,
-                        'avg_turnover': turnover,
-                        'expected_sharpe': sharpe,
-                        'score': score,
-                        'created_at': datetime.now().isoformat(),
-                        # Plan v5+ §B8: typed Hypothesis reference + variant
-                        # tag for KB learning unit upgrade.
-                        'hypothesis_id': hypothesis_id,
-                        'hypothesis_ids': [hypothesis_id] if hypothesis_id is not None else [],
-                        'experiment_variant': experiment_variant,
-                        # V-22 (2026-05-10) BRAIN feedback to LLM. The pattern
-                        # is recorded at IS-PASS time; refresh_can_submit_for_
-                        # alpha (30s countdown) later updates these fields with
-                        # the BRAIN /check verdict. Retrieval surfaces them in
-                        # the prompt so the LLM can see "this skeleton looked
-                        # great on IS but BRAIN rejected it on fitness/CW/etc."
-                        # and steer away.
-                        'brain_can_submit': None,        # True / False / None (pending)
-                        'brain_failed_checks': [],       # list of {name, ...} from BRAIN
-                        'brain_check_at': None,          # ISO timestamp of last refresh
-                    }
-                )
-                self.db.add(new_entry)
-                logger.info(f"[RAGService] Created new success pattern | skeleton={skeleton[:50]} sharpe={sharpe:.2f} category={category}")
-            
-            await self.db.commit()
+
+            # V-27.93: isolated session — see record_failure_pattern. The KB
+            # write must not be dragged into the caller's transaction; an
+            # alpha rollback must not orphan a SUCCESS_PATTERN row.
+            async with AsyncSessionLocal() as kb_db:
+                # Check if similar pattern exists
+                existing = await self._find_similar_success(skeleton, region, db=kb_db)
+
+                if existing:
+                    # Update existing pattern
+                    existing.usage_count += 1
+                    existing.meta_data = existing.meta_data or {}
+                    existing.meta_data['success_count'] = existing.meta_data.get('success_count', 0) + 1
+                    existing.meta_data['last_success'] = datetime.now().isoformat()
+                    # V-26.9 (2026-05-13): running-average ALL the metric fields,
+                    # not just sharpe. Pre-fix this branch only rolled avg_sharpe;
+                    # avg_fitness / avg_turnover / expected_sharpe stayed pinned
+                    # at whatever the FIRST hit recorded, so the RAG scorer (which
+                    # weighs expected_sharpe at line ~490) ranked stale data.
+                    n = existing.meta_data.get('success_count', 1)
+                    if n < 1:
+                        n = 1
+                    for key, raw in (
+                        ("avg_sharpe", metrics.get("sharpe", 0) or 0),
+                        ("avg_fitness", metrics.get("fitness", 0) or 0),
+                        ("avg_turnover", metrics.get("turnover", 0) or 0),
+                        # expected_sharpe is the "pattern's typical sharpe" surfaced
+                        # to the LLM — also a running average of observed sharpes
+                        # so it stays representative.
+                        ("expected_sharpe", metrics.get("sharpe", 0) or 0),
+                    ):
+                        try:
+                            old = float(existing.meta_data.get(key, 0) or 0)
+                            existing.meta_data[key] = (old * (n - 1) + float(raw)) / n
+                        except (TypeError, ValueError):
+                            # If old value is non-numeric (legacy bad row), reset
+                            # to the latest observation.
+                            existing.meta_data[key] = float(raw)
+                    # Plan v5+ §B8: append every hypothesis that produced this pattern
+                    if hypothesis_id is not None:
+                        hids = list(existing.meta_data.get('hypothesis_ids') or [])
+                        if hypothesis_id not in hids:
+                            hids.append(hypothesis_id)
+                        existing.meta_data['hypothesis_ids'] = hids
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(existing, 'meta_data')
+                    logger.info(f"[RAGService] Updated success pattern | skeleton={skeleton[:50]}")
+                else:
+                    # Create new success pattern with full category info
+                    sharpe = metrics.get('sharpe', 0)
+                    fitness = metrics.get('fitness', 0)
+                    turnover = metrics.get('turnover', 0)
+
+                    description = f"Sharpe: {sharpe:.2f}, Fitness: {fitness:.2f}, Turnover: {turnover:.2f}"
+
+                    # Calculate a quality score
+                    score = min(1.0, (sharpe / 2.0) * 0.6 + (fitness / 1.5) * 0.3 + max(0, (0.7 - turnover)) * 0.1)
+
+                    new_entry = KnowledgeEntry(
+                        pattern=skeleton,
+                        description=description,
+                        entry_type='SUCCESS_PATTERN',
+                        is_active=True,
+                        usage_count=1,
+                        meta_data={
+                            'source': 'feedback_loop',
+                            'region': region,
+                            'regions': [region] if region else [],
+                            'dataset': dataset_id,
+                            'dataset_category': category,
+                            'dataset_categories': [category],
+                            'operator_chain': op_chain[:5] if op_chain else [],
+                            'example_expression': expression[:200],
+                            'alpha_id': alpha_id,
+                            'success_count': 1,
+                            'avg_sharpe': sharpe,
+                            'avg_fitness': fitness,
+                            'avg_turnover': turnover,
+                            'expected_sharpe': sharpe,
+                            'score': score,
+                            'created_at': datetime.now().isoformat(),
+                            # Plan v5+ §B8: typed Hypothesis reference + variant
+                            # tag for KB learning unit upgrade.
+                            'hypothesis_id': hypothesis_id,
+                            'hypothesis_ids': [hypothesis_id] if hypothesis_id is not None else [],
+                            'experiment_variant': experiment_variant,
+                            # V-22 (2026-05-10) BRAIN feedback to LLM. The pattern
+                            # is recorded at IS-PASS time; refresh_can_submit_for_
+                            # alpha (30s countdown) later updates these fields with
+                            # the BRAIN /check verdict. Retrieval surfaces them in
+                            # the prompt so the LLM can see "this skeleton looked
+                            # great on IS but BRAIN rejected it on fitness/CW/etc."
+                            # and steer away.
+                            'brain_can_submit': None,        # True / False / None (pending)
+                            'brain_failed_checks': [],       # list of {name, ...} from BRAIN
+                            'brain_check_at': None,          # ISO timestamp of last refresh
+                        }
+                    )
+                    kb_db.add(new_entry)
+                    logger.info(f"[RAGService] Created new success pattern | skeleton={skeleton[:50]} sharpe={sharpe:.2f} category={category}")
+
+                await kb_db.commit()
             return True
-            
+
         except Exception as e:
+            # async-with rolled the isolated session back already.
             logger.error(f"[RAGService] Failed to record success | error={e}")
-            await self.db.rollback()
             return False
     
-    async def _find_similar_pitfall(self, skeleton: str, region: str = None) -> Optional[KnowledgeEntry]:
-        """Find existing pitfall with similar skeleton"""
+    async def _find_similar_pitfall(self, skeleton: str, region: str = None, db=None) -> Optional[KnowledgeEntry]:
+        """Find existing pitfall with similar skeleton.
+
+        `db` lets the V-27.93 isolated-session record_* paths run the lookup
+        on the same session they will mutate + commit on (default: self.db).
+        """
+        db = db or self.db
         query = select(KnowledgeEntry).where(
             KnowledgeEntry.entry_type == 'FAILURE_PITFALL',
             KnowledgeEntry.pattern == skeleton,
@@ -1297,18 +1322,23 @@ class RAGService:
         if region:
             # Also match patterns without region (global)
             pass  # We'll match exact skeleton first
-        
-        result = await self.db.execute(query)
+
+        result = await db.execute(query)
         return result.scalar_one_or_none()
-    
-    async def _find_similar_success(self, skeleton: str, region: str = None) -> Optional[KnowledgeEntry]:
-        """Find existing success pattern with similar skeleton"""
+
+    async def _find_similar_success(self, skeleton: str, region: str = None, db=None) -> Optional[KnowledgeEntry]:
+        """Find existing success pattern with similar skeleton.
+
+        `db` lets the V-27.93 isolated-session record_* paths run the lookup
+        on the same session they will mutate + commit on (default: self.db).
+        """
+        db = db or self.db
         query = select(KnowledgeEntry).where(
             KnowledgeEntry.entry_type == 'SUCCESS_PATTERN',
             KnowledgeEntry.pattern == skeleton,
             KnowledgeEntry.is_active == True
         )
-        result = await self.db.execute(query)
+        result = await db.execute(query)
         return result.scalar_one_or_none()
     
     def _generate_pitfall_description(self, error_type: str, metrics: Dict, op_chain: List) -> str:
