@@ -24,6 +24,7 @@ import asyncio
 import json
 import pickle
 from datetime import datetime, timedelta
+from enum import StrEnum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -32,6 +33,25 @@ from loguru import logger
 
 from backend.adapters.brain_adapter import BrainAdapter
 from backend.config import settings
+
+
+class CorrSource(StrEnum):
+    """V-27.158: unified vocabulary for "where a self-correlation value came
+    from", replacing the old per-method ad-hoc strings (calc_self_corr used
+    {local, empty}; get_with_fallback used {local, brain, unknown}).
+
+    StrEnum (Python 3.11+) so existing `source == "local"` comparisons in
+    callers stay valid, str()/f-string render the value ("local"), and JSONB
+    serialisation stays a plain string.
+
+    NOTE: calc_self_corr_by_window keeps its own finer-grained per-window
+    status set {ok, insufficient_data, empty_pool, missing_window} — that is
+    a different axis (per-crisis-window measurability), intentionally NOT
+    folded into CorrSource.
+    """
+    LOCAL = "local"      # measured from the local OS PnL matrix (preferred)
+    BRAIN = "brain"      # from BRAIN /correlations/SELF API
+    UNKNOWN = "unknown"  # not measured — cache miss / no PnL / both tiers failed
 
 # Cache lives under repo data dir; .gitignore should exclude it.
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "correlation_cache"
@@ -321,25 +341,26 @@ class CorrelationService:
         alpha_id: str,
         region: str,
         alpha_pnl_series: Optional[pd.Series] = None,
-    ) -> Tuple[Optional[float], str]:
+    ) -> Tuple[Optional[float], CorrSource]:
         """Compute max self-correlation against cached OS alphas.
 
-        Returns: (corr_value, source) where source ∈ {"local", "empty"}.
-        - source="local": corr_value is a real float measured against the pool.
-        - source="empty": corr_value is **None** — the value could NOT be
+        Returns: (corr_value, source) where source ∈ CorrSource.
+        - CorrSource.LOCAL: corr_value is a real float measured against the pool.
+        - CorrSource.UNKNOWN: corr_value is **None** — the value could NOT be
           measured (no cache / no PnL / insufficient overlap / all-NaN). The
           old contract returned 0.0 here, which downstream gates could not
           distinguish from "measured and genuinely uncorrelated". Callers MUST
-          branch on source, never trust a 0.0.
+          branch on source, never trust a 0.0. (V-27.158: was the ad-hoc
+          string "empty".)
         """
         cache = self._load_cache(region)
         if not cache or not cache.get("alpha_ids"):
-            return None, "empty"
+            return None, CorrSource.UNKNOWN
 
         if alpha_pnl_series is None:
             alpha_pnl_series = await self._fetch_pnl_series(alpha_id)
         if alpha_pnl_series.empty:
-            return None, "empty"
+            return None, CorrSource.UNKNOWN
 
         target_returns = _series_to_returns(alpha_pnl_series)
         if len(target_returns.dropna()) < MIN_OVERLAP_DAYS:
@@ -347,7 +368,7 @@ class CorrelationService:
                 f"[CorrelationService] {alpha_id} has {len(target_returns.dropna())} "
                 f"days < {MIN_OVERLAP_DAYS}; cannot measure (insufficient sample)"
             )
-            return None, "empty"
+            return None, CorrSource.UNKNOWN
 
         os_returns = cache["pnls"].apply(
             lambda col: col - col.ffill().shift(1), axis=0
@@ -360,15 +381,15 @@ class CorrelationService:
             os_returns = os_returns.drop(columns=[alpha_id])
 
         if os_returns.shape[1] == 0:
-            return None, "empty"
+            return None, CorrSource.UNKNOWN
 
         corrs = os_returns.corrwith(target_returns)
         max_corr = corrs.max(skipna=True)
         if pd.isna(max_corr):
             # Every pairwise corr was NaN — no overlapping observations with
             # any pool member. Not measurable; do NOT report 0.0.
-            return None, "empty"
-        return float(max_corr), "local"
+            return None, CorrSource.UNKNOWN
+        return float(max_corr), CorrSource.LOCAL
 
     # ------------------------------------------------------------------
     # Public entry: three-tier fallback
@@ -378,32 +399,31 @@ class CorrelationService:
         self,
         alpha_id: str,
         region: str = "USA",
-    ) -> Tuple[Optional[float], str]:
-        """Three-tier resolver. Returns (corr, source).
+    ) -> Tuple[Optional[float], CorrSource]:
+        """Three-tier resolver. Returns (corr, source) where source ∈ CorrSource.
 
-        source values:
-          - "local"   — corr is a real float from the local PnL cache (preferred)
-          - "brain"   — corr is a real float from BRAIN /correlations/SELF API
-          - "unknown" — corr is **None**; both tiers failed. Caller MUST NOT
-            treat this as PASS or as "uncorrelated" — it means "not measured".
-            The old contract returned 0.0 here, which silently looked like a
-            safe alpha to any `corr < threshold` check.
+          - CorrSource.LOCAL   — corr is a real float from the local PnL cache
+          - CorrSource.BRAIN   — corr is a real float from BRAIN /correlations/SELF
+          - CorrSource.UNKNOWN — corr is **None**; both tiers failed. Caller
+            MUST NOT treat this as PASS or as "uncorrelated" — it means "not
+            measured". The old contract returned 0.0, which silently looked
+            like a safe alpha to any `corr < threshold` check.
         """
         try:
             corr, src = await self.calc_self_corr(alpha_id, region)
-            if src == "local" and corr is not None:
-                return corr, "local"
+            if src == CorrSource.LOCAL and corr is not None:
+                return corr, CorrSource.LOCAL
         except Exception as e:
             logger.warning(f"[CorrelationService] local calc failed for {alpha_id}: {e}")
 
         try:
             res = await self.brain.check_correlation(alpha_id, check_type="SELF")
             if isinstance(res, dict) and res.get("max") is not None:
-                return float(res["max"]), "brain"
+                return float(res["max"]), CorrSource.BRAIN
         except Exception as e:
             logger.warning(f"[CorrelationService] BRAIN /correlations/SELF failed for {alpha_id}: {e}")
 
-        return None, "unknown"
+        return None, CorrSource.UNKNOWN
 
     # ------------------------------------------------------------------
     # Crisis-window stress test

@@ -419,13 +419,16 @@ class AlphaService(BaseService):
                 from backend.adapters.brain_adapter import BrainAdapter
                 brain_adapter = await stack.enter_async_context(BrainAdapter())
 
-            from backend.services.correlation_service import CorrelationService
+            from backend.services.correlation_service import (
+                CorrelationService,
+                CorrSource,
+            )
             corr_svc = CorrelationService(brain_adapter)
             corr, src = await corr_svc.get_with_fallback(
                 alpha.alpha_id, region=alpha.region
             )
-            # src="unknown" → corr is None → inconclusive, do NOT block.
-            if src != "unknown" and corr is not None and corr >= 0.7:
+            # src=UNKNOWN → corr is None → inconclusive, do NOT block.
+            if src != CorrSource.UNKNOWN and corr is not None and corr >= 0.7:
                 return {
                     "submitted": False,
                     "reason": (
