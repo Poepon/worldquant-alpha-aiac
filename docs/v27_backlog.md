@@ -56,24 +56,31 @@ V-27.61(retryable alpha 计入 `alpha_count`)已并入 V-27.92 簇一起根治:
 
 ---
 
-## C. correlation / submit 边界 — 回应审查时判 backlog
+## C. ✅ 已闭环 — correlation / submit 边界完整性(2026-05-14)
 
-本会话 commit `88db1b4` 修了 self_corr 三层链的核心 bug,以下是边界/
-完整性的残留,不影响主路径正确性:
+11 项中 **8 项已落地**(commit `813ce6b` correlation/brain + `b9720f4`
+submit gate/jsonb/beat),**3 项核实后不做**。
 
-| 项 | File | 现象 | 根治方向 |
+### 已落地(8 项)
+
+| 项 | File | 落地方案 | commit |
 |---|---|---|---|
-| **V-27.126** | `correlation_service.py` `get_with_fallback` | BRAIN 返回 `max=None`(corr 仍在算)落到 `UNKNOWN`,没区分"算不出"vs"还没算完"——后者本应让 caller 稍后重试 | 加 `CorrSource.BRAIN_PENDING` 或返回 retry 提示 |
-| **V-27.127** | `alpha_service.submit_alpha` vs `can_submit.py` | 第三道 gate 读陈旧 `can_submit` 列,第四道 gate 实时测 self_corr — 两份不同时点数据;旧高 corr demote 后实时变低则永远卡 can_submit=False | submit gate 第三道:can_submit=False 但原因仅 LOCAL_SELF_CORRELATION 时,允许实时 precheck 翻案 |
-| **V-27.128** | `correlation_service._fetch_pnl_series` | 重试只救"BRAIN 偶发返回空 records 但 HTTP 200"(实测救回 38/40),救不了真限流(`get_alpha_pnl` 内部 `except: return {}` 吞了 429) | `get_alpha_pnl` 不吞 429 / 重试退避加长 |
-| **V-27.129** | `correlation_service._fetch_pnl_series` | "三次都空"静默返回空 vs "三次都异常"抛出 — caller 走两条路径(前者 `(None,UNKNOWN)`,后者 try 捕获后落 BRAIN tier) | 统一:三次失败都返回 `(None, UNKNOWN)` 或都抛 |
-| **V-27.147** | `alpha_service.submit_alpha` | submit 成功后 `refresh_portfolio_from_db` 抛异常只 `logger.warning` 吞掉,skeleton 缓存可能长期陈旧,无重试/补偿 | best-effort 可接受;或加一个 beat 兜底定期 refresh |
-| **V-27.121** | `brain_adapter.submit_alpha` poll | 无 `Retry-After` 头时把响应当**终态**处理 —— 这是 `ace_lib` 确认的 BRAIN 契约假设,但 BRAIN 未在 body 给出明确 status 字段,无法在 HTTP 层自证。**无法在代码层根治**:需先拿到 BRAIN submit 响应 body 的正式契约(哪个字段表"已终结")才能改判定 | 前提依赖:BRAIN submit 响应 body 契约。拿到前维持现状 |
-| **V-27.102** | `brain_adapter.submit_alpha` | submit 成功判定为 `status == 200`,排除了 201/202(BRAIN 实际只回 200,但若日后改用 202 Accepted 异步语义会漏判) | 改 `200 <= status < 300`,或显式列举可接受码 |
-| **V-27.140** | `routers/factor_library.py` `refresh_can_submit` | JSONB `metrics` 字段 read-modify-write 无行锁,与其他写 metrics 的路径(IQC 回填、evaluation 落库)并发时后写覆盖前写 | `UPDATE ... SET metrics = metrics || '{...}'::jsonb` 原地 merge,或加行锁 |
-| **V-27.157** | `sync_tasks._fetch_os_alpha_ids` | `a["id"]` 直接下标 —— BRAIN 返回项缺 `id` 时 `KeyError` 直接炸整个 OS sync,而非跳过该项 | 改 `a.get("id")` + 跳过 None |
-| **V-27.3 存量空壳** | `sync_tasks.sync_datasets` | `a62a748` 让**新建** dataset 触发 `sync_fields_from_brain` —— 但老 buggy beat 已插入的 dataset 现在是"已存在 + 无 DataField 行",不走新建分支,字段不会回填,V-27.3 原文点的"已积累的空壳 dataset"仍空 | 下一批:一次性回填脚本(扫无 DataField 的 dataset 补 `sync_fields_from_brain.delay`),或先核实 DB 确无此类历史数据 |
-| **V-27.158 词汇表** | `calc_self_corr_by_window` | `a62a748` 已把 `evaluation.py` caller 迁到 `CorrSource` 常量;残留:`calc_self_corr_by_window` 的 per-window status(ok/insufficient_data/empty_pool/missing_window)是不同维度,**有意不并入** | 若日后要统一,需设计跨维度的 status 体系 |
+| **V-27.126** | `correlation_service.get_with_fallback` | 新增 `CorrSource.BRAIN_PENDING` —— BRAIN 返回 well-formed dict 但 `max=None`(仍在算)与 `UNKNOWN`(算不出)区分,可重试型 caller 能利用 | `813ce6b` |
+| **V-27.128** | `brain_adapter.get_alpha_pnl` | 从 `_request` 改用 `_safe_api_call`(与 `get_alpha` 一致),获得跨进程 rate-limit cooldown/retry,不再静默吞 429 | `813ce6b` |
+| **V-27.129** | `correlation_service._fetch_pnl_series` | 统一两条失败路径 —— "三次都异常"不再 raise,与"三次都空"一样返回 empty Series,`last_exc` 降级 warning | `813ce6b` |
+| **V-27.102** | `brain_adapter.submit_alpha` | 成功判定 `status == 200` → `200 <= status < 300` | `813ce6b` |
+| **V-27.157** | `correlation_service._fetch_os_alpha_ids` | `a["id"]` → `a.get("id")` + 缺 id 跳过,不再 KeyError 炸整个 OS sync(注:实际在 `correlation_service.py` 非 `sync_tasks.py`) | `813ce6b` |
+| **V-27.127** | `alpha_service.submit_alpha` | gate-3 `can_submit=False` 且 failed checks 全是 self-corr 类时放行到 gate-4 实时 precheck 翻案;非 self-corr FAIL / `can_submit=None` 仍 hard-block;`SUBMIT_GATE_LIVE_SELF_CORR_OVERRIDE` flag。收尾:submit 成功 stamp `date_submitted` 改 `datetime.utcnow()`(naive 列) | `b9720f4` |
+| **V-27.140** | `alpha_service.refresh_can_submit` | metrics 写入从整列 read-modify-write 改 SQL 原地浅合并 `metrics \|\| patch::jsonb`,消除并发后写覆盖前写其他 key | `b9720f4` |
+| **V-27.147** | `alpha_service.submit_alpha` | 新增 `refresh_portfolio_skeletons_all` beat 任务(每 6h 扫 distinct submitted region 逐个 refresh,per-region 容错);submit 后 inline refresh 保留作主路径 | `b9720f4` |
+
+### 核实后不做(3 项)
+
+| 项 | 判定 |
+|---|---|
+| **V-27.121** `brain_adapter.submit_alpha` poll | 无 `Retry-After` 头当终态 —— **无法在代码层根治**,需先拿到 BRAIN submit 响应 body 的正式契约。维持现状。 |
+| **V-27.3 存量空壳** | 已查真实 DB:**0/17** 个 dataset 缺 DataField 行,`field_count` 列与实际完全一致 —— 无历史空壳数据,不需要回填脚本。 |
+| **V-27.158 词汇表** | `calc_self_corr_by_window` per-window status 是不同维度,**有意不并入** `CorrSource`。维持现状。 |
 
 ---
 
@@ -109,5 +116,5 @@ V-27.61(retryable alpha 计入 `alpha_count`)已并入 V-27.92 簇一起根治:
 
 1. ~~**A 段**(V-27.1 / V-27.92)~~ — ✅ 已闭环(2026-05-14,commit `73dee3f` / `98a6f8d`)
 2. ~~**B 段 TOCTOU**(V-27.45 / 81)~~ — ✅ 已闭环(2026-05-14,commit `d472660` / `3999720`)
-3. **C 段** — 边界完整性,可随相关功能迭代顺带,现为下一优先
-4. **D / E 段** — 低优先,opportunistic 或专门 sprint
+3. ~~**C 段**(8 项落地 + 3 项核实不做)~~ — ✅ 已闭环(2026-05-14,commit `813ce6b` / `b9720f4`)
+4. **D / E 段** — 低优先,opportunistic 或专门 sprint,现为剩余项
