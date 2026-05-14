@@ -521,6 +521,7 @@ async def refresh_iqc_batch(
     ids = [r[0] for r in (await db.execute(q)).all()]
 
     enqueued = 0
+    last_countdown = 0
     for i, aid in enumerate(ids):
         try:
             # Stagger by 2s so the batch doesn't burst BRAIN's
@@ -529,10 +530,15 @@ async def refresh_iqc_batch(
                 args=[aid, competition], countdown=i * 2,
             )
             enqueued += 1
+            # V-27.155: track the real countdown of the last successfully
+            # queued task. `countdown` uses enumerate's `i`, so when an
+            # enqueue in the middle fails `i` outruns `enqueued` — the old
+            # `eta = enqueued * 2` then under-estimated the actual drain time.
+            last_countdown = i * 2
         except Exception as e:
             logger.warning(f"[refresh-iqc] enqueue failed for alpha_pk={aid}: {e}")
 
-    eta = enqueued * 2
+    eta = last_countdown
     return IqcRefreshResponse(
         enqueued=enqueued,
         competition=competition,

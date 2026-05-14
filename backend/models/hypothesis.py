@@ -169,3 +169,82 @@ class Hypothesis(SQLAlchemyBase):
             f"<Hypothesis id={self.id} kind={self.kind} tier=T{self.target_tier} "
             f"status={self.status} alphas={self.alpha_count}/{self.pass_count}>"
         )
+
+
+class HypothesisRoundStats(SQLAlchemyBase):
+    """Per-hypothesis per-round outcome detail — append-only.
+
+    V-27.92: the authoritative input for should_abandon_hypothesis. Pre-fix
+    the abandon decision read state.hypothesis_round_history (in-memory),
+    which is lost on worker restart / Celery task-boundary switch — so a
+    hypothesis that should have been abandoned stayed ACTIVE forever. This
+    table survives restarts and is shared across the V-20.1 prefetch round's
+    isolated session, so should_abandon always sees the full N-round window.
+
+    Counts are the REAL attribution: flip-retry products (V-27.71) and
+    retryable transient-BRAIN-failure attempts (V-27.61) are tracked in their
+    own columns and are NOT folded into alpha_count — the abandon decision
+    reads a clean alpha_count.
+    """
+
+    __tablename__ = "hypothesis_round_stats"
+    __table_args__ = (
+        Index("ix_hrs_hid_round", "hypothesis_id", "round_index"),
+        # Uniqueness key supports upsert on LangGraph checkpoint replay. task_id
+        # is part of it: a hypothesis reused across tasks restarts round_index
+        # from 0, so (hypothesis_id, round_index) alone would collide.
+        Index(
+            "uq_hrs_hid_round_task",
+            "hypothesis_id", "round_index", "task_id",
+            unique=True,
+        ),
+        {"extend_existing": True},
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+
+    hypothesis_id = Column(
+        Integer,
+        ForeignKey("hypotheses.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # nullable=False — B5 (_process_hypothesis_feedback) always runs with a
+    # task context, and task_id is part of the uniqueness key above.
+    task_id = Column(
+        Integer,
+        ForeignKey("mining_tasks.id"),
+        nullable=False,
+        index=True,
+    )
+    round_index = Column(Integer, nullable=False)
+
+    # ---- Real counts — flip products + retryable attempts excluded ----
+    alpha_count = Column(Integer, default=0, nullable=False)
+    pass_count = Column(Integer, default=0, nullable=False)
+    syntax_fail_count = Column(Integer, default=0, nullable=False)
+    simulate_fail_count = Column(Integer, default=0, nullable=False)
+    quality_fail_count = Column(Integer, default=0, nullable=False)
+
+    # ---- V-27.71: flip-retry products — separate track, never in alpha_count ----
+    flip_alpha_count = Column(Integer, default=0, nullable=False)
+    flip_pass_count = Column(Integer, default=0, nullable=False)
+
+    # ---- V-27.61: retryable (transient BRAIN failure) attempts ----
+    retryable_count = Column(Integer, default=0, nullable=False)
+
+    # ---- Attribution (B5 v2 LLM / heuristic) ----
+    attribution = Column(String(20), nullable=True)
+    attribution_reason = Column(Text, nullable=True)
+    best_sharpe = Column(Float, nullable=True)
+
+    created_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<HypothesisRoundStats hid={self.hypothesis_id} "
+            f"task={self.task_id} round={self.round_index} "
+            f"alphas={self.alpha_count}/{self.pass_count}>"
+        )

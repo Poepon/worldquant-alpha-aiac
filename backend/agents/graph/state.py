@@ -177,7 +177,13 @@ class MiningState(BaseModel):
     # Each entry: {round_index, alpha_count, pass_count, fail_count,
     #              syntax_fail_count, simulate_fail_count, attribution,
     #              best_sharpe}
-    # Used by should_abandon_hypothesis (B6) to detect N-rounds-of-HYPOTHESIS-fail.
+    # V-27.92: DEMOTED to a display cache. The authoritative input for the
+    # B6 abandon decision is now the hypothesis_round_stats DB table —
+    # in-memory history is lost on worker restart / Celery task-boundary
+    # switch and not shared across the V-20.1 prefetch round's isolated
+    # session, which silently disabled abandonment. This field still feeds
+    # the HYPOTHESIS_FEEDBACK trace step and the should_abandon_hypothesis_
+    # from_memory() flag-off fallback path.
     # Persists across rounds within a single workflow.run() invocation; reset
     # to empty when a new task starts.
     hypothesis_round_history: Dict[int, List[Dict]] = Field(default_factory=dict)

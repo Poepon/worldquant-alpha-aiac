@@ -480,21 +480,21 @@ async def test_pass_rate_returns_none_when_no_alphas(session):
 
 
 @pytest.mark.asyncio
-async def test_rounds_active_counts_distinct_round_buckets(session):
-    """Phase 3 prep: rounds_active counts distinct minute-buckets of alpha
-    created_at as proxy for "how many rounds did this hypothesis live"."""
-    import asyncio
-    from backend.models import Alpha, MiningTask, ExperimentRun
+async def test_rounds_active_counts_round_stats_rows(session):
+    """V-27.120: rounds_active counts hypothesis_round_stats rows (precise
+    round_index) instead of the old 60-second-bucket estimate over alpha
+    created_at timestamps."""
+    from backend.models import MiningTask
     from sqlalchemy import text as _text
 
     svc = HypothesisService(session)
     h = await svc.create_hypothesis(_data("rounds-active-test"))
     await session.commit()
 
-    # 0 alphas → rounds_active = 0
+    # No round-stats rows → 0
     assert await svc.rounds_active(h.id) == 0
 
-    # Need a real task / run for FK
+    # Need a real task for the round-stats FK.
     task = MiningTask(
         task_name=f"{_TAG}rounds-task", region="USA", universe="TOP3000",
         dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
@@ -502,52 +502,34 @@ async def test_rounds_active_counts_distinct_round_buckets(session):
     )
     session.add(task)
     await session.flush()
-    run = ExperimentRun(task_id=task.id, status="RUNNING")
-    session.add(run)
-    await session.flush()
 
     try:
-        # Insert 3 alphas, 2 created in same minute-bucket, 1 in another.
-        # Manipulate created_at via SQL to force buckets.
-        # alphas.created_at is TIMESTAMP WITHOUT TIME ZONE — pass naive
-        from datetime import datetime
-        t1 = datetime(2026, 5, 6, 12, 0, 30)
-        t2 = datetime(2026, 5, 6, 12, 0, 45)  # same minute as t1
-        t3 = datetime(2026, 5, 6, 12, 5, 10)  # different minute
-
-        for i, ts in enumerate([t1, t2, t3]):
-            session.add(Alpha(
-                task_id=task.id, run_id=run.id,
-                alpha_id=f"_b7_{uuid.uuid4().hex[:13]}",
-                expression=f"e{i}", region="USA", universe="TOP3000",
-                quality_status="PASS", is_sharpe=1.0, factor_tier=1,
-                hypothesis_id=h.id,
-            ))
-        await session.flush()
-        # Override created_at via raw UPDATE (server_default ate our timestamp)
-        await session.execute(_text(
-            "UPDATE alphas SET created_at = :t1 WHERE alpha_id LIKE '_b7_%' "
-            "AND hypothesis_id = :hid AND expression = 'e0'"
-        ), {"t1": t1, "hid": h.id})
-        await session.execute(_text(
-            "UPDATE alphas SET created_at = :t2 WHERE alpha_id LIKE '_b7_%' "
-            "AND hypothesis_id = :hid AND expression = 'e1'"
-        ), {"t2": t2, "hid": h.id})
-        await session.execute(_text(
-            "UPDATE alphas SET created_at = :t3 WHERE alpha_id LIKE '_b7_%' "
-            "AND hypothesis_id = :hid AND expression = 'e2'"
-        ), {"t3": t3, "hid": h.id})
+        # 3 distinct rounds under this hypothesis.
+        for r in (0, 1, 2):
+            await svc.upsert_round_stats(
+                hypothesis_id=h.id, task_id=task.id, round_index=r,
+                alpha_count=2, pass_count=0, syntax_fail_count=0,
+                simulate_fail_count=0, quality_fail_count=2,
+            )
         await session.commit()
+        assert await svc.rounds_active(h.id) == 3
 
-        # 3 alphas, 2 in bucket t1==t2 (12:00) and 1 in t3 (12:05) → 2 distinct buckets
-        assert await svc.rounds_active(h.id) == 2
+        # Idempotent upsert (checkpoint replay) → still 3, not 6.
+        await svc.upsert_round_stats(
+            hypothesis_id=h.id, task_id=task.id, round_index=1,
+            alpha_count=5, pass_count=1, syntax_fail_count=0,
+            simulate_fail_count=0, quality_fail_count=4,
+        )
+        await session.commit()
+        assert await svc.rounds_active(h.id) == 3
     finally:
-        await session.execute(_text("DELETE FROM alphas WHERE hypothesis_id = :hid"),
-                              {"hid": h.id})
-        await session.execute(_text("DELETE FROM experiment_runs WHERE id = :i"),
-                              {"i": run.id})
-        await session.execute(_text("DELETE FROM mining_tasks WHERE id = :i"),
-                              {"i": task.id})
+        await session.execute(
+            _text("DELETE FROM hypothesis_round_stats WHERE hypothesis_id = :hid"),
+            {"hid": h.id},
+        )
+        await session.execute(
+            _text("DELETE FROM mining_tasks WHERE id = :i"), {"i": task.id}
+        )
         await session.commit()
 
 

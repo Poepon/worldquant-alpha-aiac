@@ -130,10 +130,23 @@ class Settings(BaseSettings):
     CASCADE_PAUSE_POLL_SEC: float = 1.0    # 主循环每 round 末检查 PAUSED 间隔
 
     # V-19.7 watchdog + BRAIN quota guard.
-    CASCADE_WATCHDOG_DEAD_MIN: int = 15      # last_alpha_persisted_at < NOW()-N → dead
+    # V-27.1: DEAD_MIN 15→25 — a live worker can legitimately go 15+ min
+    # without a heartbeat (long BRAIN multi-sim, slow LLM, all-dedup round).
+    # The lock-takeover fix roots out the race; the wider window is a cheap
+    # probability cushion that just reduces how often a falsely-presumed-dead
+    # worker overlaps the replacement by one round.
+    CASCADE_WATCHDOG_DEAD_MIN: int = 25      # last_alpha_persisted_at < NOW()-N → dead
     CASCADE_WATCHDOG_GRACE_MIN: int = 15     # task.created_at > NOW()-N → skip (start-up grace)
     BRAIN_DAILY_SIMULATE_LIMIT: int = 1000   # consultant 估算 — 实际由 BRAIN 决定
     BRAIN_QUOTA_PAUSE_PCT: float = 0.9       # 达 90% 自动 pause CONTINUOUS_CASCADE
+
+    # V-27.1 cascade-lock takeover. The watchdog atomically takes over the
+    # lock (new token) instead of force_clear + re-acquire; the cascade main
+    # loop self-checks lock ownership at every round boundary and exits
+    # gracefully if taken over. Flag off → revert to force_clear + no
+    # ownership self-check (kill-switch for the new self-exit path).
+    CASCADE_LOCK_TAKEOVER_ENABLED: bool = True
+    CASCADE_LOCK_TTL_SEC: int = 10800        # cascade lock TTL — shared by acquire + watchdog takeover
 
     # V-20 (2026-05-10) round-pipeline. While round N's SIMULATE blocks on
     # BRAIN (~5 min, IO-bound), round N+1's LLM/CODE_GEN/VALIDATE runs in an
@@ -430,6 +443,32 @@ class Settings(BaseSettings):
     # V-26.95 — early-stop policy tunables
     EARLY_STOP_WARMUP_ROUNDS: int = 5
     EARLY_STOP_PASS_RATE_DROP_RATIO: float = 0.5
+
+    # V-27.92 — Hypothesis abandon decision data source. On (default):
+    # should_abandon_hypothesis reads the hypothesis_round_stats table
+    # (authoritative, survives worker restart). Off: legacy in-memory
+    # state.hypothesis_round_history path. The per-round detail table is
+    # ALWAYS written regardless of this flag (additive, zero-risk) — only
+    # the abandon DECISION is gated, so this is a clean kill-switch.
+    HYPOTHESIS_ABANDON_USE_DB_STATS: bool = True
+
+    # V-27.45 — re-check hypothesis status at alpha/failure INSERT time and
+    # drop the link if it has gone terminal (ABANDONED/SUPERSEDED) in the
+    # V-22.13 reuse race window. Off → keep the link unconditionally
+    # (pre-fix behaviour).
+    HYPOTHESIS_REUSE_TERMINAL_GUARD_ENABLED: bool = True
+
+    # V-27.81 — Redis in-flight lock to stop two workers simulating the same
+    # (expression_hash, region, universe) between filter_unsimulated_
+    # expressions' SELECT and brain.simulate_alpha (a wasted BRAIN slot).
+    # Off → skip the lock, fall back to pure DB dedup (pre-fix behaviour).
+    SIMULATE_DEDUP_LOCK_ENABLED: bool = True
+
+    # V-27.127 — submit gate-3: when can_submit=False but the ONLY failing
+    # checks are self-correlation, defer to the live self_corr precheck
+    # (gate-4) instead of hard-blocking on the stale verdict. Off → gate-3
+    # hard-blocks on any can_submit != True (pre-fix behaviour).
+    SUBMIT_GATE_LIVE_SELF_CORR_OVERRIDE: bool = True
 
     # V-27.108 — failure-pitfall scoring weights (failure side of V-26.36;
     # the success side is already config'd as RAG_SCORE_*).

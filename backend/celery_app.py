@@ -100,4 +100,12 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.iqc_audit_backfill_sweep",
         "schedule": 1800,   # every 30 minutes
     },
+    # V-27.147: portfolio-skeleton cache refresh fallback. submit_alpha
+    # refreshes the cache inline on each successful submit, but that is
+    # best-effort — this beat sweep every 6h is the safety net so a failed
+    # inline refresh can't leave the cache stale indefinitely.
+    "refresh-portfolio-skeletons": {
+        "task": "backend.tasks.refresh_portfolio_skeletons_all",
+        "schedule": crontab(hour="*/6", minute=45),
+    },
 }

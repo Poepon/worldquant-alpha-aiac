@@ -392,6 +392,18 @@ async def node_simulate(
     # round so the LLM stops re-generating the same narrow neighborhood.
     dedup_skel_buf: list[str] = []
 
+    # V-27.81: in-flight simulate dedup. Redis slots claimed below are
+    # released after the batch completes (and on every early return); the
+    # 900s TTL is the crash safety net. Imports kept out of the try block
+    # so _release_claimed_slots stays callable even if DB dedup raises.
+    claimed_sim_slots: list = []
+    _dedup_lock_on = getattr(settings, "SIMULATE_DEDUP_LOCK_ENABLED", True)
+    from backend.alpha_semantic_validator import compute_expression_hash
+    from backend.tasks.redis_pool import (
+        claim_simulate_slot,
+        release_simulate_slot,
+    )
+
     try:
         from backend.database import AsyncSessionLocal
         from backend.selection_strategy import filter_unsimulated_expressions
@@ -407,9 +419,7 @@ async def node_simulate(
         new_expr_set = set(new_exprs)
         for idx in valid_indices:
             expr = state.pending_alphas[idx].expression
-            if expr in new_expr_set:
-                indices_to_simulate.append(idx)
-            else:
+            if expr not in new_expr_set:
                 db_duplicates += 1
                 state.pending_alphas[idx].simulation_error = "DB duplicate: already simulated"
                 state.pending_alphas[idx].is_simulated = True
@@ -421,6 +431,33 @@ async def node_simulate(
                         dedup_skel_buf.append(sk)
                 except Exception:
                     pass
+                continue
+            # V-27.81: in-flight dedup — another worker may already be
+            # simulating this same (hash, region, universe) right now.
+            # Claim a Redis slot; if we can't, treat it exactly like a DB
+            # duplicate so we don't burn a BRAIN slot on the concurrent
+            # re-simulate.
+            if _dedup_lock_on and expr:
+                _h = compute_expression_hash(expr)
+                _slot_token = claim_simulate_slot(_h, state.region, state.universe)
+                if not _slot_token:
+                    db_duplicates += 1
+                    state.pending_alphas[idx].simulation_error = (
+                        "in-flight duplicate: concurrent simulate"
+                    )
+                    state.pending_alphas[idx].is_simulated = True
+                    state.pending_alphas[idx].simulation_success = False
+                    try:
+                        sk = _expr_to_skel(expr or "", max_depth=3)
+                        if sk:
+                            dedup_skel_buf.append(sk)
+                    except Exception:
+                        pass
+                    continue
+                claimed_sim_slots.append(
+                    (_h, state.region, state.universe, _slot_token)
+                )
+            indices_to_simulate.append(idx)
 
         logger.info(
             f"[{node_name}] DB dedup: {db_duplicates} duplicates skipped, "
@@ -451,6 +488,14 @@ async def node_simulate(
             ordered.pop(s, None)
             ordered[s] = None
         return list(ordered.keys())[-cap:]
+
+    def _release_claimed_slots() -> None:
+        # V-27.81: release every in-flight simulate slot this node claimed —
+        # called after the batch completes and before every early return.
+        # The 900s TTL is the crash safety net if this is somehow missed.
+        for _slot in claimed_sim_slots:
+            release_simulate_slot(*_slot)
+        claimed_sim_slots.clear()
 
     if not indices_to_simulate:
         logger.warning(f"[{node_name}] All expressions already in DB")
@@ -510,6 +555,7 @@ async def node_simulate(
             indices_to_simulate = keep_after_skel
             if not indices_to_simulate:
                 logger.warning(f"[{node_name}] All candidates dropped by portfolio dedup")
+                _release_claimed_slots()
                 return {
                     "pending_alphas": state.pending_alphas,
                     "recent_dedup_skeletons": _merge_dedup_skels(),
@@ -560,6 +606,7 @@ async def node_simulate(
         logger.warning(
             f"[{node_name}] All expressions filtered by pre-simulate classifier"
         )
+        _release_claimed_slots()
         return {
             "pending_alphas": state.pending_alphas,
             "recent_dedup_skeletons": _merge_dedup_skels(),
@@ -720,7 +767,11 @@ async def node_simulate(
             success_count += 1
 
         updated_alphas[idx] = updated
-    
+
+    # V-27.81: batch done — release every in-flight simulate slot we claimed
+    # (covers both simulated and post-claim-filtered expressions).
+    _release_claimed_slots()
+
     failed_errors = [
         {"expr": expressions[i][:80], "error": results[i].get("error", "unknown")[:200]}
         for i in range(len(results)) if not results[i].get("success")
@@ -807,7 +858,7 @@ async def node_evaluate(
         get_failed_tests,
         evaluate_with_brain_checks,  # 新增：BRAIN官方检查
     )
-    from backend.services.correlation_service import CorrelationService
+    from backend.services.correlation_service import CorrelationService, CorrSource
 
     start_time = time.time()
     node_name = "EVALUATE"
@@ -993,23 +1044,27 @@ async def node_evaluate(
                 logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
 
             # W0.5: prefer local PnL-matrix; fall back to BRAIN API; finally
-            # mark unknown so hard_gate downgrades to PASS_PROVISIONAL.
-            self_corr_source = "unknown"
+            # mark UNKNOWN so hard_gate downgrades to PASS_PROVISIONAL.
+            # V-27.158: self_corr_source carries CorrSource enum values from
+            # get_with_fallback; the "tier_skipped"/"skipped" branch below is
+            # a separate tier-policy axis (not a CorrSource) and stays a
+            # plain string — StrEnum makes the mixed comparisons safe.
+            self_corr_source = CorrSource.UNKNOWN
             if correlation_service is not None:
                 try:
                     _corr_raw, self_corr_source = await correlation_service.get_with_fallback(
                         alpha.alpha_id, region=state.region
                     )
-                    # get_with_fallback returns None for source="unknown"
+                    # get_with_fallback returns None for CorrSource.UNKNOWN
                     # (V-26.77 follow-up #5: the service no longer fakes 0.0
                     # for "not measured"). Keep self_corr numeric for the
                     # score / hard_gate arithmetic below — self_corr_verified
                     # (derived from source) is what actually gates PASS, so a
-                    # 0.0 placeholder here is inert when source is unknown.
+                    # 0.0 placeholder here is inert when source is UNKNOWN.
                     self_corr = _corr_raw if _corr_raw is not None else 0.0
                 except Exception as e:
                     logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
-                    self_corr_source = "unknown"
+                    self_corr_source = CorrSource.UNKNOWN
 
                 # Crisis-window stress test: piggyback on the same local PnL
                 # cache that just resolved self_corr. Only runs when the
@@ -1017,7 +1072,7 @@ async def node_evaluate(
                 # max-corr couldn't be measured the per-window slice has
                 # even less data to work with. Failures are non-fatal: the
                 # crisis read is advisory, not a hard gate.
-                if self_corr_source == "local":
+                if self_corr_source == CorrSource.LOCAL:
                     try:
                         crisis_by_window = await correlation_service.calc_self_corr_by_window(
                             alpha_id=alpha.alpha_id, region=state.region
@@ -1047,7 +1102,7 @@ async def node_evaluate(
                     self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
                     if isinstance(self_corr_result, dict):
                         self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
-                        self_corr_source = "brain"
+                        self_corr_source = CorrSource.BRAIN
                 except Exception as e:
                     logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
         else:
@@ -1104,7 +1159,9 @@ async def node_evaluate(
         self_corr_source = locals().get("self_corr_source", "skipped")
         if check_self_corr:
             self_corr_ok = self_corr < max_correlation
-            self_corr_verified = self_corr_source not in ("unknown",)
+            # V-27.158: CorrSource.UNKNOWN compares equal to "unknown"
+            # (StrEnum), so this covers both the enum and any legacy string.
+            self_corr_verified = self_corr_source not in (CorrSource.UNKNOWN, "unknown")
         else:
             self_corr_ok = True
             self_corr_verified = True  # tier_skipped, not unknown
@@ -1385,10 +1442,12 @@ async def node_evaluate(
             # distinguish "uncorrelated alpha" from "no signal".
             "_self_corr": (
                 round(self_corr, 4)
-                if self_corr_source in ("local", "brain")
+                if self_corr_source in (CorrSource.LOCAL, CorrSource.BRAIN)
                 else None
             ),
-            "_self_corr_source": self_corr_source,
+            # str() so a CorrSource enum is stored as its plain value in JSONB
+            # (StrEnum already serialises that way, but be explicit).
+            "_self_corr_source": str(self_corr_source),
             "_corr_checked": needs_corr_check,
             "_should_optimize": should_opt,
             "_optimize_reason": opt_reason,
@@ -1476,6 +1535,17 @@ async def node_evaluate(
         # GrMeLOg3 with task 81/83). Now we pre-filter to save BRAIN quota
         # AND avoid the doomed INSERT.
         flip_dedup_skipped = 0
+        # V-27.81: in-flight simulate dedup for flip-retry. Slots claimed in
+        # the dedup loop below are released after the simulate loop.
+        flip_claimed_slots: list = []
+        _flip_dedup_lock_on = getattr(settings, "SIMULATE_DEDUP_LOCK_ENABLED", True)
+        from backend.alpha_semantic_validator import (
+            compute_expression_hash as _flip_expr_hash,
+        )
+        from backend.tasks.redis_pool import (
+            claim_simulate_slot as _flip_claim_slot,
+            release_simulate_slot as _flip_release_slot,
+        )
         try:
             from backend.database import AsyncSessionLocal as _ASL
             from backend.selection_strategy import filter_unsimulated_expressions as _flt
@@ -1488,14 +1558,31 @@ async def node_evaluate(
             kept_candidates = []
             for o in flip_candidates:
                 fexpr = f"multiply(-1, {o.expression})"
-                if fexpr in _new_flipped_set:
-                    kept_candidates.append(o)
-                else:
+                if fexpr not in _new_flipped_set:
                     flip_dedup_skipped += 1
                     logger.info(
                         f"[{node_name}] V-19.3 flip-retry skip — flipped expr already "
                         f"in DB: {fexpr[:100]!r}"
                     )
+                    continue
+                # V-27.81: in-flight dedup — skip if another worker is
+                # already simulating this flipped expression right now.
+                if _flip_dedup_lock_on:
+                    _fh = _flip_expr_hash(fexpr)
+                    _flip_slot_token = _flip_claim_slot(
+                        _fh, state.region, state.universe
+                    )
+                    if not _flip_slot_token:
+                        flip_dedup_skipped += 1
+                        logger.info(
+                            f"[{node_name}] V-27.81 flip-retry skip — flipped "
+                            f"expr in-flight on another worker: {fexpr[:100]!r}"
+                        )
+                        continue
+                    flip_claimed_slots.append(
+                        (_fh, state.region, state.universe, _flip_slot_token)
+                    )
+                kept_candidates.append(o)
             flip_candidates = kept_candidates
             if flip_dedup_skipped:
                 logger.info(
@@ -1507,127 +1594,139 @@ async def node_evaluate(
                 f"[{node_name}] V-19.3 flip-retry dedup query failed, proceeding: {_e}"
             )
 
-        for orig in flip_candidates:
-            flipped_expr = f"multiply(-1, {orig.expression})"
-            try:
-                if flip_use_smart:
-                    from backend.sim_settings import smart_simulation_settings
-                    smart = smart_simulation_settings(
-                        flipped_expr,
-                        tier=tier_cfg["tier"],
-                        region=state.region,
-                        universe=state.universe,
-                    )
-                    sim_result = await brain.simulate_alpha(
-                        expression=flipped_expr,
-                        **smart,
-                    )
-                else:
-                    sim_result = await brain.simulate_alpha(
-                        expression=flipped_expr,
-                        region=state.region,
-                        universe=state.universe,
-                    )
-            except Exception as e:
-                logger.warning(f"[{node_name}] flip-retry sim failed: {e}")
-                continue
+        # V-27.81 followup: try/finally so a raise anywhere in the simulate
+        # loop (e.g. a None-metric f-string format, an evaluation-helper
+        # exception) still releases every claimed in-flight slot instead of
+        # leaking them to the 900s TTL.
+        try:
+            for orig in flip_candidates:
+                flipped_expr = f"multiply(-1, {orig.expression})"
+                try:
+                    if flip_use_smart:
+                        from backend.sim_settings import smart_simulation_settings
+                        smart = smart_simulation_settings(
+                            flipped_expr,
+                            tier=tier_cfg["tier"],
+                            region=state.region,
+                            universe=state.universe,
+                        )
+                        sim_result = await brain.simulate_alpha(
+                            expression=flipped_expr,
+                            **smart,
+                        )
+                    else:
+                        sim_result = await brain.simulate_alpha(
+                            expression=flipped_expr,
+                            region=state.region,
+                            universe=state.universe,
+                        )
+                except Exception as e:
+                    logger.warning(f"[{node_name}] flip-retry sim failed: {e}")
+                    continue
 
-            if not sim_result.get("success"):
-                logger.debug(f"[{node_name}] flip sim returned failure for {flipped_expr[:80]}")
-                continue
+                if not sim_result.get("success"):
+                    logger.debug(f"[{node_name}] flip sim returned failure for {flipped_expr[:80]}")
+                    continue
 
-            flip_metrics = sim_result.get("metrics") or {}
-            new_sharpe = flip_metrics.get("sharpe") or 0
-            new_fitness = flip_metrics.get("fitness") or 0
-            new_turnover = flip_metrics.get("turnover") or 0
+                flip_metrics = sim_result.get("metrics") or {}
+                new_sharpe = flip_metrics.get("sharpe") or 0
+                new_fitness = flip_metrics.get("fitness") or 0
+                new_turnover = flip_metrics.get("turnover") or 0
 
-            new_alpha = AlphaCandidate(
-                expression=flipped_expr,
-                hypothesis=(orig.hypothesis or "") + " (sign-flipped)",
-                explanation=(
-                    f"sign-flip retry — original {orig.expression[:60]} "
-                    f"had sharpe={orig.metrics.get('sharpe'):.3f}"
-                ),
-                is_valid=True,
-                is_simulated=True,
-                simulation_success=True,
-                alpha_id=sim_result.get("alpha_id"),
-                metrics=flip_metrics,
-                metadata={
-                    "flipped": True,
-                    "original_expression": orig.expression,
-                    "original_sharpe": orig.metrics.get("sharpe"),
-                    "round": getattr(orig.metadata, "get", lambda k: None)("round")
-                            if not isinstance(orig.metadata, dict)
-                            else (orig.metadata or {}).get("round"),
-                },
-            )
+                new_alpha = AlphaCandidate(
+                    expression=flipped_expr,
+                    hypothesis=(orig.hypothesis or "") + " (sign-flipped)",
+                    explanation=(
+                        f"sign-flip retry — original {orig.expression[:60]} "
+                        f"had sharpe={orig.metrics.get('sharpe'):.3f}"
+                    ),
+                    is_valid=True,
+                    is_simulated=True,
+                    simulation_success=True,
+                    alpha_id=sim_result.get("alpha_id"),
+                    metrics=flip_metrics,
+                    metadata={
+                        "flipped": True,
+                        "original_expression": orig.expression,
+                        "original_sharpe": orig.metrics.get("sharpe"),
+                        "round": getattr(orig.metadata, "get", lambda k: None)("round")
+                                if not isinstance(orig.metadata, dict)
+                                else (orig.metadata or {}).get("round"),
+                    },
+                )
 
-            # Re-eval with the same tier-aware gate. Reuse the per-tier thresholds
-            # (sharpe_min / fitness_min / turnover_min/max) computed at top of
-            # this function. T1 doesn't gate on concentrated / self_corr so the
-            # flip-retry path mirrors that.
-            sub_universe_check = next(
-                (c for c in flip_metrics.get("checks", [])
-                 if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
-                None,
-            )
-            sub_universe_ok = (
-                sub_universe_check is None
-                or sub_universe_check.get("result") != "FAIL"
-            )
+                # Re-eval with the same tier-aware gate. Reuse the per-tier thresholds
+                # (sharpe_min / fitness_min / turnover_min/max) computed at top of
+                # this function. T1 doesn't gate on concentrated / self_corr so the
+                # flip-retry path mirrors that.
+                sub_universe_check = next(
+                    (c for c in flip_metrics.get("checks", [])
+                     if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
+                    None,
+                )
+                sub_universe_ok = (
+                    sub_universe_check is None
+                    or sub_universe_check.get("result") != "FAIL"
+                )
 
-            pass_sharpe = new_sharpe >= sharpe_min
-            pass_fitness = new_fitness >= fitness_min
-            pass_turnover = turnover_min <= new_turnover <= turnover_max
-            # V-12 (2026-05-03 spike-discovered gap): the main hard_gate path
-            # already includes is_overfit_safe, but the sign-flip retry path
-            # bypassed it. Spike 2.0 alpha YP2QnnVW (multiply(-1, ts_zscore(
-            # analyst_revision_rank_derivative, 5))) hit train=8.37 / test=0
-            # via flip-retry and was wrongly tagged PASS. Apply the same OS-
-            # consistency gate here so flip-retry can't smuggle IS-overfit
-            # PASSes through.
-            is_overfit_safe = _check_is_os_consistency(flip_metrics, tier=tier_cfg["tier"])
+                pass_sharpe = new_sharpe >= sharpe_min
+                pass_fitness = new_fitness >= fitness_min
+                pass_turnover = turnover_min <= new_turnover <= turnover_max
+                # V-12 (2026-05-03 spike-discovered gap): the main hard_gate path
+                # already includes is_overfit_safe, but the sign-flip retry path
+                # bypassed it. Spike 2.0 alpha YP2QnnVW (multiply(-1, ts_zscore(
+                # analyst_revision_rank_derivative, 5))) hit train=8.37 / test=0
+                # via flip-retry and was wrongly tagged PASS. Apply the same OS-
+                # consistency gate here so flip-retry can't smuggle IS-overfit
+                # PASSes through.
+                is_overfit_safe = _check_is_os_consistency(flip_metrics, tier=tier_cfg["tier"])
 
-            if pass_sharpe and pass_fitness and pass_turnover and sub_universe_ok and is_overfit_safe:
-                # V-16 (2026-05-03): apply same suspicion-mode checks on the
-                # flipped expression — flip-retry inherits the same overfit
-                # surface as the main hard_gate path.
-                v16_flags = _run_suspicion_checks(flip_metrics, flipped_expr or "")
-                hard_flags = [f for f in v16_flags if f.get("severity") == "hard"]
-                if v16_flags and isinstance(new_alpha.metrics, dict):
-                    new_alpha.metrics["_v16_suspicion_flags"] = v16_flags
-                if hard_flags:
+                if pass_sharpe and pass_fitness and pass_turnover and sub_universe_ok and is_overfit_safe:
+                    # V-16 (2026-05-03): apply same suspicion-mode checks on the
+                    # flipped expression — flip-retry inherits the same overfit
+                    # surface as the main hard_gate path.
+                    v16_flags = _run_suspicion_checks(flip_metrics, flipped_expr or "")
+                    hard_flags = [f for f in v16_flags if f.get("severity") == "hard"]
+                    if v16_flags and isinstance(new_alpha.metrics, dict):
+                        new_alpha.metrics["_v16_suspicion_flags"] = v16_flags
+                    if hard_flags:
+                        new_alpha.quality_status = "PASS_PROVISIONAL"
+                        optimize_count += 1
+                        flip_retry_prov += 1
+                        logger.warning(
+                            f"[{node_name}] V-16 downgrades flip-retry PASS → PROV | "
+                            f"sharpe={new_sharpe:.2f} flags={[f['check'] for f in hard_flags]}"
+                        )
+                    else:
+                        new_alpha.quality_status = "PASS"
+                        pass_count += 1
+                        flip_retry_pass += 1
+                elif (
+                    new_sharpe >= prov_sharpe_min
+                    and new_fitness >= prov_fitness_min
+                    and turnover_min <= new_turnover <= prov_turnover_max
+                    and sub_universe_ok
+                ):
                     new_alpha.quality_status = "PASS_PROVISIONAL"
                     optimize_count += 1
                     flip_retry_prov += 1
-                    logger.warning(
-                        f"[{node_name}] V-16 downgrades flip-retry PASS → PROV | "
-                        f"sharpe={new_sharpe:.2f} flags={[f['check'] for f in hard_flags]}"
-                    )
                 else:
-                    new_alpha.quality_status = "PASS"
-                    pass_count += 1
-                    flip_retry_pass += 1
-            elif (
-                new_sharpe >= prov_sharpe_min
-                and new_fitness >= prov_fitness_min
-                and turnover_min <= new_turnover <= prov_turnover_max
-                and sub_universe_ok
-            ):
-                new_alpha.quality_status = "PASS_PROVISIONAL"
-                optimize_count += 1
-                flip_retry_prov += 1
-            else:
-                new_alpha.quality_status = "FAIL"
-                fail_count += 1
+                    new_alpha.quality_status = "FAIL"
+                    fail_count += 1
 
-            updated_alphas.append(new_alpha)
-            flip_retry_count += 1
-            logger.info(
-                f"[{node_name}] flip-retry result: orig_sharpe={orig.metrics.get('sharpe'):.2f} "
-                f"→ flipped_sharpe={new_sharpe:.2f} status={new_alpha.quality_status}"
-            )
+                updated_alphas.append(new_alpha)
+                flip_retry_count += 1
+                logger.info(
+                    f"[{node_name}] flip-retry result: orig_sharpe={orig.metrics.get('sharpe'):.2f} "
+                    f"→ flipped_sharpe={new_sharpe:.2f} status={new_alpha.quality_status}"
+                )
+        finally:
+            # V-27.81: release every in-flight simulate slot claimed in the
+            # dedup loop above (covers simulated, failed, mid-loop-continue'd,
+            # and now also raised-out flipped expressions). TTL is the crash
+            # net for anything still missed.
+            for _flip_slot in flip_claimed_slots:
+                _flip_release_slot(*_flip_slot)
 
     duration_ms = int((time.time() - start_time) * 1000)
     

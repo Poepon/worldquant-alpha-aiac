@@ -5,11 +5,13 @@ Contains the main mining task execution logic.
 """
 
 import asyncio
+import os
 from datetime import datetime
 from sqlalchemy import select, update, func
 from loguru import logger
 
 from backend.celery_app import celery_app
+from backend.config import settings
 from backend.database import AsyncSessionLocal
 from backend.agents import MiningAgent
 from backend.adapters.brain_adapter import BrainAdapter
@@ -69,51 +71,140 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             # crash-safe via TTL (3h = max expected cascade run). Worker exits
             # cleanly on duplicate; redis cleanup on normal exit + TTL safety.
             cascade_lock_key = f"cascade_lock:task:{task_id}"
-            cascade_lock_token = self.request.id  # unique per celery dispatch
             cascade_lock_acquired = False
             from backend.tasks.redis_pool import (
                 acquire_cascade_lock,
                 release_cascade_lock,
                 peek_lock_holder,
+                verify_lock_ownership,
             )
-            try:
-                cascade_lock_acquired = acquire_cascade_lock(
-                    cascade_lock_key,
-                    cascade_lock_token,
-                    ttl_sec=10800,  # 3h safety net for crashed workers
-                )
-            except Exception as _e:
-                # V-26.27: fail-closed when Redis is unreachable. The previous
-                # behavior set cascade_lock_acquired=True (fail-open) which
-                # allowed duplicate cascade workers to run concurrently —
-                # the exact bug the lock was added to prevent. Better to
-                # skip this dispatch; celery beat / watchdog will retry.
-                logger.error(
-                    f"[cascade] redis lock unreachable, refusing to dispatch "
-                    f"task={task_id} (fail-closed): {_e}"
-                )
-                return {
-                    "skipped": True,
-                    "reason": "redis_unavailable",
-                    "task_id": task_id,
-                }
-            if not cascade_lock_acquired:
-                holder_str = peek_lock_holder(cascade_lock_key) or "?"
-                logger.warning(
-                    f"[cascade] Task {task_id} already has an active run "
-                    f"(redis lock held by {holder_str}); celery_task="
-                    f"{self.request.id} exits as duplicate."
-                )
-                return {
-                    "skipped": True,
-                    "reason": "duplicate_active_run",
-                    "task_id": task_id,
-                    "lock_holder": holder_str,
-                }
+            _lock_ttl = getattr(settings, "CASCADE_LOCK_TTL_SEC", 10800)
+            _takeover_enabled = getattr(settings, "CASCADE_LOCK_TAKEOVER_ENABLED", True)
+
+            # V-27.1: peek the run's config_snapshot for a watchdog-handed
+            # takeover token BEFORE touching the lock. READ-ONLY query — no
+            # run is created here; _get_or_create_run below still does the
+            # authoritative create/attach (so a duplicate exit leaves no
+            # orphan run row). If the watchdog revived this task it already
+            # atomically took over the lock with this token, so we CLAIM it
+            # (verify ownership) rather than acquire a fresh one — the latter
+            # is what let the old worker keep running alongside the
+            # replacement (the V-27.1 double-run race).
+            _handed_token = None
+            if run_id is not None and _takeover_enabled:
+                _peek_run = (
+                    await db.execute(
+                        select(ExperimentRun).where(ExperimentRun.id == run_id)
+                    )
+                ).scalar_one_or_none()
+                if _peek_run is not None and isinstance(_peek_run.config_snapshot, dict):
+                    _handed_token = _peek_run.config_snapshot.get("cascade_lock_token")
+
+            if _handed_token:
+                # --- Claim path: the watchdog already owns the lock for us ---
+                cascade_lock_token = _handed_token
+                ownership = verify_lock_ownership(cascade_lock_key, cascade_lock_token)
+                if ownership == "OWNED":
+                    cascade_lock_acquired = True
+                    logger.info(
+                        f"[cascade] task={task_id} claimed watchdog takeover "
+                        f"lock (token={cascade_lock_token})"
+                    )
+                elif ownership == "MISSING":
+                    # TTL expired between takeover and worker start-up — fall
+                    # back to a fresh acquire with the same token.
+                    try:
+                        cascade_lock_acquired = acquire_cascade_lock(
+                            cascade_lock_key, cascade_lock_token,
+                            ttl_sec=_lock_ttl, run_id=run_id,
+                            worker_pid=os.getpid(),
+                        )
+                    except Exception as _e:
+                        logger.error(
+                            f"[cascade] redis unreachable re-acquiring expired "
+                            f"takeover lock for task={task_id} (fail-closed): {_e}"
+                        )
+                        return {
+                            "skipped": True,
+                            "reason": "redis_unavailable",
+                            "task_id": task_id,
+                        }
+                    if cascade_lock_acquired:
+                        logger.warning(
+                            f"[cascade] task={task_id} takeover lock had "
+                            f"expired; re-acquired fresh with the same token"
+                        )
+                elif ownership == "UNKNOWN":
+                    # Redis blip — fail-closed, don't run unprotected.
+                    logger.error(
+                        f"[cascade] redis UNKNOWN verifying takeover lock for "
+                        f"task={task_id} (fail-closed)"
+                    )
+                    return {
+                        "skipped": True,
+                        "reason": "redis_unavailable",
+                        "task_id": task_id,
+                    }
+                # ownership == "LOST" → cascade_lock_acquired stays False.
+                if not cascade_lock_acquired:
+                    holder = peek_lock_holder(cascade_lock_key) or {}
+                    holder_str = holder.get("token", "?")
+                    logger.warning(
+                        f"[cascade] task={task_id} takeover lock no longer "
+                        f"ours (ownership={ownership}, held by {holder_str}); "
+                        f"this worker exits as duplicate."
+                    )
+                    return {
+                        "skipped": True,
+                        "reason": "duplicate_active_run",
+                        "task_id": task_id,
+                        "lock_holder": holder_str,
+                    }
+            else:
+                # --- Normal acquire path — token is this celery dispatch ---
+                cascade_lock_token = self.request.id  # unique per celery dispatch
+                try:
+                    cascade_lock_acquired = acquire_cascade_lock(
+                        cascade_lock_key, cascade_lock_token,
+                        ttl_sec=_lock_ttl, run_id=run_id,
+                        worker_pid=os.getpid(),
+                    )
+                except Exception as _e:
+                    # V-26.27: fail-closed when Redis is unreachable. The
+                    # previous behavior set cascade_lock_acquired=True
+                    # (fail-open) which allowed duplicate cascade workers to
+                    # run concurrently — the exact bug the lock was added to
+                    # prevent. Better to skip this dispatch; celery beat /
+                    # watchdog will retry.
+                    logger.error(
+                        f"[cascade] redis lock unreachable, refusing to dispatch "
+                        f"task={task_id} (fail-closed): {_e}"
+                    )
+                    return {
+                        "skipped": True,
+                        "reason": "redis_unavailable",
+                        "task_id": task_id,
+                    }
+                if not cascade_lock_acquired:
+                    holder = peek_lock_holder(cascade_lock_key) or {}
+                    holder_str = holder.get("token", "?")
+                    logger.warning(
+                        f"[cascade] Task {task_id} already has an active run "
+                        f"(redis lock held by {holder_str}); celery_task="
+                        f"{self.request.id} exits as duplicate."
+                    )
+                    return {
+                        "skipped": True,
+                        "reason": "duplicate_active_run",
+                        "task_id": task_id,
+                        "lock_holder": holder_str,
+                    }
 
             # V-26.4: Lua-atomic release. Only deletes the key if it still
             # holds our token — if our TTL expired and another worker
-            # re-acquired with a different token, this is a no-op.
+            # re-acquired, or the watchdog took over with a different token,
+            # this is a no-op (V-27.1: the old worker cannot clobber the
+            # replacement's lock).
             def _release_lock():
                 release_cascade_lock(cascade_lock_key, cascade_lock_token)
 
@@ -136,7 +227,11 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             # original behavior 100%.
             if task.mining_mode == "CONTINUOUS_CASCADE":
                 try:
-                    return await _run_continuous_cascade(db, task, run, self.request.id)
+                    return await _run_continuous_cascade(
+                        db, task, run, self.request.id,
+                        lock_key=cascade_lock_key,
+                        lock_token=cascade_lock_token,
+                    )
                 except Exception as e:
                     logger.error(f"[cascade] Task {task_id} failed: {e}")
                     await db.rollback()
@@ -757,6 +852,54 @@ async def _prefetch_round_isolated(
                 return {"all_alphas": [], "iterations_completed": 0, "error": str(e)}
 
 
+def _verify_cascade_ownership(lock_key: str, token: str, *, where: str) -> bool:
+    """V-27.1: round-boundary cascade-lock ownership self-check. Returns True
+    if the worker should keep running, False if it should exit gracefully.
+
+      OWNED   → True  (we still hold the lock)
+      UNKNOWN → True  (Redis blip — a transient error must NEVER make a live
+                       worker self-terminate; the RCA safety floor. If every
+                       cascade worker self-killed on a Redis hiccup that is
+                       strictly worse than the original double-run bug.)
+      LOST    → False (watchdog took over; a replacement worker is running)
+      MISSING → False (lock vanished — TTL expired / cleared; don't keep
+                       running unprotected)
+
+    Returns True unconditionally when CASCADE_LOCK_TAKEOVER_ENABLED is off,
+    so the flag is a full kill-switch for the new self-exit path.
+    """
+    if not getattr(settings, "CASCADE_LOCK_TAKEOVER_ENABLED", True):
+        return True
+    from backend.tasks.redis_pool import renew_cascade_lock, verify_lock_ownership
+    state = verify_lock_ownership(lock_key, token)
+    if state in ("OWNED", "UNKNOWN"):
+        if state == "OWNED":
+            # V-27.1 followup: renew the TTL at every round boundary. The lock
+            # TTL (CASCADE_LOCK_TTL_SEC, default 3h) is shorter than a
+            # CONTINUOUS_CASCADE worker's lifetime — without renewal a healthy
+            # long-running worker lets the lock expire under it, then
+            # self-terminates (MISSING) on the next boundary, and the watchdog
+            # can take over the freed lock mid-round (a fresh double-run path).
+            _ttl = getattr(settings, "CASCADE_LOCK_TTL_SEC", 10800)
+            if not renew_cascade_lock(lock_key, token, _ttl):
+                logger.warning(
+                    f"[cascade-ownership] {where}: lock renew returned 0 "
+                    f"(redis blip or token mismatch) — continuing; the next "
+                    f"boundary check will catch a genuine loss"
+                )
+        elif state == "UNKNOWN":
+            logger.warning(
+                f"[cascade-ownership] {where}: redis UNKNOWN — continuing "
+                f"(a transient error must not self-terminate a live worker)"
+            )
+        return True
+    logger.warning(
+        f"[cascade-ownership] {where}: lock state={state} — this worker has "
+        f"been taken over, exiting gracefully"
+    )
+    return False
+
+
 async def _run_cascade_phase(
     db,
     task,
@@ -767,6 +910,8 @@ async def _run_cascade_phase(
     *,
     tier: int,
     max_rounds: int,
+    lock_key: str,
+    lock_token: str,
 ) -> dict:
     """Run a cascade phase for `tier` for `max_rounds` total rounds.
 
@@ -884,6 +1029,13 @@ async def _run_cascade_phase(
             alphas_added += len(result.get("all_alphas", []))
             # V-26.3: pass result so progress_current advances with PASS count.
             await _stamp_heartbeat(result)
+            # V-27.1: round-boundary ownership self-check. If the watchdog
+            # took over this task's lock, a replacement worker is running —
+            # exit gracefully rather than burn another round's BRAIN quota.
+            if not _verify_cascade_ownership(
+                lock_key, lock_token, where=f"T{tier} serial round boundary"
+            ):
+                return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": True}
         return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
 
     # V-20.1 pipeline path — two-deep lookahead.
@@ -964,6 +1116,16 @@ async def _run_cascade_phase(
             # V-26.3: pass round result so PASS count flows to progress_current.
             await _stamp_heartbeat(result)
 
+            # V-27.1: round-boundary ownership self-check. If the watchdog
+            # took over this task's lock, a replacement worker is running —
+            # cancel any in-flight prefetch first (so it doesn't write orphan
+            # rows after we give up, cf. V-26.29) then exit gracefully.
+            if not _verify_cascade_ownership(
+                lock_key, lock_token, where=f"T{tier} pipeline round boundary"
+            ):
+                await _cancel_remaining()
+                return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": True}
+
             # Promote next → current; schedule a fresh next if budget remaining
             current = next_task
             current_label = next_label
@@ -995,7 +1157,7 @@ async def _run_cascade_phase(
     return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
 
 
-async def _run_continuous_cascade(db, task, run, celery_task_id):
+async def _run_continuous_cascade(db, task, run, celery_task_id, *, lock_key, lock_token):
     """V-19 main loop — persistent mining service.
 
     Repeats T1 → T2 → T3 cycles until the user pauses (status='PAUSED' via
@@ -1040,6 +1202,16 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
                     f"[cascade] task={task.id} status={task.status}, exiting main loop"
                 )
                 _outer_diag(f"exit_status={task.status}")
+                break
+
+            # V-27.1: ownership self-check at the outer loop top. Catches the
+            # case where a phase is skipped (T2/T3 seed shortage) so the
+            # per-round checks inside _run_cascade_phase never run — without
+            # this a taken-over worker could spin the outer loop indefinitely.
+            if not _verify_cascade_ownership(
+                lock_key, lock_token, where="cascade outer loop top"
+            ):
+                _outer_diag("exit_taken_over")
                 break
 
             # 2026-05-11: proactively refresh BRAIN session at every phase
@@ -1087,6 +1259,7 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
                 phase_result = await _run_cascade_phase(
                     db, task, run, brain, mining_agent, operators,
                     tier=1, max_rounds=settings.CASCADE_T1_ROUNDS,
+                    lock_key=lock_key, lock_token=lock_token,
                 )
                 _outer_diag(f"T1_phase_end result={phase_result}")
                 total_alphas += phase_result["alphas_added"]
@@ -1115,6 +1288,7 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
                     phase_result = await _run_cascade_phase(
                         db, task, run, brain, mining_agent, operators,
                         tier=2, max_rounds=settings.CASCADE_T2_ROUNDS,
+                        lock_key=lock_key, lock_token=lock_token,
                     )
                     total_alphas += phase_result["alphas_added"]
                     if phase_result["paused"]:
@@ -1152,6 +1326,7 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
                         phase_result = await _run_cascade_phase(
                             db, task, run, brain, mining_agent, operators,
                             tier=3, max_rounds=settings.CASCADE_T3_ROUNDS,
+                            lock_key=lock_key, lock_token=lock_token,
                         )
                         total_alphas += phase_result["alphas_added"]
                         if phase_result["paused"]:
@@ -1160,6 +1335,15 @@ async def _run_continuous_cascade(db, task, run, celery_task_id):
                         logger.info(
                             f"[cascade] task={task.id} T3 phase SKIP: seed shortage"
                         )
+
+                # V-27.1: ownership self-check before committing the round
+                # boundary. If taken over, exit before incrementing — the
+                # replacement worker owns round-index advancement now.
+                if not _verify_cascade_ownership(
+                    lock_key, lock_token, where="cascade round-complete boundary"
+                ):
+                    _outer_diag("exit_taken_over_at_round_complete")
+                    break
 
                 # Cascade round complete — increment + reset to T1
                 task.cascade_round_idx += 1
