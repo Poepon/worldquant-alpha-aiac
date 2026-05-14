@@ -238,46 +238,82 @@ def sync_datasets():
     logger.info("Syncing datasets from BRAIN...")
     
     async def _run():
+        # V-27.3: the beat sync was INSERT-only — it skipped already-existing
+        # rows (never refreshing field_count / value_score / pyramid_multiplier
+        # / coverage) AND new rows landed with universe=NULL. Since
+        # _get_datasets_to_mine / _get_dataset_fields filter on
+        # `universe == task.universe`, every beat-synced dataset was invisible
+        # to mining — the daily beat was effectively a no-op. Now mirrors the
+        # manual sync_datasets_from_brain: per (region, universe), UPDATE
+        # existing rows + INSERT new ones with the full field set.
+        from backend.config import settings as _settings
+        universe = getattr(_settings, "DEFAULT_UNIVERSE", "TOP3000")
         async with AsyncSessionLocal() as db:
             async with BrainAdapter() as brain:
                 regions = ["USA", "CHN", "ASI", "EUR"]
-                total = 0
-                
+                new_count = 0
+                updated_count = 0
+
                 for region in regions:
-                    datasets = await brain.get_datasets(region=region)
-                    
+                    datasets = await brain.get_datasets(region=region, universe=universe)
+
                     for ds in datasets:
-                        existing = await db.execute(
+                        result = await db.execute(
                             select(DatasetMetadata).where(
                                 DatasetMetadata.dataset_id == ds.get("id"),
-                                DatasetMetadata.region == region
+                                DatasetMetadata.region == region,
+                                DatasetMetadata.universe == universe,
                             )
                         )
-                        
-                        if not existing.scalar_one_or_none():
-                            category = ds.get("category")
-                            if isinstance(category, dict):
-                                category = category.get("id")
-                                
-                            subcategory = ds.get("subcategory")
-                            if isinstance(subcategory, dict):
-                                subcategory = subcategory.get("id")
+                        existing = result.scalar_one_or_none()
 
-                            metadata = DatasetMetadata(
+                        category = ds.get("category")
+                        if isinstance(category, dict):
+                            category = category.get("id")
+                        subcategory = ds.get("subcategory")
+                        if isinstance(subcategory, dict):
+                            subcategory = subcategory.get("id")
+
+                        if existing:
+                            existing.description = ds.get("description")
+                            existing.category = category
+                            existing.subcategory = subcategory
+                            existing.field_count = ds.get("fieldCount", 0)
+                            existing.last_synced_at = func.now()
+                            existing.date_coverage = ds.get("dateCoverage")
+                            existing.themes = ds.get("themes")
+                            existing.resources = ds.get("researchPapers")
+                            existing.value_score = ds.get("valueScore")
+                            existing.alpha_count = ds.get("alphaCount")
+                            existing.pyramid_multiplier = ds.get("pyramidMultiplier")
+                            existing.coverage = ds.get("coverage")
+                            updated_count += 1
+                        else:
+                            db.add(DatasetMetadata(
                                 dataset_id=ds.get("id"),
                                 region=region,
+                                universe=universe,
                                 category=category,
                                 subcategory=subcategory,
                                 description=ds.get("description"),
-                                field_count=ds.get("fieldCount", 0)
-                            )
-                            db.add(metadata)
-                            total += 1
-                
+                                field_count=ds.get("fieldCount", 0),
+                                date_coverage=ds.get("dateCoverage"),
+                                themes=ds.get("themes"),
+                                resources=ds.get("researchPapers"),
+                                value_score=ds.get("valueScore"),
+                                alpha_count=ds.get("alphaCount"),
+                                pyramid_multiplier=ds.get("pyramidMultiplier"),
+                                coverage=ds.get("coverage"),
+                            ))
+                            new_count += 1
+
                 await db.commit()
-                logger.info(f"Synced {total} new datasets")
-                return {"new_datasets": total}
-    
+                logger.info(
+                    f"Synced datasets (universe={universe}): "
+                    f"{new_count} new, {updated_count} updated"
+                )
+                return {"new_datasets": new_count, "updated_datasets": updated_count}
+
     return run_async(_run())
 
 

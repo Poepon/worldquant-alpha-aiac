@@ -751,12 +751,19 @@ class RAGService:
         hitl_count = (await self.db.execute(hitl_count_stmt)).scalar() or 0
         apply_hitl_bonus = prefer_hitl and hitl_count >= hitl_min_count
 
+        # V-27.95: window on created_at, NOT updated_at. _track_retrieval_hit
+        # bumps updated_at on every retrieve hit (V-24.D), so windowing on
+        # updated_at was self-locking — a hit entry refreshed its own window
+        # eligibility, stayed a candidate forever, kept getting hit, and
+        # squeezed colder entries out. created_at ("when this pattern was
+        # discovered") is the right axis for "recent few-shot examples";
+        # updated_at stays free to mean "last activity" for kb_hit_audit.
         stmt = (
             select(KnowledgeEntry)
             .where(
                 KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
                 KnowledgeEntry.is_active == True,
-                KnowledgeEntry.updated_at >= cutoff,
+                KnowledgeEntry.created_at >= cutoff,
             )
             .order_by(KnowledgeEntry.usage_count.desc())
             .limit(limit * 6)  # over-fetch since dataset filter may drop many

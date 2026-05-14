@@ -874,7 +874,19 @@ async def node_evaluate(
         train_fitness_val = metrics.get("train_fitness")
         test_sharpe_val = metrics.get("test_sharpe")
         test_fitness_val = metrics.get("test_fitness")
-        
+
+        # V-27.77: do NOT fabricate the OS/test leg. When BRAIN returned no
+        # separate test metrics, leave sim_result["test"] empty —
+        # _extract_os_stats falls back gracefully (test → os → pnl.os → {}).
+        # The old `metrics.get("sharpe",0) * 0.8` invented an OS sharpe out of
+        # thin air and fed it to calculate_alpha_score / should_optimize /
+        # get_failed_tests (V-26.19 only fixed the hard_gate link via
+        # _check_is_os_consistency, not the scoring link).
+        if test_sharpe_val is not None and test_fitness_val is not None:
+            test_leg = {"sharpe": test_sharpe_val, "fitness": test_fitness_val}
+        else:
+            test_leg = {}
+
         # 构建完整的 sim_result，包含 BRAIN 返回的 checks
         sim_result = {
             "train": {
@@ -883,10 +895,7 @@ async def node_evaluate(
                 "turnover": metrics.get("turnover", 0),
                 "returns": metrics.get("returns", 0),
             },
-            "test": {
-                "sharpe": test_sharpe_val if test_sharpe_val is not None else metrics.get("sharpe", 0) * 0.8,
-                "fitness": test_fitness_val if test_fitness_val is not None else metrics.get("fitness", 0),
-            },
+            "test": test_leg,
             "is": {
                 "sharpe": metrics.get("sharpe", 0),
                 "fitness": metrics.get("fitness", 0),
@@ -1177,6 +1186,23 @@ async def node_evaluate(
             if hard_flags:
                 alpha.quality_status = "PASS_PROVISIONAL"
                 optimize_count += 1
+            elif not brain_eval['check_details']:
+                # V-27.78: BRAIN returned no checks (session-expiry window,
+                # transient 5xx, etc.) → the BRAIN-side submission gate was
+                # never verified. hard_gate_pass + score>=threshold can still
+                # be True here, reviving the score-only PASS bypass — and the
+                # BRAIN-aware downgrade below can't fire either because
+                # brain_failed_checks is empty. Without a BRAIN verdict the
+                # alpha must NOT be a confident PASS; hold it at PROVISIONAL,
+                # mirroring the unverified-self_corr path.
+                alpha.quality_status = "PASS_PROVISIONAL"
+                optimize_count += 1
+                if isinstance(alpha.metrics, dict):
+                    alpha.metrics["_brain_checks_unverified"] = True
+                logger.info(
+                    f"[{node_name}] PASS→PROVISIONAL: BRAIN returned no checks "
+                    f"(gate unverified) | sharpe={sharpe:.2f}"
+                )
             elif brain_actionable_fails and not brain_can_submit:
                 alpha.quality_status = "PASS_PROVISIONAL"
                 optimize_count += 1
