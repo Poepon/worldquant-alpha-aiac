@@ -507,6 +507,46 @@ class MiningWorkflow:
                         f"— falling back to per-row savepoint catch"
                     )
 
+            # V-27.45: hypothesis reuse TOCTOU guard — re-check hypothesis
+            # status at INSERT time (the race-window end). node_save_results /
+            # generation V-22.13 reuse may have linked these rows to a
+            # hypothesis a concurrent B5 mark_abandoned has since flipped to
+            # terminal. Resolve terminal hypothesis_ids once for both the
+            # alpha and failure loops below. Fail-open: a check failure keeps
+            # the links (== pre-fix behaviour).
+            _terminal_hids: set = set()
+            try:
+                from backend.config import settings as _v2745_settings
+                if getattr(
+                    _v2745_settings, "HYPOTHESIS_REUSE_TERMINAL_GUARD_ENABLED", True
+                ):
+                    _hids_to_check = {
+                        getattr(ar, "hypothesis_id", None)
+                        for ar in result.get("generated_alphas", [])
+                    } | {
+                        getattr(f, "hypothesis_id", None)
+                        for f in result.get("failures", [])
+                    }
+                    _hids_to_check.discard(None)
+                    if _hids_to_check:
+                        from backend.services.hypothesis_service import (
+                            HypothesisService,
+                        )
+                        _terminal_hids = await HypothesisService(
+                            self.db
+                        ).filter_terminal_ids(list(_hids_to_check))
+                        if _terminal_hids:
+                            logger.warning(
+                                f"[MiningWorkflow] V-27.45 {len(_terminal_hids)} "
+                                f"hypothesis(es) terminal — dropping links on "
+                                f"this batch: {_terminal_hids}"
+                            )
+            except Exception as _v2745_e:
+                logger.warning(
+                    f"[MiningWorkflow] V-27.45 terminal check failed "
+                    f"(non-fatal, links kept): {_v2745_e}"
+                )
+
             alpha_inserted = 0
             alpha_skipped = 0
             alpha_skipped_dup = 0
@@ -531,6 +571,11 @@ class MiningWorkflow:
                 try:
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
                     metrics_dict = alpha_result.metrics if isinstance(alpha_result.metrics, dict) else {}
+                    # V-27.45: drop the link if the hypothesis went terminal
+                    # in the reuse race window.
+                    _ar_hid = getattr(alpha_result, "hypothesis_id", None)
+                    if _ar_hid in _terminal_hids:
+                        _ar_hid = None
 
                     alpha = Alpha(
                         task_id=task.id,
@@ -558,8 +603,9 @@ class MiningWorkflow:
                         metrics_snapshot_at=task_metrics_snapshot_at,
                         # Phase 2 B4: typed Hypothesis link from
                         # AlphaResult.hypothesis_id (set by node_save_results
-                        # from state.current_hypothesis_id)
-                        hypothesis_id=getattr(alpha_result, "hypothesis_id", None),
+                        # from state.current_hypothesis_id). V-27.45: _ar_hid
+                        # is the terminal-guarded value (NULL if abandoned).
+                        hypothesis_id=_ar_hid,
                     )
                     # V-19.2: SAVEPOINT per row. flush() inside the nested
                     # transaction surfaces IntegrityError immediately so the
@@ -595,6 +641,11 @@ class MiningWorkflow:
             failure_inserted = 0
             for failure in result.get("failures", []):
                 try:
+                    # V-27.45: drop the link if the hypothesis went terminal
+                    # in the reuse race window.
+                    _f_hid = getattr(failure, "hypothesis_id", None)
+                    if _f_hid in _terminal_hids:
+                        _f_hid = None
                     fail_record = AlphaFailure(
                         task_id=task.id,
                         run_id=run_id,
@@ -605,7 +656,8 @@ class MiningWorkflow:
                         # persistence.py FailureRecord.hypothesis_id carries
                         # the resolved scalar (with list[0] fallback) so the
                         # FK is consistent with the PASS-path Alpha.hypothesis_id.
-                        hypothesis_id=getattr(failure, "hypothesis_id", None),
+                        # V-27.45: _f_hid is the terminal-guarded value.
+                        hypothesis_id=_f_hid,
                     )
                     async with self.db.begin_nested():
                         self.db.add(fail_record)

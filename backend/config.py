@@ -452,6 +452,12 @@ class Settings(BaseSettings):
     # the abandon DECISION is gated, so this is a clean kill-switch.
     HYPOTHESIS_ABANDON_USE_DB_STATS: bool = True
 
+    # V-27.45 — re-check hypothesis status at alpha/failure INSERT time and
+    # drop the link if it has gone terminal (ABANDONED/SUPERSEDED) in the
+    # V-22.13 reuse race window. Off → keep the link unconditionally
+    # (pre-fix behaviour).
+    HYPOTHESIS_REUSE_TERMINAL_GUARD_ENABLED: bool = True
+
     # V-27.108 — failure-pitfall scoring weights (failure side of V-26.36;
     # the success side is already config'd as RAG_SCORE_*).
     RAG_PITFALL_SEVERITY_HIGH: int = 30

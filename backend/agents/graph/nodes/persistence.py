@@ -193,6 +193,37 @@ async def _incremental_save_alphas(
     inserted_alpha_ids: List[str] = []  # alpha_ids that successfully landed
     on_conflict_skipped: List[str] = []  # alpha_ids skipped by ON CONFLICT (race / cross-task)
     skipped_no_alpha_id: List[str] = []  # V-26.92 observability
+
+    # V-27.45: hypothesis reuse TOCTOU guard. V-22.13 reuse (generation.py)
+    # read this hypothesis's status in a since-closed session; a concurrent
+    # B5 mark_abandoned may have flipped it to terminal (ABANDONED/SUPERSEDED)
+    # in the race window. Re-check here, close to the INSERT — terminal →
+    # drop the link, the alpha rows still land with hypothesis_id=NULL
+    # (consistent with alpha.py "NULL for legacy alphas"; B5 attribution is
+    # None-safe). Fail-open: a check failure keeps the link (pre-fix behaviour).
+    from backend.config import settings as _cfg_settings
+    if (
+        hypothesis_id is not None
+        and getattr(_cfg_settings, "HYPOTHESIS_REUSE_TERMINAL_GUARD_ENABLED", True)
+    ):
+        try:
+            from backend.services.hypothesis_service import HypothesisService
+            _terminal = await HypothesisService(db_session).filter_terminal_ids(
+                [hypothesis_id]
+            )
+            if hypothesis_id in _terminal:
+                logger.warning(
+                    f"[_incremental_save_alphas] V-27.45 hypothesis "
+                    f"{hypothesis_id} is terminal — dropping link on this "
+                    f"batch's alpha rows (hypothesis_id → NULL)"
+                )
+                hypothesis_id = None
+        except Exception as _tg_e:
+            logger.warning(
+                f"[_incremental_save_alphas] V-27.45 terminal check failed "
+                f"(non-fatal, link kept): {_tg_e}"
+            )
+
     for alpha in pending_alphas:
         if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
             continue

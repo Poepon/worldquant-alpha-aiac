@@ -278,6 +278,30 @@ class HypothesisService(BaseService):
             return True
         return False
 
+    async def filter_terminal_ids(self, hypothesis_ids: list[int]) -> set[int]:
+        """V-27.45: return the subset of `hypothesis_ids` whose status is
+        TERMINAL (ABANDONED / SUPERSEDED) — those must NOT receive new alpha /
+        failure links.
+
+        Used as a TOCTOU guard at alpha INSERT time: V-22.13 hypothesis reuse
+        (generation.py) reads status in a since-closed session, and a
+        concurrent B5 `mark_abandoned` may have flipped it in the race window.
+        `mark_abandoned` is a terminal transition (no path back to
+        ACTIVE/PROPOSED), so the status read here at INSERT time is final.
+
+        Empty input → empty set (no query)."""
+        if not hypothesis_ids:
+            return set()
+        stmt = select(Hypothesis.id).where(
+            Hypothesis.id.in_(list(hypothesis_ids)),
+            Hypothesis.status.in_([
+                HypothesisStatus.ABANDONED.value,
+                HypothesisStatus.SUPERSEDED.value,
+            ]),
+        )
+        rows = (await self.db.execute(stmt)).scalars().all()
+        return set(rows)
+
     # V-27.B (2026-05-14): mark_superseded removed — the G-refine loop
     # (abandon → refine into a SUPERSEDED child) never fired in production
     # (V-26.14: 0/673 hypotheses had a parent). HypothesisStatus.SUPERSEDED
