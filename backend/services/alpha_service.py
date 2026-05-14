@@ -349,7 +349,6 @@ class AlphaService(BaseService):
         self,
         alpha_pk: int,
         brain_adapter=None,
-        skip_precheck: bool = False,
     ) -> Dict[str, Any]:
         """Submit an alpha to BRAIN for evaluation.
 
@@ -364,6 +363,11 @@ class AlphaService(BaseService):
              "unknown" precheck is inconclusive and does NOT block — the
              submit proceeds and BRAIN makes the final call.
 
+        Concurrency (V-27.123): the alpha row is read with SELECT ... FOR
+        UPDATE and held until commit, so two concurrent submits of the same
+        alpha (double-clicked Popconfirm, frontend + script) serialise — the
+        loser sees date_submitted already set and is rejected by gate 2.
+
         On BRAIN success, stamps alpha.date_submitted and refreshes the
         portfolio-skeleton cache so the mining loop stops re-generating the
         just-submitted shape.
@@ -372,7 +376,17 @@ class AlphaService(BaseService):
         brain?} — submitted=False with a human-readable reason on any gate
         failure or BRAIN rejection. Never raises for gate failures.
         """
-        alpha = await self.alpha_repo.get_by_id(alpha_pk)
+        from sqlalchemy import select
+
+        from backend.models import Alpha
+
+        # V-27.123: row-lock the alpha for the whole submit so concurrent
+        # callers can't both pass the date_submitted gate.
+        alpha = (
+            await self.db.execute(
+                select(Alpha).where(Alpha.id == alpha_pk).with_for_update()
+            )
+        ).scalar_one_or_none()
         if not alpha:
             return {"submitted": False, "reason": "alpha not found"}
         if not alpha.alpha_id:
@@ -387,31 +401,40 @@ class AlphaService(BaseService):
                 "submitted": False,
                 "reason": f"can_submit={alpha.can_submit} — must be True before submit",
             }
+        # V-27.139: a missing region would otherwise be precheck'd against
+        # the USA OS pool, producing a meaningless corr for a non-USA alpha.
+        # Refuse rather than guess.
+        if not alpha.region:
+            return {
+                "submitted": False,
+                "reason": "alpha region 缺失，无法做 self_corr precheck — 拒绝提交",
+            }
 
-        own_adapter = brain_adapter is None
-        if own_adapter:
-            from backend.adapters.brain_adapter import BrainAdapter
-            brain_adapter = BrainAdapter()
-            await brain_adapter.__aenter__()
+        from contextlib import AsyncExitStack
 
-        try:
-            if not skip_precheck:
-                from backend.services.correlation_service import CorrelationService
-                corr_svc = CorrelationService(brain_adapter)
-                corr, src = await corr_svc.get_with_fallback(
-                    alpha.alpha_id, region=alpha.region or "USA"
-                )
-                # src="unknown" → corr is None → inconclusive, do NOT block.
-                if src != "unknown" and corr is not None and corr >= 0.7:
-                    return {
-                        "submitted": False,
-                        "reason": (
-                            f"self_corr {corr:.3f} >= 0.7 ({src}) — BRAIN would "
-                            f"reject; submitting would waste a slot"
-                        ),
-                        "self_corr": corr,
-                        "self_corr_source": src,
-                    }
+        # V-27.151: AsyncExitStack so a BrainAdapter __aenter__ failure isn't
+        # followed by an __aexit__ on a half-initialised adapter.
+        async with AsyncExitStack() as stack:
+            if brain_adapter is None:
+                from backend.adapters.brain_adapter import BrainAdapter
+                brain_adapter = await stack.enter_async_context(BrainAdapter())
+
+            from backend.services.correlation_service import CorrelationService
+            corr_svc = CorrelationService(brain_adapter)
+            corr, src = await corr_svc.get_with_fallback(
+                alpha.alpha_id, region=alpha.region
+            )
+            # src="unknown" → corr is None → inconclusive, do NOT block.
+            if src != "unknown" and corr is not None and corr >= 0.7:
+                return {
+                    "submitted": False,
+                    "reason": (
+                        f"self_corr {corr:.3f} >= 0.7 ({src}) — BRAIN would "
+                        f"reject; submitting would waste a slot"
+                    ),
+                    "self_corr": corr,
+                    "self_corr_source": src,
+                }
 
             result = await brain_adapter.submit_alpha(alpha.alpha_id)
             if not result.get("success"):
@@ -427,26 +450,25 @@ class AlphaService(BaseService):
                     "brain": result,
                 }
 
-            # success — stamp date_submitted
+            # success — stamp date_submitted (releases the FOR UPDATE lock)
             from datetime import datetime, timezone
             alpha.date_submitted = datetime.now(timezone.utc)
             await self.db.commit()
 
             # Post-submit: refresh portfolio-skeleton cache (DB-only, ~10ms)
             # so the T1 strategy prompt stops nudging the LLM toward the shape
-            # we just submitted. Non-fatal.
+            # we just submitted. Non-fatal — date_submitted is already
+            # committed; a stale skeleton cache self-heals on the next
+            # refresh (submit hook / beat).
             try:
                 from backend.agents.seed_pool.portfolio_skeletons import (
                     refresh_portfolio_from_db,
                 )
-                await refresh_portfolio_from_db(region=alpha.region or "USA")
+                await refresh_portfolio_from_db(region=alpha.region)
             except Exception as e:
                 logger.warning(f"[submit_alpha] skeleton cache refresh failed: {e}")
 
             return {"submitted": True, "reason": "ok", "brain": result}
-        finally:
-            if own_adapter:
-                await brain_adapter.__aexit__(None, None, None)
 
     async def get_marginal_contribution(
         self,

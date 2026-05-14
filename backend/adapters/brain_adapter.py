@@ -1349,9 +1349,14 @@ class BrainAdapter:
             return {"success": False, "status_code": 0, "body": str(e), "polls": 0}
 
         polls = 0
+        reached_terminal = False
         while polls < max_polls:
             retry_after = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
             if not retry_after:
+                # No Retry-After ⇒ BRAIN job reached a terminal state
+                # (ace_lib.submit_alpha contract). status/body decide
+                # accept vs reject below.
+                reached_terminal = True
                 break
             try:
                 await asyncio.sleep(float(retry_after))
@@ -1363,6 +1368,24 @@ class BrainAdapter:
                 logger.warning(f"[BrainAdapter] submit_alpha({alpha_id}) poll failed: {e}")
                 return {"success": False, "status_code": 0, "body": str(e), "polls": polls}
             polls += 1
+
+        # V-27.122: max_polls exhausted while BRAIN still returns Retry-After
+        # means the job never reached a terminal state. A 200 on the last
+        # poll just means "still processing" — must NOT be treated as
+        # success (submit is irreversible; a false success permanently
+        # stamps date_submitted on an un-submitted alpha).
+        if not reached_terminal:
+            logger.warning(
+                f"[BrainAdapter] submit_alpha({alpha_id}) polling timed out "
+                f"after {polls} polls — job still running, treating as failure"
+            )
+            return {
+                "success": False,
+                "status_code": resp.status_code,
+                "body": "submit polling timed out (max_polls exhausted; job still running)",
+                "polls": polls,
+                "timed_out": True,
+            }
 
         body_text = resp.text or ""
         try:

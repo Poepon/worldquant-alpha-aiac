@@ -194,6 +194,8 @@ async def list_alphas(
             margin=item.margin,
             fitness=item.fitness,
             created_at=item.created_at,
+            self_corr=item.self_corr,
+            self_corr_source=item.self_corr_source,
         )
         for item in items
     ]

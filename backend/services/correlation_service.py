@@ -174,11 +174,23 @@ class CorrelationService:
             "pnls": pnls,
             "saved_at": datetime.utcnow().isoformat(),
         }
+        # V-27.131: atomic write — the refresh_os_corr_cache.py script and the
+        # 06:30 beat can both write os_pnls_{region}.pkl. A direct open("wb")
+        # leaves a half-written pickle visible to _load_cache (which then
+        # throws, gets swallowed, and silently degrades every self_corr to
+        # the BRAIN tier). tmp-then-rename makes the swap atomic on POSIX and
+        # Windows (Path.replace).
+        tmp = path.with_suffix(path.suffix + ".tmp")
         try:
-            with path.open("wb") as f:
+            with tmp.open("wb") as f:
                 pickle.dump(payload, f, pickle.HIGHEST_PROTOCOL)
+            tmp.replace(path)
         except Exception as e:
             logger.error(f"[CorrelationService] Failed to save cache {path}: {e}")
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _is_cache_fresh(self, cache: Dict) -> bool:
         saved_at = cache.get("saved_at")
@@ -446,11 +458,20 @@ class CorrelationService:
                 out[window] = {"status": "missing_window"}
                 continue
 
-            target_w = _slice_returns_to_window(target_returns_full, window).dropna()
-            if len(target_w) < MIN_OVERLAP_DAYS_PER_WINDOW:
+            # V-27.124 / V-27.138: keep the RAW window slice for correlation
+            # alignment — do NOT pre-dropna it. The old code dropna'd target
+            # first, then `os_w.corrwith(target_w)` aligned every OS column
+            # onto target's now-sparse index, collapsing pairwise overlap
+            # (compounded by os columns' own first-day NaN). Result: per-window
+            # corr systematically too low → "crisis convergence" alerts
+            # essentially could not fire. The dropna'd copy is still used —
+            # only as the target's own validity gate.
+            target_w_raw = _slice_returns_to_window(target_returns_full, window)
+            target_valid = target_w_raw.dropna()
+            if len(target_valid) < MIN_OVERLAP_DAYS_PER_WINDOW:
                 out[window] = {
                     "status": "insufficient_data",
-                    "overlap_days": int(len(target_w)),
+                    "overlap_days": int(len(target_valid)),
                 }
                 continue
 
@@ -459,21 +480,34 @@ class CorrelationService:
                 out[window] = {"status": "empty_pool"}
                 continue
 
-            corrs = os_w.corrwith(target_w)
-            corrs = corrs.dropna()
-            if corrs.empty:
+            # Per-column pairwise-complete correlation: a day is dropped only
+            # when THAT specific pair is NaN, not globally. Each column must
+            # clear MIN_OVERLAP_DAYS_PER_WINDOW *actual overlapping* obs.
+            corr_by_col: Dict[str, float] = {}
+            overlap_by_col: Dict[str, int] = {}
+            for col in os_w.columns:
+                pair = pd.concat([target_w_raw, os_w[col]], axis=1).dropna()
+                if len(pair) < MIN_OVERLAP_DAYS_PER_WINDOW:
+                    continue
+                c = pair.iloc[:, 0].corr(pair.iloc[:, 1])
+                if not pd.isna(c):
+                    corr_by_col[col] = float(c)
+                    overlap_by_col[col] = int(len(pair))
+
+            if not corr_by_col:
                 out[window] = {
                     "status": "insufficient_data",
-                    "overlap_days": int(len(target_w)),
+                    "overlap_days": int(len(target_valid)),
                 }
                 continue
 
-            max_idx = corrs.idxmax()
-            max_corr = float(corrs.loc[max_idx])
+            max_idx = max(corr_by_col, key=corr_by_col.__getitem__)
             out[window] = {
                 "status": "ok",
-                "max_corr": max_corr,
-                "overlap_days": int(len(target_w)),
+                "max_corr": corr_by_col[max_idx],
+                # Report the winning pair's actual overlap, not the (misleading)
+                # target-only day count.
+                "overlap_days": overlap_by_col[max_idx],
                 "counterpart_id": str(max_idx),
             }
 

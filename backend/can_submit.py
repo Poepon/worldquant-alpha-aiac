@@ -60,6 +60,32 @@ LOCAL_SELF_CORR_DEMOTE_THRESHOLD = 0.7
 _TRUSTED_LOCAL_SELF_CORR_SOURCES: Set[str] = {"local", "brain"}
 
 
+def _local_self_corr_demote_entry(
+    local_self_corr: Optional[float],
+    local_self_corr_source: Optional[str],
+    local_self_corr_threshold: float,
+) -> Optional[Dict[str, Any]]:
+    """Synthetic LOCAL_SELF_CORRELATION FAIL check, or None.
+
+    Returns a FAIL entry only when the local measurement is present, from a
+    trusted source, and at/above the threshold. None otherwise (absent /
+    untrusted / below threshold).
+    """
+    if (
+        local_self_corr is not None
+        and local_self_corr_source in _TRUSTED_LOCAL_SELF_CORR_SOURCES
+        and local_self_corr >= local_self_corr_threshold
+    ):
+        return {
+            "name": "LOCAL_SELF_CORRELATION",
+            "result": "FAIL",
+            "value": float(local_self_corr),
+            "limit": float(local_self_corr_threshold),
+            "source": local_self_corr_source,
+        }
+    return None
+
+
 def compute_can_submit(
     brain_alpha: Optional[Dict[str, Any]],
     local_self_corr: Optional[float] = None,
@@ -89,12 +115,20 @@ def compute_can_submit(
             local demote fires.
           - pending_checks = list of {name, ...} for PENDING items
     """
+    local_fail = _local_self_corr_demote_entry(
+        local_self_corr, local_self_corr_source, local_self_corr_threshold
+    )
+
+    # V-27.141: a trusted local self_corr >= threshold is an independent
+    # "should reject" signal. Don't let it be buried when BRAIN is
+    # unreachable (brain_alpha is None) or returned no checks array — those
+    # only mean "no BRAIN signal", not "the alpha is fine".
     if brain_alpha is None:
-        return None, [], []
+        return (False, [local_fail], []) if local_fail else (None, [], [])
 
     checks = _extract_is_checks(brain_alpha)
     if not checks:
-        return None, [], []
+        return (False, [local_fail], []) if local_fail else (None, [], [])
 
     failed: List[Dict[str, Any]] = []
     pending: List[Dict[str, Any]] = []
@@ -117,18 +151,8 @@ def compute_can_submit(
                     f"as non-FAIL but please verify BRAIN API contract"
                 )
 
-    if (
-        local_self_corr is not None
-        and local_self_corr_source in _TRUSTED_LOCAL_SELF_CORR_SOURCES
-        and local_self_corr >= local_self_corr_threshold
-    ):
-        failed.append({
-            "name": "LOCAL_SELF_CORRELATION",
-            "result": "FAIL",
-            "value": float(local_self_corr),
-            "limit": float(local_self_corr_threshold),
-            "source": local_self_corr_source,
-        })
+    if local_fail is not None:
+        failed.append(local_fail)
 
     return (len(failed) == 0), failed, pending
 

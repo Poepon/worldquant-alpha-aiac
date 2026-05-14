@@ -280,8 +280,14 @@ def find_portfolio_match(
     if not entries:
         return None
     cand_fields, cand_numerics = _expr_fields_and_numerics(expression)
+    # V-27.143: an empty fields set means the parser failed (or the
+    # expression genuinely references no fields). Either way, do NOT let two
+    # empty-field expressions match each other — `frozenset() == frozenset()`
+    # would otherwise skip a real simulate on a parse-failure coincidence.
+    if not cand_fields:
+        return None
     for fields, numerics, alpha_id in entries:
-        if fields == cand_fields and _numerics_match(cand_numerics, numerics):
+        if fields and fields == cand_fields and _numerics_match(cand_numerics, numerics):
             return alpha_id or "unknown"
     return None
 
