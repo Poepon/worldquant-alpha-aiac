@@ -148,7 +148,6 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                             # 45/46 (333+233 SIMULATION_ERROR).
                             is_valid = False
                             error = "; ".join(sem_result.errors[:2])
-                            warnings.extend(sem_result.errors)
                             semantic_errors.extend(sem_result.errors[:2])
 
                         # Step 4: static suspicion checks (V-P0 2026-05-15).
@@ -165,9 +164,6 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                             for f in soft:
                                 warnings.append(f"[{f['check']}] {f['evidence']}")
                             if soft:
-                                type_warnings.extend(
-                                    f"[{f['check']}] {f['evidence']}" for f in soft
-                                )
                                 static_warn_count += len(soft)
                             if hard:
                                 hard_msg = "; ".join(
@@ -180,9 +176,9 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                                     semantic_errors.append(hard_msg)
                                 else:
                                     # already invalidated upstream — keep the
-                                    # first error, surface look-ahead as extra
-                                    # context for SELF_CORRECT.
-                                    warnings.append(f"[also] {hard_msg}")
+                                    # first error but surface look-ahead as
+                                    # extra context for SELF_CORRECT.
+                                    error = f"{error}; [also] {hard_msg}"
 
             except Exception as e:
                 is_valid = False
@@ -190,10 +186,16 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
         
         updated_alpha = alpha.model_copy()
         updated_alpha.is_valid = is_valid
-        updated_alpha.validation_error = error
-        
-        if warnings and not error:
-            updated_alpha.validation_error = f"[WARNINGS] {'; '.join(warnings[:3])}"
+
+        # Surface warnings as extra SELF_CORRECT context even when the
+        # expression is already invalid — the primary error stays first.
+        if warnings:
+            warn_str = f"[WARNINGS] {'; '.join(warnings[:3])}"
+            updated_alpha.validation_error = (
+                f"{error} | {warn_str}" if error else warn_str
+            )
+        else:
+            updated_alpha.validation_error = error
         
         if is_valid:
             valid_count += 1

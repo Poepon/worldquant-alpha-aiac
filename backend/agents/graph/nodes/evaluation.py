@@ -112,7 +112,6 @@ from backend.static_alpha_checks import (  # noqa: E402
     check_divide_by_zero as _v16_check_divide_by_zero,
     check_lookahead_bias as _v16_check_lookahead,
     check_overfit_window as _v16_check_overfit_window,
-    _extract_divide_denominators,
 )
 
 
