@@ -922,16 +922,33 @@ async def _process_hypothesis_feedback(
     # V-27.71: attribution sees only real_alphas + clean counts — flip
     # products are implementation-layer salvage and would dilute the
     # hypothesis-vs-implementation signal.
-    attribution, attribution_reason = await classify_attribution_llm(
-        hypothesis_statement=hypothesis_statement,
-        pending_alphas=real_alphas,
-        alpha_count=alpha_count,
-        pass_count=pass_count,
-        syntax_fail_count=syntax_fail,
-        simulate_fail_count=simulate_fail,
-        quality_fail_count=quality_fail,
-        llm_service=llm_service,
-    )
+    #
+    # V-27.92 followup (flip-only 轮): when a round produced ONLY flip
+    # products (real_alphas empty, flips non-empty), running attribution on
+    # an empty list is degenerate. Semantically the outcome IS a
+    # hypothesis-level result — the stated direction failed the hard gate
+    # and only the sign-flipped variant carried signal — so attribute it
+    # explicitly to "hypothesis" instead of asking the LLM to classify
+    # nothing. This is what lets a consistently-wrong-direction hypothesis
+    # be abandoned (the empty-round guard in should_abandon no longer masks
+    # flip-only rounds).
+    if not real_alphas and flip_alphas:
+        attribution = "hypothesis"
+        attribution_reason = (
+            "flip-only round — stated hypothesis direction failed the hard "
+            "gate; only the sign-flipped variant produced signal"
+        )
+    else:
+        attribution, attribution_reason = await classify_attribution_llm(
+            hypothesis_statement=hypothesis_statement,
+            pending_alphas=real_alphas,
+            alpha_count=alpha_count,
+            pass_count=pass_count,
+            syntax_fail_count=syntax_fail,
+            simulate_fail_count=simulate_fail,
+            quality_fail_count=quality_fail,
+            llm_service=llm_service,
+        )
     entry = {
         "round_index": round_index,
         "alpha_count": alpha_count,
@@ -1020,8 +1037,13 @@ async def _process_hypothesis_feedback(
                     )
             await _hdb.flush()
 
+            # V-27.92 followup (flip-only 轮): a round that produced only
+            # flip products still TRIED the hypothesis — it found the stated
+            # direction wrong. So mark_active fires on real OR flip alphas;
+            # otherwise a flip-only-productive hypothesis stays PROPOSED
+            # forever, invisible to the state machine.
             for hid in hids:
-                if alpha_count > 0:
+                if alpha_count > 0 or flip_alpha_count > 0:
                     if await svc.mark_active(hid):
                         activated.append(hid)
             # Promote only the primary — non-primary hypotheses don't have

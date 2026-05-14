@@ -239,19 +239,38 @@ class TestShouldAbandonFromDB:
 
     @pytest.mark.asyncio
     async def test_v27_68_empty_round_guard(self, pg_session):
-        # A 0-alpha round never tested the hypothesis — must not count as a
-        # failure round. alpha_count here is the CLEAN count, so a round with
-        # only flips / only retryables also lands as alpha_count==0.
+        # A round that tested NOTHING (0 real AND 0 flip — e.g. a
+        # retryable-only round or an all-dedup round) never tested the
+        # hypothesis and must not count as a failure round.
+        # V-27.92 followup: "empty" requires flip_alpha_count==0 too.
         hid, tid = await _seed(pg_session, "abandon-empty")
         svc = HypothesisService(pg_session)
         await _upsert(svc, hid, tid, 0)
         await _upsert(svc, hid, tid, 1, alpha_count=0, quality_fail_count=0,
-                      flip_alpha_count=4)
+                      flip_alpha_count=0, retryable_count=4)
         await _upsert(svc, hid, tid, 2)
         await pg_session.commit()
         assert await should_abandon_hypothesis(pg_session, hypothesis_id=hid) == (
             False, None,
         )
+
+    @pytest.mark.asyncio
+    async def test_flip_only_round_counts_toward_abandon(self, pg_session):
+        # V-27.92 followup (flip-only 轮): a flip-only round (real=0, flip>0)
+        # DID test the hypothesis — it found the stated direction wrong. It
+        # must NOT be masked by the empty-round guard; 3 such rounds with 0
+        # real PASS + attribution=hypothesis → abandon.
+        hid, tid = await _seed(pg_session, "abandon-fliponly")
+        svc = HypothesisService(pg_session)
+        for r in (0, 1, 2):
+            await _upsert(svc, hid, tid, r, alpha_count=0, quality_fail_count=0,
+                          flip_alpha_count=4, flip_pass_count=4)
+        await pg_session.commit()
+        abandon, reason = await should_abandon_hypothesis(
+            pg_session, hypothesis_id=hid
+        )
+        assert abandon is True
+        assert reason
 
     @pytest.mark.asyncio
     async def test_survives_memory_loss(self, pg_session):
@@ -402,11 +421,15 @@ class TestProcessHypothesisFeedback:
         assert h.status == HypothesisStatus.ABANDONED.value
 
     @pytest.mark.asyncio
-    async def test_flip_only_round_does_not_mark_active(self, pg_session):
-        # A round that produced only flip products has a clean alpha_count of
-        # 0 → mark_active must not fire (V-27.71 side effect).
+    async def test_flip_only_round_marks_active_not_promoted(self, pg_session):
+        # V-27.92 followup (flip-only 轮): a round that produced only flip
+        # products DID test the hypothesis (it found the stated direction
+        # wrong) → mark_active fires, hypothesis leaves PROPOSED. It is NOT
+        # promoted — flip is implementation salvage, not vindication of the
+        # stated direction (V-27.71 still holds).
         from backend.agents.graph.nodes.persistence import _process_hypothesis_feedback
-        from backend.models import Hypothesis, HypothesisStatus
+        from backend.models import Hypothesis, HypothesisRoundStats, HypothesisStatus
+        from sqlalchemy import select
 
         hid, tid = await _seed(pg_session, "feedback-fl:active")
         state = SimpleNamespace(
@@ -422,5 +445,16 @@ class TestProcessHypothesisFeedback:
         )
         h = await pg_session.get(Hypothesis, hid)
         await pg_session.refresh(h)
-        # Still PROPOSED — a flip-only round never really tested the hypothesis.
-        assert h.status == HypothesisStatus.PROPOSED.value
+        # ACTIVE (tried), NOT PROMOTED (flip is salvage, not vindication).
+        assert h.status == HypothesisStatus.ACTIVE.value
+        # Flip-only round → attribution explicitly "hypothesis" (stated
+        # direction failed), not an LLM classification on an empty list.
+        row = (
+            await pg_session.execute(
+                select(HypothesisRoundStats).where(
+                    HypothesisRoundStats.hypothesis_id == hid
+                )
+            )
+        ).scalars().one()
+        assert row.alpha_count == 0 and row.flip_alpha_count == 2
+        assert row.attribution == "hypothesis"

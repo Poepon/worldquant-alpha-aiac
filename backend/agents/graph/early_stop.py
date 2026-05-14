@@ -185,6 +185,7 @@ def should_abandon_hypothesis_from_memory(
     last_n = history_for_hid[-n_rounds:]
     pass_counts = [(e.get("pass_count", 0) or 0) for e in last_n]
     alpha_counts = [(e.get("alpha_count", 0) or 0) for e in last_n]
+    flip_counts = [(e.get("flip_alpha_count", 0) or 0) for e in last_n]
     attrs = [e.get("attribution") for e in last_n]
     rounds_str = ",".join(str(e.get("round_index", "?")) for e in last_n)
     has_any_pass = any(p > 0 for p in pass_counts)
@@ -192,10 +193,14 @@ def should_abandon_hypothesis_from_memory(
     # V-27.68: a round that generated 0 alphas never actually *tested* the
     # hypothesis (LLM/codegen hiccup, all-dedup round, …) — counting it as a
     # "0 PASS failure round" would abandon a hypothesis the workflow never
-    # gave a fair shot. Pre-fix this was only avoided as a side effect of
-    # classify_attribution returning "unknown" on alpha_count==0; make it an
-    # explicit guard reading the alpha_count the round entry already carries.
-    has_empty_round = any(c == 0 for c in alpha_counts)
+    # gave a fair shot.
+    # V-27.92 followup (flip-only 轮): "0 alphas" must mean 0 real AND 0
+    # flip — a flip-only round DID test the hypothesis (stated direction
+    # falsified) and counts toward the abandon window. Kept symmetric with
+    # the DB-stats path in should_abandon_hypothesis().
+    has_empty_round = any(
+        c == 0 and f == 0 for c, f in zip(alpha_counts, flip_counts)
+    )
 
     if has_any_pass or has_non_hypothesis_attr or has_empty_round:
         # Window satisfied N but condition didn't fire — log why so
@@ -208,7 +213,7 @@ def should_abandon_hypothesis_from_memory(
         logger.debug(
             f"[B6 abandon-skip] hid={hypothesis_id} rounds=[{rounds_str}] "
             f"pass_counts={pass_counts} alpha_counts={alpha_counts} "
-            f"attrs={attrs} reason={skip_reason}"
+            f"flip_counts={flip_counts} attrs={attrs} reason={skip_reason}"
         )
         return False, None
 
@@ -254,12 +259,18 @@ async def should_abandon_hypothesis(
     Returns:
         (should_abandon, reason).
 
-    Decision logic is identical to the in-memory version, including the
-    V-27.68 alpha_count==0 guard — but `alpha_count` here is already the
-    CLEAN count (flip-retry products and retryable attempts excluded at
-    write time, V-27.71 / V-27.61), so a round that produced only flips or
-    only retryable failures still correctly counts as "didn't test the
-    hypothesis" and blocks the abandon.
+    Decision logic mirrors the in-memory version, including the V-27.68
+    empty-round guard — but `alpha_count` here is the CLEAN count (flip-retry
+    products and retryable attempts excluded at write time, V-27.71 /
+    V-27.61).
+
+    V-27.92 followup (flip-only 轮): the empty-round guard now requires BOTH
+    `alpha_count == 0` AND `flip_alpha_count == 0`. A flip-only round (real=0,
+    flip>0) DID test the hypothesis — it found the stated direction wrong
+    (that is precisely why the sign-flipped variant worked) — so it counts
+    toward the abandon window rather than masking it as "untested". A
+    round that produced only RETRYABLE failures (real=0, flip=0) still
+    correctly counts as "didn't test" and blocks the abandon.
     """
     from sqlalchemy import select
     from backend.models import HypothesisRoundStats
@@ -285,12 +296,18 @@ async def should_abandon_hypothesis(
 
     pass_counts = [int(r.pass_count or 0) for r in rows]
     alpha_counts = [int(r.alpha_count or 0) for r in rows]
+    flip_counts = [int(r.flip_alpha_count or 0) for r in rows]
     attrs = [r.attribution for r in rows]
     rounds_str = ",".join(str(r.round_index) for r in rows)
     has_any_pass = any(p > 0 for p in pass_counts)
     has_non_hypothesis_attr = any(a != "hypothesis" for a in attrs)
-    # V-27.68 guard — a 0-alpha round never actually tested the hypothesis.
-    has_empty_round = any(c == 0 for c in alpha_counts)
+    # V-27.68 guard — a round that tested nothing never tested the
+    # hypothesis. V-27.92 followup: "tested nothing" = 0 real AND 0 flip
+    # alphas; a flip-only round counts as a real test (stated direction
+    # falsified) and must NOT be masked here.
+    has_empty_round = any(
+        c == 0 and f == 0 for c, f in zip(alpha_counts, flip_counts)
+    )
 
     if has_any_pass or has_non_hypothesis_attr or has_empty_round:
         skip_reason = (
@@ -301,7 +318,7 @@ async def should_abandon_hypothesis(
         logger.debug(
             f"[B6 abandon-skip] hid={hypothesis_id} rounds=[{rounds_str}] "
             f"pass_counts={pass_counts} alpha_counts={alpha_counts} "
-            f"attrs={attrs} reason={skip_reason}"
+            f"flip_counts={flip_counts} attrs={attrs} reason={skip_reason}"
         )
         return False, None
 
