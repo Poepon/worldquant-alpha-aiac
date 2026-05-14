@@ -1134,22 +1134,7 @@ class BrainAdapter:
         logger.warning(
             f"auth failure on {method} {url} (status={response.status_code}) — re-authenticating"
         )
-        async with self._get_auth_lock():
-            # Lock held; check if another coroutine already refreshed.
-            try:
-                fresh = await self._is_session_valid()
-            except Exception:
-                fresh = False
-            if not fresh:
-                # V-26.24: invalidate Redis cache BEFORE re-auth so that if
-                # `authenticate()` itself fails, the next ensure_session call
-                # can't resurrect the dead session from cache.
-                await self._invalidate_session_cache()
-                try:
-                    await self.authenticate()
-                except Exception as e:
-                    logger.error(f"Re-auth failed under lock: {e}")
-                    return response  # return original error response
+        await self._coalesced_reauth()
         # Retry up to 2x — cookie propagation across httpx pool can take
         # a tick on busy event loops.
         for _attempt in range(2):
@@ -1158,6 +1143,38 @@ class BrainAdapter:
                 break
             await asyncio.sleep(0.5)
         return response
+
+    async def _coalesced_reauth(self) -> bool:
+        """Serialised, cache-invalidating re-auth shared by _request and
+        _safe_api_call (V-27.91).
+
+        Acquire _auth_lock → re-check session validity (another coroutine may
+        have refreshed under the lock) → invalidate the Redis session cache
+        BEFORE re-auth (V-26.24: so a failed authenticate() can't be undone by
+        a stale cache resurrection) → authenticate().
+
+        Before this helper existed, _safe_api_call's 401 branch was a bare
+        status==401 check + bare authenticate() — it bypassed V-22.7 body-
+        marker detection, V-26.24 cache invalidation, and the _auth_lock
+        coalescing. Every data-fetch / submit path (get_alpha, submit_alpha,
+        get_datasets, get_datafields, get_user_alphas) goes through
+        _safe_api_call, so all of them could resurrect a dead session from
+        Redis and stampede the BRAIN auth endpoint on concurrent 401s.
+
+        Returns True if the session is usable afterwards.
+        """
+        async with self._get_auth_lock():
+            try:
+                if await self._is_session_valid():
+                    return True
+            except Exception:
+                pass
+            await self._invalidate_session_cache()
+            try:
+                return bool(await self.authenticate())
+            except Exception as e:
+                logger.error(f"[BrainAdapter] coalesced re-auth failed: {e}")
+                return False
 
     async def _safe_api_call(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
         """
@@ -1182,10 +1199,17 @@ class BrainAdapter:
             try:
                 response = await getattr(self.client, method.lower())(url, **kwargs)
 
-                # 1. Handle 401 Unauthorized (Token Expiry)
-                if response.status_code == 401:
-                    logger.warning(f"401 Unauthorized for {endpoint}, re-authenticating...")
-                    if await self.authenticate():
+                # 1. Handle 401 / auth-failure body marker.
+                # V-27.91: was a status==401-only check + bare authenticate(),
+                # bypassing V-22.7 body-marker detection, V-26.24 cache
+                # invalidation, and _auth_lock coalescing. Now routes through
+                # _coalesced_reauth like _request does.
+                if self._is_auth_error(response):
+                    logger.warning(
+                        f"auth failure for {endpoint} (status={response.status_code}), "
+                        f"re-authenticating..."
+                    )
+                    if await self._coalesced_reauth():
                         response = await getattr(self.client, method.lower())(url, **kwargs)
 
                 # 2. Handle 429 Too Many Requests (Rate Limit)

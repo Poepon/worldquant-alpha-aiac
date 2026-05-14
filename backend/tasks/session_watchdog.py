@@ -74,6 +74,10 @@ async def _watchdog_revive_async() -> dict:
             # Heartbeat fresh enough?
             if task.last_alpha_persisted_at and task.last_alpha_persisted_at > dead_cutoff:
                 continue
+            # V-27.2: already revived within the dead-threshold window —
+            # give the freshly-dispatched worker time to come alive.
+            if await _recently_revived(db, task.id, dead_cutoff):
+                continue
             # Dead — re-dispatch
             await _redispatch_task(
                 db, task, now,
@@ -112,6 +116,11 @@ async def _watchdog_revive_async() -> dict:
             latest_trace = (await db.execute(latest_trace_stmt)).scalar()
             if latest_trace and latest_trace > dead_cutoff:
                 continue  # liveness fresh
+            # V-27.2: skip if already revived within the dead-threshold
+            # window — discrete revive holds no lock, so this is the only
+            # guard against the watchdog double-dispatching the task.
+            if await _recently_revived(db, task.id, dead_cutoff):
+                continue
             # Dead — re-dispatch
             await _redispatch_task(
                 db, task, now,
@@ -129,6 +138,28 @@ async def _watchdog_revive_async() -> dict:
     if revived:
         logger.info(f"[watchdog] revived {len(revived)} dead task(s): {revived}")
     return {"revived_count": len(revived), "revived": revived}
+
+
+async def _recently_revived(db, task_id: int, cutoff: datetime) -> bool:
+    """True if a WATCHDOG_REVIVE run for this task started after `cutoff`.
+
+    V-27.2: the watchdog runs every 5 min but the dead-threshold is 15 min.
+    Without this guard, a task revived on tick N is still "dead" on ticks
+    N+1 / N+2 (the freshly-dispatched worker hasn't persisted an alpha or
+    written a trace_step yet) — so the watchdog re-dispatches it AGAIN and
+    two workers end up on one task. Discrete revive in particular acquires
+    no lock, so nothing else catches the double-dispatch. Skipping a task
+    whose last WATCHDOG_REVIVE is within the dead-threshold gives the
+    revived worker that full window to come alive.
+    """
+    last = (
+        await db.execute(
+            select(func.max(ExperimentRun.started_at))
+            .where(ExperimentRun.task_id == task_id)
+            .where(ExperimentRun.trigger_source == "WATCHDOG_REVIVE")
+        )
+    ).scalar()
+    return last is not None and last > cutoff
 
 
 async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list) -> None:
@@ -295,12 +326,6 @@ async def _quota_guard_async() -> dict:
             inflight = int(inflight_raw) if inflight_raw is not None else 0
         except Exception:
             inflight = -1
-        logger.warning(
-            f"[quota_guard] V-26.32 PAUSING {{?}} sessions over quota "
-            f"(today_total={cnt} alphas={alpha_cnt} failures={fail_cnt}); "
-            f"BRAIN inflight_sims={inflight} will continue to terminal status "
-            f"before quota growth halts"
-        )
 
         active = (
             await db.execute(
@@ -309,6 +334,15 @@ async def _quota_guard_async() -> dict:
                 .where(MiningTask.status == "RUNNING")
             )
         ).scalars().all()
+        # V-27.7: log moved below the `active` query so the count is real —
+        # the f-string previously had a literal `{?}` placeholder that was
+        # never filled (the log ran before `active` was fetched).
+        logger.warning(
+            f"[quota_guard] V-26.32 PAUSING {len(active)} sessions over quota "
+            f"(today_total={cnt} alphas={alpha_cnt} failures={fail_cnt}); "
+            f"BRAIN inflight_sims={inflight} will continue to terminal status "
+            f"before quota growth halts"
+        )
         for task in active:
             try:
                 await db.execute(

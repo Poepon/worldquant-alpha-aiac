@@ -430,9 +430,20 @@ async def _incremental_save_alphas(
                 # Allow up to 6 enqueues per 60s window across all workers.
                 # Sliding count via INCR + EXPIRE; once over 6 the new
                 # alpha falls back to the periodic V-22.12.1 sweep.
-                current = cli.incr(rate_key)
-                if current == 1:
-                    cli.expire(rate_key, 60)
+                # V-27.72: atomic INCR+EXPIRE via Lua. The old
+                # `incr` then `if current == 1: expire` pair is non-atomic —
+                # a SIGKILL between the two leaves the key with no TTL, which
+                # then stays > 6 forever and permanently rate-limits every
+                # worker's can_submit refresh enqueue. The Lua also
+                # self-heals a key already orphaned (TTL < 0) by a pre-fix
+                # crash.
+                current = int(cli.eval(
+                    "local c = redis.call('INCR', KEYS[1]) "
+                    "if c == 1 or redis.call('TTL', KEYS[1]) < 0 then "
+                    "redis.call('EXPIRE', KEYS[1], tonumber(ARGV[1])) end "
+                    "return c",
+                    1, rate_key, 60,
+                ))
                 if current > 6:
                     logger.info(
                         f"[_incremental_save_alphas] V-26.90 can_submit refresh "
