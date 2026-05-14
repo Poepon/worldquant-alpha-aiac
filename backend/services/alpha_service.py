@@ -363,10 +363,13 @@ class AlphaService(BaseService):
              "unknown" precheck is inconclusive and does NOT block — the
              submit proceeds and BRAIN makes the final call.
 
-        Concurrency (V-27.123): the alpha row is read with SELECT ... FOR
-        UPDATE and held until commit, so two concurrent submits of the same
-        alpha (double-clicked Popconfirm, frontend + script) serialise — the
-        loser sees date_submitted already set and is rejected by gate 2.
+        Concurrency (V-27.123): a Redis lock (submit_lock:{alpha_id},
+        SET NX EX) — NOT a DB row lock — serialises concurrent submits of
+        the same alpha. The loser gets a fast, non-blocking rejection
+        instead of queueing on a row lock held across the BRAIN HTTP
+        round-trip (which would starve the DB connection pool). Under the
+        lock the date_submitted gate is re-checked, so a submit that landed
+        just before the lock was acquired is still caught.
 
         On BRAIN success, stamps alpha.date_submitted and refreshes the
         portfolio-skeleton cache so the mining loop stops re-generating the
@@ -380,12 +383,8 @@ class AlphaService(BaseService):
 
         from backend.models import Alpha
 
-        # V-27.123: row-lock the alpha for the whole submit so concurrent
-        # callers can't both pass the date_submitted gate.
         alpha = (
-            await self.db.execute(
-                select(Alpha).where(Alpha.id == alpha_pk).with_for_update()
-            )
+            await self.db.execute(select(Alpha).where(Alpha.id == alpha_pk))
         ).scalar_one_or_none()
         if not alpha:
             return {"submitted": False, "reason": "alpha not found"}
@@ -419,59 +418,97 @@ class AlphaService(BaseService):
                 from backend.adapters.brain_adapter import BrainAdapter
                 brain_adapter = await stack.enter_async_context(BrainAdapter())
 
-            from backend.services.correlation_service import (
-                CorrelationService,
-                CorrSource,
-            )
-            corr_svc = CorrelationService(brain_adapter)
-            corr, src = await corr_svc.get_with_fallback(
-                alpha.alpha_id, region=alpha.region
-            )
-            # src=UNKNOWN → corr is None → inconclusive, do NOT block.
-            if src != CorrSource.UNKNOWN and corr is not None and corr >= 0.7:
-                return {
-                    "submitted": False,
-                    "reason": (
-                        f"self_corr {corr:.3f} >= 0.7 ({src}) — BRAIN would "
-                        f"reject; submitting would waste a slot"
-                    ),
-                    "self_corr": corr,
-                    "self_corr_source": src,
-                }
-
-            result = await brain_adapter.submit_alpha(alpha.alpha_id)
-            if not result.get("success"):
-                body = result.get("body")
-                msg = (
-                    (body.get("message") or body.get("error") or str(body))
-                    if isinstance(body, dict)
-                    else str(body)
-                )
-                return {
-                    "submitted": False,
-                    "reason": f"BRAIN rejected (status {result.get('status_code')}): {msg}",
-                    "brain": result,
-                }
-
-            # success — stamp date_submitted (releases the FOR UPDATE lock)
-            from datetime import datetime, timezone
-            alpha.date_submitted = datetime.now(timezone.utc)
-            await self.db.commit()
-
-            # Post-submit: refresh portfolio-skeleton cache (DB-only, ~10ms)
-            # so the T1 strategy prompt stops nudging the LLM toward the shape
-            # we just submitted. Non-fatal — date_submitted is already
-            # committed; a stale skeleton cache self-heals on the next
-            # refresh (submit hook / beat).
+            # V-27.123: Redis lock — concurrent submits of the same alpha get
+            # a fast non-blocking rejection instead of queueing on a DB row
+            # lock held across the BRAIN HTTP round-trip. Redis down →
+            # degrade to best-effort (proceed without the lock).
+            _lock_key = f"submit_lock:{alpha.alpha_id}"
+            _redis = None
             try:
-                from backend.agents.seed_pool.portfolio_skeletons import (
-                    refresh_portfolio_from_db,
+                _redis = await brain_adapter._get_slot_redis()
+                _got_lock = bool(await _redis.set(
+                    _lock_key, str(alpha_pk), nx=True, ex=300,
+                ))
+            except Exception as _lock_e:
+                logger.warning(
+                    f"[submit_alpha] redis lock unavailable, proceeding "
+                    f"without it: {_lock_e}"
                 )
-                await refresh_portfolio_from_db(region=alpha.region)
-            except Exception as e:
-                logger.warning(f"[submit_alpha] skeleton cache refresh failed: {e}")
+                _redis = None
+                _got_lock = True
+            if not _got_lock:
+                return {
+                    "submitted": False,
+                    "reason": "another submit for this alpha is already in progress",
+                }
 
-            return {"submitted": True, "reason": "ok", "brain": result}
+            try:
+                # Re-check date_submitted under the lock — the previous lock
+                # holder may have just finished and stamped it.
+                await self.db.refresh(alpha)
+                if alpha.date_submitted is not None:
+                    return {
+                        "submitted": False,
+                        "reason": f"already submitted at {alpha.date_submitted}",
+                    }
+
+                from backend.services.correlation_service import (
+                    CorrelationService,
+                    CorrSource,
+                )
+                corr_svc = CorrelationService(brain_adapter)
+                corr, src = await corr_svc.get_with_fallback(
+                    alpha.alpha_id, region=alpha.region
+                )
+                # src=UNKNOWN → corr is None → inconclusive, do NOT block.
+                if src != CorrSource.UNKNOWN and corr is not None and corr >= 0.7:
+                    return {
+                        "submitted": False,
+                        "reason": (
+                            f"self_corr {corr:.3f} >= 0.7 ({src}) — BRAIN would "
+                            f"reject; submitting would waste a slot"
+                        ),
+                        "self_corr": corr,
+                        "self_corr_source": src,
+                    }
+
+                result = await brain_adapter.submit_alpha(alpha.alpha_id)
+                if not result.get("success"):
+                    body = result.get("body")
+                    msg = (
+                        (body.get("message") or body.get("error") or str(body))
+                        if isinstance(body, dict)
+                        else str(body)
+                    )
+                    return {
+                        "submitted": False,
+                        "reason": f"BRAIN rejected (status {result.get('status_code')}): {msg}",
+                        "brain": result,
+                    }
+
+                # success — stamp date_submitted
+                from datetime import datetime, timezone
+                alpha.date_submitted = datetime.now(timezone.utc)
+                await self.db.commit()
+
+                # Post-submit: refresh portfolio-skeleton cache (DB-only,
+                # ~10ms) so the T1 strategy prompt stops nudging the LLM
+                # toward the shape we just submitted. Non-fatal.
+                try:
+                    from backend.agents.seed_pool.portfolio_skeletons import (
+                        refresh_portfolio_from_db,
+                    )
+                    await refresh_portfolio_from_db(region=alpha.region)
+                except Exception as e:
+                    logger.warning(f"[submit_alpha] skeleton cache refresh failed: {e}")
+
+                return {"submitted": True, "reason": "ok", "brain": result}
+            finally:
+                if _redis is not None:
+                    try:
+                        await _redis.delete(_lock_key)
+                    except Exception:
+                        pass
 
     async def get_marginal_contribution(
         self,

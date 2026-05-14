@@ -253,6 +253,13 @@ def sync_datasets():
                 regions = ["USA", "CHN", "ASI", "EUR"]
                 new_count = 0
                 updated_count = 0
+                # V-27.3: collect newly-inserted (dataset, region) pairs so
+                # field sync is triggered for them — mirrors the manual
+                # sync_datasets_from_brain. Without this a beat-synced new
+                # dataset has a field_count number but no DataField rows, so
+                # _get_dataset_fields still can't see its fields → mining
+                # can't use it ("visible but empty shell").
+                field_sync_targets: list = []
 
                 for region in regions:
                     datasets = await brain.get_datasets(region=region, universe=universe)
@@ -306,13 +313,32 @@ def sync_datasets():
                                 coverage=ds.get("coverage"),
                             ))
                             new_count += 1
+                            field_sync_targets.append((ds.get("id"), region))
 
                 await db.commit()
+
+                # V-27.3: trigger field sync for newly-inserted datasets only
+                # (existing ones already have DataField rows from a prior
+                # sync). Bounded by new_count so the beat doesn't fan out a
+                # field-sync task per dataset every day.
+                for _dsid, _reg in field_sync_targets:
+                    sync_fields_from_brain.delay(
+                        dataset_id=_dsid,
+                        region=_reg,
+                        universe=universe,
+                        delay=1,
+                    )
+
                 logger.info(
                     f"Synced datasets (universe={universe}): "
-                    f"{new_count} new, {updated_count} updated"
+                    f"{new_count} new, {updated_count} updated; "
+                    f"{len(field_sync_targets)} field syncs queued"
                 )
-                return {"new_datasets": new_count, "updated_datasets": updated_count}
+                return {
+                    "new_datasets": new_count,
+                    "updated_datasets": updated_count,
+                    "field_syncs_queued": len(field_sync_targets),
+                }
 
     return run_async(_run())
 

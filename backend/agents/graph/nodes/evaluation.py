@@ -807,7 +807,7 @@ async def node_evaluate(
         get_failed_tests,
         evaluate_with_brain_checks,  # 新增：BRAIN官方检查
     )
-    from backend.services.correlation_service import CorrelationService
+    from backend.services.correlation_service import CorrelationService, CorrSource
 
     start_time = time.time()
     node_name = "EVALUATE"
@@ -993,23 +993,27 @@ async def node_evaluate(
                 logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
 
             # W0.5: prefer local PnL-matrix; fall back to BRAIN API; finally
-            # mark unknown so hard_gate downgrades to PASS_PROVISIONAL.
-            self_corr_source = "unknown"
+            # mark UNKNOWN so hard_gate downgrades to PASS_PROVISIONAL.
+            # V-27.158: self_corr_source carries CorrSource enum values from
+            # get_with_fallback; the "tier_skipped"/"skipped" branch below is
+            # a separate tier-policy axis (not a CorrSource) and stays a
+            # plain string — StrEnum makes the mixed comparisons safe.
+            self_corr_source = CorrSource.UNKNOWN
             if correlation_service is not None:
                 try:
                     _corr_raw, self_corr_source = await correlation_service.get_with_fallback(
                         alpha.alpha_id, region=state.region
                     )
-                    # get_with_fallback returns None for source="unknown"
+                    # get_with_fallback returns None for CorrSource.UNKNOWN
                     # (V-26.77 follow-up #5: the service no longer fakes 0.0
                     # for "not measured"). Keep self_corr numeric for the
                     # score / hard_gate arithmetic below — self_corr_verified
                     # (derived from source) is what actually gates PASS, so a
-                    # 0.0 placeholder here is inert when source is unknown.
+                    # 0.0 placeholder here is inert when source is UNKNOWN.
                     self_corr = _corr_raw if _corr_raw is not None else 0.0
                 except Exception as e:
                     logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
-                    self_corr_source = "unknown"
+                    self_corr_source = CorrSource.UNKNOWN
 
                 # Crisis-window stress test: piggyback on the same local PnL
                 # cache that just resolved self_corr. Only runs when the
@@ -1017,7 +1021,7 @@ async def node_evaluate(
                 # max-corr couldn't be measured the per-window slice has
                 # even less data to work with. Failures are non-fatal: the
                 # crisis read is advisory, not a hard gate.
-                if self_corr_source == "local":
+                if self_corr_source == CorrSource.LOCAL:
                     try:
                         crisis_by_window = await correlation_service.calc_self_corr_by_window(
                             alpha_id=alpha.alpha_id, region=state.region
@@ -1047,7 +1051,7 @@ async def node_evaluate(
                     self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
                     if isinstance(self_corr_result, dict):
                         self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
-                        self_corr_source = "brain"
+                        self_corr_source = CorrSource.BRAIN
                 except Exception as e:
                     logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
         else:
@@ -1104,7 +1108,9 @@ async def node_evaluate(
         self_corr_source = locals().get("self_corr_source", "skipped")
         if check_self_corr:
             self_corr_ok = self_corr < max_correlation
-            self_corr_verified = self_corr_source not in ("unknown",)
+            # V-27.158: CorrSource.UNKNOWN compares equal to "unknown"
+            # (StrEnum), so this covers both the enum and any legacy string.
+            self_corr_verified = self_corr_source not in (CorrSource.UNKNOWN, "unknown")
         else:
             self_corr_ok = True
             self_corr_verified = True  # tier_skipped, not unknown
@@ -1385,10 +1391,12 @@ async def node_evaluate(
             # distinguish "uncorrelated alpha" from "no signal".
             "_self_corr": (
                 round(self_corr, 4)
-                if self_corr_source in ("local", "brain")
+                if self_corr_source in (CorrSource.LOCAL, CorrSource.BRAIN)
                 else None
             ),
-            "_self_corr_source": self_corr_source,
+            # str() so a CorrSource enum is stored as its plain value in JSONB
+            # (StrEnum already serialises that way, but be explicit).
+            "_self_corr_source": str(self_corr_source),
             "_corr_checked": needs_corr_check,
             "_should_optimize": should_opt,
             "_optimize_reason": opt_reason,

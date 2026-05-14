@@ -159,7 +159,15 @@ async def _recently_revived(db, task_id: int, cutoff: datetime) -> bool:
             .where(ExperimentRun.trigger_source == "WATCHDOG_REVIVE")
         )
     ).scalar()
-    return last is not None and last > cutoff
+    if last is None:
+        return False
+    # ExperimentRun.started_at is a naive DateTime column (models/task.py —
+    # no timezone=True), so asyncpg returns it tz-naive; `cutoff` is derived
+    # from datetime.now(timezone.utc) and is tz-aware. Comparing the two
+    # directly raises TypeError. Normalise the DB value to UTC-aware.
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return last > cutoff
 
 
 async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list) -> None:

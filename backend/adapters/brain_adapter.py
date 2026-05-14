@@ -74,8 +74,11 @@ class BrainAdapter:
     # of once. The Redis key's TTL IS the re-probe window: key present ⇒
     # latched & warm; key absent (never set OR TTL expired) ⇒ (re-)probe.
     # Aligns with _SLOT_COUNTER_KEY's cross-process Redis design.
-    _NO_MULTISIM_KEY: str = "brain:no_multisim"
-    _NO_MULTISIM_REPROBE_SEC: float = 24 * 3600.0  # 24h — also the Redis key TTL
+    _NO_MULTISIM_KEY: str = "brain:no_multisim"               # TTL latch — warm ⇒ skip probe
+    _NO_MULTISIM_EVER_KEY: str = "brain:no_multisim_ever"     # permanent — account was 403'd ≥ once
+    _NO_MULTISIM_PROBE_LOCK: str = "brain:no_multisim_probe"  # SET NX — re-probe herd control
+    _NO_MULTISIM_REPROBE_SEC: float = 24 * 3600.0  # 24h — also the _NO_MULTISIM_KEY TTL
+    _NO_MULTISIM_PROBE_LOCK_TTL: int = 120  # re-probe coordination window (s)
     _SINGLE_SIM_FALLBACK_CONCURRENCY: int = 3
 
     # BRAIN server-side hard limit: <= 3 sims in-flight per account, *across all
@@ -648,6 +651,32 @@ class BrainAdapter:
                 neutralization, truncation, test_period,
             )
 
+        # V-27.94: latch absent ⇒ either NEVER latched (normal account —
+        # multi-sim freely, no coordination) OR latch TTL expired (re-probe
+        # window). Only the re-probe case needs herd control, gated on the
+        # permanent _NO_MULTISIM_EVER_KEY so a normal account is never
+        # throttled. In re-probe: one worker wins SET NX and actually probes;
+        # the rest fall back to single-sim and pick up the refreshed latch
+        # (or its absence) on the next call.
+        if _slot_redis is not None:
+            try:
+                _ever = await _slot_redis.exists(self._NO_MULTISIM_EVER_KEY)
+            except Exception:
+                _ever = False
+            if _ever:
+                try:
+                    _got_probe = bool(await _slot_redis.set(
+                        self._NO_MULTISIM_PROBE_LOCK, "1",
+                        nx=True, ex=self._NO_MULTISIM_PROBE_LOCK_TTL,
+                    ))
+                except Exception:
+                    _got_probe = True  # redis hiccup → don't block the probe
+                if not _got_probe:
+                    return await self._simulate_via_single(
+                        expressions, region, universe, delay, decay,
+                        neutralization, truncation, test_period,
+                    )
+
         # Construct payload list
         sim_payloads = []
         for expr in expressions:
@@ -679,6 +708,10 @@ class BrainAdapter:
                             self._NO_MULTISIM_KEY, str(time.time()),
                             ex=int(self._NO_MULTISIM_REPROBE_SEC),
                         )
+                        # V-27.94: permanent marker — this account has been
+                        # 403'd at least once, so future re-probes (after the
+                        # TTL latch expires) go through SET NX herd control.
+                        await _slot_redis.set(self._NO_MULTISIM_EVER_KEY, "1")
                     except Exception as _redis_e:
                         logger.warning(
                             f"[BrainAdapter] multi-sim latch write failed: {_redis_e}"
@@ -694,6 +727,16 @@ class BrainAdapter:
                     expressions, region, universe, delay, decay,
                     neutralization, truncation, test_period,
                 )
+
+            # V-27.94: multi-sim probe did NOT 403 — the account has the
+            # permission (possibly an upgrade since the last latch). Clear
+            # the permanent "ever" marker so future calls stop entering the
+            # re-probe herd-control path.
+            if _slot_redis is not None:
+                try:
+                    await _slot_redis.delete(self._NO_MULTISIM_EVER_KEY)
+                except Exception:
+                    pass
 
             if response.status_code not in [200, 201, 202]:
                 logger.error(f"Batch Simulation Failed [{response.status_code}] | Response: {response.text}")
@@ -1218,13 +1261,27 @@ class BrainAdapter:
                 # bypassing V-22.7 body-marker detection, V-26.24 cache
                 # invalidation, and _auth_lock coalescing. Now routes through
                 # _coalesced_reauth like _request does.
+                #
+                # V-27.91 follow-up: if re-auth fails, or the single retry
+                # after re-auth STILL hits an auth error (cookie propagation
+                # lag across the httpx pool), don't fall through and leak the
+                # 401 to the caller — back off and re-enter the loop, same as
+                # the 429/5xx branches. The bare `while` had no auth-error
+                # `continue` so a transient post-reauth 401 escaped.
                 if self._is_auth_error(response):
                     logger.warning(
                         f"auth failure for {endpoint} (status={response.status_code}), "
-                        f"re-authenticating..."
+                        f"re-authenticating... (attempt {retries+1}/{max_retries})"
                     )
-                    if await self._coalesced_reauth():
+                    reauthed = await self._coalesced_reauth()
+                    if reauthed:
                         response = await getattr(self.client, method.lower())(url, **kwargs)
+                    if not reauthed or self._is_auth_error(response):
+                        base = min(2 ** (retries + 1), self._RL_BACKOFF_CAP_SEC)
+                        wait_time = base + random.uniform(0, base * 0.25)
+                        await asyncio.sleep(wait_time)
+                        retries += 1
+                        continue
 
                 # 2. Handle 429 Too Many Requests (Rate Limit)
                 if response.status_code == 429:
