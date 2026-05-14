@@ -444,6 +444,14 @@ class Settings(BaseSettings):
     EARLY_STOP_WARMUP_ROUNDS: int = 5
     EARLY_STOP_PASS_RATE_DROP_RATIO: float = 0.5
 
+    # V-27.92 — Hypothesis abandon decision data source. On (default):
+    # should_abandon_hypothesis reads the hypothesis_round_stats table
+    # (authoritative, survives worker restart). Off: legacy in-memory
+    # state.hypothesis_round_history path. The per-round detail table is
+    # ALWAYS written regardless of this flag (additive, zero-risk) — only
+    # the abandon DECISION is gated, so this is a clean kill-switch.
+    HYPOTHESIS_ABANDON_USE_DB_STATS: bool = True
+
     # V-27.108 — failure-pitfall scoring weights (failure side of V-26.36;
     # the success side is already config'd as RAG_SCORE_*).
     RAG_PITFALL_SEVERITY_HIGH: int = 30

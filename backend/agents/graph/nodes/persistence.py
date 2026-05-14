@@ -636,6 +636,13 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
     for alpha in state.pending_alphas:
         if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
             continue
+        # V-27.61: retryable alphas are transient BRAIN failures (HTTP 200
+        # but empty/error sim), not real hypothesis evidence. Writing them as
+        # AlphaFailure rows poisons refresh_stats's fail_count → inflates the
+        # Hypothesis.alpha_count denormalized column (and the V-27.100 sort
+        # key). Skip — they get re-simulated, not recorded as failures.
+        if isinstance(alpha.metrics, dict) and alpha.metrics.get("_sim_retryable"):
+            continue
 
         # Determine error type and message
         err_type = "UNKNOWN"
@@ -786,8 +793,10 @@ async def _process_hypothesis_feedback(
     from backend.agents.graph.early_stop import (
         classify_attribution,
         should_abandon_hypothesis,
+        should_abandon_hypothesis_from_memory,
     )
     from backend.agents.graph.attribution import classify_attribution_llm
+    from backend.config import settings as _cfg_settings
     from backend.database import AsyncSessionLocal
     from backend.services.hypothesis_service import HypothesisService
 
@@ -803,25 +812,56 @@ async def _process_hypothesis_feedback(
     # filter; until then it's "primary gets the round's outcome".
     primary_hid = state.current_hypothesis_id or hids[0]
 
-    # Aggregate counts across this round's alphas
-    alpha_count = len(pending_alphas)
+    # V-27.92 / V-27.71 / V-27.61: split this round's alphas into REAL /
+    # flip-retry / retryable buckets BEFORE counting. The state machine
+    # (mark_active / mark_promoted / should_abandon) must see a CLEAN
+    # alpha_count:
+    #   - flip-retry products (metadata.flipped) are implementation-layer
+    #     salvage, not fresh hypothesis evidence — folding them into
+    #     alpha_count inflated it and could false-trigger mark_active (V-27.71)
+    #   - retryable alphas (metrics._sim_retryable) are transient BRAIN
+    #     failures, not a real test of the hypothesis (V-27.61)
+    # flip_* / retryable_count are tracked on their own for the DB row.
+    real_alphas, flip_alphas, retryable_alphas = [], [], []
+    for a in pending_alphas:
+        _m = a.metrics if isinstance(getattr(a, "metrics", None), dict) else {}
+        _md = a.metadata if isinstance(getattr(a, "metadata", None), dict) else {}
+        if _m.get("_sim_retryable"):
+            retryable_alphas.append(a)
+        elif _md.get("flipped"):
+            flip_alphas.append(a)
+        else:
+            real_alphas.append(a)
+
+    # Real counts — these drive the lifecycle state machine.
+    alpha_count = len(real_alphas)
     pass_count = sum(
-        1 for a in pending_alphas
+        1 for a in real_alphas
         if a.quality_status in ("PASS", "PASS_PROVISIONAL")
     )
-    syntax_fail = sum(1 for a in pending_alphas if a.is_valid is False)
+    syntax_fail = sum(1 for a in real_alphas if a.is_valid is False)
     simulate_fail = sum(
-        1 for a in pending_alphas
+        1 for a in real_alphas
         if a.is_valid is not False and a.is_simulated and not a.simulation_success
     )
     quality_fail = sum(
-        1 for a in pending_alphas
+        1 for a in real_alphas
         if a.is_valid is not False
         and (a.is_simulated and a.simulation_success)
         and a.quality_status in ("FAIL", "REJECT")
     )
+    # Separate tracks for the DB row — NOT state-machine inputs.
+    flip_alpha_count = len(flip_alphas)
+    flip_pass_count = sum(
+        1 for a in flip_alphas
+        if a.quality_status in ("PASS", "PASS_PROVISIONAL")
+    )
+    retryable_count = len(retryable_alphas)
+
+    # best_sharpe spans real + flip (flip is still a real return profile for
+    # this signal direction); it's a display/log value, not an abandon input.
     best_sharpe = 0.0
-    for a in pending_alphas:
+    for a in real_alphas + flip_alphas:
         m = getattr(a, "metrics", None) or {}
         sh = m.get("sharpe")
         if sh is not None:
@@ -848,9 +888,12 @@ async def _process_hypothesis_feedback(
         except Exception as _e:
             logger.warning(f"[B5 v2] hypothesis statement lookup failed: {_e}")
 
+    # V-27.71: attribution sees only real_alphas + clean counts — flip
+    # products are implementation-layer salvage and would dilute the
+    # hypothesis-vs-implementation signal.
     attribution, attribution_reason = await classify_attribution_llm(
         hypothesis_statement=hypothesis_statement,
-        pending_alphas=pending_alphas,
+        pending_alphas=real_alphas,
         alpha_count=alpha_count,
         pass_count=pass_count,
         syntax_fail_count=syntax_fail,
@@ -865,26 +908,34 @@ async def _process_hypothesis_feedback(
         "syntax_fail_count": syntax_fail,
         "simulate_fail_count": simulate_fail,
         "quality_fail_count": quality_fail,
+        "flip_alpha_count": flip_alpha_count,
+        "flip_pass_count": flip_pass_count,
+        "retryable_count": retryable_count,
         "attribution": attribution,
         "attribution_reason": attribution_reason,  # B5 v2: LLM rationale
         "best_sharpe": best_sharpe,
     }
 
-    # Append to all hids proposed this round (every emitted hypothesis
-    # gets the same attribution since they shared a code_gen pass)
+    # Append to all hids proposed this round (every emitted hypothesis gets
+    # the same attribution since they shared a code_gen pass).
+    # V-27.92: history_out is now only a DISPLAY cache (trace step + return
+    # value). The authoritative abandon input is the hypothesis_round_stats
+    # table written below; only the flag-off path still reads history_out.
     history_out = dict(history_so_far)
     for hid in hids:
         history_out[hid] = list(history_out.get(hid, [])) + [entry]
+
+    use_db_stats = bool(
+        getattr(_cfg_settings, "HYPOTHESIS_ABANDON_USE_DB_STATS", True)
+    )
+    task_id = getattr(state, "task_id", None)
 
     # Lifecycle DB updates — fresh session so we don't conflict with the
     # incremental persistence path's session transaction state.
     #
     # V-19.6 (2026-05-06) ghost-promotion fix: B4 links every alpha in the
-    # round to the PRIMARY hypothesis (state.current_hypothesis_id). Non-
-    # primary hypotheses in current_hypothesis_ids share the round's
-    # code_gen pass but never have alphas linked to them. Pre-fix every hid
-    # got mark_promoted on any round PASS — producing "ghost PROMOTED" rows
-    # with alpha_count=0 (e.g. task 143's hids 210/211/212). Post-fix:
+    # round to the PRIMARY hypothesis. Non-primary hypotheses share the
+    # round's code_gen pass but never have alphas linked to them. Post-fix:
     #   - mark_active: all hids (they all got tried via shared code_gen)
     #   - mark_promoted: ONLY primary (only primary owns the PASS alphas)
     #   - mark_abandoned: ONLY primary (consistent with promotion ownership)
@@ -894,32 +945,73 @@ async def _process_hypothesis_feedback(
     try:
         async with AsyncSessionLocal() as _hdb:
             svc = HypothesisService(_hdb)
+
+            # V-27.92: persist this round's per-hid detail to
+            # hypothesis_round_stats FIRST, so should_abandon's SELECT below
+            # sees it within this transaction. Always written (even when the
+            # flag is off) — the table is additive and zero-risk; only the
+            # abandon DECISION is gated by the flag.
+            #
+            # Wrapped in a SAVEPOINT: a write failure here (e.g. an invalid
+            # task_id FK) must NOT abort the V-19.6 lifecycle transitions
+            # below. On failure the abandon decision degrades to "no round
+            # detail" — safe, it just won't false-abandon.
+            try:
+                async with _hdb.begin_nested():
+                    for hid in hids:
+                        await svc.upsert_round_stats(
+                            hypothesis_id=hid,
+                            task_id=task_id,
+                            round_index=round_index,
+                            alpha_count=alpha_count,
+                            pass_count=pass_count,
+                            syntax_fail_count=syntax_fail,
+                            simulate_fail_count=simulate_fail,
+                            quality_fail_count=quality_fail,
+                            flip_alpha_count=flip_alpha_count,
+                            flip_pass_count=flip_pass_count,
+                            retryable_count=retryable_count,
+                            attribution=attribution,
+                            attribution_reason=attribution_reason,
+                            best_sharpe=best_sharpe,
+                        )
+            except Exception as _rs_ex:
+                logger.warning(
+                    f"[B5] hypothesis_round_stats upsert failed (non-fatal, "
+                    f"abandon decision degrades to no-detail): {_rs_ex}"
+                )
+            await _hdb.flush()
+
             for hid in hids:
                 if alpha_count > 0:
                     if await svc.mark_active(hid):
                         activated.append(hid)
-            # Promote / abandon only the primary — non-primary hypotheses
-            # don't have alpha rows attributed to them, so promoting them
-            # would be semantically wrong (PROMOTED with alpha_count=0).
+            # Promote only the primary — non-primary hypotheses don't have
+            # alpha rows attributed to them (would be PROMOTED with
+            # alpha_count=0). pass_count is the REAL count: a round whose
+            # only PASS came from a flip-retry product does NOT promote the
+            # hypothesis (V-27.71 decision — flip is implementation salvage).
             if pass_count > 0 and primary_hid is not None:
                 if await svc.mark_promoted(primary_hid):
                     promoted.append(primary_hid)
-            # Abandonment: only the primary's history is authoritative since
-            # all hids share the same round entry (same code_gen pass). And
-            # only primary owns alphas, so only primary should ever be
-            # ABANDONED. abandon fires when last N rounds had 0 PASS +
-            # attribution=hypothesis (pass_count for THIS round can be
-            # anything — should_abandon checks the cumulative history).
-            #
-            # V-27.B (2026-05-14): the G-refine loop (refine → SUPERSEDED
-            # child) was removed — V-26.14 showed it never fired in
-            # production (0/673 hypotheses had a parent). should_abandon now
-            # goes straight to mark_abandoned.
+            # Abandonment: only primary owns alphas, so only primary is ever
+            # ABANDONED. V-27.92: the decision now reads the
+            # hypothesis_round_stats table (authoritative — survives worker
+            # restart / Celery task-boundary switch / V-20.1 prefetch round's
+            # isolated session). Flag off → legacy in-memory history_out path.
+            # V-27.B: G-refine removed — abandon goes straight to mark_abandoned.
             if primary_hid is not None:
-                should_abandon, abandon_reason = should_abandon_hypothesis(
-                    history_out.get(primary_hid, []),
-                    hypothesis_id=primary_hid,
-                )
+                if use_db_stats:
+                    should_abandon, abandon_reason = await should_abandon_hypothesis(
+                        _hdb, hypothesis_id=primary_hid,
+                    )
+                else:
+                    should_abandon, abandon_reason = (
+                        should_abandon_hypothesis_from_memory(
+                            history_out.get(primary_hid, []),
+                            hypothesis_id=primary_hid,
+                        )
+                    )
                 if should_abandon:
                     if await svc.mark_abandoned(primary_hid, reason=abandon_reason):
                         abandoned.append(primary_hid)
@@ -930,11 +1022,11 @@ async def _process_hypothesis_feedback(
                         )
             # V-19.5 (2026-05-06): NO refresh_stats here. This helper runs
             # inside node_save_results, BEFORE workflow.run_with_persistence's
-            # outer commit. Querying alphas at this point sees 0 rows for
-            # the current round (uncommitted), so refresh_stats would
-            # incorrectly write 0 to alpha_count/pass_count/sharpe_max.
-            # The authoritative refresh now happens post-commit in
-            # workflow.run_with_persistence.
+            # outer commit — querying alphas would see 0 rows for the current
+            # round. (V-27.92: the hypothesis_round_stats rows above don't
+            # have this problem — they're written from the in-memory
+            # pending_alphas, not queried back from the alphas table.) The
+            # authoritative refresh stays post-commit in run_with_persistence.
             await _hdb.commit()
     except Exception as _ex:
         logger.warning(

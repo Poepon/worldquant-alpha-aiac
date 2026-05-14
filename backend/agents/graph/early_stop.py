@@ -135,13 +135,21 @@ def classify_attribution(
 HYPOTHESIS_ABANDON_ROUNDS = 3
 
 
-def should_abandon_hypothesis(
+def should_abandon_hypothesis_from_memory(
     history_for_hid: List[Dict],
     *,
     n_rounds: int = HYPOTHESIS_ABANDON_ROUNDS,
     hypothesis_id: Optional[int] = None,
 ) -> Tuple[bool, Optional[str]]:
-    """Decide whether one specific hypothesis should be abandoned.
+    """Decide whether one specific hypothesis should be abandoned, from an
+    in-memory round-history list.
+
+    V-27.92: this is the LEGACY path, used only when
+    HYPOTHESIS_ABANDON_USE_DB_STATS is off. The authoritative path is the
+    async should_abandon_hypothesis() below, which reads the
+    hypothesis_round_stats table — in-memory history is lost on worker
+    restart / Celery task-boundary switch, which silently disabled the
+    abandon decision entirely (the V-27.92 bug).
 
     Args:
         history_for_hid: list of round summaries for this single hypothesis,
@@ -212,6 +220,96 @@ def should_abandon_hypothesis(
     # Visible at default INFO so persistence.py's terminal branch is
     # traceable. V-27.B: G-refine downstream removed — abandon is now
     # always terminal (persistence.py goes straight to mark_abandoned).
+    logger.info(
+        f"[B6 abandon-trigger] hid={hypothesis_id} rounds=[{rounds_str}] "
+        f"reason={reason!r} — hypothesis will be marked ABANDONED"
+    )
+    return True, reason
+
+
+async def should_abandon_hypothesis(
+    db,
+    *,
+    hypothesis_id: int,
+    n_rounds: int = HYPOTHESIS_ABANDON_ROUNDS,
+) -> Tuple[bool, Optional[str]]:
+    """V-27.92: decide whether one hypothesis should be abandoned, reading
+    the authoritative per-round detail from the hypothesis_round_stats table.
+
+    Pre-V-27.92 this took an in-memory `history_for_hid` list (now
+    should_abandon_hypothesis_from_memory, kept for the
+    HYPOTHESIS_ABANDON_USE_DB_STATS flag-off path). That list was lost on
+    worker restart / Celery task-boundary switch and not shared across the
+    V-20.1 prefetch round's isolated session, so the abandon decision often
+    saw an under-filled window, returned False, and a hypothesis that should
+    have been abandoned stayed ACTIVE forever. The DB table survives all of
+    that.
+
+    Args:
+        db: an AsyncSession.
+        hypothesis_id: the hypothesis to evaluate.
+        n_rounds: consecutive HYPOTHESIS-attribution rounds with 0 PASS
+            required to trigger. Default 3 per Plan §B6.
+
+    Returns:
+        (should_abandon, reason).
+
+    Decision logic is identical to the in-memory version, including the
+    V-27.68 alpha_count==0 guard — but `alpha_count` here is already the
+    CLEAN count (flip-retry products and retryable attempts excluded at
+    write time, V-27.71 / V-27.61), so a round that produced only flips or
+    only retryable failures still correctly counts as "didn't test the
+    hypothesis" and blocks the abandon.
+    """
+    from sqlalchemy import select
+    from backend.models import HypothesisRoundStats
+
+    rows = (
+        await db.execute(
+            select(HypothesisRoundStats)
+            .where(HypothesisRoundStats.hypothesis_id == hypothesis_id)
+            .order_by(HypothesisRoundStats.round_index.desc())
+            .limit(n_rounds)
+        )
+    ).scalars().all()
+    rows = list(reversed(rows))  # newest-first query → chronological
+
+    n_history = len(rows)
+    if n_history < n_rounds:
+        if n_history == n_rounds - 1:
+            logger.debug(
+                f"[B6 abandon-check] hid={hypothesis_id} "
+                f"history={n_history}/{n_rounds} (one round from threshold)"
+            )
+        return False, None
+
+    pass_counts = [int(r.pass_count or 0) for r in rows]
+    alpha_counts = [int(r.alpha_count or 0) for r in rows]
+    attrs = [r.attribution for r in rows]
+    rounds_str = ",".join(str(r.round_index) for r in rows)
+    has_any_pass = any(p > 0 for p in pass_counts)
+    has_non_hypothesis_attr = any(a != "hypothesis" for a in attrs)
+    # V-27.68 guard — a 0-alpha round never actually tested the hypothesis.
+    has_empty_round = any(c == 0 for c in alpha_counts)
+
+    if has_any_pass or has_non_hypothesis_attr or has_empty_round:
+        skip_reason = (
+            "has_pass" if has_any_pass
+            else "non_hypothesis_attr" if has_non_hypothesis_attr
+            else "empty_round"
+        )
+        logger.debug(
+            f"[B6 abandon-skip] hid={hypothesis_id} rounds=[{rounds_str}] "
+            f"pass_counts={pass_counts} alpha_counts={alpha_counts} "
+            f"attrs={attrs} reason={skip_reason}"
+        )
+        return False, None
+
+    reason = (
+        f"{n_rounds} consecutive rounds (rounds {rounds_str}) with "
+        f"0 PASS and attribution=HYPOTHESIS — signal direction does "
+        f"not survive validation"
+    )
     logger.info(
         f"[B6 abandon-trigger] hid={hypothesis_id} rounds=[{rounds_str}] "
         f"reason={reason!r} — hypothesis will be marked ABANDONED"

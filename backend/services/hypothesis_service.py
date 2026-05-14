@@ -411,6 +411,78 @@ class HypothesisService(BaseService):
             await self.refresh_stats(hid)
         return len(ids)
 
+    async def upsert_round_stats(
+        self,
+        *,
+        hypothesis_id: int,
+        task_id: Optional[int],
+        round_index: int,
+        alpha_count: int,
+        pass_count: int,
+        syntax_fail_count: int,
+        simulate_fail_count: int,
+        quality_fail_count: int,
+        flip_alpha_count: int = 0,
+        flip_pass_count: int = 0,
+        retryable_count: int = 0,
+        attribution: Optional[str] = None,
+        attribution_reason: Optional[str] = None,
+        best_sharpe: Optional[float] = None,
+    ) -> None:
+        """V-27.92: upsert one (hypothesis_id, round_index, task_id) row of
+        per-round detail into hypothesis_round_stats — the authoritative
+        input for should_abandon_hypothesis.
+
+        Idempotent: LangGraph can replay the same B5 round after a worker
+        restart, so the conflict target is the uniqueness key and the row is
+        overwritten (latest write wins) rather than duplicated.
+
+        Counts must be the REAL attribution — flip-retry products and
+        retryable (transient BRAIN failure) attempts go in flip_alpha_count /
+        retryable_count and must NOT be folded into alpha_count by the caller
+        (V-27.71 / V-27.61).
+        """
+        if task_id is None:
+            # task_id is NOT NULL + part of the uniqueness key. B5 should
+            # always have a task context; if it somehow doesn't, skip rather
+            # than crash the feedback node — the abandon decision degrades to
+            # "no detail yet" which is safe (won't false-abandon).
+            logger.warning(
+                f"[hypothesis] upsert_round_stats skipped for hid={hypothesis_id} "
+                f"round={round_index}: task_id is None (B5 ran without task context)"
+            )
+            return
+
+        from sqlalchemy.dialects.postgresql import insert as pg_insert
+        from backend.models import HypothesisRoundStats
+
+        values = dict(
+            hypothesis_id=hypothesis_id,
+            task_id=task_id,
+            round_index=round_index,
+            alpha_count=alpha_count,
+            pass_count=pass_count,
+            syntax_fail_count=syntax_fail_count,
+            simulate_fail_count=simulate_fail_count,
+            quality_fail_count=quality_fail_count,
+            flip_alpha_count=flip_alpha_count,
+            flip_pass_count=flip_pass_count,
+            retryable_count=retryable_count,
+            attribution=attribution,
+            attribution_reason=attribution_reason,
+            best_sharpe=best_sharpe,
+        )
+        stmt = pg_insert(HypothesisRoundStats).values(**values)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["hypothesis_id", "round_index", "task_id"],
+            set_={
+                k: stmt.excluded[k]
+                for k in values
+                if k not in ("hypothesis_id", "round_index", "task_id")
+            },
+        )
+        await self.db.execute(stmt)
+
     # ------------------------------------------------------------------
     # Helper queries
     # ------------------------------------------------------------------
@@ -422,26 +494,29 @@ class HypothesisService(BaseService):
 
     async def rounds_active(self, hypothesis_id: int) -> int:
         """Plan v5+ §Phase 3 prep — count rounds this hypothesis has been
-        evaluated in. Computed from alpha rows (alpha created_at deltas).
+        evaluated in.
+
+        V-27.120: reads the precise round_index from hypothesis_round_stats
+        instead of the old 60-second-bucket estimate over alpha created_at
+        timestamps (which under-counted whenever rounds ran faster than the
+        bucket, feeding low values into Phase 3 readiness reports). Each row
+        in hypothesis_round_stats is one (hypothesis, round, task) the
+        hypothesis was evaluated in — the uniqueness key guarantees no
+        double-counting, so a plain COUNT(*) is the round count.
+
+        Pre-migration hypotheses have no detail rows and return 0 — Phase 3
+        readiness is an analytics use and fresh data fills in quickly.
 
         Used by Phase 3 readiness analysis to answer:
         "Do older hypotheses (more rounds_active) PASS more reliably?"
-
-        Returns the number of distinct mining rounds where alphas were
-        produced under this hypothesis. A hypothesis without any alphas
-        returns 0.
-
-        Implementation: groups alpha created_at by 60-second buckets — each
-        bucket counts as a round. This is approximate (relies on rounds
-        being separated by simulate latency) but doesn't require a separate
-        round_index column on alphas.
         """
-        from sqlalchemy import select as _sel, func as _f, distinct as _d, cast, Numeric
-        from backend.models import Alpha
+        from sqlalchemy import select as _sel, func as _f
+        from backend.models import HypothesisRoundStats
 
         stmt = (
-            _sel(_f.count(_d(_f.date_trunc("minute", Alpha.created_at))))
-            .where(Alpha.hypothesis_id == hypothesis_id)
+            _sel(_f.count())
+            .select_from(HypothesisRoundStats)
+            .where(HypothesisRoundStats.hypothesis_id == hypothesis_id)
         )
         result = await self.db.execute(stmt)
         return int(result.scalar() or 0)

@@ -17,7 +17,7 @@ from sqlalchemy.orm import sessionmaker
 
 from backend.agents.graph.early_stop import (
     classify_attribution,
-    should_abandon_hypothesis,
+    should_abandon_hypothesis_from_memory,
     HYPOTHESIS_ABANDON_ROUNDS,
 )
 
@@ -85,31 +85,37 @@ def test_classify_both_when_evenly_mixed():
 
 
 # =============================================================================
-# B6 — should_abandon_hypothesis (pure)
+# B6 — should_abandon_hypothesis_from_memory (pure, flag-off legacy path)
 # =============================================================================
+# V-27.92: the in-memory list path is now the LEGACY fallback, used only when
+# HYPOTHESIS_ABANDON_USE_DB_STATS is off. The authoritative DB-backed path
+# (should_abandon_hypothesis reading hypothesis_round_stats) is covered in
+# tests/integration/test_v27_92_hypothesis_round_stats.py.
+# Every entry now carries alpha_count so the V-27.68 0-alpha guard is exercised
+# with realistic data.
 
 def test_abandon_no_history():
-    assert should_abandon_hypothesis([]) == (False, None)
+    assert should_abandon_hypothesis_from_memory([]) == (False, None)
 
 
 def test_abandon_short_history_no_action():
     """Less than N rounds → no abandon decision yet."""
     history = [
-        {"round_index": 1, "pass_count": 0, "attribution": "hypothesis"},
-        {"round_index": 2, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 1, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 2, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
     ]
-    abandon, reason = should_abandon_hypothesis(history)
+    abandon, reason = should_abandon_hypothesis_from_memory(history)
     assert abandon is False
 
 
 def test_abandon_n_consecutive_hypothesis_fails_triggers():
     """N=3 rounds with 0 PASS + HYPOTHESIS attribution → abandon."""
     history = [
-        {"round_index": 1, "pass_count": 0, "attribution": "hypothesis"},
-        {"round_index": 2, "pass_count": 0, "attribution": "hypothesis"},
-        {"round_index": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 1, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 2, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 3, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
     ]
-    abandon, reason = should_abandon_hypothesis(history)
+    abandon, reason = should_abandon_hypothesis_from_memory(history)
     assert abandon is True
     assert "3 consecutive rounds" in reason
     assert "rounds 1,2,3" in reason
@@ -119,57 +125,68 @@ def test_abandon_implementation_fails_do_not_count():
     """3 IMPLEMENTATION-attribution rounds — don't abandon a hypothesis just
     because the LLM kept writing buggy code. This is the core B6 invariant."""
     history = [
-        {"round_index": 1, "pass_count": 0, "attribution": "implementation"},
-        {"round_index": 2, "pass_count": 0, "attribution": "implementation"},
-        {"round_index": 3, "pass_count": 0, "attribution": "implementation"},
+        {"round_index": 1, "alpha_count": 3, "pass_count": 0, "attribution": "implementation"},
+        {"round_index": 2, "alpha_count": 3, "pass_count": 0, "attribution": "implementation"},
+        {"round_index": 3, "alpha_count": 3, "pass_count": 0, "attribution": "implementation"},
     ]
-    assert should_abandon_hypothesis(history) == (False, None)
+    assert should_abandon_hypothesis_from_memory(history) == (False, None)
 
 
 def test_abandon_pass_in_window_resets():
     """If any of the last N rounds had PASS, don't abandon."""
     history = [
-        {"round_index": 1, "pass_count": 0, "attribution": "hypothesis"},
-        {"round_index": 2, "pass_count": 1, "attribution": "unknown"},  # PASS
-        {"round_index": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 1, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 2, "alpha_count": 3, "pass_count": 1, "attribution": "unknown"},  # PASS
+        {"round_index": 3, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
     ]
-    assert should_abandon_hypothesis(history) == (False, None)
+    assert should_abandon_hypothesis_from_memory(history) == (False, None)
 
 
 def test_abandon_mixed_attribution_window_no_trigger():
     """Last N rounds must ALL be HYPOTHESIS attribution."""
     history = [
-        {"round_index": 1, "pass_count": 0, "attribution": "hypothesis"},
-        {"round_index": 2, "pass_count": 0, "attribution": "both"},
-        {"round_index": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 1, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 2, "alpha_count": 3, "pass_count": 0, "attribution": "both"},
+        {"round_index": 3, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
     ]
-    assert should_abandon_hypothesis(history) == (False, None)
+    assert should_abandon_hypothesis_from_memory(history) == (False, None)
+
+
+def test_abandon_empty_round_guard():
+    """V-27.68: a 0-alpha round never actually tested the hypothesis — it
+    must not count as a failure round, so the window doesn't trigger."""
+    history = [
+        {"round_index": 1, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 2, "alpha_count": 0, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 3, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+    ]
+    assert should_abandon_hypothesis_from_memory(history) == (False, None)
 
 
 def test_abandon_n_param_overrides_default():
     """Custom n_rounds threshold."""
     history = [
-        {"round_index": 1, "pass_count": 0, "attribution": "hypothesis"},
-        {"round_index": 2, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 1, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 2, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
     ]
     # Default N=3 → no abandon
-    assert should_abandon_hypothesis(history)[0] is False
+    assert should_abandon_hypothesis_from_memory(history)[0] is False
     # N=2 → abandon
-    assert should_abandon_hypothesis(history, n_rounds=2)[0] is True
+    assert should_abandon_hypothesis_from_memory(history, n_rounds=2)[0] is True
 
 
 def test_abandon_only_looks_at_last_n():
     """If older rounds had implementation fails but last N are HYPOTHESIS-fail
     → abandon. The window is sliding over the most recent N entries only."""
     history = [
-        {"round_index": 1, "pass_count": 0, "attribution": "implementation"},
-        {"round_index": 2, "pass_count": 0, "attribution": "implementation"},
+        {"round_index": 1, "alpha_count": 3, "pass_count": 0, "attribution": "implementation"},
+        {"round_index": 2, "alpha_count": 3, "pass_count": 0, "attribution": "implementation"},
         # Last 3 are all hypothesis-fail
-        {"round_index": 3, "pass_count": 0, "attribution": "hypothesis"},
-        {"round_index": 4, "pass_count": 0, "attribution": "hypothesis"},
-        {"round_index": 5, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 3, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 4, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
+        {"round_index": 5, "alpha_count": 3, "pass_count": 0, "attribution": "hypothesis"},
     ]
-    abandon, reason = should_abandon_hypothesis(history)
+    abandon, reason = should_abandon_hypothesis_from_memory(history)
     assert abandon is True
     assert "rounds 3,4,5" in reason
 
@@ -188,6 +205,22 @@ def _pg_reachable() -> bool:
 
 
 _TAG = f"_b5_{uuid.uuid4().hex[:8]}_"
+
+
+async def _mk_test_task(s, suffix: str):
+    """A real MiningTask for the hypothesis_round_stats FK. V-27.92:
+    _process_hypothesis_feedback now writes hypothesis_round_stats whose
+    task_id is a NOT NULL FK → mining_tasks, so these end-to-end tests need a
+    real task row instead of a synthetic id."""
+    from backend.models import MiningTask
+    t = MiningTask(
+        task_name=f"{_TAG}task-{suffix}", region="USA", universe="TOP3000",
+        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
+        status="RUNNING", daily_goal=4, max_iterations=2,
+    )
+    s.add(t)
+    await s.flush()
+    return t
 
 
 @pytest.mark.skipif(not _pg_reachable(), reason="PG not reachable")
@@ -211,11 +244,12 @@ async def test_b5_marks_promoted_when_round_has_pass():
             statement=f"{_TAG}promoted-test",
             region="USA", target_tier=1,
         ))
+        task = await _mk_test_task(s, "promoted")
         await s.commit()
 
         try:
             state = MiningState(
-                task_id=999_001, region="USA", universe="TOP3000",
+                task_id=task.id, region="USA", universe="TOP3000",
                 dataset_id="pv1", fields=[], operators=[],
                 current_hypothesis_id=h.id,
                 current_hypothesis_ids=[h.id],
@@ -248,6 +282,7 @@ async def test_b5_marks_promoted_when_round_has_pass():
             assert h.status == HypothesisStatus.PROMOTED.value
         finally:
             await s.execute(delete(Hypothesis).where(Hypothesis.id == h.id))
+            await s.delete(task)
             await s.commit()
     await engine.dispose()
 
@@ -272,13 +307,14 @@ async def test_b6_abandons_after_3_hypothesis_fail_rounds():
             statement=f"{_TAG}abandon-test",
             region="USA", target_tier=1,
         ))
+        task = await _mk_test_task(s, "abandon")
         await s.commit()
 
         try:
             history: dict = {}
             for round_idx in (1, 2, 3):
                 state = MiningState(
-                    task_id=999_002, region="USA", universe="TOP3000",
+                    task_id=task.id, region="USA", universe="TOP3000",
                     dataset_id="pv1", fields=[], operators=[],
                     current_hypothesis_id=h.id,
                     current_hypothesis_ids=[h.id],
@@ -312,6 +348,7 @@ async def test_b6_abandons_after_3_hypothesis_fail_rounds():
             assert "3 consecutive rounds" in (h.abandon_reason or "")
         finally:
             await s.execute(delete(Hypothesis).where(Hypothesis.id == h.id))
+            await s.delete(task)
             await s.commit()
     await engine.dispose()
 
@@ -346,11 +383,12 @@ async def test_v19_6_no_ghost_promotion_for_non_primary():
         sibling_b = await svc.create_hypothesis(HypothesisCreateData(
             statement=f"{_TAG}sibling-b", region="USA", target_tier=1,
         ))
+        task = await _mk_test_task(s, "ghost")
         await s.commit()
 
         try:
             state = MiningState(
-                task_id=999_006, region="USA", universe="TOP3000",
+                task_id=task.id, region="USA", universe="TOP3000",
                 dataset_id="pv1", fields=[], operators=[],
                 current_hypothesis_id=primary.id,
                 current_hypothesis_ids=[primary.id, sibling_a.id, sibling_b.id],
@@ -388,6 +426,7 @@ async def test_v19_6_no_ghost_promotion_for_non_primary():
             await s.execute(delete(Hypothesis).where(
                 Hypothesis.id.in_([primary.id, sibling_a.id, sibling_b.id])
             ))
+            await s.delete(task)
             await s.commit()
     await engine.dispose()
 
@@ -416,13 +455,14 @@ async def test_v19_6_abandon_only_primary_in_multi_hypothesis_round():
         sibling = await svc.create_hypothesis(HypothesisCreateData(
             statement=f"{_TAG}aban-sibling", region="USA", target_tier=1,
         ))
+        task = await _mk_test_task(s, "aban-multi")
         await s.commit()
 
         try:
             history: dict = {}
             for round_idx in (1, 2, 3):
                 state = MiningState(
-                    task_id=999_007, region="USA", universe="TOP3000",
+                    task_id=task.id, region="USA", universe="TOP3000",
                     dataset_id="pv1", fields=[], operators=[],
                     current_hypothesis_id=primary.id,
                     current_hypothesis_ids=[primary.id, sibling.id],
@@ -452,6 +492,7 @@ async def test_v19_6_abandon_only_primary_in_multi_hypothesis_round():
             await s.execute(delete(Hypothesis).where(
                 Hypothesis.id.in_([primary.id, sibling.id])
             ))
+            await s.delete(task)
             await s.commit()
     await engine.dispose()
 
@@ -477,13 +518,14 @@ async def test_b6_does_not_abandon_for_3_implementation_fails():
             statement=f"{_TAG}impl-fail-test",
             region="USA", target_tier=1,
         ))
+        task = await _mk_test_task(s, "impl-fail")
         await s.commit()
 
         try:
             history: dict = {}
             for round_idx in (1, 2, 3):
                 state = MiningState(
-                    task_id=999_003, region="USA", universe="TOP3000",
+                    task_id=task.id, region="USA", universe="TOP3000",
                     dataset_id="pv1", fields=[], operators=[],
                     current_hypothesis_id=h.id,
                     current_hypothesis_ids=[h.id],
@@ -519,5 +561,6 @@ async def test_b6_does_not_abandon_for_3_implementation_fails():
             assert h.status == HypothesisStatus.ACTIVE.value
         finally:
             await s.execute(delete(Hypothesis).where(Hypothesis.id == h.id))
+            await s.delete(task)
             await s.commit()
     await engine.dispose()

@@ -41,8 +41,8 @@ from backend.models.alpha import (
 # Status transition audit
 from backend.models.transition import AlphaStatusTransition
 
-# Hypothesis (Phase 2 B1)
-from backend.models.hypothesis import Hypothesis
+# Hypothesis (Phase 2 B1) + per-round stats (V-27.92)
+from backend.models.hypothesis import Hypothesis, HypothesisRoundStats
 
 # Knowledge models
 from backend.models.knowledge import (
@@ -100,6 +100,7 @@ __all__ = [
     "AlphaStatusTransition",
     # Hypothesis (Phase 2)
     "Hypothesis",
+    "HypothesisRoundStats",
     # Knowledge
     "KnowledgeEntry",
     "OperatorPreference",
