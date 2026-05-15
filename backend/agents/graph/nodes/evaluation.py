@@ -38,6 +38,39 @@ from backend.alpha_routing import route_alpha_action
 # Helpers
 # =============================================================================
 
+import math as _math  # P1-B: 仅在此 helper 使用，避免与已有 import 混淆
+
+
+def _safe_metric(metrics: dict, key: str, default: float, fallback_flags: list) -> float:
+    """Read a numeric metric; fall back to `default` on missing/None/NaN/inf/bool/str.
+
+    Mutates `fallback_flags` by appending `key` when fallback is taken.
+
+    Rules:
+      - missing key, None     → default (flag)
+      - NaN / ±inf            → default (flag)
+      - bool                  → default (flag, bool ⊂ int in Python)
+      - str / non-numeric     → default (flag)
+      - finite int/float      → float(value)
+
+    来源: docs/alphagbm_skills_research_2026-05-15.md P1-B
+    """
+    val = metrics.get(key)
+    if val is None:
+        fallback_flags.append(key)
+        return float(default)
+    if isinstance(val, bool):          # must precede isinstance(val, (int, float))
+        fallback_flags.append(key)
+        return float(default)
+    if not isinstance(val, (int, float)):
+        fallback_flags.append(key)
+        return float(default)
+    if _math.isnan(val) or _math.isinf(val):
+        fallback_flags.append(key)
+        return float(default)
+    return float(val)
+
+
 def _check_is_os_consistency(metrics: Dict, tier: Optional[int] = None) -> bool:
     """V-12: reject alphas whose IS sharpe far exceeds OS sharpe.
 
@@ -194,6 +227,480 @@ def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
         flags.append({"check": "outlier_metric", "severity": "hard", "evidence": outlier_msg})
 
     return flags
+
+
+from dataclasses import dataclass, field as _dc_field
+
+
+@dataclass
+class _EvalCtx:
+    """Per-round context bundle passed to _evaluate_single_alpha.
+
+    Avoids threading 20+ parameters through the helper signature.
+    """
+    state: "MiningState"
+    brain: object          # BrainAdapter | None
+    correlation_service: object  # CorrelationService | None
+    node_name: str
+
+    # tier thresholds
+    sharpe_min: float
+    fitness_min: float
+    turnover_min: float
+    turnover_max: float
+    max_correlation: float
+    check_self_corr: bool
+    check_concentrated: bool
+    prov_sharpe_min: float
+    prov_fitness_min: float
+    prov_turnover_min: float
+    prov_turnover_max: float
+    score_pass_threshold: float
+    score_optimize_threshold: float
+    corr_check_threshold: float
+
+    # cross-alpha accumulators (helper appends; caller reads after the loop)
+    eval_details: list = _dc_field(default_factory=list)
+    failure_feedback_queue: list = _dc_field(default_factory=list)
+
+
+@dataclass
+class _SingleAlphaEvalResult:
+    """What _evaluate_single_alpha returns for telemetry (alpha is mutated in-place)."""
+    corr_check_performed: bool = False
+    corr_check_skipped_reason: Optional[str] = None
+
+
+async def _evaluate_single_alpha(
+    alpha: "object",
+    ctx: "_EvalCtx",
+) -> _SingleAlphaEvalResult:
+    """Evaluate one alpha candidate in-place, mutating alpha.quality_status and alpha.metrics.
+
+    Returns _SingleAlphaEvalResult with telemetry only (counters live in node_evaluate).
+
+    来源: docs/alphagbm_skills_research_2026-05-15.md P1-B — per-alpha try/except
+    """
+    from backend.alpha_scoring import (
+        calculate_alpha_score,
+        should_optimize,
+        get_failed_tests,
+        evaluate_with_brain_checks,
+    )
+    from backend.services.correlation_service import CorrelationService, CorrSource
+    from backend.alpha_routing import route_alpha_action
+
+    state = ctx.state
+    brain = ctx.brain
+    correlation_service = ctx.correlation_service
+    node_name = ctx.node_name
+
+    sharpe_min = ctx.sharpe_min
+    fitness_min = ctx.fitness_min
+    turnover_min = ctx.turnover_min
+    turnover_max = ctx.turnover_max
+    max_correlation = ctx.max_correlation
+    check_self_corr = ctx.check_self_corr
+    check_concentrated = ctx.check_concentrated
+    prov_sharpe_min = ctx.prov_sharpe_min
+    prov_fitness_min = ctx.prov_fitness_min
+    prov_turnover_min = ctx.prov_turnover_min
+    prov_turnover_max = ctx.prov_turnover_max
+    score_pass_threshold = ctx.score_pass_threshold
+    score_optimize_threshold = ctx.score_optimize_threshold
+    corr_check_threshold = ctx.corr_check_threshold
+
+    # local telemetry flags
+    _corr_performed: bool = False
+    _corr_skipped_reason: Optional[str] = None
+
+    # P1-B: explicit init instead of locals().get() -- PEP 667 safe
+    self_corr_source: object = "skipped"
+
+    metrics = alpha.metrics or {}
+
+    train_sharpe_val = metrics.get("train_sharpe")
+    train_fitness_val = metrics.get("train_fitness")
+    test_sharpe_val = metrics.get("test_sharpe")
+    test_fitness_val = metrics.get("test_fitness")
+
+    # V-27.77: do NOT fabricate the OS/test leg.
+    if test_sharpe_val is not None and test_fitness_val is not None:
+        test_leg = {"sharpe": test_sharpe_val, "fitness": test_fitness_val}
+    else:
+        test_leg = {}
+
+    # 构建完整的 sim_result，包含 BRAIN 返回的 checks
+    sim_result = {
+        "train": {
+            "sharpe": train_sharpe_val if train_sharpe_val is not None else metrics.get("sharpe", 0),
+            "fitness": train_fitness_val if train_fitness_val is not None else metrics.get("fitness", 0),
+            "turnover": metrics.get("turnover", 0),
+            "returns": metrics.get("returns", 0),
+        },
+        "test": test_leg,
+        "is": {
+            "sharpe": metrics.get("sharpe", 0),
+            "fitness": metrics.get("fitness", 0),
+            "turnover": metrics.get("turnover", 0),
+            "drawdown": metrics.get("drawdown", 0),
+            "longCount": metrics.get("longCount"),
+            "shortCount": metrics.get("shortCount"),
+            "checks": metrics.get("checks", []),  # BRAIN 官方检查结果
+        },
+        "riskNeutralized": metrics.get("riskNeutralized", {}),
+        "investabilityConstrained": metrics.get("investabilityConstrained", {}),
+        "checks": metrics.get("checks", []),  # 顶层也放一份
+        "can_submit": metrics.get("can_submit", False),
+    }
+
+    # 新增：使用 BRAIN 官方检查结果进行快速判断
+    brain_eval = evaluate_with_brain_checks(sim_result)
+    brain_can_submit = brain_eval.get('can_submit', False)
+    brain_failed_checks = brain_eval.get('failed_checks', [])
+
+    # Stage 1: Preliminary score WITHOUT correlation
+    preliminary_score = calculate_alpha_score(
+        sim_result=sim_result,
+        prod_corr=0.0,
+        self_corr=0.0
+    )
+
+    # P1-B: use _safe_metric for sharpe/fitness/turnover to handle NaN/inf/bool/str
+    fallback_flags: list = []
+    sharpe = _safe_metric(metrics, "sharpe", 0.0, fallback_flags)
+    turnover = _safe_metric(metrics, "turnover", 0.0, fallback_flags)
+    fitness = _safe_metric(metrics, "fitness", 0.0, fallback_flags)
+
+    # 使用 BRAIN 官方检查或本地阈值
+    if brain_eval['check_details']:
+        # 有官方检查结果，以官方为准
+        meets_thresholds = brain_can_submit or (not brain_failed_checks)
+    else:
+        # Fallback: 使用本地阈值
+        meets_thresholds = (
+            sharpe >= sharpe_min and
+            turnover <= turnover_max and
+            fitness >= fitness_min
+        )
+
+    # Stage 2: Correlation check for promising candidates
+    prod_corr = 0.0
+    self_corr = 0.0
+    needs_corr_check = check_self_corr and (
+        preliminary_score >= corr_check_threshold or
+        meets_thresholds
+    )
+
+    if needs_corr_check and brain and alpha.alpha_id:
+        _corr_performed = True
+        try:
+            prod_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="PROD")
+            if isinstance(prod_corr_result, dict):
+                prod_corr = float(prod_corr_result.get("max", 0.0) or 0.0)
+        except Exception as e:
+            logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
+
+        self_corr_source = CorrSource.UNKNOWN
+        if correlation_service is not None:
+            try:
+                _corr_raw, self_corr_source = await correlation_service.get_with_fallback(
+                    alpha.alpha_id, region=state.region
+                )
+                self_corr = _corr_raw if _corr_raw is not None else 0.0
+            except Exception as e:
+                logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
+                self_corr_source = CorrSource.UNKNOWN
+
+            if self_corr_source == CorrSource.LOCAL:
+                try:
+                    crisis_by_window = await correlation_service.calc_self_corr_by_window(
+                        alpha_id=alpha.alpha_id, region=state.region
+                    )
+                    if isinstance(alpha.metrics, dict):
+                        alpha.metrics = dict(alpha.metrics)
+                    else:
+                        alpha.metrics = {}
+                    alpha.metrics["_crisis_correlations"] = crisis_by_window
+                    spikes = [
+                        (w, info["max_corr"])
+                        for w, info in crisis_by_window.items()
+                        if info.get("status") == "ok"
+                        and info.get("max_corr", 0.0) >= max_correlation
+                    ]
+                    if spikes:
+                        logger.info(
+                            f"[{node_name}] {alpha.alpha_id} crisis-corr spikes: "
+                            f"{spikes} (global self_corr={self_corr:.3f})"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[{node_name}] crisis-window corr failed for {alpha.alpha_id}: {e}"
+                    )
+        else:
+            try:
+                self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
+                if isinstance(self_corr_result, dict):
+                    self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
+                    self_corr_source = CorrSource.BRAIN
+            except Exception as e:
+                logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
+    else:
+        _corr_skipped_reason = "tier_skipped" if not check_self_corr else "skipped"
+        # tier_skipped means "by tier policy, not because we couldn't measure" —
+        # downstream gate should treat as ok+verified, NOT downgrade to PROVISIONAL
+        self_corr_source = "tier_skipped" if not check_self_corr else "skipped"
+
+    # Final score with correlation penalty
+    score = calculate_alpha_score(
+        sim_result=sim_result,
+        prod_corr=prod_corr,
+        self_corr=self_corr
+    )
+
+    should_opt, opt_reason = should_optimize(sim_result)
+    failed_tests = get_failed_tests(sim_result)
+
+    sub_universe_check = next(
+        (c for c in metrics.get("checks", [])
+         if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
+        None,
+    )
+    sub_universe_ok = (
+        sub_universe_check is None
+        or sub_universe_check.get("result") != "FAIL"
+    )
+    concentrated_check = next(
+        (c for c in metrics.get("checks", [])
+         if c.get("name") == "CONCENTRATED_WEIGHT"),
+        None,
+    )
+    if check_concentrated:
+        concentrated_ok = (
+            concentrated_check is None
+            or concentrated_check.get("result") != "FAIL"
+        )
+    else:
+        concentrated_ok = True
+
+    # PR2: tier-aware self_corr gate
+    if check_self_corr:
+        self_corr_ok = self_corr < max_correlation
+        self_corr_verified = self_corr_source not in (CorrSource.UNKNOWN, "unknown")
+    else:
+        self_corr_ok = True
+        self_corr_verified = True  # tier_skipped, not unknown
+
+    # V-26.76: pass tier so T3 hits the strict 0.4/0.5 floor
+    from backend.agents.graph.tier_thresholds import get_tier_thresholds as _get_thr
+    _tier_val = getattr(state, "factor_tier", None)
+    is_overfit_safe = _check_is_os_consistency(metrics, tier=_tier_val)
+
+    hard_gate_pass = (
+        sharpe >= sharpe_min
+        and fitness >= fitness_min
+        and turnover_min <= turnover <= turnover_max
+        and sub_universe_ok
+        and concentrated_ok
+        and self_corr_ok
+        and self_corr_verified
+        and is_overfit_safe
+    )
+
+    self_corr_acceptable = self_corr_ok or not self_corr_verified
+    near_pass = (
+        sharpe >= prov_sharpe_min
+        and fitness >= prov_fitness_min
+        and prov_turnover_min <= turnover <= prov_turnover_max
+        and sub_universe_ok
+        and concentrated_ok
+        and self_corr_acceptable
+    )
+
+    v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
+    hard_v16_flags = [f for f in v16_flags if f.get("severity") == "hard"]
+    brain_actionable_fails_list = [
+        c.get("name") for c in brain_failed_checks or []
+        if c.get("name") in (
+            "LOW_FITNESS",
+            "LOW_SHARPE",
+            "CONCENTRATED_WEIGHT",
+            "HIGH_TURNOVER",
+            "LOW_TURNOVER",
+            "MATCHES_PYRAMID",
+            "HIGH_CORRELATION",
+            "SELF_CORRELATION",
+        )
+    ]
+    decision = route_alpha_action(
+        hard_gate_pass=hard_gate_pass,
+        meets_thresholds=meets_thresholds,
+        score=score,
+        score_pass_threshold=score_pass_threshold,
+        has_v16_hard_flags=bool(hard_v16_flags),
+        brain_checks_present=bool(brain_eval['check_details']),
+        brain_actionable_fails=bool(brain_actionable_fails_list),
+        brain_can_submit=brain_can_submit,
+        near_pass=near_pass,
+        should_optimize=should_opt,
+        score_optimize_threshold=score_optimize_threshold,
+    )
+    alpha.quality_status = decision.status
+
+    if decision.status == "FAIL":
+        # Enhanced: Alignment check and attribution for failures
+        alignment_issues = []
+        attribution = "unknown"
+
+        hypothesis_dict = {}
+        if hasattr(alpha, 'hypothesis') and alpha.hypothesis:
+            if isinstance(alpha.hypothesis, dict):
+                hypothesis_dict = alpha.hypothesis
+            else:
+                hypothesis_dict = {"statement": alpha.hypothesis}
+
+        from backend.agents.prompts import (
+            quick_alignment_check,
+            determine_attribution_heuristic,
+        )
+        if hypothesis_dict and alpha.expression:
+            is_aligned, alignment_issues = quick_alignment_check(
+                hypothesis_dict, alpha.expression, state.fields
+            )
+
+            result_dict = {
+                "success": False,
+                "sharpe": sharpe,
+                "fitness": fitness,
+                "turnover": turnover,
+            }
+            attribution = determine_attribution_heuristic(
+                result_dict, alignment_issues, alpha.validation_error
+            )
+
+            if not is_aligned:
+                logger.debug(
+                    f"[{node_name}] Alignment issues for {alpha.alpha_id}: {alignment_issues[:2]}"
+                )
+
+        error_type = "QUALITY_FAIL"
+        brain_fail_priority = (
+            "CONCENTRATED_WEIGHT",
+            "LOW_SUB_UNIVERSE_SHARPE",
+            "HIGH_PROD_CORRELATION",
+            "HIGH_SELF_CORRELATION",
+        )
+        brain_fails = {
+            c.get("name"): c
+            for c in metrics.get("checks", []) or []
+            if c.get("result") == "FAIL"
+        }
+        for name in brain_fail_priority:
+            if name in brain_fails:
+                error_type = name
+                break
+        if error_type == "QUALITY_FAIL":
+            if sharpe < sharpe_min:
+                error_type = "LOW_SHARPE"
+            elif fitness < fitness_min:
+                error_type = "LOW_FITNESS"
+            elif turnover > turnover_max:
+                error_type = "HIGH_TURNOVER"
+            elif sharpe < 0:
+                error_type = "NEGATIVE_SIGNAL"
+
+        if alpha.expression:
+            ctx.failure_feedback_queue.append({
+                "expression": alpha.expression,
+                "error_type": error_type,
+                "metrics": metrics,
+                "region": state.region,
+                "dataset_id": state.dataset_id,
+                "hypothesis": hypothesis_dict.get("statement", ""),
+                "alignment_issues": alignment_issues,
+                "attribution": attribution,
+            })
+
+    # Store detailed metrics with BRAIN checks info
+    # P1-B: append _metrics_fallback_flags to the spread
+    alpha.metrics = {
+        **metrics,
+        "_score": round(score, 4),
+        "_preliminary_score": round(preliminary_score, 4),
+        "_prod_corr": round(prod_corr, 4) if prod_corr else None,
+        "_self_corr": (
+            round(self_corr, 4)
+            if self_corr_source in (CorrSource.LOCAL, CorrSource.BRAIN)
+            else None
+        ),
+        "_self_corr_source": str(self_corr_source),
+        "_corr_checked": needs_corr_check,
+        "_should_optimize": should_opt,
+        "_optimize_reason": opt_reason,
+        "_failed_tests": failed_tests,
+        "_brain_can_submit": brain_can_submit,
+        "_brain_failed_checks": brain_failed_checks,
+        "_brain_pending_checks": brain_eval.get('pending_checks', []),
+        "_pyramid_multiplier": (brain_eval.get('pyramid_info') or {}).get('multiplier', 1.0),
+        "_metrics_fallback_flags": fallback_flags,
+    }
+
+    # Routing annotations
+    if decision.status in ("PASS", "PASS_PROVISIONAL"):
+        alpha.metrics["_routing_reason"] = decision.reason
+        if v16_flags:
+            alpha.metrics["_v16_suspicion_flags"] = v16_flags
+            if decision.reason == "near_pass":
+                logger.warning(
+                    f"[{node_name}] V-16 suspicion mode on PROVISIONAL "
+                    f"(sharpe={sharpe:.2f}) | flags={[f['check'] for f in v16_flags]}"
+                )
+            else:
+                logger.warning(
+                    f"[{node_name}] V-16 suspicion mode (sharpe={sharpe:.2f}) | "
+                    f"flags={[f['check'] for f in v16_flags]}"
+                )
+        if decision.reason == "brain_checks_unverified":
+            alpha.metrics["_brain_checks_unverified"] = True
+            logger.info(
+                f"[{node_name}] PASS→PROVISIONAL: BRAIN returned no checks "
+                f"(gate unverified) | sharpe={sharpe:.2f}"
+            )
+        elif decision.reason == "brain_actionable_fails":
+            alpha.metrics["_brain_pass_downgrade"] = brain_actionable_fails_list
+            logger.info(
+                f"[{node_name}] PASS→PROVISIONAL: BRAIN rejected on "
+                f"{brain_actionable_fails_list} | sharpe={sharpe:.2f} "
+                f"fitness={fitness:.2f} expr={(alpha.expression or '')[:80]}"
+            )
+        elif decision.reason == "near_pass" and brain_actionable_fails_list:
+            alpha.metrics["_brain_actionable_fails"] = brain_actionable_fails_list
+
+    _debug_log("F", "nodes.py:evaluate:alpha_detail", f"Alpha evaluated: {alpha.quality_status}", {
+        "alpha_id": alpha.alpha_id,
+        "expression": alpha.expression[:80] if alpha.expression else None,
+        "sharpe": round(sharpe, 3),
+        "fitness": round(fitness, 3),
+        "turnover": round(turnover, 3),
+        "score": round(score, 3),
+        "status": alpha.quality_status
+    })
+
+    ctx.eval_details.append({
+        "id": alpha.alpha_id,
+        "status": alpha.quality_status,
+        "score": round(score, 4),
+        "sharpe": sharpe,
+        "fitness": fitness,
+        "turnover": turnover,
+        "corr_checked": needs_corr_check,
+        "optimize_reason": opt_reason if should_opt else None,
+    })
+
+    return _SingleAlphaEvalResult(
+        corr_check_performed=_corr_performed,
+        corr_check_skipped_reason=_corr_skipped_reason,
+    )
 
 
 # =============================================================================
@@ -738,9 +1245,6 @@ async def node_evaluate(
     # already guards this with model_copy(); node_evaluate mutates both
     # top-level fields and the nested metrics dict, so it needs a DEEP copy.
     updated_alphas = [a.model_copy(deep=True) for a in state.pending_alphas]
-    pass_count = 0
-    fail_count = 0
-    optimize_count = 0
     corr_checks_performed = 0
     corr_checks_skipped = 0
 
@@ -793,517 +1297,80 @@ async def node_evaluate(
     
     eval_details = []
     failure_feedback_queue = []
-    
+
+    # P1-B: bundle context for per-alpha helper
+    _ctx = _EvalCtx(
+        state=state,
+        brain=brain,
+        correlation_service=correlation_service,
+        node_name=node_name,
+        sharpe_min=sharpe_min,
+        fitness_min=fitness_min,
+        turnover_min=turnover_min,
+        turnover_max=turnover_max,
+        max_correlation=max_correlation,
+        check_self_corr=check_self_corr,
+        check_concentrated=check_concentrated,
+        prov_sharpe_min=prov_sharpe_min,
+        prov_fitness_min=prov_fitness_min,
+        prov_turnover_min=prov_turnover_min,
+        prov_turnover_max=prov_turnover_max,
+        score_pass_threshold=score_pass_threshold,
+        score_optimize_threshold=score_optimize_threshold,
+        corr_check_threshold=corr_check_threshold,
+        eval_details=eval_details,
+        failure_feedback_queue=failure_feedback_queue,
+    )
+    eval_errors = 0
+
     for i, alpha in enumerate(updated_alphas):
-        # Hard rule: anything that didn't simulate successfully cannot be PASS,
-        # regardless of any earlier transient status. Metrics are missing, so
-        # gates are unverifiable.
+        # Hard rule: anything that didn't simulate successfully cannot be PASS.
         if not alpha.is_simulated or not alpha.simulation_success:
-            # V-27.61: a retryable sim failure (429 / slot timeout / stale
-            # counter) is transient — don't bury it as a terminal FAIL,
-            # which would pollute the KB and the failure_feedback_queue.
-            # Leave quality_status at PENDING: it's neither counted as a
-            # fail nor persisted (node_save_results only writes PASS / PROV);
-            # mining moves on with a fresh expression next round.
             if isinstance(alpha.metrics, dict) and alpha.metrics.get("_sim_retryable"):
                 logger.info(
                     f"[{node_name}] retryable sim failure held at PENDING "
                     f"(not FAIL) | expr={(alpha.expression or '')[:60]}"
                 )
+                updated_alphas[i] = alpha
                 continue
             alpha.quality_status = "FAIL"
-            fail_count += 1
+            updated_alphas[i] = alpha
             continue
 
-        metrics = alpha.metrics or {}
-        
-        train_sharpe_val = metrics.get("train_sharpe")
-        train_fitness_val = metrics.get("train_fitness")
-        test_sharpe_val = metrics.get("test_sharpe")
-        test_fitness_val = metrics.get("test_fitness")
-
-        # V-27.77: do NOT fabricate the OS/test leg. When BRAIN returned no
-        # separate test metrics, leave sim_result["test"] empty —
-        # _extract_os_stats falls back gracefully (test → os → pnl.os → {}).
-        # The old `metrics.get("sharpe",0) * 0.8` invented an OS sharpe out of
-        # thin air and fed it to calculate_alpha_score / should_optimize /
-        # get_failed_tests (V-26.19 only fixed the hard_gate link via
-        # _check_is_os_consistency, not the scoring link).
-        if test_sharpe_val is not None and test_fitness_val is not None:
-            test_leg = {"sharpe": test_sharpe_val, "fitness": test_fitness_val}
-        else:
-            test_leg = {}
-
-        # 构建完整的 sim_result，包含 BRAIN 返回的 checks
-        sim_result = {
-            "train": {
-                "sharpe": train_sharpe_val if train_sharpe_val is not None else metrics.get("sharpe", 0),
-                "fitness": train_fitness_val if train_fitness_val is not None else metrics.get("fitness", 0),
-                "turnover": metrics.get("turnover", 0),
-                "returns": metrics.get("returns", 0),
-            },
-            "test": test_leg,
-            "is": {
-                "sharpe": metrics.get("sharpe", 0),
-                "fitness": metrics.get("fitness", 0),
-                "turnover": metrics.get("turnover", 0),
-                "drawdown": metrics.get("drawdown", 0),
-                "longCount": metrics.get("longCount"),
-                "shortCount": metrics.get("shortCount"),
-                "checks": metrics.get("checks", []),  # BRAIN 官方检查结果
-            },
-            "riskNeutralized": metrics.get("riskNeutralized", {}),
-            "investabilityConstrained": metrics.get("investabilityConstrained", {}),
-            "checks": metrics.get("checks", []),  # 顶层也放一份
-            "can_submit": metrics.get("can_submit", False),
-        }
-        
-        # 新增：使用 BRAIN 官方检查结果进行快速判断
-        brain_eval = evaluate_with_brain_checks(sim_result)
-        brain_can_submit = brain_eval.get('can_submit', False)
-        brain_failed_checks = brain_eval.get('failed_checks', [])
-        # V-26.77 (2026-05-13): removed dead `pyramid_multiplier` extraction —
-        # the variable was assigned and never read. Pyramid bonus is now
-        # handled inside calculate_alpha_score via brain_eval directly.
-
-        # Stage 1: Preliminary score WITHOUT correlation
-        preliminary_score = calculate_alpha_score(
-            sim_result=sim_result,
-            prod_corr=0.0,
-            self_corr=0.0
-        )
-        
-        sharpe = metrics.get("sharpe", 0) or 0
-        turnover = metrics.get("turnover", 0) or 0
-        fitness = metrics.get("fitness", 0) or 0
-        
-        # 使用 BRAIN 官方检查或本地阈值
-        if brain_eval['check_details']:
-            # 有官方检查结果，以官方为准
-            meets_thresholds = brain_can_submit or (not brain_failed_checks)
-        else:
-            # Fallback: 使用本地阈值
-            meets_thresholds = (
-                sharpe >= sharpe_min and
-                turnover <= turnover_max and
-                fitness >= fitness_min
-            )
-        
-        # Stage 2: Correlation check for promising candidates
-        # PR2: T1/T2 tier skips self_corr entirely (check_self_corr=False).
-        # The 8-12 LLM-guided wrapper variants per seed are necessarily
-        # PnL-correlated; gating them on self_corr would FAIL the whole T2
-        # batch. self_corr is only meaningful at T3 (vs already-submitted OS
-        # pool), which is where we keep the strict gate.
-        prod_corr = 0.0
-        self_corr = 0.0
-        needs_corr_check = check_self_corr and (
-            preliminary_score >= corr_check_threshold or
-            meets_thresholds
-        )
-
-        if needs_corr_check and brain and alpha.alpha_id:
-            corr_checks_performed += 1
-            try:
-                prod_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="PROD")
-                if isinstance(prod_corr_result, dict):
-                    prod_corr = float(prod_corr_result.get("max", 0.0) or 0.0)
-            except Exception as e:
-                logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
-
-            # W0.5: prefer local PnL-matrix; fall back to BRAIN API; finally
-            # mark UNKNOWN so hard_gate downgrades to PASS_PROVISIONAL.
-            # V-27.158: self_corr_source carries CorrSource enum values from
-            # get_with_fallback; the "tier_skipped"/"skipped" branch below is
-            # a separate tier-policy axis (not a CorrSource) and stays a
-            # plain string — StrEnum makes the mixed comparisons safe.
-            self_corr_source = CorrSource.UNKNOWN
-            if correlation_service is not None:
-                try:
-                    _corr_raw, self_corr_source = await correlation_service.get_with_fallback(
-                        alpha.alpha_id, region=state.region
-                    )
-                    # get_with_fallback returns None for CorrSource.UNKNOWN
-                    # (V-26.77 follow-up #5: the service no longer fakes 0.0
-                    # for "not measured"). Keep self_corr numeric for the
-                    # score / hard_gate arithmetic below — self_corr_verified
-                    # (derived from source) is what actually gates PASS, so a
-                    # 0.0 placeholder here is inert when source is UNKNOWN.
-                    self_corr = _corr_raw if _corr_raw is not None else 0.0
-                except Exception as e:
-                    logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
-                    self_corr_source = CorrSource.UNKNOWN
-
-                # Crisis-window stress test: piggyback on the same local PnL
-                # cache that just resolved self_corr. Only runs when the
-                # cache produced a real value ("local") — if the global
-                # max-corr couldn't be measured the per-window slice has
-                # even less data to work with. Failures are non-fatal: the
-                # crisis read is advisory, not a hard gate.
-                if self_corr_source == CorrSource.LOCAL:
-                    try:
-                        crisis_by_window = await correlation_service.calc_self_corr_by_window(
-                            alpha_id=alpha.alpha_id, region=state.region
-                        )
-                        if isinstance(alpha.metrics, dict):
-                            alpha.metrics = dict(alpha.metrics)
-                        else:
-                            alpha.metrics = {}
-                        alpha.metrics["_crisis_correlations"] = crisis_by_window
-                        spikes = [
-                            (w, info["max_corr"])
-                            for w, info in crisis_by_window.items()
-                            if info.get("status") == "ok"
-                            and info.get("max_corr", 0.0) >= max_correlation
-                        ]
-                        if spikes:
-                            logger.info(
-                                f"[{node_name}] {alpha.alpha_id} crisis-corr spikes: "
-                                f"{spikes} (global self_corr={self_corr:.3f})"
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            f"[{node_name}] crisis-window corr failed for {alpha.alpha_id}: {e}"
-                        )
-            else:
-                try:
-                    self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
-                    if isinstance(self_corr_result, dict):
-                        self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
-                        self_corr_source = CorrSource.BRAIN
-                except Exception as e:
-                    logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
-        else:
-            corr_checks_skipped += 1
-            # tier_skipped means "by tier policy, not because we couldn't measure" —
-            # downstream gate should treat as ok+verified, NOT downgrade to PROVISIONAL
-            self_corr_source = "tier_skipped" if not check_self_corr else "skipped"
-        
-        # Final score with correlation penalty
-        score = calculate_alpha_score(
-            sim_result=sim_result,
-            prod_corr=prod_corr,
-            self_corr=self_corr
-        )
-        
-        should_opt, opt_reason = should_optimize(sim_result)
-        failed_tests = get_failed_tests(sim_result)
-
-        # Hard skill gate (BRAIN red-line on IS metrics) — see plan §
-        # "BRAIN Gate 真实值校准". PASS requires ALL of:
-        #   sharpe >= SHARPE_MIN AND fitness >= FITNESS_MIN
-        #   AND 0.01 <= turnover <= TURNOVER_MAX
-        #   AND sub-universe check not FAIL
-        #   AND self_corr < MAX_CORRELATION
-        sub_universe_check = next(
-            (c for c in metrics.get("checks", [])
-             if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
-            None,
-        )
-        sub_universe_ok = (
-            sub_universe_check is None
-            or sub_universe_check.get("result") != "FAIL"
-        )
-        # Post-Step1 (2026-04-30): BRAIN /check rejects ~25% of project's PASS
-        # alphas on CONCENTRATED_WEIGHT (single position > 10% on some date).
-        # Local hard_gate now mirrors that rule using sim_result's checks block.
-        concentrated_check = next(
-            (c for c in metrics.get("checks", [])
-             if c.get("name") == "CONCENTRATED_WEIGHT"),
-            None,
-        )
-        # PR2: T1 skips concentrated_weight check (raw signal evaluation only).
-        # T2/T3 keep BRAIN's CONCENTRATED_WEIGHT rule.
-        if check_concentrated:
-            concentrated_ok = (
-                concentrated_check is None
-                or concentrated_check.get("result") != "FAIL"
-            )
-        else:
-            concentrated_ok = True
-
-        # PR2: tier-aware self_corr gate. T1/T2 force ok+verified so PASS path
-        # is reachable for wrapper variants; T3 uses real self_corr value.
-        self_corr_source = locals().get("self_corr_source", "skipped")
-        if check_self_corr:
-            self_corr_ok = self_corr < max_correlation
-            # V-27.158: CorrSource.UNKNOWN compares equal to "unknown"
-            # (StrEnum), so this covers both the enum and any legacy string.
-            self_corr_verified = self_corr_source not in (CorrSource.UNKNOWN, "unknown")
-        else:
-            self_corr_ok = True
-            self_corr_verified = True  # tier_skipped, not unknown
-
-        # V-12 (2026-05-03): IS-only PASS bar lets train_sharpe >> test_sharpe
-        # alphas through. Spike data showed T2 train_avg=3.94 / test_avg=0.40
-        # (90% decay), with top alphas like sharpe=16.2/test=0.0 — pure IS
-        # overfit. Require OS consistency for high-IS-sharpe alphas: above
-        # sharpe=2 we need a positive os_sharpe with retention >= 0.3 (or 0.4
-        # if sharpe>5). Lower-IS alphas pass without OS check (their own bar
-        # is conservative enough).
-        # V-26.76: pass tier so T3 hits the strict 0.4/0.5 floor.
-        is_overfit_safe = _check_is_os_consistency(metrics, tier=tier_cfg["tier"])
-
-        hard_gate_pass = (
-            sharpe >= sharpe_min
-            and fitness >= fitness_min
-            and turnover_min <= turnover <= turnover_max
-            and sub_universe_ok
-            and concentrated_ok
-            and self_corr_ok
-            and self_corr_verified
-            and is_overfit_safe
-        )
-
-        # PASS_PROVISIONAL: 近成功池 (sharpe + fitness>=0.6 + turnover [0.01,0.85])
-        # 用于 KB 学习/island 优化种子，但不视为可提交
-        #
-        # 议题 B (PnL 硬闸门，规模无关替代 expression injection):
-        #   self_corr 由 correlation_service 用 OS PnL 矩阵实测得出 (W0.5)。
-        #   - 已验证且 >= 0.7 (self_corr_ok=False, verified=True) → 直接 FAIL，
-        #     不污染 PROVISIONAL 池 (重复 alpha 没必要进 KB 学习)
-        #   - 未验证 (verified=False, cache miss + API fail) → 仍允许 PROVISIONAL
-        #     (defensive：宁可保留候选也不丢真信号)
-        #   - skipped (前置门没过自然没算 corr) → ok=True, verified=True (skipped
-        #     != unknown), 不影响其他门的判定
-        # 这套机制对 OS 池规模无关 — 不论 5 还是 10000 条提交 alpha,
-        # 单条 alpha 的 corrwith 都是 O(N列) ~50ms 量级。
-        self_corr_acceptable = self_corr_ok or not self_corr_verified
-        # PR2: PROVISIONAL bar uses tier-specific looser thresholds (plan §"PASS_PROVISIONAL 阈值").
-        # T1: sharpe>0.5, fitness>0.3, turnover<0.85
-        # T2: sharpe>0.8, fitness>0.6, turnover<0.65
-        # T3: sharpe>=1.3, fitness>=0.8, turnover<0.70
-        near_pass = (
-            sharpe >= prov_sharpe_min
-            and fitness >= prov_fitness_min
-            # V-26.80: symmetric provisional band; see prov_turnover_min above.
-            and prov_turnover_min <= turnover <= prov_turnover_max
-            and sub_universe_ok
-            and concentrated_ok
-            and self_corr_acceptable
-        )
-
-        # P0 #3: Determine quality status via centralized band router.
-        # Pre-computes shared inputs once — the original decision tree called
-        # _run_suspicion_checks and brain_actionable_fails separately in Band A
-        # (L1073/L1107) and Band B (L1163/L1173); pre-computing here removes the
-        # duplication and makes every input to route_alpha_action() explicit.
-        v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
-        hard_v16_flags = [f for f in v16_flags if f.get("severity") == "hard"]
-        # Fix-C / V-26.21: the actionable set covers checks that indicate a
-        # structural BRAIN reject rather than signal weakness, justifying a
-        # downgrade to PASS_PROVISIONAL so the optimization chain gets a chance
-        # to fix fitness/turnover/concentration before queuing submission.
-        brain_actionable_fails_list = [
-            c.get("name") for c in brain_failed_checks or []
-            if c.get("name") in (
-                "LOW_FITNESS",
-                "LOW_SHARPE",
-                "CONCENTRATED_WEIGHT",
-                "HIGH_TURNOVER",
-                "LOW_TURNOVER",
-                "MATCHES_PYRAMID",
-                "HIGH_CORRELATION",
-                "SELF_CORRELATION",
-            )
-        ]
-        decision = route_alpha_action(
-            hard_gate_pass=hard_gate_pass,
-            meets_thresholds=meets_thresholds,
-            score=score,
-            score_pass_threshold=score_pass_threshold,
-            has_v16_hard_flags=bool(hard_v16_flags),
-            brain_checks_present=bool(brain_eval['check_details']),
-            brain_actionable_fails=bool(brain_actionable_fails_list),
-            brain_can_submit=brain_can_submit,
-            near_pass=near_pass,
-            should_optimize=should_opt,
-            score_optimize_threshold=score_optimize_threshold,
-        )
-        alpha.quality_status = decision.status
-
-        if decision.status == "PASS":
-            pass_count += 1
-        elif decision.status == "FAIL":
-            fail_count += 1
-        else:  # PASS_PROVISIONAL or OPTIMIZE
-            optimize_count += 1
-
-        if decision.status == "FAIL":
-            # Enhanced: Alignment check and attribution for failures
-            # This helps distinguish hypothesis failure from implementation failure
-            alignment_issues = []
-            attribution = "unknown"
-
-            # Get hypothesis from alpha if available
-            hypothesis_dict = {}
-            if hasattr(alpha, 'hypothesis') and alpha.hypothesis:
-                if isinstance(alpha.hypothesis, dict):
-                    hypothesis_dict = alpha.hypothesis
-                else:
-                    hypothesis_dict = {"statement": alpha.hypothesis}
-
-            # Quick alignment check
-            if hypothesis_dict and alpha.expression:
-                is_aligned, alignment_issues = quick_alignment_check(
-                    hypothesis_dict, alpha.expression, state.fields
-                )
-
-                # Determine attribution
-                result_dict = {
-                    "success": False,
-                    "sharpe": sharpe,
-                    "fitness": fitness,
-                    "turnover": turnover,
-                }
-                attribution = determine_attribution_heuristic(
-                    result_dict, alignment_issues, alpha.validation_error
-                )
-
-                if not is_aligned:
-                    logger.debug(
-                        f"[{node_name}] Alignment issues for {alpha.alpha_id}: {alignment_issues[:2]}"
-                    )
-
-            # Determine error type
-            # P0: BRAIN check FAIL 优先匹配（来自 metrics.checks），它们指向具体
-            # settings/结构修法（truncation / neutralization / sub-universe），
-            # 比 sharpe/fitness/turnover 通用归因更可操作。
-            error_type = "QUALITY_FAIL"
-            brain_fail_priority = (
-                "CONCENTRATED_WEIGHT",
-                "LOW_SUB_UNIVERSE_SHARPE",
-                "HIGH_PROD_CORRELATION",
-                "HIGH_SELF_CORRELATION",
-            )
-            brain_fails = {
-                c.get("name"): c
-                for c in metrics.get("checks", []) or []
-                if c.get("result") == "FAIL"
+        try:
+            _single_result = await _evaluate_single_alpha(alpha, _ctx)
+            if _single_result.corr_check_performed:
+                corr_checks_performed += 1
+            elif _single_result.corr_check_skipped_reason:
+                corr_checks_skipped += 1
+        except Exception as _eval_exc:
+            # P1-B fear-score fallback: one bad alpha does NOT crash the batch
+            eval_errors += 1
+            alpha.quality_status = "FAIL"
+            prior_metrics = alpha.metrics or {}
+            existing_flags = prior_metrics.get("_metrics_fallback_flags")
+            if not isinstance(existing_flags, list):
+                existing_flags = []
+            alpha.metrics = {
+                **prior_metrics,
+                "_eval_error": f"{type(_eval_exc).__name__}: {_eval_exc}"[:500],
+                "_metrics_fallback_flags": existing_flags + ["__eval_exception__"],
             }
-            for name in brain_fail_priority:
-                if name in brain_fails:
-                    error_type = name
-                    break
-            if error_type == "QUALITY_FAIL":
-                # Fallback: 通用 metric-band 归因
-                if sharpe < sharpe_min:
-                    error_type = "LOW_SHARPE"
-                elif fitness < fitness_min:
-                    error_type = "LOW_FITNESS"
-                elif turnover > turnover_max:
-                    error_type = "HIGH_TURNOVER"
-                elif sharpe < 0:
-                    error_type = "NEGATIVE_SIGNAL"
-
-            if alpha.expression:
-                failure_feedback_queue.append({
-                    "expression": alpha.expression,
-                    "error_type": error_type,
-                    "metrics": metrics,
-                    "region": state.region,
-                    "dataset_id": state.dataset_id,
-                    # New: attribution info for knowledge filtering
-                    "hypothesis": hypothesis_dict.get("statement", ""),
-                    "alignment_issues": alignment_issues,
-                    "attribution": attribution,
-                })
-        
-        # Store detailed metrics with BRAIN checks info
-        alpha.metrics = {
-            **metrics,
-            "_score": round(score, 4),
-            "_preliminary_score": round(preliminary_score, 4),
-            "_prod_corr": round(prod_corr, 4) if prod_corr else None,
-            # V-26.77 follow-up #2 (2026-05-14): falsy guard `if self_corr`
-            # collapsed 0.0 -> None, masking BOTH "BRAIN cache miss" (src=
-            # unknown) AND "actually uncorrelated" (src=local/brain, 0.0).
-            # Audit work for alpha 8003: a local-source 0.5669 happened
-            # to be falsy-truthy and stored; later 0.0-unknown overwrote
-            # it. New rule: store the value when the source is trusted
-            # ('local' or 'brain'), regardless of magnitude; store None
-            # only when the source is 'unknown' / 'tier_skipped' / 'skipped'.
-            # `_self_corr_source` is now stamped alongside so a reader can
-            # distinguish "uncorrelated alpha" from "no signal".
-            "_self_corr": (
-                round(self_corr, 4)
-                if self_corr_source in (CorrSource.LOCAL, CorrSource.BRAIN)
-                else None
-            ),
-            # str() so a CorrSource enum is stored as its plain value in JSONB
-            # (StrEnum already serialises that way, but be explicit).
-            "_self_corr_source": str(self_corr_source),
-            "_corr_checked": needs_corr_check,
-            "_should_optimize": should_opt,
-            "_optimize_reason": opt_reason,
-            "_failed_tests": failed_tests,
-            # BRAIN 官方检查信息
-            "_brain_can_submit": brain_can_submit,
-            "_brain_failed_checks": brain_failed_checks,
-            "_brain_pending_checks": brain_eval.get('pending_checks', []),
-            # V-26.77 follow-up (2026-05-14): pyramid_multiplier was previously
-            # extracted into a local variable then stamped here; the variable
-            # was removed but this stamping line was missed, raising NameError
-            # on every iteration. Read directly from brain_eval to restore the
-            # diagnostic field without resurrecting the dead local.
-            "_pyramid_multiplier": (brain_eval.get('pyramid_info') or {}).get('multiplier', 1.0),
-        }
-        
-        # Routing annotations — written after the alpha.metrics = {...} assignment
-        # above so they are not lost by the **metrics spread (V-26.79 pattern).
-        # Only PASS / PASS_PROVISIONAL paths annotate; FAIL and OPTIMIZE don't
-        # need per-flag decoration (FAIL attribution is in failure_feedback_queue).
-        if decision.status in ("PASS", "PASS_PROVISIONAL"):
-            alpha.metrics["_routing_reason"] = decision.reason
-            if v16_flags:
-                alpha.metrics["_v16_suspicion_flags"] = v16_flags
-                if decision.reason == "near_pass":
-                    logger.warning(
-                        f"[{node_name}] V-16 suspicion mode on PROVISIONAL "
-                        f"(sharpe={sharpe:.2f}) | flags={[f['check'] for f in v16_flags]}"
-                    )
-                else:
-                    logger.warning(
-                        f"[{node_name}] V-16 suspicion mode (sharpe={sharpe:.2f}) | "
-                        f"flags={[f['check'] for f in v16_flags]}"
-                    )
-            if decision.reason == "brain_checks_unverified":
-                alpha.metrics["_brain_checks_unverified"] = True
-                logger.info(
-                    f"[{node_name}] PASS→PROVISIONAL: BRAIN returned no checks "
-                    f"(gate unverified) | sharpe={sharpe:.2f}"
-                )
-            elif decision.reason == "brain_actionable_fails":
-                alpha.metrics["_brain_pass_downgrade"] = brain_actionable_fails_list
-                logger.info(
-                    f"[{node_name}] PASS→PROVISIONAL: BRAIN rejected on "
-                    f"{brain_actionable_fails_list} | sharpe={sharpe:.2f} "
-                    f"fitness={fitness:.2f} expr={(alpha.expression or '')[:80]}"
-                )
-            elif decision.reason == "near_pass" and brain_actionable_fails_list:
-                alpha.metrics["_brain_actionable_fails"] = brain_actionable_fails_list
-
-        _debug_log("F", "nodes.py:evaluate:alpha_detail", f"Alpha evaluated: {alpha.quality_status}", {
-            "alpha_id": alpha.alpha_id,
-            "expression": alpha.expression[:80] if alpha.expression else None,
-            "sharpe": round(sharpe, 3),
-            "fitness": round(fitness, 3),
-            "turnover": round(turnover, 3),
-            "score": round(score, 3),
-            "status": alpha.quality_status
-        })
-        
-        eval_details.append({
-            "id": alpha.alpha_id,
-            "status": alpha.quality_status,
-            "score": round(score, 4),
-            "sharpe": sharpe,
-            "fitness": fitness,
-            "turnover": turnover,
-            "corr_checked": needs_corr_check,
-            "optimize_reason": opt_reason if should_opt else None,
-        })
-        
+            _ctx.eval_details.append({
+                "id": alpha.alpha_id,
+                "status": "FAIL",
+                "score": None,
+                "sharpe": None,
+                "fitness": None,
+                "turnover": None,
+                "corr_checked": False,
+                "optimize_reason": None,
+                "_eval_error": f"{type(_eval_exc).__name__}: {_eval_exc}"[:200],
+            })
+            logger.exception(
+                f"[{node_name}] per-alpha eval crashed for "
+                f"{alpha.alpha_id or (alpha.expression or '')[:60]}; marking FAIL"
+            )
         updated_alphas[i] = alpha
 
     # PR5 — T1 sign-flip retry. For each FAIL alpha whose |sharpe| ≥
@@ -1518,7 +1585,6 @@ async def node_evaluate(
                         new_alpha.metrics["_v16_suspicion_flags"] = v16_flags
                     if hard_flags:
                         new_alpha.quality_status = "PASS_PROVISIONAL"
-                        optimize_count += 1
                         flip_retry_prov += 1
                         logger.warning(
                             f"[{node_name}] V-16 downgrades flip-retry PASS → PROV | "
@@ -1526,7 +1592,6 @@ async def node_evaluate(
                         )
                     else:
                         new_alpha.quality_status = "PASS"
-                        pass_count += 1
                         flip_retry_pass += 1
                 elif (
                     new_sharpe >= prov_sharpe_min
@@ -1535,11 +1600,9 @@ async def node_evaluate(
                     and sub_universe_ok
                 ):
                     new_alpha.quality_status = "PASS_PROVISIONAL"
-                    optimize_count += 1
                     flip_retry_prov += 1
                 else:
                     new_alpha.quality_status = "FAIL"
-                    fail_count += 1
 
                 updated_alphas.append(new_alpha)
                 flip_retry_count += 1
@@ -1649,8 +1712,6 @@ async def node_evaluate(
             if _attr in ("implementation", "both"):
                 _dr_alpha.quality_status = "PASS_PROVISIONAL"
                 _dr_alpha.metrics["_routing_reason"] = "dual_run_downgrade"
-                pass_count -= 1
-                optimize_count += 1
                 dual_run_downgraded += 1
                 logger.warning(
                     f"[{node_name}] signal-vs-control: PASS → PROV | "
@@ -1826,8 +1887,6 @@ async def node_evaluate(
                     if _gs.confidence < _gs_conf_min:
                         _gs_alpha.quality_status = "PASS_PROVISIONAL"
                         _gs_alpha.metrics["_routing_reason"] = "graded_low_confidence"
-                        pass_count -= 1
-                        optimize_count += 1
                         graded_downgraded += 1
                         logger.warning(
                             f"[{node_name}] graded-score: PASS → PROV | "
@@ -1924,8 +1983,29 @@ async def node_evaluate(
         except Exception as e:
             logger.warning(f"[{node_name}] baseline screen skipped (error): {e}")
 
+    # P1-B: single source of truth for counters — replaces 12 scattered +=1/-=1 sites.
+    # Invariant: pass + optimize + fail == N + provisional_count (PROV double-counts
+    # into optimize), matching pre-change net of L1652 `pass-=1; optimize+=1`.
+    pass_count = 0
+    optimize_count = 0
+    fail_count = 0
+    provisional_count = 0
+    for _tally_alpha in updated_alphas:
+        _qs = _tally_alpha.quality_status
+        if _qs == "PASS":
+            pass_count += 1
+        elif _qs == "PASS_PROVISIONAL":
+            provisional_count += 1
+            optimize_count += 1   # PROV enters optimize bucket (consistent with P1-A)
+        elif _qs == "OPTIMIZE":
+            optimize_count += 1
+        else:
+            fail_count += 1       # FAIL / PENDING / unknown
+    # Known PENDING drift: pre-change early-PENDING continue (L813) skipped fail_count;
+    # post-change tally counts PENDING as fail. Conscious choice for trace invariance.
+
     duration_ms = int((time.time() - start_time) * 1000)
-    
+
     _debug_log("E", "nodes.py:evaluate:result", "Evaluation complete", {
         "pass": pass_count,
         "optimize": optimize_count,
@@ -2077,6 +2157,8 @@ async def node_evaluate(
             "graded_downgraded": graded_downgraded,
             "graded_no_baseline": graded_no_baseline,
             "graded_failed": graded_failed,
+            "provisional_count": provisional_count,
+            "eval_errors": eval_errors,
             "details": eval_details[:20]
         },
         duration_ms,
