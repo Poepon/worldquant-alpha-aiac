@@ -1533,6 +1533,107 @@ async def node_evaluate(
             for _flip_slot in flip_claimed_slots:
                 _flip_release_slot(*_flip_slot)
 
+    # P0: signal-vs-control 双跑归因 (docs/alphagbm_skills_research_2026-05-15.md).
+    # 为每个 PASS alpha 模拟一个"对照"表达式(T1 信号核剥成裸字段、保留 T2/T3 结构),
+    # 用 Δ(sharpe_signal − sharpe_control) 归因业绩来源。
+    # Δ 大 → 信号在做功 → 保持 PASS / "hypothesis"。
+    # Δ 小 → 结构产物 → PASS 降级 PASS_PROVISIONAL / "implementation"。
+    # 整块为 best-effort:任何失败仅跳过单个 alpha,评估继续。
+    # opt-in via ENABLE_SIGNAL_CONTROL_DUAL_RUN(默认 False,避免意外耗配额)。
+    dual_run_count = 0
+    dual_run_downgraded = 0
+    dual_run_no_control = 0
+    if brain is not None and getattr(settings, "ENABLE_SIGNAL_CONTROL_DUAL_RUN", False):
+        from backend.factor_tier_classifier import derive_control_expression
+        from backend.agents.prompts.alignment import determine_attribution_dual_run
+        _dr_delta_min = getattr(settings, "SIGNAL_CONTROL_DELTA_SHARPE_MIN", 0.3)
+        _dr_cap = getattr(settings, "SIGNAL_CONTROL_CAP", 5)
+
+        # 仅对 PASS 跑对照(直接提交池、"走运结构"风险最高)。
+        # flip-retry 提升出的新 PASS 也包含在内(它们已追加到 updated_alphas)。
+        # 按 sharpe 降序取 top-cap:最高分的最值得审查。
+        _dr_candidates = sorted(
+            [
+                a for a in updated_alphas
+                if a.quality_status == "PASS"
+                and a.is_simulated and a.simulation_success
+                and isinstance(a.metrics, dict)
+            ],
+            key=lambda a: a.metrics.get("sharpe", 0) or 0,
+            reverse=True,
+        )[:_dr_cap]
+
+        if _dr_candidates:
+            logger.info(
+                f"[{node_name}] signal-vs-control dual-run: "
+                f"{len(_dr_candidates)} PASS candidate(s) | delta_min={_dr_delta_min}"
+            )
+
+        for _dr_alpha in _dr_candidates:
+            _ctrl_expr = derive_control_expression(_dr_alpha.expression or "")
+            if not _ctrl_expr:
+                dual_run_no_control += 1
+                _dr_alpha.metrics["_dual_run_skipped"] = "no_clean_control"
+                logger.debug(
+                    f"[{node_name}] dual-run: no clean control for "
+                    f"{(_dr_alpha.expression or '')[:80]!r}"
+                )
+                continue
+            try:
+                _ctl_result = await brain.simulate_alpha(
+                    expression=_ctrl_expr,
+                    region=state.region,
+                    universe=state.universe,
+                )
+            except Exception as _dr_exc:
+                logger.warning(
+                    f"[{node_name}] dual-run control sim failed for "
+                    f"{_ctrl_expr[:80]!r}: {_dr_exc}"
+                )
+                continue
+            if not _ctl_result.get("success"):
+                logger.debug(
+                    f"[{node_name}] dual-run: control sim returned failure for {_ctrl_expr[:80]!r}"
+                )
+                continue
+            _ctl_metrics = _ctl_result.get("metrics") or {}
+            _attr, _conf, _evid = determine_attribution_dual_run(
+                signal_result=_dr_alpha.metrics,
+                control_result=_ctl_metrics,
+                delta_sharpe_min=_dr_delta_min,
+            )
+            _dr_alpha.metrics["_control_expression"] = _ctrl_expr
+            _dr_alpha.metrics["_control_sharpe"] = _ctl_metrics.get("sharpe")
+            _dr_alpha.metrics["_control_fitness"] = _ctl_metrics.get("fitness")
+            _dr_alpha.metrics["_delta_sharpe"] = round(
+                (_dr_alpha.metrics.get("sharpe") or 0)
+                - (_ctl_metrics.get("sharpe") or 0),
+                4,
+            )
+            _dr_alpha.metrics["_dual_run_attribution"] = _attr
+            _dr_alpha.metrics["_dual_run_confidence"] = round(_conf, 3)
+            _dr_alpha.metrics["_dual_run_evidence"] = _evid
+            dual_run_count += 1
+            # 结构产物 → PASS 降级为 PASS_PROVISIONAL(镜像 flip-retry V-16 降级模式)
+            if _attr in ("implementation", "both"):
+                _dr_alpha.quality_status = "PASS_PROVISIONAL"
+                pass_count -= 1
+                optimize_count += 1
+                dual_run_downgraded += 1
+                logger.warning(
+                    f"[{node_name}] signal-vs-control: PASS → PROV | "
+                    f"expr={(_dr_alpha.expression or '')[:60]!r} "
+                    f"Δsharpe={_dr_alpha.metrics['_delta_sharpe']} "
+                    f"attribution={_attr}"
+                )
+            else:
+                logger.info(
+                    f"[{node_name}] signal-vs-control: PASS confirmed | "
+                    f"expr={(_dr_alpha.expression or '')[:60]!r} "
+                    f"Δsharpe={_dr_alpha.metrics['_delta_sharpe']} "
+                    f"attribution={_attr}"
+                )
+
     # P0: baseline + Nσ-residual screening (docs/alphagbm_skills_research_2026-05-15.md).
     # Annotates each successfully-simulated alpha with its residual against the
     # (hypothesis-family × dataset × region) grid baseline. SOFT SIGNAL ONLY —
@@ -1777,6 +1878,9 @@ async def node_evaluate(
             "baseline_discoveries": baseline_discoveries,
             "baseline_below": baseline_below,
             "baseline_insufficient": baseline_insufficient,
+            "dual_run_count": dual_run_count,
+            "dual_run_downgraded": dual_run_downgraded,
+            "dual_run_no_control": dual_run_no_control,
             "details": eval_details[:20]
         },
         duration_ms,

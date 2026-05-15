@@ -248,6 +248,16 @@ class Settings(BaseSettings):
     T1_FLIP_RETRY_SHARPE: float = 0.5  # min |sharpe| to trigger flip; below = noise
     T1_FLIP_RETRY_CAP: int = 5  # max flips per round
 
+    # Signal-vs-control 双跑归因 — 一个 PASS alpha 被识别后,模拟一个"对照"表达式
+    # (T1 信号核剥成裸字段、保留 T2/T3 结构包装);Δ(sharpe_signal − sharpe_control)
+    # 归因业绩来源。Δ 小 = PASS 是结构产物(包装在做功,非假设信号)→ PASS 降级为
+    # PASS_PROVISIONAL,拦在直接提交池外。每轮上限 SIGNAL_CONTROL_CAP。
+    # 设 ENABLE_SIGNAL_CONTROL_DUAL_RUN=False 全局关闭(默认 opt-in,避免意外增加
+    # BRAIN 模拟配额消耗)。来源:docs/alphagbm_skills_research_2026-05-15.md P0。
+    ENABLE_SIGNAL_CONTROL_DUAL_RUN: bool = False  # opt-in(额外 BRAIN 模拟)
+    SIGNAL_CONTROL_DELTA_SHARPE_MIN: float = 0.3  # 信号被信任所需的最小 Δsharpe
+    SIGNAL_CONTROL_CAP: int = 5  # 每轮对照模拟次数上限
+
     # PR7 — incremental persistence for T2/T3 tasks. By default, T2/T3 work-
     # flow batches all 8+ seeds before run_with_persistence writes Alpha rows
     # to DB (workflow.run() only returns at END). This means a 1-hour task
