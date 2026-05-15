@@ -453,7 +453,7 @@ class TestCanCallLLM:
         from backend.config import settings as cfg
 
         svc = self._svc(session, llm=AsyncMock())
-        svc._token_used = cfg.THESIS_SCORE_DAILY_TOKEN_BUDGET
+        svc._token_used = cfg.THESIS_SCORE_PER_RUN_TOKEN_BUDGET
         h = SimpleNamespace(
             last_thesis_score_at=None, last_thesis_score_status=None,
         )
@@ -623,6 +623,22 @@ class TestScoreWithLLMOrFallback:
 
 
 class TestPersistResultEdge:
+    @staticmethod
+    def _aggs(hid: int, current_sharpe_avg=None):
+        """Build a minimal HypothesisAggregates for _persist_result tests."""
+        from backend.services.hypothesis_health_service import (
+            HypothesisAggregates,
+        )
+        return HypothesisAggregates(
+            hypothesis_id=hid,
+            related_alpha_count=0,
+            current_sharpe_avg=current_sharpe_avg,
+            current_pass_rate=None,
+            stale_share=None,
+            recent_rounds=[],
+            baseline_metrics=None,
+        )
+
     @pytest.mark.asyncio
     async def test_first_hit_writes_audit(self, session):
         from backend.models import HypothesisStatusTransition
@@ -642,7 +658,10 @@ class TestPersistResultEdge:
         h_fresh = (await session.execute(
             select(type(h)).where(type(h).id == h.id)
         )).scalar_one()
-        await svc._persist_result(h_fresh, [hit], None, None, datetime.now(timezone.utc))
+        aggs = self._aggs(h_fresh.id, current_sharpe_avg=1.23)
+        await svc._persist_result(
+            h_fresh, aggs, [hit], None, None, datetime.now(timezone.utc),
+        )
         rows = (await session.execute(
             select(HypothesisStatusTransition).where(
                 HypothesisStatusTransition.hypothesis_id == h.id,
@@ -651,6 +670,9 @@ class TestPersistResultEdge:
         assert len(rows) == 1
         assert rows[0].old_is_triggered is False
         assert rows[0].new_is_triggered is True
+        # Audit's sharpe_at_transition uses fresh aggs value (P2 fix), not
+        # the stale h.sharpe_avg cache.
+        assert rows[0].sharpe_at_transition == pytest.approx(1.23)
 
     @pytest.mark.asyncio
     async def test_steady_state_no_new_audit(self, session):
@@ -675,7 +697,10 @@ class TestPersistResultEdge:
         h_fresh = (await session.execute(
             select(Hypothesis).where(Hypothesis.id == h.id)
         )).scalar_one()
-        await svc._persist_result(h_fresh, [hit], None, None, datetime.now(timezone.utc))
+        aggs = self._aggs(h_fresh.id)
+        await svc._persist_result(
+            h_fresh, aggs, [hit], None, None, datetime.now(timezone.utc),
+        )
         rows = (await session.execute(
             select(HypothesisStatusTransition).where(
                 HypothesisStatusTransition.hypothesis_id == h.id,
@@ -693,7 +718,10 @@ class TestPersistResultEdge:
         h = await _mk_hyp(session, suffix="pre-3", status="ACTIVE")
         await session.commit()
         svc = HypothesisHealthService(session)
-        await svc._persist_result(h, [], None, None, datetime.now(timezone.utc))
+        aggs = self._aggs(h.id)
+        await svc._persist_result(
+            h, aggs, [], None, None, datetime.now(timezone.utc),
+        )
         rows = (await session.execute(
             select(HypothesisStatusTransition).where(
                 HypothesisStatusTransition.hypothesis_id == h.id,

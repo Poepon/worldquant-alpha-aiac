@@ -22,15 +22,12 @@ of truth is alphas.hypothesis_id JOIN — refresh_stats() reconciles them.
 
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import dataclass, asdict, is_dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
-import sqlalchemy as sa
 from sqlalchemy import select, update, func, case
-from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
@@ -383,10 +380,12 @@ class HypothesisService(BaseService):
         FIFO cap: ``trigger_detail`` is kept under
         ``settings.TRIGGER_DETAIL_MAX_ENTRIES`` — oldest entries drop.
 
-        MFX-5: on PG we use the JSONB ``||`` concat operator so concurrent
-        triggers (e.g. manual API + daily beat) never lose a hit. On
-        sqlite (unit tests) there's no real concurrency, so a Python
-        read-modify-write is correct.
+        Concurrency: on PG the read-merge-write happens under
+        ``SELECT ... FOR UPDATE`` so manual-API + daily-beat collisions
+        cannot lose hits (the prior MFX-5 split — atomic ``||`` append +
+        post-refresh cap-truncate — had a lost-update window between the
+        two statements). On sqlite (unit tests) there is no real
+        concurrency so the lock is omitted.
 
         Returns True when at least one new hit was appended OR
         ``is_triggered`` flipped False→True. Returns False on a fully-deduped
@@ -432,39 +431,34 @@ class HypothesisService(BaseService):
 
         triggered_at_value = h.triggered_at or now_utc
 
-        if self._is_postgres() and novel:
-            # PG: atomic JSONB || concat. Use ``bindparam(type_=JSONB)`` so
-            # SQLAlchemy/asyncpg serialise the python list as JSONB directly.
-            # Passing ``json.dumps(novel)`` into ``cast(..., JSONB)`` would
-            # double-encode (the JSON text gets stored as a JSONB string
-            # containing the array, instead of an actual array).
+        if self._is_postgres():
+            # P2 review fix: take a row-level lock so the read-merge-write
+            # cycle is atomic w.r.t. concurrent writers (manual API + daily
+            # beat could collide, and the prior split "JSONB || atomic
+            # append + post-refresh cap-truncate" had a lost-update window
+            # where novel hits arriving between the append and the truncate
+            # got dropped). One round-trip merge under SELECT ... FOR UPDATE
+            # is simpler and obviously correct.
+            locked = (await self.db.execute(
+                select(Hypothesis)
+                .where(Hypothesis.id == hypothesis_id)
+                .with_for_update()
+            )).scalar_one_or_none()
+            if locked is None:
+                return False
+            existing_locked = list(locked.trigger_detail or [])
+            merged = (existing_locked + novel)[-settings.TRIGGER_DETAIL_MAX_ENTRIES:]
             await self.db.execute(
                 update(Hypothesis)
                 .where(Hypothesis.id == hypothesis_id)
                 .values(
-                    trigger_detail=Hypothesis.trigger_detail.op("||")(
-                        sa.bindparam("novel_hits", value=novel, type_=JSONB)
-                    ),
+                    trigger_detail=merged,
                     is_triggered=True,
                     triggered_at=triggered_at_value,
                 )
             )
-            # Apply FIFO cap if exceeded (in-process read-modify-write —
-            # cheap because the row is already in session cache).
-            await self.db.refresh(h)
-            merged_now = list(h.trigger_detail or [])
-            cap = settings.TRIGGER_DETAIL_MAX_ENTRIES
-            if len(merged_now) > cap:
-                merged_now = merged_now[-cap:]
-                await self.db.execute(
-                    update(Hypothesis)
-                    .where(Hypothesis.id == hypothesis_id)
-                    .values(trigger_detail=merged_now)
-                )
         else:
-            # sqlite path (unit tests) + PG fallback when no novel hits but
-            # we still need to flip is_triggered. Python merge — safe under
-            # the test event loop where no concurrent updates exist.
+            # sqlite path (unit tests) — no real concurrency, plain merge.
             merged = (existing + novel)[-settings.TRIGGER_DETAIL_MAX_ENTRIES:]
             await self.db.execute(
                 update(Hypothesis)

@@ -493,16 +493,39 @@ class HypothesisHealthService:
         hyps = await self._load_hypotheses_in_scope()
         aggs_map = await self._build_aggregates(hyps, now_utc)
         records: List[Dict[str, Any]] = []
+        # P1-B fear-score fallback parity: one bad hypothesis must NOT crash
+        # the daily batch (mirrors graded-score / dual-run / per-alpha try
+        # patterns). Failures are counted and reported in the payload.
+        self._failed = 0
         for h in hyps:
             aggs = aggs_map[h.id]
-            hits = self._evaluate_all_triggers(aggs)
-            llm_score, llm_status = None, None
-            if hits and await self._can_call_llm(h, now_utc):
-                llm_score, llm_status = await self._score_with_llm_or_fallback(
-                    h, aggs, hits,
+            try:
+                hits = self._evaluate_all_triggers(aggs)
+                llm_score, llm_status = None, None
+                if hits and await self._can_call_llm(h, now_utc):
+                    llm_score, llm_status = await self._score_with_llm_or_fallback(
+                        h, aggs, hits,
+                    )
+                await self._persist_result(
+                    h, aggs, hits, llm_score, llm_status, now_utc,
                 )
-            await self._persist_result(h, hits, llm_score, llm_status, now_utc)
-            records.append(self._record_row(h, aggs, hits, llm_score, llm_status))
+                records.append(
+                    self._record_row(h, aggs, hits, llm_score, llm_status)
+                )
+            except Exception as exc:
+                self._failed += 1
+                logger.warning(
+                    f"[hyp_health] per-hypothesis eval crashed hid={h.id} "
+                    f"({type(exc).__name__}: {exc}); skipping"
+                )
+                # roll back any partial writes from this hypothesis so the
+                # next iteration starts clean (commit happens inside
+                # _persist_result, so a partial commit can't leak — but a
+                # mid-flight UPDATE before the commit can).
+                try:
+                    await self.db.rollback()
+                except Exception:
+                    pass
         return self._build_payload(records, now_utc)
 
     # ------------------------------------------------------------------
@@ -652,7 +675,7 @@ class HypothesisHealthService:
         """
         if self.llm is None or not settings.ENABLE_LLM_THESIS_SCORE_ON_TRIGGER:
             return False
-        if self._token_used >= settings.THESIS_SCORE_DAILY_TOKEN_BUDGET:
+        if self._token_used >= settings.THESIS_SCORE_PER_RUN_TOKEN_BUDGET:
             return False
         last = _to_utc_aware(h.last_thesis_score_at)
         if last is not None:
@@ -735,6 +758,7 @@ class HypothesisHealthService:
     async def _persist_result(
         self,
         h,
+        aggs: HypothesisAggregates,
         hits: List[TriggerHit],
         llm_score: Optional[LLMThesisScore],
         llm_status: Optional[str],
@@ -742,7 +766,13 @@ class HypothesisHealthService:
     ) -> None:
         """Apply mark_triggered (when hits) + update_thesis_score (when LLM
         emitted). Audit row only on False → True ``is_triggered`` edge
-        (SFX-10). Commits at the end."""
+        (SFX-10). Commits at the end.
+
+        SFX-9 consistency: the audit's ``sharpe_at_transition`` uses the
+        FRESH ``aggs.current_sharpe_avg`` (real-time JOIN), not the
+        denormalized ``h.sharpe_avg`` cache that ``refresh_stats`` may have
+        left stale. The trigger reason and the recorded sharpe must agree.
+        """
         from backend.models import HypothesisStatusTransition
         from backend.services.hypothesis_service import HypothesisService
 
@@ -761,7 +791,7 @@ class HypothesisHealthService:
                 hypothesis_id=h.id,
                 old_is_triggered=False,
                 new_is_triggered=True,
-                sharpe_at_transition=h.sharpe_avg,  # cached value, breadcrumb only
+                sharpe_at_transition=aggs.current_sharpe_avg,
                 reason="; ".join(hit.reason for hit in hits)[:1000],
                 source="trigger_eval_beat",
             ))
@@ -839,7 +869,7 @@ class HypothesisHealthService:
                 "triggers": asdict(self.cfg),
                 "trigger_detail_max_entries": settings.TRIGGER_DETAIL_MAX_ENTRIES,
                 "stale_red_days": settings.STALE_RED_DAYS,
-                "llm_token_budget": settings.THESIS_SCORE_DAILY_TOKEN_BUDGET,
+                "llm_token_budget_per_run": settings.THESIS_SCORE_PER_RUN_TOKEN_BUDGET,
                 "llm_backoff_hours": settings.LLM_SCORE_RETRY_BACKOFF_HOURS,
                 "thesis_score_dump_threshold": threshold,
             },
@@ -847,6 +877,7 @@ class HypothesisHealthService:
                 "checked": len(records),
                 "by_band": by_band,
                 "triggered_count": triggered_count,
+                "failed_count": getattr(self, "_failed", 0),
             },
             "hypotheses": dumped,
             "llm_token_used": self._token_used,

@@ -315,7 +315,10 @@ class Settings(BaseSettings):
     # LLM scoring controls
     ENABLE_LLM_THESIS_SCORE_ON_PROMOTED: bool = True
     ENABLE_LLM_THESIS_SCORE_ON_TRIGGER: bool = True
-    THESIS_SCORE_DAILY_TOKEN_BUDGET: int = 200_000  # per-run budget
+    # Per-RUN(not per-day)token budget — counter resets every Celery beat
+    # invocation. Renamed in P2 review fix; the old "DAILY" name was misleading
+    # because nothing tracked spend across runs.
+    THESIS_SCORE_PER_RUN_TOKEN_BUDGET: int = 200_000
     LLM_SCORE_RETRY_BACKOFF_HOURS: int = 4          # fallback failure retry
     THESIS_SCORING_MAX_ROUNDS: int = 10             # prompt length cap
     THESIS_SCORING_MAX_TRIGGER_HITS: int = 3

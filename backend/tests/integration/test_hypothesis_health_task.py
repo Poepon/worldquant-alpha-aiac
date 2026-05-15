@@ -477,7 +477,7 @@ async def test_token_budget_exhausted_stops_llm(
     """Budget = 800; first LLM call burns 1000 tokens; second hyp's
     LLM call must be skipped by the gate."""
     from backend.config import settings as cfg
-    monkeypatch.setattr(cfg, "THESIS_SCORE_DAILY_TOKEN_BUDGET", 800)
+    monkeypatch.setattr(cfg, "THESIS_SCORE_PER_RUN_TOKEN_BUDGET", 800)
     h1 = await _mk_hyp(
         pg_session, suffix="b1", status="PROMOTED",
         baseline_metrics={"n_alphas": 5, "sharpe_avg": 2.0},
