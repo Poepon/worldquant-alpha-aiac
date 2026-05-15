@@ -1666,18 +1666,60 @@ async def node_evaluate(
                     f"attribution={_attr}"
                 )
 
+    # ── Shared baseline setup ─────────────────────────────────────────────────
+    # expected_signal lookup + category_resolver are needed by both the
+    # graded-score block (below) and the baseline screening block (further down).
+    # Computed once here so both blocks share the SAME resolver — previously
+    # graded-score's BaselineProvider was constructed without one and could
+    # never fall back to the coarse cell, inflating false "no baseline" counts.
+    _shared_baseline_cfg_needed = (
+        getattr(settings, "ENABLE_GRADED_SCORE", False)
+        or getattr(settings, "BASELINE_SCREEN_ENABLED", False)
+    )
+    _shared_expected_signal: str = "unknown"
+    def _shared_resolve_category(_ds):  # default no-op resolver
+        return None
+    if _shared_baseline_cfg_needed:
+        for _h in (state.hypotheses or []):
+            if isinstance(_h, dict) and _h.get("expected_signal"):
+                _shared_expected_signal = _h["expected_signal"]
+                break
+        if _shared_expected_signal == "unknown" and getattr(state, "current_hypothesis_id", None):
+            try:
+                from backend.database import AsyncSessionLocal
+                from backend.models import Hypothesis as _SharedHyp
+                async with AsyncSessionLocal() as _shared_db:
+                    _shared_row = await _shared_db.get(_SharedHyp, state.current_hypothesis_id)
+                    if _shared_row and _shared_row.expected_signal:
+                        _shared_expected_signal = _shared_row.expected_signal
+            except Exception:
+                pass
+
+        _cat_map: Dict[str, str] = {}
+        for _f in (state.fields or []):
+            if isinstance(_f, dict):
+                _ds = _f.get("dataset_id")
+                _cat = _f.get("category") or _f.get("dataset_category")
+                if _ds and _cat:
+                    _cat_map[_ds] = _cat
+        _default_cat = getattr(state, "dataset_category", None) or None
+
+        def _shared_resolve_category(ds_id):
+            return _cat_map.get(ds_id) or _default_cat
+
     # P1-A: graded-score — 百分位归一化 + 非均匀权重 + confidence 维度
     # (docs/alphagbm_skills_research_2026-05-15.md 原则①).
     # Advisory layer: compute_graded_score produces percentile/grade/confidence
     # alongside the existing raw _score.  A PASS alpha with low confidence
-    # (measured inputs < SCORE_CONFIDENCE_MIN) is downgraded to PASS_PROVISIONAL —
+    # (applicable inputs < SCORE_CONFIDENCE_MIN) is downgraded to PASS_PROVISIONAL —
     # confidence is the real decision gate, not the grade.
     # calculate_alpha_score / route_alpha_action / band thresholds are untouched.
-    # Opt-in via ENABLE_GRADED_SCORE (default False).  Block-level best-effort:
-    # any failure leaves alphas un-graded; evaluation continues exactly as before.
+    # Opt-in via ENABLE_GRADED_SCORE (default False).  Setup failures degrade
+    # the whole block; per-alpha failures are isolated and counted.
     graded_count = 0
     graded_downgraded = 0
     graded_no_baseline = 0
+    graded_failed = 0
     if getattr(settings, "ENABLE_GRADED_SCORE", False):
         try:
             from backend.alpha_scoring import compute_graded_score
@@ -1693,26 +1735,10 @@ async def node_evaluate(
                 "turnover_penalty":      getattr(settings, "SCORE_WEIGHT_TURNOVER_PENALTY", 0.15),
                 "investability_penalty": getattr(settings, "SCORE_WEIGHT_INVESTABILITY_PENALTY", 0.20),
             }
-            # request-scoped; defaults to metric_col="is_sharpe" (matches BASELINE_METRIC)
-            _gs_bp = BaselineProvider()
-
-            # expected_signal — same logic as baseline block L1691-1708 below;
-            # duplicated here because graded-score runs BEFORE the baseline block.
-            _gs_expected_signal = "unknown"
-            for _h in (state.hypotheses or []):
-                if isinstance(_h, dict) and _h.get("expected_signal"):
-                    _gs_expected_signal = _h["expected_signal"]
-                    break
-            if _gs_expected_signal == "unknown" and getattr(state, "current_hypothesis_id", None):
-                try:
-                    from backend.database import AsyncSessionLocal
-                    from backend.models import Hypothesis as _GsHyp
-                    async with AsyncSessionLocal() as _gs_db:
-                        _gs_row = await _gs_db.get(_GsHyp, state.current_hypothesis_id)
-                        if _gs_row and _gs_row.expected_signal:
-                            _gs_expected_signal = _gs_row.expected_signal
-                except Exception:
-                    pass
+            # request-scoped; uses the shared category_resolver so insufficient
+            # fine cells fall back to the coarse cell — same as baseline block.
+            _gs_bp = BaselineProvider(category_resolver=_shared_resolve_category)
+            _gs_tier = tier_cfg.get("tier")
 
             _gs_candidates = [
                 a for a in updated_alphas
@@ -1728,84 +1754,106 @@ async def node_evaluate(
                 )[:_gs_cap]
 
             for _gs_alpha in _gs_candidates:
-                # Baseline lookup — degrades to "insufficient" on any per-alpha error
-                _gs_stats = None
                 try:
-                    _gs_stats = await _gs_bp.get_baseline(
-                        expected_signal=_gs_expected_signal,
-                        dataset_id=state.dataset_id or "",   # round-shared (AlphaCandidate has no dataset_id)
-                        region=state.region,
-                    )
-                except Exception as _gs_bl_exc:
-                    logger.warning(
-                        f"[{node_name}] graded-score baseline lookup failed: {_gs_bl_exc}"
-                    )
-                if _gs_stats is None or not getattr(_gs_stats, "usable", False):
-                    graded_no_baseline += 1
-
-                # calculate_alpha_score reads flat keys (sharpe/fitness/turnover)
-                # from sim_result["train"/"test"]. alpha.metrics IS flat with those
-                # keys → wrapping it satisfies the extractor without a snapshot.
-                _gs_sim = {"train": _gs_alpha.metrics, "test": _gs_alpha.metrics}
-
-                # confidence_inputs: which continuous inputs are real measurements?
-                # _self_corr is non-None ONLY when source ∈ {LOCAL, BRAIN} (L1228-1232).
-                # _prod_corr is non-None only when prod_corr was truthy (L1217);
-                # a true 0.0 maps to None — same pre-V26.77-fix gap as self_corr had;
-                # treating None as "not measured" is safe (false-negative → PROVISIONAL).
-                _gs_conf_inputs = {
-                    "prod_corr_real":   (
-                        _gs_alpha.metrics.get("_prod_corr") is not None
-                        and bool(_gs_alpha.metrics.get("_corr_checked"))
-                    ),
-                    "self_corr_real":   _gs_alpha.metrics.get("_self_corr") is not None,
-                    "baseline_real":    (
+                    # Baseline lookup
+                    _gs_stats = None
+                    try:
+                        _gs_stats = await _gs_bp.get_baseline(
+                            expected_signal=_shared_expected_signal,
+                            dataset_id=state.dataset_id or "",
+                            region=state.region,
+                        )
+                    except Exception as _gs_bl_exc:
+                        logger.warning(
+                            f"[{node_name}] graded-score baseline lookup failed: {_gs_bl_exc}"
+                        )
+                    _gs_baseline_usable = (
                         _gs_stats is not None and getattr(_gs_stats, "usable", False)
-                    ),
-                    "metrics_complete": all(
-                        _gs_alpha.metrics.get(k) is not None
-                        for k in ("sharpe", "fitness", "turnover")
-                    ),
-                }
-                _gs = compute_graded_score(
-                    _gs_sim,
-                    prod_corr=_gs_alpha.metrics.get("_prod_corr") or 0.0,
-                    self_corr=_gs_alpha.metrics.get("_self_corr") or 0.0,
-                    weights=_gs_weights,
-                    baseline_stats=_gs_stats,
-                    confidence_inputs=_gs_conf_inputs,
-                )
-                _gs_alpha.metrics["_score_pct"] = round(_gs.percentile, 4)
-                _gs_alpha.metrics["_score_grade"] = _gs.grade
-                _gs_alpha.metrics["_score_grade_action"] = _gs.grade_action
-                _gs_alpha.metrics["_score_confidence"] = round(_gs.confidence, 3)
-                _gs_alpha.metrics["_score_evidence"] = _gs.evidence
-                graded_count += 1
+                    )
+                    if not _gs_baseline_usable:
+                        graded_no_baseline += 1
 
-                if _gs.confidence < _gs_conf_min:
-                    _gs_alpha.quality_status = "PASS_PROVISIONAL"
-                    _gs_alpha.metrics["_routing_reason"] = "graded_low_confidence"
-                    pass_count -= 1
-                    optimize_count += 1
-                    graded_downgraded += 1
+                    # calculate_alpha_score reads flat keys (sharpe/fitness/turnover)
+                    # from sim_result["train"/"test"]. alpha.metrics IS flat with those
+                    # keys → wrapping it satisfies the extractor without a snapshot.
+                    _gs_sim = {"train": _gs_alpha.metrics, "test": _gs_alpha.metrics}
+
+                    # Tri-state confidence_inputs (P1-A fix):
+                    #   True  = real measurement on file (incl. true 0.0)
+                    #   False = expected for this alpha but missing/fabricated
+                    #   None  = not applicable for this tier/context → SKIPPED
+                    # Old code conflated "not measured" with "measured zero" and
+                    # counted N/A as fabricated, systematically downgrading
+                    # tier-1 / cold-start alphas.
+                    if bool(_gs_alpha.metrics.get("_corr_checked")):
+                        # Once corr-check ran, any value (incl. true 0.0) is real.
+                        _prod_corr_input: Optional[bool] = True
+                    else:
+                        _prod_corr_input = None  # corr-check didn't run for this alpha
+
+                    if _gs_tier in (2, 3):
+                        # Only tier-2/3 are expected to carry self_corr.
+                        _self_corr_input: Optional[bool] = (
+                            _gs_alpha.metrics.get("_self_corr") is not None
+                        )
+                    else:
+                        _self_corr_input = None  # tier-1 / unknown — N/A
+
+                    _gs_conf_inputs: Dict[str, Optional[bool]] = {
+                        "prod_corr_real":   _prod_corr_input,
+                        "self_corr_real":   _self_corr_input,
+                        "baseline_real":    _gs_baseline_usable,
+                        "metrics_complete": all(
+                            _gs_alpha.metrics.get(k) is not None
+                            for k in ("sharpe", "fitness", "turnover")
+                        ),
+                    }
+                    _gs = compute_graded_score(
+                        _gs_sim,
+                        prod_corr=_gs_alpha.metrics.get("_prod_corr") or 0.0,
+                        self_corr=_gs_alpha.metrics.get("_self_corr") or 0.0,
+                        weights=_gs_weights,
+                        baseline_stats=_gs_stats,
+                        confidence_inputs=_gs_conf_inputs,
+                    )
+                    _gs_alpha.metrics["_score_pct"] = round(_gs.percentile, 4)
+                    _gs_alpha.metrics["_score_grade"] = _gs.grade
+                    _gs_alpha.metrics["_score_grade_action"] = _gs.grade_action
+                    _gs_alpha.metrics["_score_confidence"] = round(_gs.confidence, 3)
+                    _gs_alpha.metrics["_score_evidence"] = _gs.evidence
+                    graded_count += 1
+
+                    if _gs.confidence < _gs_conf_min:
+                        _gs_alpha.quality_status = "PASS_PROVISIONAL"
+                        _gs_alpha.metrics["_routing_reason"] = "graded_low_confidence"
+                        pass_count -= 1
+                        optimize_count += 1
+                        graded_downgraded += 1
+                        logger.warning(
+                            f"[{node_name}] graded-score: PASS → PROV | "
+                            f"expr={(_gs_alpha.expression or '')[:60]!r} "
+                            f"confidence={_gs.confidence:.3f} < {_gs_conf_min} "
+                            f"grade={_gs.grade}"
+                        )
+                    else:
+                        logger.info(
+                            f"[{node_name}] graded-score: PASS kept | "
+                            f"expr={(_gs_alpha.expression or '')[:60]!r} "
+                            f"grade={_gs.grade} pct={_gs.percentile:.3f} "
+                            f"confidence={_gs.confidence:.3f}"
+                        )
+                except Exception as _gs_alpha_exc:
+                    graded_failed += 1
                     logger.warning(
-                        f"[{node_name}] graded-score: PASS → PROV | "
-                        f"expr={(_gs_alpha.expression or '')[:60]!r} "
-                        f"confidence={_gs.confidence:.3f} < {_gs_conf_min} "
-                        f"grade={_gs.grade}"
+                        f"[{node_name}] graded-score: per-alpha failure for "
+                        f"{(_gs_alpha.expression or '')[:60]!r}: {_gs_alpha_exc}"
                     )
-                else:
-                    logger.info(
-                        f"[{node_name}] graded-score: PASS kept | "
-                        f"expr={(_gs_alpha.expression or '')[:60]!r} "
-                        f"grade={_gs.grade} pct={_gs.percentile:.3f} "
-                        f"confidence={_gs.confidence:.3f}"
-                    )
+                    continue
         except Exception as _gs_block_exc:
-            # Block-level guard: any unexpected failure leaves alphas un-graded;
-            # evaluation continues exactly as if ENABLE_GRADED_SCORE were False.
+            # Setup-level guard: import / config failure leaves all alphas
+            # un-graded; evaluation continues as if ENABLE_GRADED_SCORE were False.
             logger.warning(
-                f"[{node_name}] graded-score block failed (degrading): {_gs_block_exc}"
+                f"[{node_name}] graded-score block setup failed (degrading): {_gs_block_exc}"
             )
 
     # P0: baseline + Nσ-residual screening (docs/alphagbm_skills_research_2026-05-15.md).
@@ -1830,43 +1878,12 @@ async def node_evaluate(
                 residual_sigma,
             )
 
-            # expected_signal = hypothesis family tag. Prefer the in-state
-            # hypothesis dict; fall back to the typed Hypothesis row; else
-            # "unknown" (which simply yields insufficient-data cells).
-            expected_signal = "unknown"
-            for _h in (state.hypotheses or []):
-                if isinstance(_h, dict) and _h.get("expected_signal"):
-                    expected_signal = _h["expected_signal"]
-                    break
-            if expected_signal == "unknown" and getattr(state, "current_hypothesis_id", None):
-                try:
-                    from backend.database import AsyncSessionLocal
-                    from backend.models import Hypothesis as _Hyp
-                    async with AsyncSessionLocal() as _db:
-                        _row = await _db.get(_Hyp, state.current_hypothesis_id)
-                        if _row and _row.expected_signal:
-                            expected_signal = _row.expected_signal
-                except Exception:
-                    pass
-
-            # category_resolver: dataset_id -> category for the coarse fallback,
-            # built from field metadata already in state; defaults to the
-            # round's dataset_category when a per-dataset mapping isn't present.
-            _cat_map = {}
-            for _f in (state.fields or []):
-                if isinstance(_f, dict):
-                    _ds = _f.get("dataset_id")
-                    _cat = _f.get("category") or _f.get("dataset_category")
-                    if _ds and _cat:
-                        _cat_map[_ds] = _cat
-            _default_cat = getattr(state, "dataset_category", None) or None
-
-            def _resolve_category(ds_id):
-                return _cat_map.get(ds_id) or _default_cat
-
+            # expected_signal + category_resolver come from the shared baseline
+            # setup block above (computed once, reused by graded-score too).
+            expected_signal = _shared_expected_signal
             provider = BaselineProvider(
                 metric_col="is_sharpe",
-                category_resolver=_resolve_category,
+                category_resolver=_shared_resolve_category,
             )
             metric_key = getattr(settings, "BASELINE_METRIC", "sharpe")
             discovery_sigma = getattr(settings, "BASELINE_DISCOVERY_SIGMA", 2.0)
@@ -2059,6 +2076,7 @@ async def node_evaluate(
             "graded_count": graded_count,
             "graded_downgraded": graded_downgraded,
             "graded_no_baseline": graded_no_baseline,
+            "graded_failed": graded_failed,
             "details": eval_details[:20]
         },
         duration_ms,

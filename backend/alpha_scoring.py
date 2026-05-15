@@ -12,7 +12,10 @@ Reference: 优化.md Section 3.1, BRAIN Alpha submission requirements
 
 from typing import Dict, Optional, Any, Tuple, List
 from dataclasses import dataclass, field
+from statistics import NormalDist
 import logging
+
+from backend.baseline_screener import residual_sigma as _residual_sigma
 
 logger = logging.getLogger(__name__)
 
@@ -587,8 +590,12 @@ class GradedScore:
                  empirical percentile rank in a future iteration.
     grade:       A-E per _GRADE_BANDS above.
     grade_action: Bound action for this grade.
-    confidence:  Mean of confidence_inputs boolean flags (0..1). Empty → 0.5.
-    evidence:    Human-readable trace of what was measured vs fabricated.
+    confidence:  Tri-state — measures real information content. Inputs are
+                 either True (real measurement), False (expected-but-fabricated),
+                 or None (not applicable for this alpha's tier/context). Only
+                 True/False inputs count toward the ratio; None is skipped.
+                 All-None or empty → 0.5 neutral.
+    evidence:    Human-readable trace of what was measured vs fabricated vs N/A.
     """
     raw_score: float
     percentile: float
@@ -605,7 +612,7 @@ def compute_graded_score(
     self_corr: float = 0.0,
     weights: Optional[Dict[str, float]] = None,
     baseline_stats: Optional[Any] = None,    # BaselineStats | None (avoid circular import)
-    confidence_inputs: Optional[Dict[str, bool]] = None,
+    confidence_inputs: Optional[Dict[str, Optional[bool]]] = None,
 ) -> GradedScore:
     """Structured layer over calculate_alpha_score: percentile + grade + confidence.
 
@@ -617,15 +624,18 @@ def compute_graded_score(
         pct = statistics.NormalDist().cdf(z)
         Fallback to 0.5 when baseline is None / not usable / z is None.
 
-    Confidence:
-        mean of confidence_inputs.values(); empty dict → 0.5 neutral.
-        Evidence records which inputs were fabricated (not real measurements).
+    Confidence (tri-state):
+        Each input flag is one of:
+          True  — real measurement available
+          False — measurement was *expected* but missing/fabricated
+          None  — not applicable for this alpha (e.g. tier-1 doesn't run
+                  self_corr) → SKIPPED, doesn't penalise confidence
+        confidence = real_count / (real_count + fabricated_count)
+        All-None or empty → 0.5 neutral.
 
     来源: docs/alphagbm_skills_research_2026-05-15.md P1-A — 百分位归一化 +
     非均匀权重 + confidence 维度
     """
-    from statistics import NormalDist
-
     evidence: List[str] = []
 
     # ── raw_score ──────────────────────────────────────────────────────────────
@@ -640,9 +650,6 @@ def compute_graded_score(
     percentile = 0.5  # neutral fallback
     try:
         if baseline_stats is not None and getattr(baseline_stats, "usable", False):
-            # residual_sigma lives in baseline_screener; import lazily to keep
-            # this module free of DB-layer imports (used in pure-test contexts).
-            from backend.baseline_screener import residual_sigma as _residual_sigma
             os_stats = _extract_os_stats(sim_result)
             test_sharpe = _safe_float(
                 os_stats.get("sharpe") or os_stats.get("Sharpe")
@@ -673,17 +680,28 @@ def compute_graded_score(
             grade_action = action
             break
 
-    # ── confidence: mean of real-input flags ──────────────────────────────────
+    # ── confidence (tri-state): only True/False inputs count; None = skip ─────
     if not confidence_inputs:
         confidence = 0.5
         evidence.append("confidence=0.5 (no confidence_inputs provided — neutral)")
     else:
-        real_flags = list(confidence_inputs.values())
-        confidence = sum(bool(f) for f in real_flags) / len(real_flags)
-        fabricated = [k for k, v in confidence_inputs.items() if not v]
-        if fabricated:
-            evidence.append(f"fabricated_inputs={fabricated} (treated as 0/None placeholders)")
+        real_keys        = [k for k, v in confidence_inputs.items() if v is True]
+        fabricated_keys  = [k for k, v in confidence_inputs.items() if v is False]
+        na_keys          = [k for k, v in confidence_inputs.items() if v is None]
+        applicable_count = len(real_keys) + len(fabricated_keys)
+        if applicable_count == 0:
+            # All inputs N/A → no information → neutral
+            confidence = 0.5
+            evidence.append(
+                f"confidence=0.5 (all inputs N/A: {na_keys})"
+            )
         else:
+            confidence = len(real_keys) / applicable_count
+        if na_keys:
+            evidence.append(f"na_inputs={na_keys} (skipped — not applicable)")
+        if fabricated_keys:
+            evidence.append(f"fabricated_inputs={fabricated_keys} (expected but missing)")
+        elif applicable_count > 0:
             evidence.append("all_inputs_real=True")
 
     return GradedScore(

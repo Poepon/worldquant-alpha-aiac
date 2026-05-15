@@ -161,7 +161,7 @@ class TestGradedScoreGrade:
 # ---------------------------------------------------------------------------
 
 class TestGradedScoreConfidence:
-    """Confidence computation from boolean input flags."""
+    """Confidence computation — tri-state inputs (True/False/None)."""
 
     def test_all_real_gives_1(self):
         gs = compute_graded_score(
@@ -205,6 +205,49 @@ class TestGradedScoreConfidence:
             confidence_inputs={"a": True, "b": True},
         )
         assert any("all_inputs_real" in e for e in gs.evidence)
+
+    # ── Tri-state semantics: None = N/A, skipped, doesn't penalise ────────────
+
+    def test_na_inputs_are_skipped_not_counted(self):
+        """None inputs are N/A — they don't enter the denominator."""
+        # 1 real + 1 N/A → applicable=1, real=1 → confidence = 1.0 (NOT 0.5)
+        gs = compute_graded_score(
+            _sim(),
+            confidence_inputs={"real": True, "na": None},
+        )
+        assert gs.confidence == pytest.approx(1.0)
+
+    def test_all_na_gives_neutral_05(self):
+        """All-N/A means no information — neutral 0.5, never punitive."""
+        gs = compute_graded_score(
+            _sim(),
+            confidence_inputs={"a": None, "b": None, "c": None},
+        )
+        assert gs.confidence == pytest.approx(0.5)
+
+    def test_mixed_real_fabricated_na(self):
+        """Confidence = real / (real + fabricated); N/A excluded from both."""
+        # 2 real + 1 fabricated + 1 N/A → applicable=3, real=2 → 2/3
+        gs = compute_graded_score(
+            _sim(),
+            confidence_inputs={"r1": True, "r2": True, "f": False, "n": None},
+        )
+        assert gs.confidence == pytest.approx(2 / 3)
+
+    def test_na_keys_appear_in_evidence(self):
+        gs = compute_graded_score(
+            _sim(),
+            confidence_inputs={"real": True, "na_input": None},
+        )
+        assert any("na_input" in e and "skipped" in e for e in gs.evidence)
+
+    def test_one_real_one_fabricated_no_na_gives_half(self):
+        """Sanity check that the historical 50/50 case still works."""
+        gs = compute_graded_score(
+            _sim(),
+            confidence_inputs={"r": True, "f": False},
+        )
+        assert gs.confidence == pytest.approx(0.5)
 
 
 # ---------------------------------------------------------------------------
