@@ -19,9 +19,17 @@ from typing import Iterable, Optional
 
 
 # Six canonical pillars + ``other`` fallback. Validated by ``normalize_pillar``.
-PILLAR_VALUES: set[str] = {
+# Tuple (not set) for deterministic iteration — ``infer_pillar``'s vote dict
+# is initialized via this iterable, and ``max(votes.items())`` ties are
+# resolved by insertion order. A set would make the tie-break non-deterministic
+# across processes (P2 review: test_voting_volatility_via_operators self-
+# acknowledged "result in (volatility, momentum)").
+PILLAR_VALUES: tuple[str, ...] = (
     "momentum", "value", "quality", "volatility", "sentiment", "other",
-}
+)
+# Membership-check view for callers that previously used PILLAR_VALUES as a set
+# (`x in PILLAR_VALUES` works on tuple too, but frozenset is O(1) for hot paths).
+_PILLAR_VALUES_SET: frozenset[str] = frozenset(PILLAR_VALUES)
 
 
 # Operator → pillar votes. An operator may legitimately belong to multiple
@@ -173,7 +181,7 @@ def normalize_pillar(raw) -> Optional[str]:
     if not s:
         return None
     s = _ALIASES.get(s, s)
-    return s if s in PILLAR_VALUES else None
+    return s if s in _PILLAR_VALUES_SET else None
 
 
 def _classify_field(field_name: str) -> Optional[str]:
@@ -261,6 +269,15 @@ def infer_pillar(
     # 3. Weighted vote
     votes: dict[str, float] = {pp: 0.0 for pp in PILLAR_VALUES}
 
+    # P2 review fix: single-pillar ops are unambiguous evidence (e.g.
+    # ts_std_dev → volatility, divide is not in this category since it's
+    # multi-pillar) and outweigh fields. Field weight reduced from 2.0 to
+    # 1.0 — previously `ts_std_dev(returns)` got tied or lost to momentum
+    # because `returns` field-pattern fired at 2.0 vs ts_std_dev op at 1.0.
+    SINGLE_PILLAR_OP_WEIGHT = 1.5
+    MULTI_PILLAR_OP_SHARE = 1.0  # split 1/N across the membership set
+    FIELD_WEIGHT = 1.0
+
     ops: list[str] = []
     if suggested_operators:
         ops.extend(o.strip().lower() for o in suggested_operators if o)
@@ -270,13 +287,17 @@ def infer_pillar(
         pillars = OPERATOR_TO_PILLAR.get(op, set())
         if not pillars:
             continue
-        # Multi-pillar ops split their vote so a single op cannot dominate.
-        w = 1.0 / len(pillars)
-        for pp in pillars:
-            votes[pp] += w
+        if len(pillars) == 1:
+            # Unambiguous op — assign the full single-pillar weight directly.
+            (only_pillar,) = pillars
+            votes[only_pillar] += SINGLE_PILLAR_OP_WEIGHT
+        else:
+            # Multi-pillar op — share 1.0 across the membership set so a
+            # single op cannot dominate over fields + other op evidence.
+            share = MULTI_PILLAR_OP_SHARE / len(pillars)
+            for pp in pillars:
+                votes[pp] += share
 
-    # Fields carry 2× weight: the economic mechanism is usually visible at the
-    # data layer, while operators are often re-used across families.
     fields: list[str] = []
     if key_fields:
         fields.extend(str(f).lower() for f in key_fields if f)
@@ -285,14 +306,14 @@ def infer_pillar(
     for f in fields:
         pp = _classify_field(f)
         if pp:
-            votes[pp] += 2.0
+            votes[pp] += FIELD_WEIGHT
 
     # 4. Fallback
     if not any(v > 0 for v in votes.values()):
         return "other"
     top_p, top_v = max(votes.items(), key=lambda kv: kv[1])
-    # Require at least one strong signal (>= 1 field hit OR >= 1 full op vote)
-    # before trusting the inference. Below that the vote is just noise.
+    # Require ≥1 unit of signal (one field hit OR one full single-pillar op
+    # OR enough split-op evidence to add up). Below that the vote is noise.
     if top_v < 1.0:
         return "other"
     return top_p

@@ -14,12 +14,18 @@ Contains:
 - node_code_gen: Generate alpha expressions
 """
 
+import json
 import time
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from loguru import logger
 from langchain_core.runnables import RunnableConfig
+
+from sqlalchemy import select as _sa_select, func as _sa_func
+from backend.config import settings as _gen_settings
+from backend.models import Alpha, Hypothesis
 
 
 # V-26.49 (2026-05-13): proper dataclass for LLM-call failures. Pre-fix used
@@ -332,21 +338,17 @@ async def node_hypothesis(
     # renders an extra nudge block. Failure of the SQL / Redis path is
     # non-fatal: pillar_hint stays None and the node continues normally.
     pillar_hint: Optional[str] = None
-    try:
-        from backend.config import settings as _p2b_settings
-        _pillar_aware = bool(getattr(
-            _p2b_settings, "ENABLE_PILLAR_AWARE_SELECTION", False,
-        ))
-    except Exception:
-        _pillar_aware = False
+    _pillar_aware = bool(getattr(
+        _gen_settings, "ENABLE_PILLAR_AWARE_SELECTION", False,
+    ))
     if _pillar_aware:
         try:
             # M9 fix: Redis 60s TTL cache keyed by (region, utc-date) so the
             # per-round JOIN doesn't fire on every node_hypothesis invocation.
+            # `redis_pool` is lazy-imported because backend.tasks ↔
+            # backend.agents has a known cycle (commit 4ec6e8f message).
             from backend.tasks.redis_pool import get_redis_client
-            import json as _p2b_json
-            from datetime import datetime as _p2b_dt, timezone as _p2b_tz, timedelta as _p2b_td
-            _p2b_today = _p2b_dt.now(_p2b_tz.utc).strftime("%Y-%m-%d")
+            _p2b_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
             _p2b_cache_key = f"aiac:pillar_deficit:{state.region}:{_p2b_today}"
             _p2b_redis = None
             try:
@@ -358,7 +360,7 @@ async def node_hypothesis(
                 try:
                     _p2b_cached = _p2b_redis.get(_p2b_cache_key)
                     if _p2b_cached is not None:
-                        counts = _p2b_json.loads(_p2b_cached)
+                        counts = json.loads(_p2b_cached)
                 except Exception:
                     counts = None
 
@@ -367,18 +369,16 @@ async def node_hypothesis(
                 # ``hypothesis_id IS NULL`` must NOT be silently dropped.
                 # They land in the ``unknown`` bucket and are excluded from
                 # share computation (so they don't dilute deficits).
-                from sqlalchemy import select as _p2b_select, func as _p2b_func
-                from backend.models import Alpha, Hypothesis
                 # alphas.created_at is TIMESTAMP WITHOUT TIME ZONE — use a
                 # naive UTC cutoff so asyncpg accepts the WHERE clause.
                 _p2b_cutoff = (
-                    _p2b_dt.now(_p2b_tz.utc) - _p2b_td(days=7)
+                    datetime.now(timezone.utc) - timedelta(days=7)
                 ).replace(tzinfo=None)
                 async with resolve_db(config) as _p2b_db:
                     _p2b_stmt = (
-                        _p2b_select(
+                        _sa_select(
                             Hypothesis.pillar,
-                            _p2b_func.count(Alpha.id),
+                            _sa_func.count(Alpha.id),
                         )
                         .select_from(Alpha)
                         .outerjoin(
@@ -396,7 +396,7 @@ async def node_hypothesis(
                 if _p2b_redis is not None:
                     try:
                         _p2b_redis.setex(
-                            _p2b_cache_key, 60, _p2b_json.dumps(counts),
+                            _p2b_cache_key, 60, json.dumps(counts),
                         )
                     except Exception:
                         pass  # cache failure must not break the node
@@ -405,7 +405,7 @@ async def node_hypothesis(
             # from the denominator so legacy backlog doesn't dilute fresh
             # shares. Threshold is deficit relative to target.
             _p2b_target = getattr(
-                _p2b_settings, "PILLAR_TARGET_DISTRIBUTION", {},
+                _gen_settings, "PILLAR_TARGET_DISTRIBUTION", {},
             ) or {}
             pillared_total = sum(
                 c for p, c in counts.items() if p in _p2b_target
@@ -422,7 +422,7 @@ async def node_hypothesis(
                     deficits.items(), key=lambda kv: kv[1],
                 )
                 _p2b_skew_t = float(getattr(
-                    _p2b_settings, "PILLAR_BALANCE_SKEW_THRESHOLD", 0.4,
+                    _gen_settings, "PILLAR_BALANCE_SKEW_THRESHOLD", 0.4,
                 ))
                 # Trigger when the deficit exceeds threshold * target.
                 if top_def > _p2b_skew_t * _p2b_target.get(top_pillar, 0.2):

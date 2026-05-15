@@ -29,17 +29,23 @@ from backend.pillar_classifier import (
 
 class TestPillarValues:
     def test_six_pillars_present(self):
-        assert PILLAR_VALUES == {
+        # PILLAR_VALUES is now a tuple (deterministic iteration); compare
+        # as a set for order-agnostic equality.
+        assert set(PILLAR_VALUES) == {
             "momentum", "value", "quality",
             "volatility", "sentiment", "other",
         }
+        # And the tuple form anchors a stable iteration order for the
+        # vote dict's max() tiebreak — assert it's actually a tuple.
+        assert isinstance(PILLAR_VALUES, tuple)
 
     def test_operator_map_values_are_pillar_subsets(self):
         """Every operator's pillar set must be a subset of PILLAR_VALUES."""
+        _pillars_set = set(PILLAR_VALUES)
         for op, pillars in OPERATOR_TO_PILLAR.items():
-            assert pillars <= PILLAR_VALUES, (
+            assert pillars <= _pillars_set, (
                 f"operator {op!r} maps to non-pillar values: "
-                f"{pillars - PILLAR_VALUES}"
+                f"{pillars - _pillars_set}"
             )
 
 
@@ -173,13 +179,22 @@ class TestInferPillar:
         assert result == "value"
 
     def test_voting_volatility_via_operators(self):
+        """P2 review fix: vol ops (single-pillar) at 1.5 each outweigh
+        the close field at 1.0 — result is deterministically volatility.
+        Pre-fix the algorithm tied (op 1.0 vs field 2.0) and the test
+        had to accept `result in (volatility, momentum)`."""
         result = infer_pillar(
             suggested_operators=["ts_std_dev", "ts_skewness"],
-            key_fields=["close"],  # 2.0 momentum vs 2.0 volatility ops
+            key_fields=["close"],
         )
-        # 2 ops volatility (2.0) + 1 field momentum (2.0) — tie; but field
-        # weight 2× per op makes momentum tie. Check it's one of them.
-        assert result in ("volatility", "momentum")
+        assert result == "volatility"
+
+    def test_voting_single_vol_op_beats_pv_field(self):
+        """Single ts_std_dev (1.5 vol) > single close field (1.0 momentum)."""
+        result = infer_pillar(
+            expression="ts_std_dev(returns, 20)",
+        )
+        assert result == "volatility"
 
     def test_voting_low_signal_falls_to_other(self):
         """Stage 4: bare neutral operators with no field hints → other."""

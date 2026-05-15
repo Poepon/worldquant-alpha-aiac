@@ -105,15 +105,21 @@ class TestDiversityTrackerWeights:
 
     def test_config_weight_override_via_patch(self):
         """When backend.config.settings attributes are overridden, DiversityTracker
-        picks up the new values (via getattr fallback path in __init__)."""
+        picks up the new values (via getattr fallback path in __init__).
+
+        Note: `diversity_tracker` does `from backend.config import settings` at
+        module top, so monkeypatching `backend.config.settings` after import
+        does NOT rebind the name in `diversity_tracker`. We patch the
+        `settings` attribute on the consumer module directly instead.
+        """
         from unittest.mock import MagicMock
-        import backend.config as _cfg_mod
+        import backend.diversity_tracker as _dt_mod
         fake_settings = MagicMock()
         fake_settings.DIVERSITY_DATASET_WEIGHT  = 0.10
         fake_settings.DIVERSITY_FIELD_WEIGHT    = 0.20
         fake_settings.DIVERSITY_OPERATOR_WEIGHT = 0.30
         fake_settings.DIVERSITY_SETTINGS_WEIGHT = 0.40
-        with patch.object(_cfg_mod, "settings", fake_settings):
+        with patch.object(_dt_mod, "settings", fake_settings):
             tracker = DiversityTracker(db=None, weights=None)
         assert tracker.weights["dataset"]  == pytest.approx(0.10)
         assert tracker.weights["field"]    == pytest.approx(0.20)

@@ -21,7 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from loguru import logger
 
+from backend.config import settings
 from backend.models import Alpha, KnowledgeEntry
+from backend.pillar_classifier import PILLAR_VALUES
 
 
 # =============================================================================
@@ -183,7 +185,6 @@ class DiversityTracker:
             self.weights = weights
         else:
             try:
-                from backend.config import settings
                 self.weights = {
                     "dataset":  getattr(settings, "DIVERSITY_DATASET_WEIGHT", 0.30),
                     "field":    getattr(settings, "DIVERSITY_FIELD_WEIGHT", 0.30),
@@ -503,13 +504,9 @@ class DiversityTracker:
         #   - ENABLE_PILLAR_AWARE_SELECTION=True AND pillar is non-None →
         #     run the 5-dim weighted sum with weights renormalised to total
         #     1.0 so pillar contributes its configured share.
-        try:
-            from backend.config import settings as _p2b_div_settings
-            _p2b_div_enabled = bool(getattr(
-                _p2b_div_settings, "ENABLE_PILLAR_AWARE_SELECTION", False,
-            ))
-        except Exception:
-            _p2b_div_enabled = False
+        _p2b_div_enabled = bool(getattr(
+            settings, "ENABLE_PILLAR_AWARE_SELECTION", False,
+        ))
         _use_pillar = (
             _p2b_div_enabled
             and pillar is not None
@@ -654,17 +651,7 @@ class DiversityTracker:
         ``settings.PILLAR_TARGET_DISTRIBUTION``; deficits are clamped at 0
         (over-represented pillars don't get a negative number).
         """
-        try:
-            from backend.config import settings as _p2b_gpb_settings
-            target = getattr(
-                _p2b_gpb_settings, "PILLAR_TARGET_DISTRIBUTION", {},
-            ) or {}
-        except Exception:
-            target = {}
-        try:
-            from backend.pillar_classifier import PILLAR_VALUES
-        except Exception:
-            PILLAR_VALUES = set()
+        target = getattr(settings, "PILLAR_TARGET_DISTRIBUTION", {}) or {}
         total = sum(self.pillar_usage.values())
         by = {p: self.pillar_usage.get(p, 0) for p in PILLAR_VALUES}
         shares = {p: (c / total if total else 0.0) for p, c in by.items()}
