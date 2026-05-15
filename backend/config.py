@@ -56,13 +56,17 @@ class Settings(BaseSettings):
     # gateway, OpenRouter, vendor-compatible endpoint) when needed.
     ANTHROPIC_BASE_URL: str = os.getenv("ANTHROPIC_BASE_URL", "")
     # Anthropic extended-thinking reasoning effort (opus-4-7 family).
+    # Tier names match Anthropic's model capability metadata (low/medium/high/max)
+    # plus an intermediate "xhigh" and the alias "auto" → adaptive.
     # Levels:
     #   "disabled" → no thinking block (legacy / fastest)
-    #   "low"      → budget_tokens=1024  (Anthropic minimum)
+    #   "low"      → budget_tokens=1024   (Anthropic minimum)
     #   "medium"   → budget_tokens=4096
     #   "high"     → budget_tokens=16384
-    #   "xhigh"    → budget_tokens=32000  (DEFAULT — max-quality reasoning)
-    #   "adaptive" → model self-allocates budget (Anthropic adaptive mode)
+    #   "xhigh"    → budget_tokens=32000  (DEFAULT — between high and max)
+    #   "max"      → budget_tokens=64000  (Anthropic official top effort tier)
+    #   "auto"     → model self-allocates budget (alias for Anthropic adaptive mode)
+    #   "adaptive" → same as "auto"
     # Ignored on non-reasoning models (haiku/sonnet); openai-compat providers
     # also ignore this setting.
     ANTHROPIC_THINKING_EFFORT: str = os.getenv("ANTHROPIC_THINKING_EFFORT", "xhigh")

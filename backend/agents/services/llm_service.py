@@ -40,12 +40,21 @@ _ANTHROPIC_NO_TEMPERATURE_PREFIXES: Tuple[str, ...] = ("claude-opus-4-7",)
 _ANTHROPIC_THINKING_PREFIXES: Tuple[str, ...] = ("claude-opus-4-7",)
 
 # Reasoning-effort tier → thinking budget_tokens. 1024 is Anthropic's hard
-# minimum; "xhigh" mirrors OpenAI o-series x-high reasoning_effort tier.
+# minimum (per /thinking docs). Tier names match Anthropic's model capability
+# metadata (low/medium/high/max) plus our intermediate "xhigh" between high
+# and max (mirrors OpenAI o-series x-high reasoning_effort).
 _ANTHROPIC_THINKING_BUDGETS: Dict[str, int] = {
     "low":    1024,
     "medium": 4096,
     "high":   16384,
     "xhigh":  32000,
+    "max":    64000,   # Anthropic official top tier — budget < max_tokens still applies
+}
+
+# Tier name aliases — "auto" is the user-friendly name for Anthropic's
+# `thinking.type=adaptive` (model self-allocates budget).
+_ANTHROPIC_EFFORT_ALIASES: Dict[str, str] = {
+    "auto": "adaptive",
 }
 
 
@@ -272,7 +281,11 @@ class LLMService:
                 # Extended thinking — opus-4-7 family only; caller's max_tokens
                 # is preserved as the *output* budget (thinking adds on top).
                 thinking_enabled = False
-                effort = self.anthropic_thinking_effort
+                # Resolve aliases (e.g. "auto" → "adaptive") so downstream
+                # branches only need to know about canonical tier names.
+                effort = _ANTHROPIC_EFFORT_ALIASES.get(
+                    self.anthropic_thinking_effort, self.anthropic_thinking_effort
+                )
                 if (
                     _anthropic_supports_thinking(self.model)
                     and effort
