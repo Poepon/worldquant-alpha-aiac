@@ -48,16 +48,9 @@ class TestDeriveControlExpression:
         assert result == "group_neutralize(close, industry)"
 
     def test_t2_group_rank(self):
+        # T1 inner ts_zscore(volume, 10) stripped to its bare field; wrapper kept.
         result = derive_control_expression("group_rank(ts_zscore(volume, 10), sector)")
-        assert result == "group_rank(close, sector)" or \
-               result == "group_rank(volume, sector)"
-        # Exact field depends on inner expression — just check it's a valid control
-        # (inner field extracted, wrapper preserved)
-        assert result is not None
-        assert result.startswith("group_rank(")
-        # Inner should NOT contain a ts_ operator
-        inner = result[len("group_rank("):-1].split(",")[0].strip()
-        assert "(" not in inner  # bare field, no function call
+        assert result == "group_rank(volume, sector)"
 
     def test_t2_group_rank_exact(self):
         result = derive_control_expression("group_rank(ts_zscore(returns, 5), sector)")

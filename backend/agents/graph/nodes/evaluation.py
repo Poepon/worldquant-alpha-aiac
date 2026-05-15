@@ -605,12 +605,26 @@ async def node_simulate(
         else:
             updated.is_simulated = True
 
-        # A1: stamp smart-settings metadata into metrics for audit / KB insight
+        # A1: stamp the resolved sim-settings into metrics for audit / KB insight,
+        # and so node_evaluate's signal-vs-control dual-run can re-simulate the
+        # control with the SAME settings — otherwise Δsharpe mixes signal-core
+        # difference with sim-settings difference and the attribution is invalid.
         if smart_enabled and i in smart_settings_per_idx:
             updated.metrics = {
                 **updated.metrics,
                 "_sim_settings": smart_settings_per_idx[i],
                 "_sim_settings_reason": smart_reasons_per_idx.get(i, ""),
+            }
+        else:
+            updated.metrics = {
+                **updated.metrics,
+                "_sim_settings": {
+                    "region": state.region,
+                    "universe": state.universe,
+                    "delay": _v16_settings.SIM_DEFAULT_DELAY,
+                    "decay": _v16_settings.SIM_DEFAULT_DECAY,
+                    "neutralization": _v16_settings.SIM_DEFAULT_NEUTRALIZATION,
+                },
             }
 
         if updated.simulation_success:
@@ -1415,11 +1429,16 @@ async def node_evaluate(
                             region=state.region,
                             universe=state.universe,
                         )
+                        _flip_sim_settings = dict(smart)
                         sim_result = await brain.simulate_alpha(
                             expression=flipped_expr,
                             **smart,
                         )
                     else:
+                        _flip_sim_settings = {
+                            "region": state.region,
+                            "universe": state.universe,
+                        }
                         sim_result = await brain.simulate_alpha(
                             expression=flipped_expr,
                             region=state.region,
@@ -1434,6 +1453,9 @@ async def node_evaluate(
                     continue
 
                 flip_metrics = sim_result.get("metrics") or {}
+                # Stamp the settings actually used so node_evaluate's dual-run can
+                # replay the control with identical settings (see _sim_settings).
+                flip_metrics["_sim_settings"] = _flip_sim_settings
                 new_sharpe = flip_metrics.get("sharpe") or 0
                 new_fitness = flip_metrics.get("fitness") or 0
                 new_turnover = flip_metrics.get("turnover") or 0
@@ -1543,6 +1565,7 @@ async def node_evaluate(
     dual_run_count = 0
     dual_run_downgraded = 0
     dual_run_no_control = 0
+    dual_run_sim_failed = 0
     if brain is not None and getattr(settings, "ENABLE_SIGNAL_CONTROL_DUAL_RUN", False):
         from backend.factor_tier_classifier import derive_control_expression
         from backend.agents.prompts.alignment import determine_attribution_dual_run
@@ -1579,19 +1602,27 @@ async def node_evaluate(
                     f"{(_dr_alpha.expression or '')[:80]!r}"
                 )
                 continue
+            # Simulate the control with the SAME settings the signal alpha used
+            # (stamped into metrics["_sim_settings"] by node_simulate / flip-retry).
+            # Without this, Δsharpe mixes signal-core difference with sim-settings
+            # difference and the attribution is invalid. Fall back to region/
+            # universe only if the stamp is somehow absent.
+            _ctl_sim_kwargs = dict(_dr_alpha.metrics.get("_sim_settings") or {
+                "region": state.region,
+                "universe": state.universe,
+            })
+            _ctl_sim_kwargs["expression"] = _ctrl_expr
             try:
-                _ctl_result = await brain.simulate_alpha(
-                    expression=_ctrl_expr,
-                    region=state.region,
-                    universe=state.universe,
-                )
+                _ctl_result = await brain.simulate_alpha(**_ctl_sim_kwargs)
             except Exception as _dr_exc:
+                dual_run_sim_failed += 1
                 logger.warning(
                     f"[{node_name}] dual-run control sim failed for "
                     f"{_ctrl_expr[:80]!r}: {_dr_exc}"
                 )
                 continue
             if not _ctl_result.get("success"):
+                dual_run_sim_failed += 1
                 logger.debug(
                     f"[{node_name}] dual-run: control sim returned failure for {_ctrl_expr[:80]!r}"
                 )
@@ -1617,6 +1648,7 @@ async def node_evaluate(
             # 结构产物 → PASS 降级为 PASS_PROVISIONAL(镜像 flip-retry V-16 降级模式)
             if _attr in ("implementation", "both"):
                 _dr_alpha.quality_status = "PASS_PROVISIONAL"
+                _dr_alpha.metrics["_routing_reason"] = "dual_run_downgrade"
                 pass_count -= 1
                 optimize_count += 1
                 dual_run_downgraded += 1
@@ -1881,6 +1913,7 @@ async def node_evaluate(
             "dual_run_count": dual_run_count,
             "dual_run_downgraded": dual_run_downgraded,
             "dual_run_no_control": dual_run_no_control,
+            "dual_run_sim_failed": dual_run_sim_failed,
             "details": eval_details[:20]
         },
         duration_ms,
