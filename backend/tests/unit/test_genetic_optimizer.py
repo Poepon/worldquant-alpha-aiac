@@ -612,9 +612,21 @@ class TestGetPromotionCandidates:
     def test_excludes_unsimulated(self):
         opt = GeneticOptimizer(OptimizationConfig(num_islands=2, population_size=20))
         opt.initialize(SEED_EXPR, SEED_METRICS)
-        # nothing simulated except the seed
+        # Simulate only half of each island; the rest stay unsimulated and
+        # must not leak into the promotion pool.
+        unsimulated_fps = set()
+        for island in opt.islands:
+            pending = [i for i in island.individuals if not i.simulated]
+            for idx, ind in enumerate(pending):
+                if idx % 2 == 0:
+                    opt.update_individual(ind, _good_sim_result())
+                else:
+                    unsimulated_fps.add(ind.fingerprint)
+
         candidates = opt.get_promotion_candidates()
+        assert candidates, "expected some simulated candidates"
         assert all(c.simulated for c in candidates)
+        assert all(c.fingerprint not in unsimulated_fps for c in candidates)
 
 
 # =============================================================================

@@ -1134,7 +1134,11 @@ async def run_genetic_optimization(
         """Run promotion-grid sims for *ind* and call confirm_individual_grid."""
         grid_results = []
         for override in config.fidelity_grid:
-            if optimizer.simulations_used >= config.max_simulations:
+            # simulations_used is batch-incremented by confirm_individual_grid
+            # after the loop, so it does not advance mid-grid — count the
+            # in-progress grid_results here or the guard never fires and the
+            # full grid always runs, overshooting the budget.
+            if optimizer.simulations_used + len(grid_results) >= config.max_simulations:
                 break
             try:
                 r = await simulate_func(
