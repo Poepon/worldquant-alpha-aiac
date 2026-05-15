@@ -1090,6 +1090,19 @@ async def node_simulate(
         updated.metrics = res.get("metrics", {}) or {}
         updated.simulation_error = res.get("error")
 
+        # P1-E follow-up (M-4 incomplete fix): node_validate stamps
+        # `_validation_findings` and `_risk_bounds` into pre-simulate
+        # alpha.metrics so persistence (which writes alpha.metrics to
+        # JSONB) can carry them to KB. The unconditional `updated.metrics =
+        # res.get("metrics")` above DROPS those annotations before
+        # persistence ever sees them. Carry them across explicitly.
+        # `setdefault` so a (hypothetical) BRAIN metrics dict containing
+        # the same key does not get overwritten by stale validation data.
+        if isinstance(current.metrics, dict):
+            for _k, _v in current.metrics.items():
+                if _k.startswith("_validation_") or _k == "_risk_bounds":
+                    updated.metrics.setdefault(_k, _v)
+
         # V-27.61: a retryable failure (429 / slot-acquire timeout / stale
         # slot counter — brain_adapter.simulate_alpha returns retryable=True
         # for these) is TRANSIENT, not a verdict on the alpha. Keep

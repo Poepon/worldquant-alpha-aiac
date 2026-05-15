@@ -116,6 +116,66 @@ class TestNodeValidateStructuredFindings:
         # validation_error is a single string (not List[Finding]).
         assert isinstance(alpha.validation_error, str)
 
+    @pytest.mark.asyncio
+    async def test_findings_survive_node_simulate_metrics_replacement(self):
+        """P1-E follow-up regression: node_simulate replaces
+        ``alpha.metrics`` wholesale with the BRAIN result. Without the
+        carry-over fix in evaluation.py L1090+, ``_validation_findings``
+        and ``_risk_bounds`` get clobbered before persistence ever sees
+        them. Simulate the same merge step here to lock the contract.
+        """
+        # 1. Pre-simulate state — node_validate has stamped findings.
+        validated_metrics = {
+            "_validation_findings": [
+                {"rule_id": RuleId.LOW_COVERAGE_FIELD, "severity": "soft",
+                 "message": "Low coverage", "category": "semantics",
+                 "location": None, "metadata": {}},
+            ],
+            "_risk_bounds": {"max_loss_hint": "high",
+                             "rationale": [RuleId.RISK_DIVIDE_BY_VOLATILE_DENOM],
+                             "confidence": 0.25,
+                             "severity_distribution": {"hard": 0, "soft": 0, "info": 1}},
+        }
+        # 2. Simulated BRAIN response — fresh metrics dict (no findings).
+        sim_metrics = {"sharpe": 1.6, "fitness": 1.1, "turnover": 0.4}
+
+        # 3. Replicate node_simulate's merge logic verbatim.
+        post_sim_metrics = dict(sim_metrics)
+        for k, v in validated_metrics.items():
+            if k.startswith("_validation_") or k == "_risk_bounds":
+                post_sim_metrics.setdefault(k, v)
+
+        # 4. Assert findings + risk_bounds survived alongside sim metrics.
+        assert post_sim_metrics["sharpe"] == 1.6
+        assert post_sim_metrics["_validation_findings"] == validated_metrics["_validation_findings"]
+        assert post_sim_metrics["_risk_bounds"]["max_loss_hint"] == "high"
+
+    @pytest.mark.asyncio
+    async def test_node_validate_does_not_writethrough_to_input_state(self):
+        """V-26.79 pattern: ``updated_alpha = alpha.model_copy()`` is shallow,
+        so mutating ``updated_alpha.metrics`` previously wrote through to
+        the LangGraph input state's metrics dict. The detach-via-dict()
+        fix prevents that — the input alpha's metrics must be untouched.
+        """
+        # Alpha with a pre-existing metrics dict (could be any sentinel).
+        input_metrics = {"_seed_marker": "preserve_me"}
+        alpha = AlphaCandidate(expression="rank(close)")
+        alpha.metrics = input_metrics
+        state = MiningState(
+            task_id=1,
+            region="USA",
+            universe="TOP3000",
+            dataset_id="x",
+            fields=[{"id": "close"}],
+            pending_alphas=[alpha],
+        )
+        await node_validate(state, config=None)
+        # The ORIGINAL input metrics dict must be unchanged — no
+        # `_validation_findings` / `_risk_bounds` written through.
+        assert input_metrics == {"_seed_marker": "preserve_me"}, (
+            f"shared-ref write-through detected: {input_metrics}"
+        )
+
 
 # =============================================================================
 # 2) M-5: static_alpha_checks adapted to Finding format

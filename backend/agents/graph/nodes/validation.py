@@ -282,15 +282,21 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
         # persisted by persistence.py:275). NOT `alpha.metadata` —
         # AlphaCandidate.metadata is never read by node_save_results, so
         # writing there would silently produce zero effect.
+        # V-26.79 pattern: `updated_alpha = alpha.model_copy()` is shallow,
+        # so `updated_alpha.metrics` is the SAME dict object as
+        # `alpha.metrics`. Mutating it would write through to the
+        # LangGraph input state, corrupting it for replay/interrupt-resume.
+        # Detach with dict() before any mutation.
+        if aggregated_findings or risk_bounds:
+            updated_alpha.metrics = (
+                dict(updated_alpha.metrics) if isinstance(updated_alpha.metrics, dict)
+                else {}
+            )
         if aggregated_findings:
-            if updated_alpha.metrics is None:
-                updated_alpha.metrics = {}
             updated_alpha.metrics["_validation_findings"] = [
                 f.to_dict() for f in aggregated_findings
             ]
         if risk_bounds:
-            if updated_alpha.metrics is None:
-                updated_alpha.metrics = {}
             updated_alpha.metrics["_risk_bounds"] = risk_bounds
         
         if is_valid:

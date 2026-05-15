@@ -495,7 +495,10 @@ def _infer_risk_findings(expression: str) -> List[Finding]:
         if len(divide_args) < 2:
             continue
         denom_low = divide_args[1].lower()
-        for risky in ALL_VOLATILE_DENOMS:
+        # sorted() — set iteration order is non-deterministic; without
+        # it `metadata["denom_field"]` differs across runs whenever the
+        # denom contains multiple risky tokens (e.g. divide(x, eps*adv5)).
+        for risky in sorted(ALL_VOLATILE_DENOMS):
             if re.search(rf"\b{re.escape(risky)}\b", denom_low):
                 findings.append(Finding(
                     rule_id=RuleId.RISK_DIVIDE_BY_VOLATILE_DENOM,
