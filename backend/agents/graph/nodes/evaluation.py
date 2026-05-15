@@ -12,6 +12,7 @@ Contains:
 """
 
 import asyncio
+import math
 import time
 import random
 from typing import Dict, List, Optional, Tuple
@@ -32,13 +33,18 @@ from backend.agents.prompts import (
     determine_attribution_heuristic,
 )
 from backend.alpha_routing import route_alpha_action
+from backend.alpha_scoring import (
+    calculate_alpha_score,
+    should_optimize,
+    get_failed_tests,
+    evaluate_with_brain_checks,
+)
+from backend.services.correlation_service import CorrelationService, CorrSource
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
-
-import math as _math  # P1-B: 仅在此 helper 使用，避免与已有 import 混淆
 
 
 def _safe_metric(metrics: dict, key: str, default: float, fallback_flags: list) -> float:
@@ -65,7 +71,7 @@ def _safe_metric(metrics: dict, key: str, default: float, fallback_flags: list) 
     if not isinstance(val, (int, float)):
         fallback_flags.append(key)
         return float(default)
-    if _math.isnan(val) or _math.isinf(val):
+    if math.isnan(val) or math.isinf(val):
         fallback_flags.append(key)
         return float(default)
     return float(val)
@@ -281,15 +287,6 @@ async def _evaluate_single_alpha(
 
     来源: docs/alphagbm_skills_research_2026-05-15.md P1-B — per-alpha try/except
     """
-    from backend.alpha_scoring import (
-        calculate_alpha_score,
-        should_optimize,
-        get_failed_tests,
-        evaluate_with_brain_checks,
-    )
-    from backend.services.correlation_service import CorrelationService, CorrSource
-    from backend.alpha_routing import route_alpha_action
-
     state = ctx.state
     brain = ctx.brain
     correlation_service = ctx.correlation_service
@@ -492,7 +489,6 @@ async def _evaluate_single_alpha(
         self_corr_verified = True  # tier_skipped, not unknown
 
     # V-26.76: pass tier so T3 hits the strict 0.4/0.5 floor
-    from backend.agents.graph.tier_thresholds import get_tier_thresholds as _get_thr
     _tier_val = getattr(state, "factor_tier", None)
     is_overfit_safe = _check_is_os_consistency(metrics, tier=_tier_val)
 
@@ -559,10 +555,6 @@ async def _evaluate_single_alpha(
             else:
                 hypothesis_dict = {"statement": alpha.hypothesis}
 
-        from backend.agents.prompts import (
-            quick_alignment_check,
-            determine_attribution_heuristic,
-        )
         if hypothesis_dict and alpha.expression:
             is_aligned, alignment_issues = quick_alignment_check(
                 hypothesis_dict, alpha.expression, state.fields
@@ -1223,14 +1215,6 @@ async def node_evaluate(
         - pending_alphas (with quality_status and score)
         - trace_steps
     """
-    from backend.alpha_scoring import (
-        calculate_alpha_score,
-        should_optimize,
-        get_failed_tests,
-        evaluate_with_brain_checks,  # 新增：BRAIN官方检查
-    )
-    from backend.services.correlation_service import CorrelationService, CorrSource
-
     start_time = time.time()
     node_name = "EVALUATE"
 
@@ -1327,6 +1311,9 @@ async def node_evaluate(
         # Hard rule: anything that didn't simulate successfully cannot be PASS.
         if not alpha.is_simulated or not alpha.simulation_success:
             if isinstance(alpha.metrics, dict) and alpha.metrics.get("_sim_retryable"):
+                # V-27.61 + P1-B: stamp PENDING explicitly so the post-loop
+                # tally classifies retryable as PENDING, not FAIL.
+                alpha.quality_status = "PENDING"
                 logger.info(
                     f"[{node_name}] retryable sim failure held at PENDING "
                     f"(not FAIL) | expr={(alpha.expression or '')[:60]}"
@@ -1860,13 +1847,24 @@ async def node_evaluate(
                     else:
                         _self_corr_input = None  # tier-1 / unknown — N/A
 
+                    # P1-B integration: a metric that was fallback-replaced
+                    # (NaN/inf/missing → default by _safe_metric) is `not None`
+                    # but no longer a real measurement. Treat as "expected but
+                    # missing" so confidence drops, per fear-score's
+                    # "fallback 标记 + confidence=真实数据占比" pairing.
+                    _core_metric_keys = ("sharpe", "fitness", "turnover")
+                    _fallback_flags = _gs_alpha.metrics.get("_metrics_fallback_flags") or []
+                    _core_fellback = any(f in _core_metric_keys for f in _fallback_flags)
                     _gs_conf_inputs: Dict[str, Optional[bool]] = {
                         "prod_corr_real":   _prod_corr_input,
                         "self_corr_real":   _self_corr_input,
                         "baseline_real":    _gs_baseline_usable,
-                        "metrics_complete": all(
-                            _gs_alpha.metrics.get(k) is not None
-                            for k in ("sharpe", "fitness", "turnover")
+                        "metrics_complete": (
+                            all(
+                                _gs_alpha.metrics.get(k) is not None
+                                for k in _core_metric_keys
+                            )
+                            and not _core_fellback
                         ),
                     }
                     _gs = compute_graded_score(
@@ -1984,11 +1982,15 @@ async def node_evaluate(
             logger.warning(f"[{node_name}] baseline screen skipped (error): {e}")
 
     # P1-B: single source of truth for counters — replaces 12 scattered +=1/-=1 sites.
-    # Invariant: pass + optimize + fail == N + provisional_count (PROV double-counts
-    # into optimize), matching pre-change net of L1652 `pass-=1; optimize+=1`.
+    # Invariant: pass + optimize + fail + pending == N. provisional_count is a
+    # subset of optimize (PROV enters optimize bucket but is also reported
+    # separately for visibility, consistent with P1-A's PROV→optimize mapping).
+    # PENDING (V-27.61 retryable sim) is its OWN bucket so transient BRAIN 429s
+    # / slot timeouts do NOT inflate fail_count and mislead operators.
     pass_count = 0
     optimize_count = 0
     fail_count = 0
+    pending_count = 0
     provisional_count = 0
     for _tally_alpha in updated_alphas:
         _qs = _tally_alpha.quality_status
@@ -1996,13 +1998,13 @@ async def node_evaluate(
             pass_count += 1
         elif _qs == "PASS_PROVISIONAL":
             provisional_count += 1
-            optimize_count += 1   # PROV enters optimize bucket (consistent with P1-A)
+            optimize_count += 1
         elif _qs == "OPTIMIZE":
             optimize_count += 1
+        elif _qs == "PENDING":
+            pending_count += 1
         else:
-            fail_count += 1       # FAIL / PENDING / unknown
-    # Known PENDING drift: pre-change early-PENDING continue (L813) skipped fail_count;
-    # post-change tally counts PENDING as fail. Conscious choice for trace invariance.
+            fail_count += 1       # FAIL / None / unknown
 
     duration_ms = int((time.time() - start_time) * 1000)
 
@@ -2010,14 +2012,16 @@ async def node_evaluate(
         "pass": pass_count,
         "optimize": optimize_count,
         "fail": fail_count,
+        "pending": pending_count,
         "corr_checked": corr_checks_performed,
         "corr_skipped": corr_checks_skipped,
         "duration_ms": duration_ms,
         "pass_rate": round(pass_count / max(1, pass_count + optimize_count + fail_count) * 100, 1)
     })
-    
+
     logger.info(
-        f"[{node_name}] Complete | pass={pass_count} optimize={optimize_count} fail={fail_count} "
+        f"[{node_name}] Complete | pass={pass_count} optimize={optimize_count} "
+        f"fail={fail_count} pending={pending_count} "
         f"corr_checked={corr_checks_performed} corr_skipped={corr_checks_skipped}"
     )
     
@@ -2158,6 +2162,7 @@ async def node_evaluate(
             "graded_no_baseline": graded_no_baseline,
             "graded_failed": graded_failed,
             "provisional_count": provisional_count,
+            "pending_count": pending_count,
             "eval_errors": eval_errors,
             "details": eval_details[:20]
         },
