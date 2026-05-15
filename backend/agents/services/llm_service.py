@@ -33,9 +33,28 @@ except ImportError:
 # are covered.
 _ANTHROPIC_NO_TEMPERATURE_PREFIXES: Tuple[str, ...] = ("claude-opus-4-7",)
 
+# Anthropic reasoning models that support extended thinking. Same prefix
+# pattern as the no-temperature list; kept separate because the two
+# capabilities are technically independent (e.g. a future opus could still
+# accept temperature without thinking, or vice versa).
+_ANTHROPIC_THINKING_PREFIXES: Tuple[str, ...] = ("claude-opus-4-7",)
+
+# Reasoning-effort tier → thinking budget_tokens. 1024 is Anthropic's hard
+# minimum; "xhigh" mirrors OpenAI o-series x-high reasoning_effort tier.
+_ANTHROPIC_THINKING_BUDGETS: Dict[str, int] = {
+    "low":    1024,
+    "medium": 4096,
+    "high":   16384,
+    "xhigh":  32000,
+}
+
 
 def _anthropic_supports_temperature(model: str) -> bool:
     return not any(model.startswith(p) for p in _ANTHROPIC_NO_TEMPERATURE_PREFIXES)
+
+
+def _anthropic_supports_thinking(model: str) -> bool:
+    return any(model.startswith(p) for p in _ANTHROPIC_THINKING_PREFIXES)
 
 
 class LLMResponse(BaseModel):
@@ -109,6 +128,12 @@ class LLMService:
             base_url if (base_url and self.provider == 'anthropic')
             else (getattr(settings, 'ANTHROPIC_BASE_URL', '') or '')
         )
+        # Extended-thinking reasoning effort (opus-4-7 family). Settings-driven
+        # so call() signature stays Protocol-stable. Normalize to lowercase;
+        # unknown values fall back to "xhigh" at use-time.
+        self.anthropic_thinking_effort = (
+            getattr(settings, 'ANTHROPIC_THINKING_EFFORT', 'xhigh') or 'xhigh'
+        ).strip().lower()
 
         # Active model for self.model (back-compat with downstream readers)
         self.model = (
@@ -143,10 +168,17 @@ class LLMService:
                 anthropic_kwargs["base_url"] = self.anthropic_base_url
             self.anthropic_client = anthropic.AsyncAnthropic(**anthropic_kwargs)
 
+        # Pre-resolve thinking-tier display name for logging only.
+        _thinking_tag = (
+            self.anthropic_thinking_effort
+            if (self.provider == 'anthropic' and _anthropic_supports_thinking(self.model))
+            else 'n/a'
+        )
         logger.info(
             f"[LLMService] Initialized | provider={self.provider} model={self.model} "
             f"openai_base_url={self.base_url} "
-            f"anthropic_base_url={self.anthropic_base_url or '<sdk default>'}"
+            f"anthropic_base_url={self.anthropic_base_url or '<sdk default>'} "
+            f"thinking={_thinking_tag}"
         )
 
     async def _ensure_credentials_loaded(self):
@@ -236,7 +268,46 @@ class LLMService:
                 }
                 if _anthropic_supports_temperature(self.model):
                     anth_kwargs["temperature"] = temperature
-                resp = await self.anthropic_client.messages.create(**anth_kwargs)
+
+                # Extended thinking — opus-4-7 family only; caller's max_tokens
+                # is preserved as the *output* budget (thinking adds on top).
+                thinking_enabled = False
+                effort = self.anthropic_thinking_effort
+                if (
+                    _anthropic_supports_thinking(self.model)
+                    and effort
+                    and effort != 'disabled'
+                ):
+                    thinking_enabled = True
+                    if effort == 'adaptive':
+                        anth_kwargs['thinking'] = {
+                            "type": "adaptive",
+                            "display": "omitted",
+                        }
+                    else:
+                        budget = _ANTHROPIC_THINKING_BUDGETS.get(
+                            effort, _ANTHROPIC_THINKING_BUDGETS['xhigh']
+                        )
+                        # Spec: 1024 <= budget_tokens < max_tokens. Bump
+                        # max_tokens so the original `max_tokens` arg is
+                        # honored as output budget on top of thinking.
+                        anth_kwargs['max_tokens'] = budget + max(max_tokens, 1024)
+                        anth_kwargs['thinking'] = {
+                            "type": "enabled",
+                            "budget_tokens": budget,
+                            "display": "omitted",
+                        }
+
+                # The SDK forces streaming when total expected output exceeds
+                # its 10-minute non-streaming budget — that's always the case
+                # with thinking enabled at medium+ effort. Use the stream
+                # context manager and aggregate to the same final Message
+                # shape so the downstream code path stays identical.
+                if thinking_enabled:
+                    async with self.anthropic_client.messages.stream(**anth_kwargs) as stream:
+                        resp = await stream.get_final_message()
+                else:
+                    resp = await self.anthropic_client.messages.create(**anth_kwargs)
                 # Extract text from the first content block (TextBlock)
                 content = ""
                 for block in resp.content:

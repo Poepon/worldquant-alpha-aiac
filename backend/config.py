@@ -55,6 +55,17 @@ class Settings(BaseSettings):
     # official api.anthropic.com. Set to a proxy/mirror (e.g. self-hosted
     # gateway, OpenRouter, vendor-compatible endpoint) when needed.
     ANTHROPIC_BASE_URL: str = os.getenv("ANTHROPIC_BASE_URL", "")
+    # Anthropic extended-thinking reasoning effort (opus-4-7 family).
+    # Levels:
+    #   "disabled" → no thinking block (legacy / fastest)
+    #   "low"      → budget_tokens=1024  (Anthropic minimum)
+    #   "medium"   → budget_tokens=4096
+    #   "high"     → budget_tokens=16384
+    #   "xhigh"    → budget_tokens=32000  (DEFAULT — max-quality reasoning)
+    #   "adaptive" → model self-allocates budget (Anthropic adaptive mode)
+    # Ignored on non-reasoning models (haiku/sonnet); openai-compat providers
+    # also ignore this setting.
+    ANTHROPIC_THINKING_EFFORT: str = os.getenv("ANTHROPIC_THINKING_EFFORT", "xhigh")
     
     # Mining Configuration
     DEFAULT_REGION: str = "USA"
