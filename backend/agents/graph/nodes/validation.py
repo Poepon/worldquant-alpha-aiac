@@ -617,7 +617,8 @@ async def node_self_correct(
                 system_prompt=SELF_CORRECT_SYSTEM,
                 user_prompt=prompt,
                 temperature=_settings.SELF_CORRECT_TEMPERATURE,
-                json_mode=True
+                json_mode=True,
+                node_key="self_correct",
             )
             
             updated_alpha = current.model_copy()

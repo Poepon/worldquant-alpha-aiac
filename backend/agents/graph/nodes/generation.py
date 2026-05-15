@@ -221,7 +221,8 @@ async def node_distill_context(
             system_prompt=DISTILL_SYSTEM,
             user_prompt=prompt,
             temperature=0.5,
-            json_mode=True
+            json_mode=True,
+            node_key="distill_context",
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call failed: {llm_err}")
@@ -669,7 +670,8 @@ async def node_hypothesis(
             system_prompt=HYPOTHESIS_SYSTEM,
             user_prompt=prompt,
             temperature=temperature,
-            json_mode=True
+            json_mode=True,
+            node_key="hypothesis",
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call exception: {llm_err}")
@@ -1184,7 +1186,8 @@ async def node_code_gen(
             system_prompt=ALPHA_GENERATION_SYSTEM,
             user_prompt=prompt,
             temperature=temperature,
-            json_mode=True
+            json_mode=True,
+            node_key="code_gen",
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call exception: {llm_err}")

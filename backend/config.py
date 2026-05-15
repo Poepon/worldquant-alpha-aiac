@@ -4,8 +4,56 @@ Centralized settings management using Pydantic
 """
 
 import os
+import json
+import logging
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, Dict
+
+_config_logger = logging.getLogger(__name__)
+
+
+def _load_thinking_overrides() -> Dict[str, str]:
+    """Load per-node thinking_effort overrides.
+
+    Defaults to the conservative tier table (post red-team review):
+    hypothesis/code_gen = xhigh, self_correct = low, distill/attribution
+    = disabled, strategy/round_analysis/failure_analysis = high. The env
+    variable THINKING_EFFORT_OVERRIDES, if set, must be a JSON object;
+    its keys merge over the defaults (partial-override semantics). On
+    parse failure we warn-log and fall back to defaults — backend MUST
+    NOT crash on a malformed override.
+    """
+    defaults = {
+        "hypothesis":       "xhigh",
+        "code_gen":         "xhigh",
+        "self_correct":     "low",
+        "distill_context":  "disabled",
+        "attribution":      "disabled",
+        "strategy":         "high",
+        "round_analysis":   "high",
+        "failure_analysis": "high",
+    }
+    env_val = os.getenv("THINKING_EFFORT_OVERRIDES")
+    if not env_val:
+        return defaults
+    try:
+        parsed = json.loads(env_val)
+        if not isinstance(parsed, dict):
+            raise ValueError("THINKING_EFFORT_OVERRIDES must be a JSON object")
+        # Partial-override: env keys win, missing keys keep defaults.
+        return {**defaults, **{str(k): str(v) for k, v in parsed.items()}}
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        _config_logger.warning(
+            "[config] THINKING_EFFORT_OVERRIDES parse failed, using defaults | error=%s",
+            e,
+        )
+        return defaults
+
+
+# Module-level cache — loaded once at import time. Bypasses BaseSettings's
+# automatic env JSON parsing (which would crash Settings() construction on
+# malformed JSON); the helper above handles env + fault tolerance directly.
+_THINKING_EFFORT_OVERRIDES_CACHE: Dict[str, str] = _load_thinking_overrides()
 
 
 class Settings(BaseSettings):
@@ -70,7 +118,24 @@ class Settings(BaseSettings):
     # Ignored on non-reasoning models (haiku/sonnet); openai-compat providers
     # also ignore this setting.
     ANTHROPIC_THINKING_EFFORT: str = os.getenv("ANTHROPIC_THINKING_EFFORT", "xhigh")
-    
+
+    # Per-node thinking_effort kill-switch. False → LLMService ignores the
+    # per-node table and falls back to ANTHROPIC_THINKING_EFFORT for every
+    # call. One env line + reload is enough to disable runaway costs.
+    ENABLE_PER_NODE_THINKING_EFFORT: bool = (
+        os.getenv("ENABLE_PER_NODE_THINKING_EFFORT", "true").strip().lower()
+        in ("1", "true", "yes")
+    )
+
+    # Per-node thinking_effort overrides. Keys are prompt registry keys
+    # (see backend/agents/prompts/registry.py); values are effort tiers
+    # (low/medium/high/xhigh/max/auto/adaptive/disabled). Loaded module-level
+    # to bypass Pydantic's env JSON validation (which would crash on bad JSON);
+    # see _load_thinking_overrides() for env handling + fault tolerance.
+    @property
+    def THINKING_EFFORT_OVERRIDES(self) -> Dict[str, str]:
+        return _THINKING_EFFORT_OVERRIDES_CACHE
+
     # Mining Configuration
     DEFAULT_REGION: str = "USA"
     DEFAULT_UNIVERSE: str = "TOP3000"

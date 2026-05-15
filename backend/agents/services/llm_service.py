@@ -223,7 +223,53 @@ class LLMService:
 
     def invalidate_credentials_cache(self):
         self._credentials_loaded = False
-    
+
+    def _resolve_effort(
+        self,
+        node_key: Optional[str],
+        thinking_effort: Optional[str],
+    ) -> str:
+        """Resolve the effective thinking_effort tier for this call.
+
+        Priority (high → low):
+          1. explicit `thinking_effort` arg
+          2. settings.THINKING_EFFORT_OVERRIDES[node_key]  (kill-switch gated)
+          3. self.anthropic_thinking_effort  (service instance default)
+          4. 'xhigh'                          (final safety net)
+        """
+        candidates = [thinking_effort]
+        if node_key and getattr(settings, 'ENABLE_PER_NODE_THINKING_EFFORT', True):
+            overrides = getattr(settings, 'THINKING_EFFORT_OVERRIDES', None) or {}
+            candidates.append(overrides.get(node_key))
+        candidates.append(self.anthropic_thinking_effort)
+        candidates.append('xhigh')
+        for c in candidates:
+            if c:
+                return c.strip().lower()
+        return 'xhigh'
+
+    def _emit_metrics(
+        self,
+        node_key: Optional[str],
+        effort: str,
+        tokens: int,
+        latency_ms: int,
+        success: bool,
+    ) -> None:
+        """Push one per-call sample to metrics_tracker (best-effort)."""
+        try:
+            from backend.metrics_tracker import record_llm_call
+            record_llm_call(
+                node_key=node_key or "_unspecified",
+                effort=effort,
+                tokens=tokens,
+                latency_ms=latency_ms,
+                success=success,
+            )
+        except Exception:
+            # metrics 累加失败不影响 LLM 主流程 — 这是侧效输出
+            pass
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -235,25 +281,43 @@ class LLMService:
         user_prompt: str,
         temperature: float = 0.7,
         json_mode: bool = True,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
+        *,
+        node_key: Optional[str] = None,
+        thinking_effort: Optional[str] = None,
     ) -> LLMResponse:
         """
         Make an LLM call with automatic retries and logging.
-        
+
         Args:
             system_prompt: System message
             user_prompt: User message
             temperature: Sampling temperature
             json_mode: Whether to request JSON output
             max_tokens: Maximum response tokens
-            
+            node_key: Optional node identifier; Service consults
+                settings.THINKING_EFFORT_OVERRIDES to pick per-node thinking
+                effort. See `_resolve_effort` for full priority chain.
+            thinking_effort: Optional explicit effort override; highest
+                priority in the resolve chain (above node_key table lookup).
+
         Returns:
             LLMResponse with content and metadata
         """
         start_time = time.time()
         call_id = f"{int(start_time * 1000) % 100000}"
-        
-        logger.debug(f"[LLMService] Call started | id={call_id} json_mode={json_mode}")
+
+        # Resolve per-call effort (three-tier priority):
+        #   1. explicit `thinking_effort` arg
+        #   2. settings.THINKING_EFFORT_OVERRIDES[node_key] (gated by
+        #      ENABLE_PER_NODE_THINKING_EFFORT kill-switch)
+        #   3. self.anthropic_thinking_effort (service instance default)
+        effort_active = self._resolve_effort(node_key, thinking_effort)
+
+        logger.debug(
+            f"[LLMService] Call started | id={call_id} json_mode={json_mode} "
+            f"node={node_key or '-'} effort={effort_active}"
+        )
         
         try:
             await self._ensure_credentials_loaded()
@@ -281,11 +345,10 @@ class LLMService:
                 # Extended thinking — opus-4-7 family only; caller's max_tokens
                 # is preserved as the *output* budget (thinking adds on top).
                 thinking_enabled = False
-                # Resolve aliases (e.g. "auto" → "adaptive") so downstream
-                # branches only need to know about canonical tier names.
-                effort = _ANTHROPIC_EFFORT_ALIASES.get(
-                    self.anthropic_thinking_effort, self.anthropic_thinking_effort
-                )
+                # `effort_active` already resolved via the three-tier priority
+                # chain above; alias-normalize "auto" → "adaptive" so downstream
+                # branches only need canonical tier names.
+                effort = _ANTHROPIC_EFFORT_ALIASES.get(effort_active, effort_active)
                 if (
                     _anthropic_supports_thinking(self.model)
                     and effort
@@ -390,9 +453,11 @@ class LLMService:
             
             logger.info(
                 f"[LLMService] Call success | id={call_id} "
+                f"node={node_key or '-'} effort={effort_active} "
                 f"tokens={tokens_used} latency={latency_ms}ms"
             )
-            
+            self._emit_metrics(node_key, effort_active, tokens_used, latency_ms, success=True)
+
             return LLMResponse(
                 content=content,
                 parsed=parsed,
@@ -401,11 +466,15 @@ class LLMService:
                 latency_ms=latency_ms,
                 success=True
             )
-            
+
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
-            logger.error(f"[LLMService] Call failed | id={call_id} error={e}")
-            
+            logger.error(
+                f"[LLMService] Call failed | id={call_id} "
+                f"node={node_key or '-'} effort={effort_active} error={e}"
+            )
+            self._emit_metrics(node_key, effort_active, 0, latency_ms, success=False)
+
             return LLMResponse(
                 content="",
                 model=self.model,

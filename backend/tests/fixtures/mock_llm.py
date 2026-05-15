@@ -166,12 +166,18 @@ class MockLLMService:
         temperature: float = 0.7,
         json_mode: bool = True,
         max_tokens: int = 4096,
+        *,
+        node_key: Optional[str] = None,
+        thinking_effort: Optional[str] = None,
     ) -> MockLLMResponse:
         """
         Mock LLM call.
-        
+
         Returns queued response if available, otherwise returns
-        default response based on config.
+        default response based on config. The `node_key` and
+        `thinking_effort` keyword args (added when LLMProtocol gained
+        per-node effort support) are recorded in call history so tests
+        can assert `mock.call_history[-1]["node_key"] == "hypothesis"`.
         """
         self._call_history.append({
             "method": "call",
@@ -179,6 +185,8 @@ class MockLLMService:
             "user_prompt": user_prompt[:100] + "..." if len(user_prompt) > 100 else user_prompt,
             "temperature": temperature,
             "json_mode": json_mode,
+            "node_key": node_key,
+            "thinking_effort": thinking_effort,
         })
         
         # Use queued response if available
