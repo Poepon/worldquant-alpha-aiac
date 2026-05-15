@@ -13,7 +13,10 @@ Contains:
 - build_optimization_prompt: Builder for optimization prompt
 """
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from backend.alpha_semantic_validator import Finding  # noqa: F401
 
 # V-26.61 (2026-05-13): SELF_CORRECT_SYSTEM is now sourced from
 # prompts.yaml via the PromptLoader, matching the rest of the prompt
@@ -84,56 +87,130 @@ whether a specific change improves performance."""
 
 def build_self_correct_prompt(
     expression: str,
-    error_message: str,
-    error_type: str,
-    available_fields: List[str],
-    similar_errors: Optional[List[Dict]] = None
+    findings: Optional[List[Any]] = None,
+    available_fields: Optional[List[str]] = None,
+    similar_errors: Optional[List[Dict]] = None,
+    # Backward-compat shim — legacy callers pass (error_message, error_type)
+    # as a pair; we coerce them into a single synthetic Finding.
+    error_message: Optional[str] = None,
+    error_type: Optional[str] = None,
 ) -> str:
-    """
-    Build prompt for self-correction.
-    
-    Redesigned to include learning from similar errors (RD-Agent pattern).
-    
+    """Build prompt for self-correction (P1-E: structured-finding aware).
+
+    Primary input is `findings: List[Finding]` — hard/soft/info findings are
+    rendered into separate sections so the LLM sees severity-graded fix
+    instructions. Legacy `(error_message, error_type)` is still accepted and
+    coerced into a single synthetic Finding for backward compat.
+
     Args:
         expression: The failed expression
-        error_message: Error message from the failure
-        error_type: Categorized error type
+        findings: P1-E primary input — list of `Finding` records. When None
+            and `error_message` is given, a synthetic Finding is materialized.
         available_fields: List of valid field names
         similar_errors: Optional list of similar errors and their fixes
+        error_message: Legacy single-string error (back-compat shim)
+        error_type: Legacy category string (back-compat shim)
     """
-    
+    if available_fields is None:
+        available_fields = []
+
+    # M-3 back-compat: synthesize a Finding from (error_message, error_type)
+    # if no structured findings were passed.
+    findings_list: List[Any] = list(findings) if findings else []
+    if not findings_list and error_message:
+        from backend.alpha_semantic_validator import Finding as _Finding
+        findings_list = [
+            _Finding(
+                rule_id=(error_type or "other"),
+                severity="hard",
+                message=error_message,
+                category="semantics",
+            )
+        ]
+
+    severity_order = {"hard": 0, "soft": 1, "info": 2}
+    sorted_findings = sorted(
+        findings_list, key=lambda f: severity_order.get(getattr(f, "severity", "info"), 99),
+    )
+    hard = [f for f in sorted_findings if getattr(f, "severity", None) == "hard"]
+    soft = [f for f in sorted_findings if getattr(f, "severity", None) == "soft"]
+    info = [f for f in sorted_findings if getattr(f, "severity", None) == "info"]
+
+    def _render(blocks: List[Any]) -> str:
+        lines = []
+        for f in blocks:
+            rule_id = getattr(f, "rule_id", "other")
+            severity = getattr(f, "severity", "info")
+            message = getattr(f, "message", "")
+            location = getattr(f, "location", None)
+            line = f"- [rule={rule_id}, {severity}] {message}"
+            if location:
+                line += f" (location: `{location}`)"
+            lines.append(line)
+        return "\n".join(lines)
+
+    sections: List[str] = []
+    if hard:
+        sections.append(f"### Errors that MUST be fixed\n{_render(hard)}")
+    if soft:
+        sections.append(f"### Warnings (fix if relevant)\n{_render(soft)}")
+    if info:
+        # N-3: cap info section to 5 entries to keep prompt bounded.
+        info_capped = info[:5]
+        sections.append(
+            f"### Risk hints (informational; consider in your fix)\n"
+            f"{_render(info_capped)}"
+        )
+    findings_section = "\n\n".join(sections) if sections else "(no findings)"
+
+    # Compute legacy display strings — primary error_type for the diagnosis
+    # block; first hard message (or first finding) for context-line.
+    legacy_error_type = error_type or (hard[0].rule_id if hard else (
+        sorted_findings[0].rule_id if sorted_findings else "other"
+    ))
+    legacy_error_message = error_message or (
+        "; ".join(f.message for f in hard[:2]) if hard
+        else "; ".join(f.message for f in sorted_findings[:2])
+    )
+
     # Build similar errors section if available
     similar_section = ""
     if similar_errors:
         examples = []
         for i, err in enumerate(similar_errors[:3], 1):
+            rule_tag = err.get("rule_id")
+            rule_suffix = f" [rule={rule_tag}]" if rule_tag else ""
             examples.append(f"""
-**Example {i}**:
+**Example {i}**{rule_suffix}:
 - Failed: `{err.get('failed_expression', 'N/A')[:80]}`
 - Error: {err.get('error', 'N/A')}
 - Fixed: `{err.get('fixed_expression', 'N/A')[:80]}`
 - Fix approach: {err.get('fix_description', 'N/A')}
 """)
-        
+
         similar_section = f"""
 ## Similar Errors and Fixes
 
 These similar errors were resolved before. Learn from these patterns:
 {''.join(examples)}
 """
-    
+
     return f"""## Failed Expression
 
 ```
 {expression}
 ```
 
-## Error Information
+## Findings
 
-**Error Type**: {error_type}
-**Error Message**: 
+{findings_section}
+
+## Error Information (legacy summary)
+
+**Error Type**: {legacy_error_type}
+**Error Message**:
 ```
-{error_message}
+{legacy_error_message}
 ```
 
 ## Available Fields
@@ -152,7 +229,9 @@ The following fields are valid in this context:
 2. **Fix**: What is the minimal change needed to resolve it?
 3. **Verify**: Why will the fix work?
 
-Consider multiple possible fixes and choose the most appropriate one.
+Prioritize the **hard** findings — they invalidate the expression. Soft
+findings should be addressed if your fix naturally allows it; info findings
+are context only.
 
 **Output Schema** (JSON):
 ```json

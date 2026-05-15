@@ -881,7 +881,7 @@ def _dedup_and_validate(
             result = validator.validate(expr)
             if not result.valid:
                 logger.warning(
-                    f"[T{target_tier} expand] dropped invalid: {expr[:80]} errors={result.errors}"
+                    f"[T{target_tier} expand] dropped invalid: {expr[:80]} errors={result.error_messages}"
                 )
                 n_invalid += 1
                 continue

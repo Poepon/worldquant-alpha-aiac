@@ -26,8 +26,37 @@ from validator import ExpressionValidator
 from backend.alpha_semantic_validator import (
     AlphaSemanticValidator,
     ExpressionDeduplicator,
+    Finding,
+    RuleId,
 )
 from backend.static_alpha_checks import run_static_suspicion_checks
+
+
+# P1-E S-4: map structured rule_id → KB error_type category. Used by
+# `_find_similar_errors` for high-precision rule-id-first lookup (KB rows
+# without rule_id still fall back to the regex-based `_categorize_error`).
+_RULE_ID_TO_CATEGORY: Dict[str, str] = {
+    RuleId.EMPTY_EXPRESSION: "syntax",
+    RuleId.UNKNOWN_OPERATOR: "operator_usage",
+    RuleId.FIELD_NOT_FOUND: "field_name",
+    RuleId.TYPE_MISMATCH_VECTOR_TS: "type_error",
+    RuleId.LOW_COVERAGE_FIELD: "other",
+    RuleId.RISK_DIVIDE_BY_VOLATILE_DENOM: "other",
+    RuleId.RISK_HIGH_EXPONENT_SIGNED_POWER: "other",
+    RuleId.RISK_SHORT_DECAY_WINDOW: "other",
+    RuleId.RISK_EXTREME_WINSORIZATION: "other",
+    RuleId.STATIC_LOOKAHEAD_BIAS: "other",
+    RuleId.STATIC_DIVIDE_BY_ZERO: "other",
+    RuleId.STATIC_OVERFIT_WINDOW: "other",
+    RuleId.OTHER: "other",
+}
+
+# Static-check name → structured rule_id (M-5: dict→Finding bridge).
+_STATIC_CHECK_TO_RULE_ID: Dict[str, str] = {
+    "lookahead_bias": RuleId.STATIC_LOOKAHEAD_BIAS,
+    "divide_by_zero": RuleId.STATIC_DIVIDE_BY_ZERO,
+    "overfit_window": RuleId.STATIC_OVERFIT_WINDOW,
+}
 
 # Initialize Validators (Singleton-ish)
 _VALIDATOR = ExpressionValidator()
@@ -104,7 +133,12 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
         is_valid = True
         error = None
         warnings = []
-        
+        # P1-E: structured findings collected for this alpha (semantic +
+        # static-check adapter). Stamped to alpha.metrics at end of loop
+        # (M-4: metrics, not metadata — persistence.py:275 only reads metrics).
+        aggregated_findings: List[Finding] = []
+        risk_bounds: Dict = {}
+
         if not expression or not expression.strip():
             is_valid = False
             error = "Empty expression"
@@ -129,28 +163,48 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                         error = "; ".join(err_list) if err_list else "Syntax error"
                         syntax_errors.append(error)
                     else:
-                        # Step 3: Semantic validation (type constraints)
+                        # Step 3: Semantic validation (type constraints).
+                        # P1-E: consume structured Finding list instead of
+                        # str lists. sem_result.findings holds the canonical
+                        # records; .errors/.warnings are derived views.
                         sem_result = semantic_validator.validate(expression)
-                        
-                        if sem_result.warnings:
-                            warnings.extend(sem_result.warnings)
-                            type_warnings.extend(sem_result.warnings[:2])
+                        aggregated_findings.extend(sem_result.findings)
+                        risk_bounds = sem_result.risk_bounds or {}
 
-                        if sem_result.errors:
-                            # V-15 (2026-05-03 spike 2.0 finding): semantic
-                            # errors must invalidate the expression so
-                            # SELF_CORRECT can rewrite it. Previously these
-                            # errors were appended to the warnings list and
-                            # is_valid stayed True, letting VECTOR-on-ts_op
-                            # mismatches through to SIMULATE where BRAIN
-                            # rejected with "does not support event inputs"
-                            # — wasting ~50% of T2 BRAIN sim budget on task
-                            # 45/46 (333+233 SIMULATION_ERROR).
+                        hard_findings = [
+                            f for f in sem_result.findings if f.severity == "hard"
+                        ]
+                        soft_findings = [
+                            f for f in sem_result.findings
+                            if f.severity in ("soft", "info")
+                        ]
+
+                        # Soft+info findings — surface as SELF_CORRECT context
+                        # regardless of validity. Tag with rule_id so the LLM
+                        # prompt and KB lookup can disambiguate.
+                        if soft_findings:
+                            warnings.extend(
+                                f"[{f.rule_id}] {f.message}" for f in soft_findings
+                            )
+                            type_warnings.extend(
+                                f"[{f.rule_id}] {f.message}"
+                                for f in soft_findings[:2]
+                            )
+
+                        if hard_findings:
+                            # V-15 (2026-05-03 spike 2.0): semantic hard
+                            # findings invalidate so SELF_CORRECT can rewrite.
                             is_valid = False
-                            error = "; ".join(sem_result.errors[:2])
-                            semantic_errors.extend(sem_result.errors[:2])
+                            error = "; ".join(
+                                f.message for f in hard_findings[:2]
+                            )
+                            semantic_errors.extend(
+                                f.message for f in hard_findings[:2]
+                            )
 
                         # Step 4: static suspicion checks (V-P0 2026-05-15).
+                        # P1-E M-5: adapt static dict→Finding so the unified
+                        # _validation_findings container also sees these.
                         # Look-ahead bias / divide-by-zero / overfit-window are
                         # expression-only — moved here from node_evaluate so a
                         # bad expression never burns a BRAIN sim, with no
@@ -159,15 +213,42 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
                         # warnings only and still simulate.
                         static_flags = run_static_suspicion_checks(expression)
                         if static_flags:
-                            soft = [f for f in static_flags if f["severity"] == "soft"]
-                            hard = [f for f in static_flags if f["severity"] == "hard"]
-                            for f in soft:
-                                warnings.append(f"[{f['check']}] {f['evidence']}")
+                            static_findings: List[Finding] = []
+                            for sf in static_flags:
+                                check_name = sf.get("check", "")
+                                rule_id = _STATIC_CHECK_TO_RULE_ID.get(
+                                    check_name, f"static_{check_name}",
+                                )
+                                static_findings.append(Finding(
+                                    rule_id=rule_id,
+                                    severity=sf.get("severity", "soft"),
+                                    message=sf.get("evidence", check_name),
+                                    category="risk",
+                                    metadata={"check": check_name},
+                                ))
+                            aggregated_findings.extend(static_findings)
+
+                            soft = [
+                                (sf, f) for sf, f in zip(static_flags, static_findings)
+                                if f.severity == "soft"
+                            ]
+                            hard = [
+                                (sf, f) for sf, f in zip(static_flags, static_findings)
+                                if f.severity == "hard"
+                            ]
+                            # SOFT — keep the legacy `[check] evidence` warning
+                            # string so backward-compat assertions (e.g.
+                            # `"divide_by_zero" in validation_error`) still hold.
+                            for sf, _f in soft:
+                                warnings.append(
+                                    f"[{sf['check']}] {sf['evidence']}"
+                                )
                             if soft:
                                 static_warn_count += len(soft)
                             if hard:
                                 hard_msg = "; ".join(
-                                    f"{f['check']}: {f['evidence']}" for f in hard
+                                    f"{sf['check']}: {sf['evidence']}"
+                                    for sf, _f in hard
                                 )
                                 static_block_count += len(hard)
                                 if is_valid:
@@ -196,6 +277,21 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
             )
         else:
             updated_alpha.validation_error = error
+
+        # P1-E M-4: stamp structured findings to `alpha.metrics` (JSONB,
+        # persisted by persistence.py:275). NOT `alpha.metadata` —
+        # AlphaCandidate.metadata is never read by node_save_results, so
+        # writing there would silently produce zero effect.
+        if aggregated_findings:
+            if updated_alpha.metrics is None:
+                updated_alpha.metrics = {}
+            updated_alpha.metrics["_validation_findings"] = [
+                f.to_dict() for f in aggregated_findings
+            ]
+        if risk_bounds:
+            if updated_alpha.metrics is None:
+                updated_alpha.metrics = {}
+            updated_alpha.metrics["_risk_bounds"] = risk_bounds
         
         if is_valid:
             valid_count += 1
@@ -306,18 +402,42 @@ def _find_similar_errors(
     error_message: str,
     error_type: str,
     knowledge_base: List[Dict],
-    max_results: int = 3
+    max_results: int = 3,
+    rule_id: Optional[str] = None,
 ) -> List[Dict]:
-    """Find similar errors from knowledge base for learning."""
-    similar = []
+    """Find similar errors from knowledge base for learning.
+
+    P1-E S-5: prefer rule_id exact match (high-precision lookup) for new
+    Finding-aware KB rows. Falls back to error_category match (regex-based
+    `_categorize_error`) for legacy rule_id-less entries, so existing KB
+    rows keep working without backfill.
+    """
+    similar: List[Dict] = []
+    seen_ids = set()
+
+    # Phase 1: rule_id exact match (only matches new KB rows that carry rule_id).
+    if rule_id:
+        for entry in knowledge_base:
+            if entry.get("rule_id") == rule_id:
+                eid = id(entry)
+                if eid in seen_ids:
+                    continue
+                similar.append(entry)
+                seen_ids.add(eid)
+                if len(similar) >= max_results:
+                    return similar
+
+    # Phase 2: regex-based category fallback (backward-compat with legacy KB).
     error_category = _categorize_error(error_message)
-    
     for entry in knowledge_base:
+        if id(entry) in seen_ids:
+            continue
         if entry.get("error_category") == error_category:
             similar.append(entry)
+            seen_ids.add(id(entry))
             if len(similar) >= max_results:
                 break
-    
+
     return similar
 
 
@@ -326,13 +446,18 @@ def _record_correction(
     fixed_expression: str,
     error_message: str,
     error_type: str,
-    fix_description: str
+    fix_description: str,
+    rule_id: Optional[str] = None,
 ) -> None:
     """Record a successful correction for future learning.
 
     V-26.17: writes through to the Redis-backed cross-worker store and
     also appends to the in-memory list for the same-process / Redis-down
     fallback case.
+
+    P1-E S-5: optional `rule_id` lets `_find_similar_errors` perform
+    exact-match lookup on new entries (legacy entries lack the field and
+    fall through to category-based regex matching).
     """
     global _ERROR_KNOWLEDGE_BASE
     entry = {
@@ -342,6 +467,8 @@ def _record_correction(
         "error_category": _categorize_error(error_message),
         "fix_description": fix_description,
     }
+    if rule_id:
+        entry["rule_id"] = rule_id
     try:
         from backend.tasks.redis_pool import error_kb_record
         error_kb_record(entry)
@@ -441,21 +568,41 @@ async def node_self_correct(
         error_message = current.validation_error or "Unknown error"
         error_type = _categorize_error(error_message)
 
-        # Find similar errors for learning
+        # P1-E: reconstruct structured Findings from alpha.metrics for the
+        # SELF_CORRECT prompt + rule-id-aware KB lookup. Falls back to
+        # synthetic Finding from (error_message, error_type) if the alpha
+        # came from a legacy pre-P1-E path that didn't stamp findings.
+        stamped = (current.metrics or {}).get("_validation_findings") or []
+        findings_for_prompt: List[Finding] = []
+        for entry in stamped:
+            f = Finding.from_dict(entry)
+            if f is not None:
+                findings_for_prompt.append(f)
+
+        primary_rule_id: Optional[str] = None
+        if findings_for_prompt:
+            # Use the first hard finding's rule_id for KB lookup (high-precision
+            # match against rule_id-aware KB rows).
+            hard = [f for f in findings_for_prompt if f.severity == "hard"]
+            primary_rule_id = (hard[0].rule_id if hard else findings_for_prompt[0].rule_id)
+
+        # Find similar errors for learning — prefer rule_id exact match.
         similar_errors = _find_similar_errors(
-            error_message, error_type, correction_kb
+            error_message, error_type, correction_kb, rule_id=primary_rule_id,
         )
-        
+
         if similar_errors:
             logger.debug(f"[{node_name}] Found {len(similar_errors)} similar errors for learning")
-        
-        # Use enhanced prompt builder with error learning
+
+        # Use enhanced prompt builder with structured Findings. Backward-compat
+        # `error_message`/`error_type` keep flowing for legacy alpha rows.
         prompt = build_self_correct_prompt(
             expression=current.expression,
+            findings=findings_for_prompt if findings_for_prompt else None,
             error_message=error_message,
             error_type=error_type,
             available_fields=allowed_fields,
-            similar_errors=similar_errors if similar_errors else None
+            similar_errors=similar_errors if similar_errors else None,
         )
         
         try:
@@ -499,13 +646,15 @@ async def node_self_correct(
                     updated_alpha.validation_error = None
                     fixed_count += 1
                     
-                    # Record for future learning
+                    # Record for future learning (P1-E S-5: stamp rule_id
+                    # so the new entry is rule-id-lookup-eligible).
                     _record_correction(
                         original_expression=current.expression,
                         fixed_expression=fixed,
                         error_message=error_message,
                         error_type=error_type,
-                        fix_description=changes_made
+                        fix_description=changes_made,
+                        rule_id=primary_rule_id,
                     )
                     
                     # Extract transferable knowledge
