@@ -25,6 +25,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspa
 
 from backend.database import SQLAlchemyBase
 
+# P2 review fix (2026-05-16): Warmup `backend.tasks` before any test imports
+# `backend.agents`. Pairs with the root-cause fix at evaluation.py (removed
+# top-level backend.tasks import). Belt-and-suspenders for future tests
+# that may re-introduce the cycle. See 6+ existing integration test files
+# using the same warmup pattern.
+import backend.tasks  # noqa: F401
+
 
 # =============================================================================
 # Async Configuration

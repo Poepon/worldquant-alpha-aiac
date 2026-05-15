@@ -41,7 +41,11 @@ from backend.alpha_scoring import (
 )
 from backend.services.correlation_service import CorrelationService, CorrSource
 from backend.multi_fidelity_eval import RobustnessGate
-from backend.tasks.session_watchdog import _quota_guard_async
+# P2 review fix (2026-05-16): _quota_guard_async moved to lazy import inside
+# the robustness block at L2064. Top-level import was the SOLE remaining
+# `backend.tasks` top-level import in backend/agents/, closing the
+# backend.agents ↔ backend.tasks cycle. Pattern matches generation.py:351,
+# persistence.py:458, validation.py:479.
 import redis.asyncio as _rb_redis_aio
 
 
@@ -2061,6 +2065,8 @@ async def node_evaluate(
             _rb_today_total = 0
             _rb_limit = getattr(settings, "BRAIN_DAILY_SIMULATE_LIMIT", 1000)
             try:
+                # P2 review fix (2026-05-16): lazy import to break agents↔tasks cycle.
+                from backend.tasks.session_watchdog import _quota_guard_async
                 _q = await _quota_guard_async()
                 _rb_today_total = int(_q.get("today_total_count", 0) or 0)
                 _rb_limit = int(

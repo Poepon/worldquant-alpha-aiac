@@ -158,7 +158,10 @@ class TestUpsertPitfalls:
         )).scalar_one()
         assert row.entry_type == "FAILURE_PITFALL"
         assert row.is_active is True
-        assert (row.meta_data or {}).get("fail_count") == 1
+        # P2 review fix (2026-05-16): _make_sig default failure_count=2
+        # (≥ promotion threshold per e8f1845 design). Pitfall is written
+        # with fail_count=2 after promotion; align assert.
+        assert (row.meta_data or {}).get("fail_count") == 2
 
     @pytest.mark.asyncio
     async def test_upsert_existing_increments(self, pg_session):

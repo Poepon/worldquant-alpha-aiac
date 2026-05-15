@@ -160,13 +160,17 @@ class _FakeAsyncRedis:
         self.closed = False
 
     async def get(self, key: str):
-        if key == "aiac:robustness_today_used":
+        # P2 review fix (2026-05-16): prefix-match per-UTC-day key from
+        # RobustnessGate.today_key() — "aiac:robustness_used:YYYY-MM-DD".
+        # Old equality check against "aiac:robustness_today_used" stopped
+        # matching after the P2 UTC-bucket rework.
+        if key.startswith("aiac:robustness_used"):
             return str(self.counter_value) if self.counter_value else None
         return self.store.get(key)
 
     async def incr(self, key: str):
         self.incr_calls += 1
-        if key == "aiac:robustness_today_used":
+        if key.startswith("aiac:robustness_used"):
             self.counter_value += 1
             return self.counter_value
         v = int(self.store.get(key, "0")) + 1
@@ -206,6 +210,10 @@ def _patch_block(
         "ROBUSTNESS_HOTCHECK_QUOTA_PCT": 0.85,
         "ROBUSTNESS_PER_ALPHA_TIMEOUT_SEC": 600,
         "ROBUSTNESS_SELECTION_STRATEGY": "first",
+        # P2 review fix (2026-05-16): lift quota-guard denominator so dev DB's
+        # accumulated today_total (~1049) cannot trip the 0.65 SKIP threshold.
+        # evaluation.py:~2090 computes (today_total + extra) / BRAIN_DAILY_SIMULATE_LIMIT.
+        "BRAIN_DAILY_SIMULATE_LIMIT": 99999,
     }
     if settings_overrides:
         overrides.update(settings_overrides)
