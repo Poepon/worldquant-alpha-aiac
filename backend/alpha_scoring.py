@@ -558,6 +558,144 @@ def calculate_alpha_score(
     return score
 
 
+# =============================================================================
+# P1-A: Graded scoring — percentile normalization + non-uniform weights + confidence
+# docs/alphagbm_skills_research_2026-05-15.md 原则①
+# =============================================================================
+
+# 5 grades, each carrying a single bound action per research principle ①
+# "每档绑定明确动作". Checked in order: first band where pct >= cutoff wins.
+_GRADE_BANDS: List[Tuple[float, str, str]] = [
+    (0.90, "A", "submit_priority"),  # top decile vs cell history
+    (0.70, "B", "pass_normal"),      # top 30%
+    (0.50, "C", "review"),           # above median
+    (0.30, "D", "optimize"),         # below median
+    (0.00, "E", "fail_lean"),        # bottom 30%
+]
+
+
+@dataclass
+class GradedScore:
+    """Structured scoring output with percentile, grade, and confidence.
+
+    raw_score:   Identical to calculate_alpha_score() — no change to routing.
+    percentile:  normal-CDF(residual_sigma(test_sharpe, baseline_stats)); 0.5
+                 when baseline is missing/unusable (neutral fallback). NOTE: the
+                 N(0,1) approximation understates tail percentiles when sharpe's
+                 empirical distribution is heavy-tailed; v1 acceptable because
+                 grade boundaries already carry margin; replace with true
+                 empirical percentile rank in a future iteration.
+    grade:       A-E per _GRADE_BANDS above.
+    grade_action: Bound action for this grade.
+    confidence:  Mean of confidence_inputs boolean flags (0..1). Empty → 0.5.
+    evidence:    Human-readable trace of what was measured vs fabricated.
+    """
+    raw_score: float
+    percentile: float
+    grade: str
+    grade_action: str
+    confidence: float
+    evidence: List[str]
+
+
+def compute_graded_score(
+    sim_result: Dict[str, Any],
+    *,
+    prod_corr: float = 0.0,
+    self_corr: float = 0.0,
+    weights: Optional[Dict[str, float]] = None,
+    baseline_stats: Optional[Any] = None,    # BaselineStats | None (avoid circular import)
+    confidence_inputs: Optional[Dict[str, bool]] = None,
+) -> GradedScore:
+    """Structured layer over calculate_alpha_score: percentile + grade + confidence.
+
+    Keeps calculate_alpha_score() as the single source of truth for raw_score;
+    does NOT replicate the scoring formula.
+
+    Percentile derivation:
+        z = residual_sigma(test_sharpe, baseline_stats)  [from baseline_screener]
+        pct = statistics.NormalDist().cdf(z)
+        Fallback to 0.5 when baseline is None / not usable / z is None.
+
+    Confidence:
+        mean of confidence_inputs.values(); empty dict → 0.5 neutral.
+        Evidence records which inputs were fabricated (not real measurements).
+
+    来源: docs/alphagbm_skills_research_2026-05-15.md P1-A — 百分位归一化 +
+    非均匀权重 + confidence 维度
+    """
+    from statistics import NormalDist
+
+    evidence: List[str] = []
+
+    # ── raw_score ──────────────────────────────────────────────────────────────
+    raw_score = calculate_alpha_score(
+        sim_result=sim_result,
+        prod_corr=prod_corr,
+        self_corr=self_corr,
+        weights=weights,
+    )
+
+    # ── percentile via normal CDF of residual sigma ────────────────────────────
+    percentile = 0.5  # neutral fallback
+    try:
+        if baseline_stats is not None and getattr(baseline_stats, "usable", False):
+            # residual_sigma lives in baseline_screener; import lazily to keep
+            # this module free of DB-layer imports (used in pure-test contexts).
+            from backend.baseline_screener import residual_sigma as _residual_sigma
+            os_stats = _extract_os_stats(sim_result)
+            test_sharpe = _safe_float(
+                os_stats.get("sharpe") or os_stats.get("Sharpe")
+            )
+            z = _residual_sigma(test_sharpe, baseline_stats)
+            if z is not None:
+                percentile = NormalDist().cdf(z)
+                # Clamp to [0.001, 0.999] to avoid exact 0/1 at extreme z
+                percentile = max(0.001, min(0.999, percentile))
+                evidence.append(
+                    f"baseline={baseline_stats.cell_key} "
+                    f"mean={baseline_stats.mean:.3f} std={baseline_stats.std:.3f} "
+                    f"test_sharpe={test_sharpe:.3f} z={z:.3f} pct={percentile:.4f}"
+                )
+            else:
+                evidence.append("percentile=0.5 (baseline unusable / test_sharpe missing)")
+        else:
+            evidence.append("percentile=0.5 (no baseline available)")
+    except Exception as _exc:
+        evidence.append(f"percentile=0.5 (error: {_exc})")
+
+    # ── grade: cut percentile into 5 bands ────────────────────────────────────
+    grade = "E"
+    grade_action = "fail_lean"
+    for cutoff, g, action in _GRADE_BANDS:
+        if percentile >= cutoff:
+            grade = g
+            grade_action = action
+            break
+
+    # ── confidence: mean of real-input flags ──────────────────────────────────
+    if not confidence_inputs:
+        confidence = 0.5
+        evidence.append("confidence=0.5 (no confidence_inputs provided — neutral)")
+    else:
+        real_flags = list(confidence_inputs.values())
+        confidence = sum(bool(f) for f in real_flags) / len(real_flags)
+        fabricated = [k for k, v in confidence_inputs.items() if not v]
+        if fabricated:
+            evidence.append(f"fabricated_inputs={fabricated} (treated as 0/None placeholders)")
+        else:
+            evidence.append("all_inputs_real=True")
+
+    return GradedScore(
+        raw_score=round(raw_score, 6),
+        percentile=round(percentile, 6),
+        grade=grade,
+        grade_action=grade_action,
+        confidence=round(confidence, 6),
+        evidence=evidence,
+    )
+
+
 def _extract_is_stats(sim_result: Dict) -> Dict:
     """从模拟结果中提取训练集统计信息。"""
     # Try multiple possible locations based on actual ace_lib output

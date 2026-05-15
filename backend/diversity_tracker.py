@@ -107,6 +107,29 @@ class ExplorationSuggestion:
 
 
 # =============================================================================
+# P1-A: Percentile-rank helper (stable normalization without magic numbers)
+# =============================================================================
+
+def _percentile_rank(value: float, distribution: List[float]) -> float:
+    """Fraction of distribution values that are <= value.
+
+    Replaces the old '*5 magic number' and 'max_count+1' normalization with a
+    stable, session-relative saturation measure.  Higher rank → more saturated
+    → lower diversity.
+
+    Returns 0.5 (neutral) when distribution is empty or all-zero.
+    Clamps result to [0.0, 1.0].
+    """
+    if not distribution:
+        return 0.5
+    non_zero = [v for v in distribution if v > 0]
+    if not non_zero:
+        return 0.0  # value is as low as everything; treat as very diverse
+    rank = sum(1 for v in distribution if v <= value) / len(distribution)
+    return max(0.0, min(1.0, rank))
+
+
+# =============================================================================
 # Diversity Tracker
 # =============================================================================
 
@@ -137,31 +160,50 @@ class DiversityTracker:
         tracker.record_attempt(record)
     """
     
-    def __init__(self, db: Optional[AsyncSession] = None):
+    def __init__(self, db: Optional[AsyncSession] = None, weights: Optional[Dict[str, float]] = None):
         self.db = db
-        
+
+        # P1-A: component weights — from caller or config; default = historical
+        # hardcoded values (0.30/0.30/0.25/0.15) so old instantiations are zero-change.
+        if weights is not None:
+            self.weights = weights
+        else:
+            try:
+                from backend.config import settings
+                self.weights = {
+                    "dataset":  getattr(settings, "DIVERSITY_DATASET_WEIGHT", 0.30),
+                    "field":    getattr(settings, "DIVERSITY_FIELD_WEIGHT", 0.30),
+                    "operator": getattr(settings, "DIVERSITY_OPERATOR_WEIGHT", 0.25),
+                    "settings": getattr(settings, "DIVERSITY_SETTINGS_WEIGHT", 0.15),
+                }
+            except Exception:
+                self.weights = {
+                    "dataset": 0.30, "field": 0.30,
+                    "operator": 0.25, "settings": 0.15,
+                }
+
         # In-memory tracking (session-level)
         self.attempts: List[ExplorationRecord] = []
         self.fingerprints: Set[str] = set()
-        
+
         # Usage counts
         self.dataset_usage: Dict[str, int] = defaultdict(int)
         self.field_usage: Dict[str, int] = defaultdict(int)
         self.operator_usage: Dict[str, int] = defaultdict(int)
         self.setting_usage: Dict[str, int] = defaultdict(int)
-        
+
         # Success tracking
         self.dataset_success: Dict[str, int] = defaultdict(int)
         self.operator_success: Dict[str, int] = defaultdict(int)
-        
+
         # Configuration
         self.region: str = "USA"
         self.max_attempts_memory: int = 1000
-        
+
         # All available items (populated from DB or config)
         self.available_datasets: Set[str] = set()
         self.available_operators: Set[str] = set()
-        
+
         self._initialized = False
     
     async def initialize(
@@ -339,53 +381,59 @@ class DiversityTracker:
         score = DiversityScore()
         suggestions = []
         
+        # P1-A: all sub-scores use percentile_rank for stable normalization.
+        # percentile_rank(value, distribution) = fraction of distribution values
+        # that are <= value.  diversity = 1 − saturation_rank (higher usage
+        # = higher rank = lower diversity).  Empty distribution → 0.5 neutral.
+
         # 1. Dataset diversity
         ds_count = self.dataset_usage.get(dataset_id, 0)
-        total_ds_attempts = sum(self.dataset_usage.values()) or 1
-        ds_freq = ds_count / total_ds_attempts
-        
-        # Higher score for less-explored datasets
-        score.dataset_diversity = max(0, 1.0 - ds_freq * 5)
-        
+        score.dataset_diversity = 1.0 - _percentile_rank(
+            ds_count, list(self.dataset_usage.values())
+        )
+
         if ds_count > 10:
             suggestions.append(f"Dataset '{dataset_id}' heavily explored ({ds_count} attempts)")
-        
+
         # 2. Field diversity
         if fields:
             field_counts = [self.field_usage.get(f, 0) for f in fields]
             avg_field_usage = sum(field_counts) / len(field_counts) if field_counts else 0
-            max_field_count = max(self.field_usage.values()) if self.field_usage else 1
-            score.field_diversity = max(0, 1.0 - avg_field_usage / (max_field_count + 1))
-            
+            score.field_diversity = 1.0 - _percentile_rank(
+                avg_field_usage, list(self.field_usage.values())
+            )
+
             overused_fields = [f for f, c in zip(fields, field_counts) if c > 5]
             if overused_fields:
                 suggestions.append(f"Fields heavily used: {overused_fields[:3]}")
         else:
             score.field_diversity = 1.0
-        
+
         # 3. Operator diversity
         if operators:
             op_counts = [self.operator_usage.get(op.lower(), 0) for op in operators]
             avg_op_usage = sum(op_counts) / len(op_counts) if op_counts else 0
-            max_op_count = max(self.operator_usage.values()) if self.operator_usage else 1
-            score.operator_diversity = max(0, 1.0 - avg_op_usage / (max_op_count + 1))
-            
+            score.operator_diversity = 1.0 - _percentile_rank(
+                avg_op_usage, list(self.operator_usage.values())
+            )
+
             # Suggest underused operators
             underused = self._get_underused_operators(operators)
             if underused:
                 suggestions.append(f"Consider operators: {underused[:5]}")
         else:
             score.operator_diversity = 1.0
-        
+
         # 4. Settings diversity
         setting_key = f"{delay}-{decay}-{neutralization}"
         setting_count = self.setting_usage.get(setting_key, 0)
-        max_setting_count = max(self.setting_usage.values()) if self.setting_usage else 1
-        score.settings_diversity = max(0, 1.0 - setting_count / (max_setting_count + 1))
-        
+        score.settings_diversity = 1.0 - _percentile_rank(
+            setting_count, list(self.setting_usage.values())
+        )
+
         if setting_count > 20:
             suggestions.append(f"Setting combo '{setting_key}' overused ({setting_count} times)")
-        
+
         # Check fingerprint collision
         temp_record = ExplorationRecord(
             dataset_id=dataset_id,
@@ -398,17 +446,17 @@ class DiversityTracker:
             decay=decay,
             neutralization=neutralization
         )
-        
+
         if temp_record.fingerprint in self.fingerprints:
             score.similar_attempts += 1
             suggestions.append("Nearly identical combination was tried before")
-        
-        # Calculate overall score
+
+        # Calculate overall score using config-driven (or injected) weights
         score.overall_score = (
-            0.30 * score.dataset_diversity +
-            0.30 * score.field_diversity +
-            0.25 * score.operator_diversity +
-            0.15 * score.settings_diversity
+            self.weights["dataset"]  * score.dataset_diversity +
+            self.weights["field"]    * score.field_diversity +
+            self.weights["operator"] * score.operator_diversity +
+            self.weights["settings"] * score.settings_diversity
         )
         
         score.suggestions = suggestions

@@ -1666,6 +1666,148 @@ async def node_evaluate(
                     f"attribution={_attr}"
                 )
 
+    # P1-A: graded-score — 百分位归一化 + 非均匀权重 + confidence 维度
+    # (docs/alphagbm_skills_research_2026-05-15.md 原则①).
+    # Advisory layer: compute_graded_score produces percentile/grade/confidence
+    # alongside the existing raw _score.  A PASS alpha with low confidence
+    # (measured inputs < SCORE_CONFIDENCE_MIN) is downgraded to PASS_PROVISIONAL —
+    # confidence is the real decision gate, not the grade.
+    # calculate_alpha_score / route_alpha_action / band thresholds are untouched.
+    # Opt-in via ENABLE_GRADED_SCORE (default False).  Block-level best-effort:
+    # any failure leaves alphas un-graded; evaluation continues exactly as before.
+    graded_count = 0
+    graded_downgraded = 0
+    graded_no_baseline = 0
+    if getattr(settings, "ENABLE_GRADED_SCORE", False):
+        try:
+            from backend.alpha_scoring import compute_graded_score
+            from backend.agents.services.baseline_provider import BaselineProvider
+
+            _gs_conf_min = getattr(settings, "SCORE_CONFIDENCE_MIN", 0.5)
+            _gs_cap = getattr(settings, "SCORE_GRADED_CAP", 0)
+            _gs_weights = {
+                "test_sharpe":           getattr(settings, "SCORE_WEIGHT_TEST_SHARPE", 0.55),
+                "train_sharpe":          getattr(settings, "SCORE_WEIGHT_TRAIN_SHARPE", 0.25),
+                "fitness":               getattr(settings, "SCORE_WEIGHT_FITNESS", 0.20),
+                "prod_corr_penalty":     getattr(settings, "SCORE_WEIGHT_PROD_CORR_PENALTY", 0.30),
+                "turnover_penalty":      getattr(settings, "SCORE_WEIGHT_TURNOVER_PENALTY", 0.15),
+                "investability_penalty": getattr(settings, "SCORE_WEIGHT_INVESTABILITY_PENALTY", 0.20),
+            }
+            # request-scoped; defaults to metric_col="is_sharpe" (matches BASELINE_METRIC)
+            _gs_bp = BaselineProvider()
+
+            # expected_signal — same logic as baseline block L1691-1708 below;
+            # duplicated here because graded-score runs BEFORE the baseline block.
+            _gs_expected_signal = "unknown"
+            for _h in (state.hypotheses or []):
+                if isinstance(_h, dict) and _h.get("expected_signal"):
+                    _gs_expected_signal = _h["expected_signal"]
+                    break
+            if _gs_expected_signal == "unknown" and getattr(state, "current_hypothesis_id", None):
+                try:
+                    from backend.database import AsyncSessionLocal
+                    from backend.models import Hypothesis as _GsHyp
+                    async with AsyncSessionLocal() as _gs_db:
+                        _gs_row = await _gs_db.get(_GsHyp, state.current_hypothesis_id)
+                        if _gs_row and _gs_row.expected_signal:
+                            _gs_expected_signal = _gs_row.expected_signal
+                except Exception:
+                    pass
+
+            _gs_candidates = [
+                a for a in updated_alphas
+                if a.quality_status == "PASS"
+                and a.is_simulated and a.simulation_success
+                and isinstance(a.metrics, dict)
+            ]
+            if _gs_cap > 0:
+                _gs_candidates = sorted(
+                    _gs_candidates,
+                    key=lambda a: a.metrics.get("sharpe", 0) or 0,
+                    reverse=True,
+                )[:_gs_cap]
+
+            for _gs_alpha in _gs_candidates:
+                # Baseline lookup — degrades to "insufficient" on any per-alpha error
+                _gs_stats = None
+                try:
+                    _gs_stats = await _gs_bp.get_baseline(
+                        expected_signal=_gs_expected_signal,
+                        dataset_id=state.dataset_id or "",   # round-shared (AlphaCandidate has no dataset_id)
+                        region=state.region,
+                    )
+                except Exception as _gs_bl_exc:
+                    logger.warning(
+                        f"[{node_name}] graded-score baseline lookup failed: {_gs_bl_exc}"
+                    )
+                if _gs_stats is None or not getattr(_gs_stats, "usable", False):
+                    graded_no_baseline += 1
+
+                # calculate_alpha_score reads flat keys (sharpe/fitness/turnover)
+                # from sim_result["train"/"test"]. alpha.metrics IS flat with those
+                # keys → wrapping it satisfies the extractor without a snapshot.
+                _gs_sim = {"train": _gs_alpha.metrics, "test": _gs_alpha.metrics}
+
+                # confidence_inputs: which continuous inputs are real measurements?
+                # _self_corr is non-None ONLY when source ∈ {LOCAL, BRAIN} (L1228-1232).
+                # _prod_corr is non-None only when prod_corr was truthy (L1217);
+                # a true 0.0 maps to None — same pre-V26.77-fix gap as self_corr had;
+                # treating None as "not measured" is safe (false-negative → PROVISIONAL).
+                _gs_conf_inputs = {
+                    "prod_corr_real":   (
+                        _gs_alpha.metrics.get("_prod_corr") is not None
+                        and bool(_gs_alpha.metrics.get("_corr_checked"))
+                    ),
+                    "self_corr_real":   _gs_alpha.metrics.get("_self_corr") is not None,
+                    "baseline_real":    (
+                        _gs_stats is not None and getattr(_gs_stats, "usable", False)
+                    ),
+                    "metrics_complete": all(
+                        _gs_alpha.metrics.get(k) is not None
+                        for k in ("sharpe", "fitness", "turnover")
+                    ),
+                }
+                _gs = compute_graded_score(
+                    _gs_sim,
+                    prod_corr=_gs_alpha.metrics.get("_prod_corr") or 0.0,
+                    self_corr=_gs_alpha.metrics.get("_self_corr") or 0.0,
+                    weights=_gs_weights,
+                    baseline_stats=_gs_stats,
+                    confidence_inputs=_gs_conf_inputs,
+                )
+                _gs_alpha.metrics["_score_pct"] = round(_gs.percentile, 4)
+                _gs_alpha.metrics["_score_grade"] = _gs.grade
+                _gs_alpha.metrics["_score_grade_action"] = _gs.grade_action
+                _gs_alpha.metrics["_score_confidence"] = round(_gs.confidence, 3)
+                _gs_alpha.metrics["_score_evidence"] = _gs.evidence
+                graded_count += 1
+
+                if _gs.confidence < _gs_conf_min:
+                    _gs_alpha.quality_status = "PASS_PROVISIONAL"
+                    _gs_alpha.metrics["_routing_reason"] = "graded_low_confidence"
+                    pass_count -= 1
+                    optimize_count += 1
+                    graded_downgraded += 1
+                    logger.warning(
+                        f"[{node_name}] graded-score: PASS → PROV | "
+                        f"expr={(_gs_alpha.expression or '')[:60]!r} "
+                        f"confidence={_gs.confidence:.3f} < {_gs_conf_min} "
+                        f"grade={_gs.grade}"
+                    )
+                else:
+                    logger.info(
+                        f"[{node_name}] graded-score: PASS kept | "
+                        f"expr={(_gs_alpha.expression or '')[:60]!r} "
+                        f"grade={_gs.grade} pct={_gs.percentile:.3f} "
+                        f"confidence={_gs.confidence:.3f}"
+                    )
+        except Exception as _gs_block_exc:
+            # Block-level guard: any unexpected failure leaves alphas un-graded;
+            # evaluation continues exactly as if ENABLE_GRADED_SCORE were False.
+            logger.warning(
+                f"[{node_name}] graded-score block failed (degrading): {_gs_block_exc}"
+            )
+
     # P0: baseline + Nσ-residual screening (docs/alphagbm_skills_research_2026-05-15.md).
     # Annotates each successfully-simulated alpha with its residual against the
     # (hypothesis-family × dataset × region) grid baseline. SOFT SIGNAL ONLY —
@@ -1914,6 +2056,9 @@ async def node_evaluate(
             "dual_run_downgraded": dual_run_downgraded,
             "dual_run_no_control": dual_run_no_control,
             "dual_run_sim_failed": dual_run_sim_failed,
+            "graded_count": graded_count,
+            "graded_downgraded": graded_downgraded,
+            "graded_no_baseline": graded_no_baseline,
             "details": eval_details[:20]
         },
         duration_ms,

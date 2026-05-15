@@ -258,6 +258,27 @@ class Settings(BaseSettings):
     SIGNAL_CONTROL_DELTA_SHARPE_MIN: float = 0.3  # 信号被信任所需的最小 Δsharpe
     SIGNAL_CONTROL_CAP: int = 5  # 每轮对照模拟次数上限
 
+    # P1-A: Graded scoring — 百分位归一化 + 非均匀权重 + confidence 维度
+    # (docs/alphagbm_skills_research_2026-05-15.md 原则①). Advisory layer;
+    # 老 calculate_alpha_score / routing 阈值不变。opt-in。
+    # 开启后:每个 PASS alpha 用 sharpe 相对 cell 历史基线算出百分位,切 5 档(A-E),
+    # 附带 confidence(真实输入占比);低 confidence 的 PASS → PASS_PROVISIONAL。
+    ENABLE_GRADED_SCORE: bool = False
+    SCORE_WEIGHT_TEST_SHARPE: float = 0.55        # 与 alpha_scoring.default_weights 逐位一致
+    SCORE_WEIGHT_TRAIN_SHARPE: float = 0.25
+    SCORE_WEIGHT_FITNESS: float = 0.20
+    SCORE_WEIGHT_PROD_CORR_PENALTY: float = 0.30
+    SCORE_WEIGHT_TURNOVER_PENALTY: float = 0.15
+    SCORE_WEIGHT_INVESTABILITY_PENALTY: float = 0.20
+    SCORE_CONFIDENCE_MIN: float = 0.5             # PASS confidence 低于此 → 降级 PROVISIONAL
+    SCORE_GRADED_CAP: int = 0                     # 0 = 全部 PASS;>0 仅对 sharpe top-N 跑
+
+    # P1-A: diversity_tracker 权重(替换 evaluate_diversity 内硬编码 0.30/0.30/0.25/0.15)
+    DIVERSITY_DATASET_WEIGHT: float = 0.30
+    DIVERSITY_FIELD_WEIGHT: float = 0.30
+    DIVERSITY_OPERATOR_WEIGHT: float = 0.25
+    DIVERSITY_SETTINGS_WEIGHT: float = 0.15
+
     # PR7 — incremental persistence for T2/T3 tasks. By default, T2/T3 work-
     # flow batches all 8+ seeds before run_with_persistence writes Alpha rows
     # to DB (workflow.run() only returns at END). This means a 1-hour task
