@@ -106,7 +106,7 @@
 
 ---
 
-## 5. 实施进度(2026-05-15 P0 + P1 + P2-B + P2-D 完成,剩 P2-A/C)
+## 5. 实施进度(2026-05-16 P0 + P1 + P2-A + P2-B + P2-D 完成,剩 P2-C)
 
 ### P0 已完成 ✅
 
@@ -141,10 +141,10 @@
 |---|---|---|
 | Five Pillars 因子分类保证 alpha 池均衡覆盖 | `4ec6e8f` | `Hypothesis.pillar` 列(LLM emit 或 `pillar_classifier.infer_pillar` 静态推断兜底)+ `diversity_tracker` 5 维(老 4 维 byte-for-byte 不变)+ `node_hypothesis` opt-in `ENABLE_PILLAR_AWARE_SELECTION=False` nudge(Redis 60s cache + LEFT JOIN 覆盖 legacy NULL hypothesis_id)+ 09:00 SH `pillar_balance_check` 每日 task。49 new tests |
 | negative knowledge 沉淀 + 标准化复盘 schema | `6cae5f5` | 6 类失败信号 → `FailureSignature`(sha1[:16] cluster)→ UPSERT `knowledge_entries.entry_type=FAILURE_PITFALL` 修复 `prompts/hypothesis.py:208` dead reference + opt-in `ENABLE_NEGATIVE_KNOWLEDGE_NUDGE` + 09:30 SH 每日 task `docs/negative_knowledge/<date>.json` + `v26_retrospective.py --full` ADDITIVE Pydantic superset(legacy CLI 完全不动)。0 Alembic / 0 新表 / 0 新 index。25 new tests |
+| field→经济机制映射 RAG 引导生成 | `5a72da0` | `MacroNarrative` 数据契约(field/dataset/category 三 scope)+ 11 条种子(6 field + 5 category)inline 入 KB `entry_type=MACRO_NARRATIVE` + LLM 离线批生成填长尾(opt-in)+ `PromptContext.macro_narratives` 段(opt-in `ENABLE_MACRO_NARRATIVE_GUIDANCE`)+ `RAGService.get_macro_narratives` parallel pipeline(query 签名不动)+ 10:00 SH 每日 beat(序 08:00→08:30→09:00→09:30→**10:00**)+ Redis 10min cache + S5 token budget guard。两 flag 都默认 OFF(M9)。0 Alembic。24 new tests |
 
 ### P2 待办(优先级 🟢 nice-to-have)
 
 | 项 | 来源 skill | 落地文件 |
 |---|---|---|
-| field→经济机制映射 RAG 引导生成 | macro-view | `field_screener.py` / prompts |
 | regime-aware 阈值门控 + 风格 preset 编码 | vix-status / duan | `evolution_strategy.py` / `config.py` |
