@@ -26,6 +26,18 @@ except ImportError:
     _ANTHROPIC_AVAILABLE = False
 
 
+# Anthropic reasoning models that reject `temperature` at the API layer.
+# Same pattern as OpenAI's o-series — reasoning is opaque, so the param is
+# deprecated and a 400 is returned if passed. Match by prefix so dated /
+# context-variant ids (e.g. "claude-opus-4-7[1m]", "claude-opus-4-7-20260301")
+# are covered.
+_ANTHROPIC_NO_TEMPERATURE_PREFIXES: Tuple[str, ...] = ("claude-opus-4-7",)
+
+
+def _anthropic_supports_temperature(model: str) -> bool:
+    return not any(model.startswith(p) for p in _ANTHROPIC_NO_TEMPERATURE_PREFIXES)
+
+
 class LLMResponse(BaseModel):
     """Standard LLM response wrapper."""
     content: str
@@ -210,17 +222,21 @@ class LLMService:
             # (Anthropic doesn't have a response_format flag; the existing
             # prompts already say "Output Schema: JSON ...").
             if self.provider == 'anthropic':
-                resp = await self.anthropic_client.messages.create(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=[{
+                # Reasoning models (opus-4-7 family) reject `temperature`;
+                # only send it when the model still accepts it.
+                anth_kwargs: Dict[str, Any] = {
+                    "model": self.model,
+                    "max_tokens": max_tokens,
+                    "system": [{
                         "type": "text",
                         "text": system_prompt,
                         "cache_control": {"type": "ephemeral"},
                     }],
-                    messages=[{"role": "user", "content": user_prompt}],
-                )
+                    "messages": [{"role": "user", "content": user_prompt}],
+                }
+                if _anthropic_supports_temperature(self.model):
+                    anth_kwargs["temperature"] = temperature
+                resp = await self.anthropic_client.messages.create(**anth_kwargs)
                 # Extract text from the first content block (TextBlock)
                 content = ""
                 for block in resp.content:
