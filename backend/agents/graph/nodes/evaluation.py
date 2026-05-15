@@ -31,6 +31,7 @@ from backend.agents.prompts import (
     quick_alignment_check,
     determine_attribution_heuristic,
 )
+from backend.alpha_routing import route_alpha_action
 
 
 # =============================================================================
@@ -1073,8 +1074,6 @@ async def node_evaluate(
         # _run_suspicion_checks and brain_actionable_fails separately in Band A
         # (L1073/L1107) and Band B (L1163/L1173); pre-computing here removes the
         # duplication and makes every input to route_alpha_action() explicit.
-        from backend.alpha_routing import route_alpha_action
-
         v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
         hard_v16_flags = [f for f in v16_flags if f.get("severity") == "hard"]
         # Fix-C / V-26.21: the actionable set covers checks that indicate a
