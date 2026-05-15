@@ -302,6 +302,18 @@ class Settings(BaseSettings):
     # 例 target=0.20 + threshold=0.4 → 0.20−share ≥ 0.08 时 nudge 该 pillar。
     PILLAR_BALANCE_SKEW_THRESHOLD: float = 0.4
 
+    # P2-D (2026-05-15): Negative-knowledge nudge + daily extract task.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skills `take-profit`
+    # + `health-check`. Default OFF — the nudge block in
+    # backend/agents/graph/nodes/generation.py is skipped byte-for-byte when
+    # ENABLE_NEGATIVE_KNOWLEDGE_NUDGE is False (PromptContext.failure_pitfalls
+    # = state.pitfalls[:5] unchanged). Switch to True after observing 1-2 days
+    # of docs/negative_knowledge/<sh-date>.json.
+    ENABLE_NEGATIVE_KNOWLEDGE_NUDGE: bool = False
+    NEGATIVE_KNOWLEDGE_TOP_K: int = 5            # max pitfalls fetched per call
+    NEGATIVE_KNOWLEDGE_MIN_FAIL_COUNT: int = 3   # promote-to-LLM threshold
+    NEGATIVE_KNOWLEDGE_RETROSPECTIVE_WINDOW_HOURS: int = 24
+
     # P1-C (2026-05-15): alpha library health check thresholds + weights.
     # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `health-check`.
     # Consumed by backend/services/alpha_health_service.py via

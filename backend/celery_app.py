@@ -93,6 +93,17 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_pillar_balance_check",
         "schedule": crontab(hour=9, minute=0),
     },
+    # P2-D (2026-05-15): daily negative-knowledge extract at 09:30
+    # Asia/Shanghai. Aggregates 24h of failure signals (Alpha.metrics
+    # findings / robustness / failed_tests, AlphaFailure error_type,
+    # HypothesisRoundStats attribution='hypothesis') and UPSERTs to
+    # knowledge_entries (entry_type='FAILURE_PITFALL'). Emits
+    # docs/negative_knowledge/<sh-date>.json. Read-mostly: only mutates
+    # knowledge_entries.
+    "negative-knowledge-extract": {
+        "task": "backend.tasks.run_negative_knowledge_extract",
+        "schedule": crontab(hour=9, minute=30),
+    },
     # V-19.7: revive dead CONTINUOUS_CASCADE sessions. Detects worker crash /
     # silent stalls via task.last_alpha_persisted_at < NOW()-15min and
     # re-dispatches a fresh celery worker. Grace period skips fresh sessions.

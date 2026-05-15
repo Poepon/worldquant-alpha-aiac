@@ -61,6 +61,8 @@ from backend.tasks.alpha_health_check import run_alpha_health_check
 from backend.tasks.hypothesis_health_check import run_hypothesis_health_check
 # P2-B (2026-05-15): daily pillar-balance-check task
 from backend.tasks.pillar_balance_check import run_pillar_balance_check
+# P2-D (2026-05-15): daily negative-knowledge extract task
+from backend.tasks.negative_knowledge_extract import run_negative_knowledge_extract
 
 __all__ = [
     # Utilities
@@ -98,4 +100,6 @@ __all__ = [
     "run_hypothesis_health_check",
     # P2-B: daily pillar-balance-check
     "run_pillar_balance_check",
+    # P2-D: daily negative-knowledge extract
+    "run_negative_knowledge_extract",
 ]

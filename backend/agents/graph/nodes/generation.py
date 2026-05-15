@@ -438,6 +438,90 @@ async def node_hypothesis(
             )
             pillar_hint = None
 
+    # P2-D (2026-05-15): Negative-knowledge nudge — opt-in via
+    # ``ENABLE_NEGATIVE_KNOWLEDGE_NUDGE``. When OFF (default) the entire
+    # block is skipped so prompt rendering is byte-for-byte legacy —
+    # PromptContext.failure_pitfalls = state.pitfalls[:5] unchanged. When
+    # ON, top-K pitfalls (filtered by region + min_fail_count + 14d
+    # recency + non-UNKNOWN skeleton, see negative_knowledge_service.py
+    # fetch_top_pitfalls SQL) are prepended to state.pitfalls. Result is
+    # capped at 5 to match the legacy slice. Failure of the Redis / DB
+    # path is non-fatal: ``neg_kb_pitfalls`` stays empty and the prompt
+    # falls back to legacy.
+    neg_kb_pitfalls: List[Dict] = []
+    neg_kb_keys_seen: List[str] = []
+    _neg_kb_enabled = bool(getattr(
+        _gen_settings, "ENABLE_NEGATIVE_KNOWLEDGE_NUDGE", False,
+    ))
+    if _neg_kb_enabled:
+        try:
+            # Lazy import — backend.services.negative_knowledge_service ↔
+            # backend.tasks has the same known cycle as P2-B (see M9 fix
+            # commentary above for redis_pool). Mirror that pattern.
+            from backend.tasks.redis_pool import get_redis_client
+            from backend.services.negative_knowledge_service import (
+                NegativeKnowledgeService,
+            )
+            _p2d_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            _p2d_cache_key = (
+                f"aiac:neg_knowledge:{state.region}:{_p2d_today}"
+            )
+            _p2d_redis = None
+            try:
+                _p2d_redis = get_redis_client()
+            except Exception:
+                _p2d_redis = None
+            cached_pitfalls = None
+            if _p2d_redis is not None:
+                try:
+                    _p2d_cached = _p2d_redis.get(_p2d_cache_key)
+                    if _p2d_cached is not None:
+                        cached_pitfalls = json.loads(_p2d_cached)
+                except Exception:
+                    cached_pitfalls = None
+
+            if cached_pitfalls is None:
+                _top_k = int(getattr(
+                    _gen_settings, "NEGATIVE_KNOWLEDGE_TOP_K", 5,
+                ))
+                _min_fc = int(getattr(
+                    _gen_settings, "NEGATIVE_KNOWLEDGE_MIN_FAIL_COUNT", 3,
+                ))
+                async with resolve_db(config) as _p2d_db:
+                    _nks = NegativeKnowledgeService(_p2d_db)
+                    cached_pitfalls = await _nks.fetch_top_pitfalls(
+                        region=state.region,
+                        limit=_top_k,
+                        min_fail_count=_min_fc,
+                    )
+                if _p2d_redis is not None:
+                    try:
+                        _p2d_redis.setex(
+                            _p2d_cache_key, 300,
+                            json.dumps(cached_pitfalls, default=str),
+                        )
+                    except Exception:
+                        pass  # cache failure must not break the node
+
+            neg_kb_pitfalls = list(cached_pitfalls or [])
+            neg_kb_keys_seen = [
+                p.get("signature_key", "") for p in neg_kb_pitfalls
+                if isinstance(p, dict) and p.get("signature_key")
+            ]
+            if neg_kb_pitfalls:
+                logger.info(
+                    f"[{node_name}] P2-D nudge | n={len(neg_kb_pitfalls)} "
+                    f"region={state.region} "
+                    f"keys={neg_kb_keys_seen}"
+                )
+        except Exception as _p2d_ex:
+            logger.warning(
+                f"[{node_name}] P2-D negative-knowledge nudge failed "
+                f"(non-fatal): {_p2d_ex}"
+            )
+            neg_kb_pitfalls = []
+            neg_kb_keys_seen = []
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -450,7 +534,16 @@ async def node_hypothesis(
         fields=target_fields,
         operators=state.operators[:30],
         success_patterns=state.patterns[:5],
-        failure_pitfalls=state.pitfalls[:5],
+        # P2-D: when flag is on AND we fetched ≥1 pitfall, prepend them to
+        # state.pitfalls. When flag is off OR no pitfalls fetched, fall
+        # back to state.pitfalls[:5] — byte-for-byte legacy (verified by
+        # test_node_hypothesis_negative_knowledge.test_flag_off_byte_for_byte
+        # _legacy).
+        failure_pitfalls=(
+            (neg_kb_pitfalls + (state.pitfalls or []))[:5]
+            if _neg_kb_enabled and neg_kb_pitfalls
+            else state.pitfalls[:5]
+        ),
         exploration_weight=exploration_weight,
         available_dataset_pool=getattr(state, "available_dataset_pool", []) or [],
         pillar_hint=pillar_hint,
@@ -764,6 +857,15 @@ async def node_hypothesis(
                     # mirrors the existing ``_v22_13_reused`` pattern.
                     if pillar_hint and resolved_pillar == pillar_hint:
                         primary_h["_pillar_nudged"] = pillar_hint
+                    # P2-D N4: stamp which signature_keys were shown to
+                    # the LLM. Independent of whether LLM acted on them —
+                    # used by ops to track nudge surface area / pickup
+                    # rate. Non-persisted; lives only on the in-memory
+                    # ``hypotheses`` list returned to state.
+                    if neg_kb_keys_seen:
+                        primary_h["_negative_knowledge_pitfalls_seen"] = (
+                            list(neg_kb_keys_seen)
+                        )
 
                     data = HypothesisCreateData(
                         statement=statement,
@@ -798,6 +900,17 @@ async def node_hypothesis(
             logger.warning(
                 f"[{node_name}] Phase 2 hypothesis persist failed (non-fatal): {_ex}"
             )
+
+    # P2-D S8 audit: flag was on AND we showed N pitfalls to the LLM, but
+    # the parser came back with no valid hypothesis (LLM-side failure).
+    # Surfaces "nudge shown / no LLM signal" cases for ops without blocking
+    # the node.
+    if _neg_kb_enabled and neg_kb_keys_seen and current_hypothesis_id is None:
+        logger.warning(
+            f"[{node_name}] P2-D nudge shown ({len(neg_kb_keys_seen)} "
+            f"pitfalls) but LLM returned no valid hypothesis "
+            f"(region={state.region})"
+        )
 
     return {
         "hypotheses": hypotheses,
