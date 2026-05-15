@@ -106,7 +106,7 @@
 
 ---
 
-## 5. 实施进度(2026-05-16 P0 + P1 + P2-A + P2-B + P2-D 完成,剩 P2-C)
+## 5. 实施进度(2026-05-16 **全 P0 + P1 + P2 路线图完成 ✅**)
 
 ### P0 已完成 ✅
 
@@ -142,9 +142,10 @@
 | Five Pillars 因子分类保证 alpha 池均衡覆盖 | `4ec6e8f` | `Hypothesis.pillar` 列(LLM emit 或 `pillar_classifier.infer_pillar` 静态推断兜底)+ `diversity_tracker` 5 维(老 4 维 byte-for-byte 不变)+ `node_hypothesis` opt-in `ENABLE_PILLAR_AWARE_SELECTION=False` nudge(Redis 60s cache + LEFT JOIN 覆盖 legacy NULL hypothesis_id)+ 09:00 SH `pillar_balance_check` 每日 task。49 new tests |
 | negative knowledge 沉淀 + 标准化复盘 schema | `6cae5f5` | 6 类失败信号 → `FailureSignature`(sha1[:16] cluster)→ UPSERT `knowledge_entries.entry_type=FAILURE_PITFALL` 修复 `prompts/hypothesis.py:208` dead reference + opt-in `ENABLE_NEGATIVE_KNOWLEDGE_NUDGE` + 09:30 SH 每日 task `docs/negative_knowledge/<date>.json` + `v26_retrospective.py --full` ADDITIVE Pydantic superset(legacy CLI 完全不动)。0 Alembic / 0 新表 / 0 新 index。25 new tests |
 | field→经济机制映射 RAG 引导生成 | `5a72da0` | `MacroNarrative` 数据契约(field/dataset/category 三 scope)+ 11 条种子(6 field + 5 category)inline 入 KB `entry_type=MACRO_NARRATIVE` + LLM 离线批生成填长尾(opt-in)+ `PromptContext.macro_narratives` 段(opt-in `ENABLE_MACRO_NARRATIVE_GUIDANCE`)+ `RAGService.get_macro_narratives` parallel pipeline(query 签名不动)+ 10:00 SH 每日 beat(序 08:00→08:30→09:00→09:30→**10:00**)+ Redis 10min cache + S5 token budget guard。两 flag 都默认 OFF(M9)。0 Alembic。24 new tests |
+| regime-aware 阈值门控 + 风格 preset 编码 | `d99e4c1` | 5 档 `RegimePreset`(crisis/elevated/normal/calm/very_calm)倍率系统**叠加**在 tier_thresholds 上(不替换);regime 信号自 alpha_health 7 天 pass_rate + EWMA(α=0.3)自动推断;`PromptContext.style_preset` + `build_style_preset_block` helper 注入投资哲学(opt-in)+ `apply_regime_multipliers` 倍率应用(opt-in,MF6 不乘 score_optimize)+ Alpha.metrics["_regime_at_eval"] 数据采集 stamp + 10:30 SH 每日 beat(序 ...→10:00→**10:30**)+ Redis 24h cache。**3 flag 全默认 OFF**(S1)。0 BRAIN 配额 / 0 LLM call / 0 外部 API / 0 Alembic。36 new tests |
 
-### P2 待办(优先级 🟢 nice-to-have)
+### 全 P0 + P1 + P2 路线图已完成 🎉
 
-| 项 | 来源 skill | 落地文件 |
-|---|---|---|
-| regime-aware 阈值门控 + 风格 preset 编码 | vix-status / duan | `evolution_strategy.py` / `config.py` |
+**P2 4 项全部交付**;路线图 15 项全部交付:P0×5 + P1×6 + P2×4。AlphaGBM/skills 26 个 skill 调研产出的可迁移知识全部落地为可工程化的 opt-in 能力。
+
+下一步建议:**1-2 周观察期**,ops 按 onboarding 文档分阶段 flip flags(参见各 P2 commit message 内顺序);累计 1000+ alpha 数据点后回看 baseline 是否需要刷新。
