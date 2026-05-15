@@ -401,7 +401,10 @@ def determine_attribution_dual_run(
                          is actively counterproductive — both hypothesis and
                          implementation are suspect.
 
-    confidence scales with |Δ| relative to the threshold boundary.
+    confidence measures classification certainty: it is 0.5 at either decision
+    boundary (±threshold) — where the verdict is a near-coin-flip — and rises
+    toward 1.0 as Δ moves away from the nearest boundary in *either* direction
+    (deep into any zone). It is comparable across all three attribution labels.
 
     来源: docs/alphagbm_skills_research_2026-05-15.md P0 — signal-vs-control 双跑归因
     """
@@ -419,8 +422,12 @@ def determine_attribution_dual_run(
         f"delta_sharpe={delta:.3f} (threshold={delta_sharpe_min})",
     ]
 
-    # confidence: 0.5 at threshold boundary, approaches 1.0 as |Δ| >> threshold
-    confidence = min(1.0, 0.5 + abs(delta) / (2.0 * max(delta_sharpe_min, 0.1)))
+    # confidence (Direction A — classification certainty): distance from the
+    # nearest decision boundary (±threshold). 0.5 exactly on a boundary, rising
+    # to 1.0 as Δ moves away into any zone. A verdict near a boundary is a
+    # near-coin-flip → low confidence; deep in a zone → high confidence.
+    boundary_dist = abs(abs(delta) - delta_sharpe_min)
+    confidence = min(1.0, 0.5 + boundary_dist / (2.0 * max(delta_sharpe_min, 0.1)))
 
     if delta >= delta_sharpe_min:
         evidence.append("signal materially outperforms control — hypothesis signal is doing work")

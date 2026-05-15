@@ -302,38 +302,43 @@ class TestDetermineAttributionDualRun:
         assert len(evid) >= 4
 
     # ------------------------------------------------------------------
-    # Confidence monotonicity (within the "implementation" zone)
+    # Confidence — classification certainty (Direction A)
+    # 0.5 on a decision boundary, rising to 1.0 deep in any zone.
     # ------------------------------------------------------------------
 
-    def test_confidence_increases_with_delta_in_implementation_zone(self):
-        """Larger |Δ| within the implementation band → higher confidence."""
+    def test_confidence_decreases_toward_boundary_in_implementation_zone(self):
+        """Direction A: within the implementation band, confidence is highest
+        deep in the zone (Δ≈0) and falls toward 0.5 as Δ nears the threshold."""
         ctl = {"sharpe": 1.0}
-        _, conf_low, _ = determine_attribution_dual_run(
+        _, conf_deep, _ = determine_attribution_dual_run(
             {"sharpe": 1.05}, ctl, delta_sharpe_min=0.5
-        )  # delta=0.05
+        )  # delta=0.05 — deep in the implementation zone
         _, conf_mid, _ = determine_attribution_dual_run(
             {"sharpe": 1.20}, ctl, delta_sharpe_min=0.5
         )  # delta=0.20
-        _, conf_high, _ = determine_attribution_dual_run(
+        _, conf_near, _ = determine_attribution_dual_run(
             {"sharpe": 1.45}, ctl, delta_sharpe_min=0.5
-        )  # delta=0.45  (still < threshold 0.5)
-        assert conf_low < conf_mid < conf_high, (
-            f"Expected monotonic increase: {conf_low:.3f} < {conf_mid:.3f} < {conf_high:.3f}"
+        )  # delta=0.45 — near the threshold boundary
+        assert conf_deep > conf_mid > conf_near, (
+            f"Expected confidence to fall toward boundary: "
+            f"{conf_deep:.3f} > {conf_mid:.3f} > {conf_near:.3f}"
         )
 
-    def test_confidence_at_boundary_is_1(self):
-        """At |Δ| == threshold, confidence formula reaches 1.0 (capped)."""
+    def test_confidence_at_boundary_is_minimum(self):
+        """Direction A: exactly on a decision boundary (|Δ| == threshold) the
+        verdict is a near-coin-flip → confidence is at its 0.5 minimum."""
         sig = {"sharpe": 1.3}
         ctl = {"sharpe": 1.0}   # delta = 0.3 == threshold
         _, conf, _ = determine_attribution_dual_run(sig, ctl, delta_sharpe_min=0.3)
-        assert conf == pytest.approx(1.0, abs=1e-9)
+        assert conf == pytest.approx(0.5, abs=1e-9)
 
-    def test_confidence_below_boundary(self):
-        """At |Δ| = 0, confidence = 0.5."""
+    def test_confidence_deep_in_zone_is_high(self):
+        """Direction A: at Δ=0 (deepest in the implementation zone, furthest
+        from either boundary) confidence reaches its 1.0 maximum."""
         sig = {"sharpe": 1.0}
         ctl = {"sharpe": 1.0}   # delta = 0.0
         _, conf, _ = determine_attribution_dual_run(sig, ctl, delta_sharpe_min=0.3)
-        assert conf == pytest.approx(0.5, abs=1e-9)
+        assert conf == pytest.approx(1.0, abs=1e-9)
 
     def test_confidence_is_between_zero_and_one(self):
         """confidence must always be ∈ [0, 1]."""
