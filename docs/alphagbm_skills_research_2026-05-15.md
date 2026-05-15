@@ -103,3 +103,43 @@
 ## 4. 建议起点
 
 从 P0 的 **"拟合基线 + Nσ残差" 挖矿算法** 入手 —— 它是本次调研唯一能直接变成新挖矿能力(而非仅优化现有流程)的知识点:对 (假设×数据集) 网格拟合期望表现,残差 `deviation_sigma > 2` 的候选才是真发现。其余 P0 项(signal-vs-control 双跑、多保真严格化、网格取中位数、多档路由)均为对现有流程的增强。
+
+---
+
+## 5. 实施进度(2026-05-15 P0 + P1 全部完成)
+
+### P0 已完成 ✅
+
+| 项 | commit | 说明 |
+|---|---|---|
+| 拟合基线 + Nσ残差挖矿筛选 | `07f8944` | vol-surface 模式落地 — `baseline_screener.py` + `BaselineProvider` + `residual_sigma` |
+| 多保真严格化(语义→低保真→simulate) | `753589a` | `static_alpha_checks.py` 前置 3 项检查(look-ahead/divide/overfit-window),simulate 前拦截 |
+| signal-vs-control 双跑归因 | `d36656e` | `evaluation.py` 内联块 + AttributionType 接入 |
+| 变体族群网格 × 取中位数 抗过拟合 | `e57259b` | genetic_optimizer 晋级网格 fidelity 多次跑取中位数 |
+| 多档动作路由(submit / GA / 丢) | `78938c1` | 集中化 `alpha_routing.py` + tier-aware score 阈值 |
+
+### P1 已完成 ✅
+
+| 项 | commit | 说明 |
+|---|---|---|
+| 评分百分位归一化 + 非均匀权重 + confidence | `c8df434` | `alpha_scoring.compute_graded_score` + 5 档 A-E grade;`diversity_tracker` 同口径 |
+| fallback 降级 + 节点永不崩 | `fb67ff6` / `81c87ad` | `_safe_metric` NaN/inf/bool/str 防御 + per-alpha try/except + post-loop tally |
+| 结构化淘汰触发器(part 1:Alpha 库体检) | `6a9dd47` / `3d6aaba` | 每日 08:00 SH beat,`docs/alpha_health_check/*.json` 5 档健康带;后续把 drift severity 改 worst-of(sharpe+fitness) |
+| 结构化淘汰触发器(part 2:Hypothesis 触发器) | `9044483` | 每日 08:30 SH beat,5 类 trigger + active→triggered 软标记 + LLM thesis_score/ai_feedback;`hypothesis_status_transitions` 审计表 |
+| What-if 参数扰动鲁棒性检验 | `d6f3abb` | `multi_fidelity_eval.RobustnessGate`:window 邻近 N=4 变体 + worst-of;Redis counter 双烧防御 + per-alpha hard timeout |
+| 结构化语义校验红旗 + 风险边界预标注 | `2cd6c46` | `Finding{rule_id, severity, message, category}` 替代 `List[str]`;4 类静态 risk 推断(divide-by-volatile / signed_power / short-decay / extreme-winsorize);SELF_CORRECT prompt 按 severity 分段渲染 |
+
+### P0 + P1 测试覆盖统计
+
+- 总新增测试 **300+ 个**(unit + integration)
+- `test_suite.py --unit` 7/7 零漂移
+- `baseline.json` 在所有 flag OFF 路径上**逐位保持**(每个 P1 项都加 disabled passthrough 回归测试)
+
+### P2 待办(优先级 🟢 nice-to-have)
+
+| 项 | 来源 skill | 落地文件 |
+|---|---|---|
+| field→经济机制映射 RAG 引导生成 | macro-view | `field_screener.py` / prompts |
+| Five Pillars 因子分类保证 alpha 池均衡覆盖 | compare | `diversity_tracker.py` |
+| regime-aware 阈值门控 + 风格 preset 编码 | vix-status / duan | `evolution_strategy.py` / `config.py` |
+| negative knowledge 沉淀 + 标准化复盘 schema | take-profit / health-check | `knowledge_extraction.py` / `scripts/v26_retrospective.py` |
