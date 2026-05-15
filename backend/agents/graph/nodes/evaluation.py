@@ -1913,6 +1913,225 @@ async def node_evaluate(
                 f"[{node_name}] graded-score block setup failed (degrading): {_gs_block_exc}"
             )
 
+    # ── P1-D: What-if window-perturbation robustness gate ────────────────────
+    # Source: docs/alphagbm_skills_research_2026-05-15.md skill `pnl-simulator`.
+    # M-9 insertion site: graded-score block 之后,baseline-screen 块之前(独立段)。
+    # 既不污染 graded-score 共享 baseline setup,也不影响 baseline-screen 的 soft-signal
+    # 注释。本块只动 quality_status (PASS → PASS_PROVISIONAL 降级)+ metrics stamp。
+    # 整块为 best-effort:任何失败仅跳过单个 alpha,评估继续。
+    # opt-in via ENABLE_ROBUSTNESS_CHECK (默认 False,避免意外烧 BRAIN 配额)。
+    robustness_attempted = 0
+    robustness_passed = 0
+    robustness_failed_downgrade = 0
+    robustness_skipped_no_window = 0
+    robustness_skipped_quota = 0
+    robustness_skipped_round_cap = 0
+    robustness_skipped_timeout = 0
+    robustness_skipped_other = 0
+    robustness_sim_failed_total = 0
+
+    if brain is not None and getattr(settings, "ENABLE_ROBUSTNESS_CHECK", False):
+        try:
+            from backend.multi_fidelity_eval import RobustnessGate
+            import redis.asyncio as _rb_redis_aio
+
+            _rb_n = getattr(settings, "ROBUSTNESS_N_PERTURBATIONS", 4)
+            _rb_ratio = getattr(settings, "ROBUSTNESS_MIN_RATIO", 0.7)
+            _rb_cap = getattr(settings, "MAX_ROBUSTNESS_PER_ROUND", 5)
+            _rb_qpct = getattr(settings, "ROBUSTNESS_SKIP_QUOTA_PCT", 0.65)
+            _rb_hot_pct = getattr(settings, "ROBUSTNESS_HOTCHECK_QUOTA_PCT", 0.85)
+            _rb_alpha_timeout = getattr(
+                settings, "ROBUSTNESS_PER_ALPHA_TIMEOUT_SEC", 600
+            )
+            _rb_strategy = getattr(
+                settings, "ROBUSTNESS_SELECTION_STRATEGY", "first"
+            )
+
+            # M-2:复用 _quota_guard_async(单 SQL,handles Alpha.created_at naive
+            # vs AlphaFailure.created_at tz-aware 不一致)。失败 → pct=0.0 放行。
+            _rb_redis = None
+            _rb_robustness_extra = 0
+            _rb_today_total = 0
+            _rb_limit = getattr(settings, "BRAIN_DAILY_SIMULATE_LIMIT", 1000)
+            try:
+                from backend.tasks.session_watchdog import _quota_guard_async
+                _q = await _quota_guard_async()
+                _rb_today_total = int(_q.get("today_total_count", 0) or 0)
+                _rb_limit = int(
+                    _q.get("limit")
+                    or getattr(settings, "BRAIN_DAILY_SIMULATE_LIMIT", 1000)
+                )
+            except Exception as _rb_q_exc:
+                logger.warning(
+                    f"[{node_name}] robustness quota pre-check failed (degrading): {_rb_q_exc}"
+                )
+
+            try:
+                _rb_redis = _rb_redis_aio.from_url(
+                    settings.REDIS_URL, decode_responses=True
+                )
+                _rb_extra_raw = await _rb_redis.get(RobustnessGate.REDIS_COUNTER_KEY)
+                _rb_robustness_extra = int(_rb_extra_raw or 0)
+            except Exception as _rb_r_exc:
+                _rb_redis = None
+                _rb_robustness_extra = 0
+                logger.warning(
+                    f"[{node_name}] robustness redis init failed (counter disabled): {_rb_r_exc}"
+                )
+
+            _rb_used_pct = (
+                (_rb_today_total + _rb_robustness_extra) / max(_rb_limit, 1)
+            )
+
+            if _rb_used_pct >= _rb_qpct:
+                logger.warning(
+                    f"[{node_name}] robustness ROUND SKIPPED quota_pct={_rb_used_pct:.2f} >= {_rb_qpct}"
+                )
+                for _rb_alpha in updated_alphas:
+                    if (
+                        _rb_alpha.quality_status == "PASS"
+                        and isinstance(_rb_alpha.metrics, dict)
+                        and _rb_alpha.metrics.get("_robustness_passed") is None
+                        and _rb_alpha.metrics.get("_robustness_skipped") is None
+                    ):
+                        _rb_alpha.metrics["_robustness_skipped"] = "quota_exhausted"
+                        robustness_skipped_quota += 1
+            else:
+                # Top-sharpe PASS only (scope per plan); cap to MAX_ROBUSTNESS_PER_ROUND.
+                _rb_candidates = sorted(
+                    [
+                        a for a in updated_alphas
+                        if a.quality_status == "PASS"
+                        and a.is_simulated
+                        and a.simulation_success
+                        and isinstance(a.metrics, dict)
+                    ],
+                    key=lambda a: a.metrics.get("sharpe", 0) or 0,
+                    reverse=True,
+                )
+                _rb_in_cap = _rb_candidates[:_rb_cap]
+                for _rb_alpha in _rb_candidates[_rb_cap:]:
+                    if (
+                        _rb_alpha.metrics.get("_robustness_passed") is None
+                        and _rb_alpha.metrics.get("_robustness_skipped") is None
+                    ):
+                        _rb_alpha.metrics["_robustness_skipped"] = "round_cap"
+                        robustness_skipped_round_cap += 1
+
+                gate = RobustnessGate(
+                    brain,
+                    n_perturbations=_rb_n,
+                    min_ratio=_rb_ratio,
+                    selection_strategy=_rb_strategy,
+                    redis_client=_rb_redis,
+                )
+
+                for _rb_alpha in _rb_in_cap:
+                    # idempotent: 已 stamp 的 alpha 跳过(防止双跑 / 重入)
+                    if (
+                        _rb_alpha.metrics.get("_robustness_passed") is not None
+                        or _rb_alpha.metrics.get("_robustness_skipped") is not None
+                    ):
+                        continue
+
+                    # M-7 hot-check:每完成一个 alpha 检查 counter,超 0.85 后续 skip
+                    if _rb_redis is not None:
+                        try:
+                            _cur_extra_raw = await _rb_redis.get(
+                                RobustnessGate.REDIS_COUNTER_KEY
+                            )
+                            _cur_extra = int(_cur_extra_raw or 0)
+                            _cur_pct = (
+                                (_rb_today_total + _cur_extra) / max(_rb_limit, 1)
+                            )
+                            if _cur_pct >= _rb_hot_pct:
+                                _rb_alpha.metrics["_robustness_skipped"] = "quota_exhausted"
+                                robustness_skipped_quota += 1
+                                continue
+                        except Exception:
+                            pass
+
+                    # S-5 per-alpha hard timeout
+                    try:
+                        result = await asyncio.wait_for(
+                            gate.check(_rb_alpha),
+                            timeout=_rb_alpha_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        _rb_alpha.metrics["_robustness_skipped"] = "per_alpha_timeout"
+                        robustness_skipped_timeout += 1
+                        continue
+                    except Exception as _rb_exc:
+                        logger.warning(
+                            f"[{node_name}] robustness raised for "
+                            f"{(_rb_alpha.expression or '')[:60]!r}: {_rb_exc}"
+                        )
+                        _rb_alpha.metrics["_robustness_skipped"] = "exception"
+                        robustness_skipped_other += 1
+                        continue
+
+                    robustness_attempted += 1
+                    robustness_sim_failed_total += result.sim_failed_count
+                    _rb_alpha.metrics["_robustness_baseline_sharpe"] = round(
+                        result.baseline_sharpe, 4
+                    )
+                    _rb_alpha.metrics["_robustness_n_run"] = result.perturbation_count
+                    _rb_alpha.metrics["_robustness_elapsed_ms"] = result.elapsed_ms
+
+                    if result.skip_reason:
+                        _rb_alpha.metrics["_robustness_skipped"] = result.skip_reason
+                        if result.skip_reason == "no_window":
+                            robustness_skipped_no_window += 1
+                        else:
+                            robustness_skipped_other += 1
+                        continue
+
+                    # 成功完成 check (passed=True 或 False)
+                    _rb_alpha.metrics["_robustness_worst_sharpe"] = result.worst_sharpe
+                    _rb_alpha.metrics["_robustness_worst_ratio"] = result.worst_ratio
+                    _rb_alpha.metrics["_robustness_passed"] = result.passed
+                    _rb_alpha.metrics["_robustness_can_submit_consistency"] = (
+                        result.can_submit_consistency
+                    )  # S-7 观测信号
+
+                    if result.passed:
+                        robustness_passed += 1
+                        logger.info(
+                            f"[{node_name}] robustness PASS | "
+                            f"expr={(_rb_alpha.expression or '')[:60]!r} "
+                            f"baseline={result.baseline_sharpe:.3f} "
+                            f"worst={result.worst_sharpe:.3f} "
+                            f"ratio={result.worst_ratio:.3f}"
+                        )
+                    else:
+                        _rb_alpha.quality_status = "PASS_PROVISIONAL"
+                        # M-6 idempotent:不覆盖 graded-score / dual-run 已 stamp 的 _routing_reason
+                        _rb_alpha.metrics.setdefault(
+                            "_routing_reason", "robustness_downgrade"
+                        )
+                        _rb_alpha.metrics["_robustness_failed"] = True  # M-8 KB-skip flag
+                        _rb_alpha.metrics["_skip_optimize_pool"] = True  # M-8 防 OPTIMIZE 池二次烧
+                        robustness_failed_downgrade += 1
+                        logger.warning(
+                            f"[{node_name}] robustness: PASS → PROV | "
+                            f"expr={(_rb_alpha.expression or '')[:60]!r} "
+                            f"baseline={result.baseline_sharpe:.3f} "
+                            f"worst={result.worst_sharpe:.3f} "
+                            f"ratio={result.worst_ratio:.3f} < {_rb_ratio}"
+                        )
+
+            # Close async redis client gracefully so its socket releases
+            # before the node returns (matters in test fixtures / aiosqlite).
+            if _rb_redis is not None:
+                try:
+                    await _rb_redis.close()
+                except Exception:
+                    pass
+        except Exception as _rb_block_exc:
+            logger.warning(
+                f"[{node_name}] robustness block setup failed (degrading): {_rb_block_exc}"
+            )
+
     # P0: baseline + Nσ-residual screening (docs/alphagbm_skills_research_2026-05-15.md).
     # Annotates each successfully-simulated alpha with its residual against the
     # (hypothesis-family × dataset × region) grid baseline. SOFT SIGNAL ONLY —
@@ -2161,6 +2380,15 @@ async def node_evaluate(
             "graded_downgraded": graded_downgraded,
             "graded_no_baseline": graded_no_baseline,
             "graded_failed": graded_failed,
+            "robustness_attempted": robustness_attempted,
+            "robustness_passed": robustness_passed,
+            "robustness_failed_downgrade": robustness_failed_downgrade,
+            "robustness_skipped_no_window": robustness_skipped_no_window,
+            "robustness_skipped_quota": robustness_skipped_quota,
+            "robustness_skipped_round_cap": robustness_skipped_round_cap,
+            "robustness_skipped_timeout": robustness_skipped_timeout,
+            "robustness_skipped_other": robustness_skipped_other,
+            "robustness_sim_failed_total": robustness_sim_failed_total,
             "provisional_count": provisional_count,
             "pending_count": pending_count,
             "eval_errors": eval_errors,

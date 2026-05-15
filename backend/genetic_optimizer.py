@@ -343,6 +343,111 @@ def mutate_window_parameter(expression: str) -> Tuple[str, str]:
     return mutated, f"window: {func_name} {original_window} -> {new_window}"
 
 
+def enumerate_window_perturbations(
+    expression: str,
+    n: int = 4,
+    *,
+    selection_strategy: str = "first",
+) -> List[Tuple[str, str]]:
+    """Generate up to N deterministic unique window-parameter variants.
+
+    Args:
+        expression: alpha expression (may be empty/None — returns []).
+        n: number of variants requested.
+        selection_strategy: 'first' | 'largest' | 'all_in_order'.
+            'first' (default, recommended for determinism): perturb the first
+                ``(ts_*|group_*)`` site whose second argument is ``\\d+``;
+                returns up to ``n`` nearest WINDOW_VALUES.  Ties on
+                ``match.start()`` are impossible since matches are by-position.
+            'largest': perturb the site whose original window NUM is the
+                largest; ties broken by ``match.start()`` (earliest wins).
+            'all_in_order': perturb up to ``n`` distinct sites in source order
+                (one nearest variant per site).
+
+    Returns:
+        List of ``(new_expression, description)`` tuples — empty when no
+        matching window site is found (caller treats as ``skip_reason='no_window'``).
+        Order is by ``abs(w - original_window)`` ascending for first/largest,
+        or by site position for all_in_order.  Dedup ensures no duplicate
+        ``new_expression`` rows.
+
+    Edge cases:
+      - Empty / None expression                                → []
+      - No ``(ts_\\w+|group_\\w+)(<inner>, NUM)`` site           → []
+      - Ternary like ``ts_co_skewness(close, returns, 20)``     → []
+        (regex captures only the second arg; third-arg windows are missed.)
+      - n > available nearest values                           → truncated
+      - Duplicate windows in expression                        → dedup'd
+      - Original window not in WINDOW_VALUES (e.g. 7)          → still works
+        (we pick the n closest by absolute distance).
+    """
+    if not expression:
+        return []
+
+    # Same pattern as mutate_window_parameter; binary forms only.
+    window_pattern = re.compile(r'(ts_\w+|group_\w+)\s*\(\s*([^,]+)\s*,\s*(\d+)')
+    matches = list(window_pattern.finditer(expression))
+    if not matches:
+        return []
+
+    n = max(1, int(n))
+
+    def _nearest_values(original: int, count: int) -> List[int]:
+        """Return up to `count` WINDOW_VALUES nearest to `original`, excluding it.
+
+        Tiebreaker: smaller value first (stable, deterministic)."""
+        ordered = sorted(
+            (w for w in WINDOW_VALUES if w != original),
+            key=lambda w: (abs(w - original), w),
+        )
+        return ordered[:count]
+
+    out: List[Tuple[str, str]] = []
+    seen_exprs: Set[str] = set()
+
+    def _substitute(match: "re.Match[str]", new_window: int) -> str:
+        """Return expression with this match's window NUM replaced."""
+        return expression[:match.start(3)] + str(new_window) + expression[match.end(3):]
+
+    if selection_strategy == "all_in_order":
+        # One nearest variant per site, up to n distinct sites.
+        for match in matches[:n]:
+            orig = int(match.group(3))
+            nearest = _nearest_values(orig, 1)
+            if not nearest:
+                continue
+            new_window = nearest[0]
+            new_expr = _substitute(match, new_window)
+            if new_expr == expression or new_expr in seen_exprs:
+                continue
+            seen_exprs.add(new_expr)
+            out.append((
+                new_expr,
+                f"window_perturbation: {match.group(1)} {orig} -> {new_window}",
+            ))
+        return out
+
+    if selection_strategy == "largest":
+        # Largest NUM; ties → match.start() smallest (earliest).
+        chosen = max(matches, key=lambda m: (int(m.group(3)), -m.start()))
+    else:
+        # 'first' (default) and any unknown strategy falls back to first.
+        chosen = matches[0]
+
+    orig = int(chosen.group(3))
+    func_name = chosen.group(1)
+    for new_window in _nearest_values(orig, n):
+        new_expr = _substitute(chosen, new_window)
+        if new_expr == expression or new_expr in seen_exprs:
+            continue
+        seen_exprs.add(new_expr)
+        out.append((
+            new_expr,
+            f"window_perturbation: {func_name} {orig} -> {new_window}",
+        ))
+    return out
+
+
 def mutate_add_wrapper(expression: str) -> Tuple[str, str]:
     """
     Add a wrapper function around the expression.

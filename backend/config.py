@@ -593,6 +593,24 @@ class Settings(BaseSettings):
         "tariff_2025": ["2025-04-01", "2025-05-31"],
     }
 
+    # P1-D: 参数扰动鲁棒性检验 (window perturbation).
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `pnl-simulator`.
+    # opt-in (default OFF) — 默认不烧 BRAIN 配额。
+    # 集成位置: backend/agents/graph/nodes/evaluation.py graded-score 块之后、
+    # baseline-screen 块之前的独立内联段(M-9)。
+    # quota 配置:
+    #   ROBUSTNESS_SKIP_QUOTA_PCT 整轮 pre-check(today_total + redis_extra >= pct*limit
+    #   → skip 全部 alpha);默认 0.65 留 35% buffer。
+    #   ROBUSTNESS_HOTCHECK_QUOTA_PCT 单 alpha 完成后 hot-check;默认 0.85。
+    ENABLE_ROBUSTNESS_CHECK: bool = False
+    ROBUSTNESS_N_PERTURBATIONS: int = 4
+    ROBUSTNESS_MIN_RATIO: float = 0.7
+    MAX_ROBUSTNESS_PER_ROUND: int = 5
+    ROBUSTNESS_SKIP_QUOTA_PCT: float = 0.65
+    ROBUSTNESS_HOTCHECK_QUOTA_PCT: float = 0.85
+    ROBUSTNESS_PER_ALPHA_TIMEOUT_SEC: int = 600
+    ROBUSTNESS_SELECTION_STRATEGY: str = "first"
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     

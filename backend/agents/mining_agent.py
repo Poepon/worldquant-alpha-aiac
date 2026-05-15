@@ -684,11 +684,19 @@ class MiningAgent:
             # Consider alphas that were optimized or simulated but failed quality
             status = getattr(a, "quality_status", None)
             is_sim = getattr(a, "is_simulated", False)
-            
+
             if not is_sim:
                 continue
-                
+
             metrics = getattr(a, "metrics", {}) or {}
+
+            # P1-D (M-8): alphas downgraded by the window-perturbation
+            # robustness gate carry ``_skip_optimize_pool=True``. They have
+            # already burned config-fragility budget upstream — re-running GA
+            # on them would double-burn BRAIN quota for a candidate the gate
+            # already said is not robust. Skip them here.
+            if metrics.get("_skip_optimize_pool"):
+                continue
 
             # If explicit optimize status, always include
             if status == "OPTIMIZE":
