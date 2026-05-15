@@ -65,6 +65,17 @@ class Hypothesis(SQLAlchemyBase):
                 "is_triggered IS TRUE AND status IN ('ACTIVE','PROMOTED')"
             ),
         ),
+        # P2-B (2026-05-15): per-pillar active hypothesis count partial index.
+        # Double declaration (Alembic + model layer) mirrors the existing four
+        # partial indexes above — required so the sqlite test fixture's
+        # ``metadata.create_all()`` builds the index. PG honours the partial
+        # ``postgresql_where`` clause; sqlite ignores it and creates a regular
+        # index, which is fine for tests.
+        Index(
+            "ix_hypotheses_pillar_active",
+            "pillar",
+            postgresql_where="pillar IS NOT NULL AND is_active IS TRUE",
+        ),
         {"extend_existing": True},
     )
 
@@ -86,6 +97,13 @@ class Hypothesis(SQLAlchemyBase):
     expected_signal = Column(String(50), default="unknown")
     confidence = Column(String(20), default="medium")     # high|medium|low
     novelty = Column(String(30), default="established")   # established|emerging|experimental
+
+    # P2-B (2026-05-15): Five Pillars factor classifier.
+    # 取值: momentum|value|quality|volatility|sentiment|other (PILLAR_VALUES
+    # 在 backend/pillar_classifier 校验)。NULL = legacy row;
+    # pillar_classifier.infer_pillar 走 op/field 静态推断兜底。
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `compare`.
+    pillar = Column(String(20), nullable=True, default=None)
 
     # Hints for downstream code_gen / strategy_select
     key_fields = Column(JSONB, default=list)

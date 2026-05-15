@@ -84,6 +84,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_hypothesis_health_check",
         "schedule": crontab(hour=8, minute=30),
     },
+    # P2-B (2026-05-15): daily pillar-balance check at 09:00 Asia/Shanghai.
+    # Runs AFTER both 08:00 alpha-library-health-check + 08:30 hypothesis-
+    # health-check so any sync-induced refresh has settled before the
+    # alpha+hypothesis outerjoin runs. Pure read-only — emits
+    # docs/pillar_balance/<sh-date>.json (no DB mutation).
+    "pillar-balance-check": {
+        "task": "backend.tasks.run_pillar_balance_check",
+        "schedule": crontab(hour=9, minute=0),
+    },
     # V-19.7: revive dead CONTINUOUS_CASCADE sessions. Detects worker crash /
     # silent stalls via task.last_alpha_persisted_at < NOW()-15min and
     # re-dispatches a fresh celery worker. Grace period skips fresh sessions.

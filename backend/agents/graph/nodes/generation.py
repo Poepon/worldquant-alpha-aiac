@@ -322,7 +322,122 @@ async def node_hypothesis(
     logger.info(f"[{node_name}] Starting | task={state.task_id} trace_len={len(experiment_trace)}")
     
     target_fields = state.focused_fields if state.focused_fields else state.fields[:20]
-    
+
+    # P2-B (2026-05-15): Five Pillars balance nudge — opt-in via
+    # ``ENABLE_PILLAR_AWARE_SELECTION``. When OFF (default) the entire block
+    # is skipped so prompt rendering is byte-for-byte legacy. When ON we
+    # compute per-pillar shares of the last 7d alpha pool in this region,
+    # check whether the most-deficient pillar exceeds a threshold, and pass
+    # that pillar to PromptContext.pillar_hint so build_hypothesis_prompt
+    # renders an extra nudge block. Failure of the SQL / Redis path is
+    # non-fatal: pillar_hint stays None and the node continues normally.
+    pillar_hint: Optional[str] = None
+    try:
+        from backend.config import settings as _p2b_settings
+        _pillar_aware = bool(getattr(
+            _p2b_settings, "ENABLE_PILLAR_AWARE_SELECTION", False,
+        ))
+    except Exception:
+        _pillar_aware = False
+    if _pillar_aware:
+        try:
+            # M9 fix: Redis 60s TTL cache keyed by (region, utc-date) so the
+            # per-round JOIN doesn't fire on every node_hypothesis invocation.
+            from backend.tasks.redis_pool import get_redis_client
+            import json as _p2b_json
+            from datetime import datetime as _p2b_dt, timezone as _p2b_tz, timedelta as _p2b_td
+            _p2b_today = _p2b_dt.now(_p2b_tz.utc).strftime("%Y-%m-%d")
+            _p2b_cache_key = f"aiac:pillar_deficit:{state.region}:{_p2b_today}"
+            _p2b_redis = None
+            try:
+                _p2b_redis = get_redis_client()
+            except Exception:
+                _p2b_redis = None
+            counts = None
+            if _p2b_redis is not None:
+                try:
+                    _p2b_cached = _p2b_redis.get(_p2b_cache_key)
+                    if _p2b_cached is not None:
+                        counts = _p2b_json.loads(_p2b_cached)
+                except Exception:
+                    counts = None
+
+            if counts is None:
+                # M3 fix: LEFT JOIN from Alpha — legacy alphas where
+                # ``hypothesis_id IS NULL`` must NOT be silently dropped.
+                # They land in the ``unknown`` bucket and are excluded from
+                # share computation (so they don't dilute deficits).
+                from sqlalchemy import select as _p2b_select, func as _p2b_func
+                from backend.models import Alpha, Hypothesis
+                # alphas.created_at is TIMESTAMP WITHOUT TIME ZONE — use a
+                # naive UTC cutoff so asyncpg accepts the WHERE clause.
+                _p2b_cutoff = (
+                    _p2b_dt.now(_p2b_tz.utc) - _p2b_td(days=7)
+                ).replace(tzinfo=None)
+                async with resolve_db(config) as _p2b_db:
+                    _p2b_stmt = (
+                        _p2b_select(
+                            Hypothesis.pillar,
+                            _p2b_func.count(Alpha.id),
+                        )
+                        .select_from(Alpha)
+                        .outerjoin(
+                            Hypothesis,
+                            Alpha.hypothesis_id == Hypothesis.id,
+                        )
+                        .where(
+                            Alpha.region == state.region,
+                            Alpha.created_at >= _p2b_cutoff,
+                        )
+                        .group_by(Hypothesis.pillar)
+                    )
+                    _p2b_rows = (await _p2b_db.execute(_p2b_stmt)).all()
+                counts = {(p or "unknown"): int(c) for p, c in _p2b_rows}
+                if _p2b_redis is not None:
+                    try:
+                        _p2b_redis.setex(
+                            _p2b_cache_key, 60, _p2b_json.dumps(counts),
+                        )
+                    except Exception:
+                        pass  # cache failure must not break the node
+
+            # Compute pillar deficits — ``unknown`` (legacy NULL) is excluded
+            # from the denominator so legacy backlog doesn't dilute fresh
+            # shares. Threshold is deficit relative to target.
+            _p2b_target = getattr(
+                _p2b_settings, "PILLAR_TARGET_DISTRIBUTION", {},
+            ) or {}
+            pillared_total = sum(
+                c for p, c in counts.items() if p in _p2b_target
+            ) or 1
+            shares = {
+                p: counts.get(p, 0) / pillared_total for p in _p2b_target
+            }
+            deficits = {
+                p: max(0.0, _p2b_target[p] - shares.get(p, 0.0))
+                for p in _p2b_target
+            }
+            if deficits:
+                top_pillar, top_def = max(
+                    deficits.items(), key=lambda kv: kv[1],
+                )
+                _p2b_skew_t = float(getattr(
+                    _p2b_settings, "PILLAR_BALANCE_SKEW_THRESHOLD", 0.4,
+                ))
+                # Trigger when the deficit exceeds threshold * target.
+                if top_def > _p2b_skew_t * _p2b_target.get(top_pillar, 0.2):
+                    pillar_hint = top_pillar
+                    logger.info(
+                        f"[{node_name}] P2-B pillar nudge | shares={shares} "
+                        f"hint={top_pillar} deficit={top_def:.3f}"
+                    )
+        except Exception as _p2b_ex:
+            logger.warning(
+                f"[{node_name}] P2-B pillar nudge failed (non-fatal): "
+                f"{_p2b_ex}"
+            )
+            pillar_hint = None
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -338,6 +453,7 @@ async def node_hypothesis(
         failure_pitfalls=state.pitfalls[:5],
         exploration_weight=exploration_weight,
         available_dataset_pool=getattr(state, "available_dataset_pool", []) or [],
+        pillar_hint=pillar_hint,
     )
     
     # Use new hypothesis builder with experiment trace
@@ -623,6 +739,32 @@ async def node_hypothesis(
                         break
                 if primary_h is not None:
                     statement = (primary_h.get("idea") or primary_h.get("statement") or "").strip()
+                    # P2-B (2026-05-15, M8 fix): resolve pillar BEFORE the
+                    # HypothesisCreateData ctor so persistence happens
+                    # unconditionally. Decision-injection (the nudge above)
+                    # is gated by ENABLE_PILLAR_AWARE_SELECTION, but data
+                    # collection (stamp) is always on — otherwise the
+                    # pillar_balance_check report has nothing to read.
+                    from backend.pillar_classifier import (
+                        normalize_pillar as _p2b_norm,
+                        infer_pillar as _p2b_infer,
+                    )
+                    _llm_pillar_raw = primary_h.get("pillar")
+                    _llm_pillar = _p2b_norm(_llm_pillar_raw)
+                    resolved_pillar = _llm_pillar or _p2b_infer(
+                        hypothesis_pillar=_llm_pillar_raw,
+                        key_fields=primary_h.get("key_fields") or [],
+                        suggested_operators=primary_h.get(
+                            "suggested_operators",
+                        ) or [],
+                        expected_signal=primary_h.get("expected_signal"),
+                    )
+                    # N2: stamp ``_pillar_nudged`` when the LLM actually
+                    # honoured the nudge. Cheap, non-persisted audit hook —
+                    # mirrors the existing ``_v22_13_reused`` pattern.
+                    if pillar_hint and resolved_pillar == pillar_hint:
+                        primary_h["_pillar_nudged"] = pillar_hint
+
                     data = HypothesisCreateData(
                         statement=statement,
                         rationale=primary_h.get("rationale") or primary_h.get("reason") or "",
@@ -638,6 +780,8 @@ async def node_hypothesis(
                         dataset_pool=primary_h.get("selected_datasets") or [],
                         experiment_variant=str(experiment_variant)
                             if experiment_variant is not None else None,
+                        # P2-B (2026-05-15, M8): always stamp the pillar.
+                        pillar=resolved_pillar,
                     )
                     row = await svc.create_hypothesis(data)
                     current_hypothesis_ids.append(row.id)

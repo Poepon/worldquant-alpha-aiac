@@ -6,7 +6,7 @@ Contains:
 - Helper functions for building context sections
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
 
@@ -41,6 +41,12 @@ class PromptContext:
     # single-anchor mode; populated = LLM may pick 1-3 datasets in
     # `selected_datasets` to combine fields across domains.
     available_dataset_pool: List[str] = field(default_factory=list)
+
+    # P2-B (2026-05-15): Five Pillars balance nudge. node_hypothesis sets this
+    # to the under-represented pillar when the recent alpha pool is skewed
+    # (and ENABLE_PILLAR_AWARE_SELECTION is on). None = no nudge, prompt
+    # renders byte-for-byte legacy.
+    pillar_hint: Optional[str] = None
 
 
 def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:

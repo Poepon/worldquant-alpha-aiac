@@ -34,23 +34,27 @@ class ExplorationRecord:
     dataset_id: str
     region: str
     universe: str
-    
+
     # Expression components
     fields_used: List[str] = field(default_factory=list)
     operators_used: List[str] = field(default_factory=list)
     operator_skeleton: str = ""
-    
+
     # Settings
     delay: int = 1
     decay: int = 0
     neutralization: str = "NONE"
-    
+
     # Results
     was_successful: bool = False
     sharpe: float = 0.0
-    
+
     # Timestamp
     timestamp: datetime = field(default_factory=datetime.now)
+
+    # P2-B (2026-05-15): Five Pillars factor classification (None for legacy
+    # records / records where pillar inference was deliberately skipped).
+    pillar: Optional[str] = None
     
     @property
     def fingerprint(self) -> str:
@@ -74,23 +78,28 @@ class DiversityScore:
     field_diversity: float = 0.0
     operator_diversity: float = 0.0
     settings_diversity: float = 0.0
-    
+    # P2-B (2026-05-15): Five Pillars sub-score — only contributes to
+    # ``overall_score`` when ENABLE_PILLAR_AWARE_SELECTION is True AND a
+    # non-None pillar is supplied. Otherwise stays 0.0 and is ignored.
+    pillar_diversity: float = 0.0
+
     # Combined score
     overall_score: float = 0.0
-    
+
     # Suggestions
     suggestions: List[str] = field(default_factory=list)
-    
+
     # Metadata
     similar_attempts: int = 0
     last_similar_attempt: Optional[datetime] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "dataset_diversity": round(self.dataset_diversity, 3),
             "field_diversity": round(self.field_diversity, 3),
             "operator_diversity": round(self.operator_diversity, 3),
             "settings_diversity": round(self.settings_diversity, 3),
+            "pillar_diversity": round(self.pillar_diversity, 3),
             "overall_score": round(self.overall_score, 3),
             "similar_attempts": self.similar_attempts,
             "suggestions": self.suggestions,
@@ -165,6 +174,11 @@ class DiversityTracker:
 
         # P1-A: component weights — from caller or config; default = historical
         # hardcoded values (0.30/0.30/0.25/0.15) so old instantiations are zero-change.
+        # P2-B (2026-05-15): ``pillar`` is an additive 5th weight (default 0.20
+        # via DIVERSITY_PILLAR_WEIGHT). When the 5th weight is loaded the old
+        # 4 weights are PRESERVED unchanged — overall_score only renormalises
+        # to a 5-way sum when ENABLE_PILLAR_AWARE_SELECTION is on AND the
+        # caller passes a non-None pillar (see evaluate_diversity).
         if weights is not None:
             self.weights = weights
         else:
@@ -175,11 +189,13 @@ class DiversityTracker:
                     "field":    getattr(settings, "DIVERSITY_FIELD_WEIGHT", 0.30),
                     "operator": getattr(settings, "DIVERSITY_OPERATOR_WEIGHT", 0.25),
                     "settings": getattr(settings, "DIVERSITY_SETTINGS_WEIGHT", 0.15),
+                    "pillar":   getattr(settings, "DIVERSITY_PILLAR_WEIGHT",   0.20),
                 }
             except Exception:
                 self.weights = {
                     "dataset": 0.30, "field": 0.30,
                     "operator": 0.25, "settings": 0.15,
+                    "pillar": 0.20,
                 }
 
         # In-memory tracking (session-level)
@@ -191,6 +207,9 @@ class DiversityTracker:
         self.field_usage: Dict[str, int] = defaultdict(int)
         self.operator_usage: Dict[str, int] = defaultdict(int)
         self.setting_usage: Dict[str, int] = defaultdict(int)
+        # P2-B: per-pillar usage / success (5th dimension).
+        self.pillar_usage: Dict[str, int] = defaultdict(int)
+        self.pillar_success: Dict[str, int] = defaultdict(int)
 
         # Success tracking
         self.dataset_success: Dict[str, int] = defaultdict(int)
@@ -317,16 +336,24 @@ class DiversityTracker:
     def _update_usage_counts(self, record: ExplorationRecord):
         """Update usage counters from a record."""
         self.dataset_usage[record.dataset_id] += 1
-        
+
         for field in record.fields_used:
             self.field_usage[field] += 1
-        
+
         for op in record.operators_used:
             self.operator_usage[op] += 1
-        
+
         setting_key = f"{record.delay}-{record.decay}-{record.neutralization}"
         self.setting_usage[setting_key] += 1
-        
+
+        # P2-B: tally pillar usage when the record carries one. Legacy records
+        # with pillar=None are skipped (no synthetic ``unknown`` bucket — we
+        # don't want to dilute fresh ratios with backlog).
+        if getattr(record, "pillar", None):
+            self.pillar_usage[record.pillar] += 1
+            if record.was_successful:
+                self.pillar_success[record.pillar] += 1
+
         if record.was_successful:
             self.dataset_success[record.dataset_id] += 1
             for op in record.operators_used:
@@ -362,11 +389,12 @@ class DiversityTracker:
         operators: List[str],
         delay: int = 1,
         decay: int = 0,
-        neutralization: str = "NONE"
+        neutralization: str = "NONE",
+        pillar: Optional[str] = None,
     ) -> DiversityScore:
         """
         Evaluate diversity of a proposed alpha combination.
-        
+
         Args:
             dataset_id: Proposed dataset
             fields: Proposed fields
@@ -374,7 +402,14 @@ class DiversityTracker:
             delay: Trading delay
             decay: Decay setting
             neutralization: Neutralization setting
-        
+            pillar: Optional Five Pillars classification (P2-B). When None OR
+                ``ENABLE_PILLAR_AWARE_SELECTION`` is False, the 5th dim is
+                ignored and ``overall_score`` is computed via the 4-dim P1-A
+                formula (byte-for-byte). When provided AND the flag is on,
+                the 5-dim weighted sum runs with weights renormalised to
+                sum to 1.0 (so pillar=0.20 means it contributes 20% of the
+                final score regardless of how the other 4 weights total).
+
         Returns:
             DiversityScore with assessment and suggestions
         """
@@ -451,16 +486,61 @@ class DiversityTracker:
             score.similar_attempts += 1
             suggestions.append("Nearly identical combination was tried before")
 
-        # Calculate overall score using config-driven (or injected) weights
-        score.overall_score = (
-            self.weights["dataset"]  * score.dataset_diversity +
-            self.weights["field"]    * score.field_diversity +
-            self.weights["operator"] * score.operator_diversity +
-            self.weights["settings"] * score.settings_diversity
+        # P2-B (2026-05-15): Five Pillars sub-score — only computed when the
+        # caller provided a non-None pillar. Otherwise stays at 0.0 and is
+        # ignored by the byte-for-byte P1-A path below.
+        if pillar:
+            pcount = self.pillar_usage.get(pillar, 0)
+            score.pillar_diversity = 1.0 - _percentile_rank(
+                pcount, list(self.pillar_usage.values()),
+            )
+
+        # M4 fix — overall_score formula gating:
+        #   - ENABLE_PILLAR_AWARE_SELECTION=False OR pillar is None → use the
+        #     legacy 4-dim P1-A formula (direct weighted sum on the four old
+        #     weights, no renormalisation). Behavior is byte-for-byte
+        #     identical to pre-P2-B; ``test_diversity_weights.py`` passes.
+        #   - ENABLE_PILLAR_AWARE_SELECTION=True AND pillar is non-None →
+        #     run the 5-dim weighted sum with weights renormalised to total
+        #     1.0 so pillar contributes its configured share.
+        try:
+            from backend.config import settings as _p2b_div_settings
+            _p2b_div_enabled = bool(getattr(
+                _p2b_div_settings, "ENABLE_PILLAR_AWARE_SELECTION", False,
+            ))
+        except Exception:
+            _p2b_div_enabled = False
+        _use_pillar = (
+            _p2b_div_enabled
+            and pillar is not None
+            and "pillar" in self.weights
         )
-        
+        if _use_pillar:
+            w = self.weights
+            total = (
+                w["dataset"] + w["field"] + w["operator"]
+                + w["settings"] + w.get("pillar", 0.0)
+            )
+            if total > 0:
+                score.overall_score = (
+                    w["dataset"]  / total * score.dataset_diversity +
+                    w["field"]    / total * score.field_diversity +
+                    w["operator"] / total * score.operator_diversity +
+                    w["settings"] / total * score.settings_diversity +
+                    w.get("pillar", 0.0) / total * score.pillar_diversity
+                )
+        else:
+            # Byte-for-byte P1-A 4-dim formula (DO NOT touch — P1-A
+            # ``test_overall_score_is_weighted_sum`` asserts on this exact form).
+            score.overall_score = (
+                self.weights["dataset"]  * score.dataset_diversity +
+                self.weights["field"]    * score.field_diversity +
+                self.weights["operator"] * score.operator_diversity +
+                self.weights["settings"] * score.settings_diversity
+            )
+
         score.suggestions = suggestions
-        
+
         return score
     
     def _get_underused_operators(self, current_ops: List[str]) -> List[str]:
@@ -567,6 +647,47 @@ class DiversityTracker:
         
         return suggestions[:n]
     
+    def get_pillar_balance(self) -> Dict[str, Any]:
+        """P2-B observability — expose pillar coverage / skew / deficits.
+
+        Reads in-session ``pillar_usage`` only (no DB hit). Targets come from
+        ``settings.PILLAR_TARGET_DISTRIBUTION``; deficits are clamped at 0
+        (over-represented pillars don't get a negative number).
+        """
+        try:
+            from backend.config import settings as _p2b_gpb_settings
+            target = getattr(
+                _p2b_gpb_settings, "PILLAR_TARGET_DISTRIBUTION", {},
+            ) or {}
+        except Exception:
+            target = {}
+        try:
+            from backend.pillar_classifier import PILLAR_VALUES
+        except Exception:
+            PILLAR_VALUES = set()
+        total = sum(self.pillar_usage.values())
+        by = {p: self.pillar_usage.get(p, 0) for p in PILLAR_VALUES}
+        shares = {p: (c / total if total else 0.0) for p, c in by.items()}
+        deficits = {
+            p: max(0.0, target.get(p, 0.0) - shares.get(p, 0.0))
+            for p in PILLAR_VALUES
+        }
+        skew = (max(shares.values()) - min(shares.values())) if shares else 0.0
+        next_p = (
+            max(deficits.items(), key=lambda kv: kv[1])[0]
+            if deficits else "other"
+        )
+        return {
+            "by_pillar": by,
+            "shares": {k: round(v, 3) for k, v in shares.items()},
+            "skew": round(skew, 3),
+            "target": target,
+            "deficits": {k: round(v, 3) for k, v in deficits.items()},
+            "next_pillar": (
+                next_p if deficits.get(next_p, 0) > 0 else None
+            ),
+        }
+
     def get_diversity_stats(self) -> Dict[str, Any]:
         """Get statistics about exploration diversity."""
         return {

@@ -279,6 +279,29 @@ class Settings(BaseSettings):
     DIVERSITY_OPERATOR_WEIGHT: float = 0.25
     DIVERSITY_SETTINGS_WEIGHT: float = 0.15
 
+    # P2-B (2026-05-15): Five Pillars factor classification.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `compare`.
+    # diversity_tracker 5 维启用走重归一化路径 — pillar 是新增第 5 维,默认 0.20。
+    # 老 4 维 weight (0.30/0.30/0.25/0.15) **不动** — ENABLE_PILLAR_AWARE_SELECTION
+    # OFF / pillar=None 时 evaluate_diversity 行为 byte-for-byte 等同 P1-A。
+    DIVERSITY_PILLAR_WEIGHT: float = 0.20
+    # Pillar-aware selection 开关 — 默认 OFF。开启时 node_hypothesis 跑 deficit
+    # 检查 + prompt nudge,diversity_tracker 走 5 维重归一化加权。
+    # 1-2 周观察 docs/pillar_balance/<sh-date>.json 后再切换。
+    ENABLE_PILLAR_AWARE_SELECTION: bool = False
+    # 6 桶 + other 的目标分布 — pillar_balance_check 报告内 deficit 计算基准。
+    PILLAR_TARGET_DISTRIBUTION: dict = {
+        "momentum":   0.25,
+        "value":      0.20,
+        "quality":    0.20,
+        "volatility": 0.15,
+        "sentiment":  0.10,
+        "other":      0.10,
+    }
+    # nudge 触发阈值:max(deficit) > threshold * target.share。
+    # 例 target=0.20 + threshold=0.4 → 0.20−share ≥ 0.08 时 nudge 该 pillar。
+    PILLAR_BALANCE_SKEW_THRESHOLD: float = 0.4
+
     # P1-C (2026-05-15): alpha library health check thresholds + weights.
     # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `health-check`.
     # Consumed by backend/services/alpha_health_service.py via

@@ -102,6 +102,14 @@ class HypothesisCreateData:
     parent_hypothesis_id: Optional[int] = None
     experiment_variant: Optional[str] = None
 
+    # P2-B (2026-05-15): Five Pillars factor classification. Value is the
+    # normalize_pillar(llm_emit) or infer_pillar(...) fallback resolved by the
+    # caller (node_hypothesis); None means the caller deliberately chose to
+    # leave the stamp empty (legacy / opt-out path). Persistence is decoupled
+    # from the ENABLE_PILLAR_AWARE_SELECTION flag: stamp always runs, decision
+    # injection (nudge) is the only thing gated by the flag.
+    pillar: Optional[str] = None
+
 
 @dataclass
 class HypothesisStats:
@@ -157,6 +165,8 @@ class HypothesisService(BaseService):
             parent_alpha_id=data.parent_alpha_id,
             parent_hypothesis_id=data.parent_hypothesis_id,
             experiment_variant=data.experiment_variant,
+            # P2-B (2026-05-15): Five Pillars stamp — see HypothesisCreateData.
+            pillar=data.pillar,
             status=HypothesisStatus.PROPOSED.value,
             is_active=True,
         )

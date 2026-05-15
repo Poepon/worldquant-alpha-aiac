@@ -59,6 +59,8 @@ from backend.tasks.llm_op_monitor import monitor_llm_op_hallucinations
 from backend.tasks.alpha_health_check import run_alpha_health_check
 # P1-C part 2 (2026-05-15): daily hypothesis-health-check task
 from backend.tasks.hypothesis_health_check import run_hypothesis_health_check
+# P2-B (2026-05-15): daily pillar-balance-check task
+from backend.tasks.pillar_balance_check import run_pillar_balance_check
 
 __all__ = [
     # Utilities
@@ -94,4 +96,6 @@ __all__ = [
     "run_alpha_health_check",
     # P1-C part 2: daily hypothesis-health-check
     "run_hypothesis_health_check",
+    # P2-B: daily pillar-balance-check
+    "run_pillar_balance_check",
 ]
