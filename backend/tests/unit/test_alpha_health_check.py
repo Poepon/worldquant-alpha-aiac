@@ -192,7 +192,8 @@ class TestClassifyDriftFromDecay:
         assert out["severity"] == "red"
         # delta = (1-2)/2 * 100 = -50 → reason includes 50pct
         assert out["sharpe_delta_pct"] == -50.0
-        assert out["reason"] == "sharpe_down_50pct"
+        # Multi-metric reason: both sharpe AND fitness dropped 50%
+        assert out["reason"] == "sharpe_down_50pct+fitness_down_50pct"
 
     def test_sharpe_down_30_orange(self):
         a = _alpha(
@@ -258,7 +259,8 @@ class TestClassifyDriftFromDecay:
         assert out["severity"] == "yellow"
 
     def test_severity_independent_of_turnover_direction(self):
-        # severity is sharpe-only — flipping turnover sign shouldn't change band
+        # severity is sharpe+fitness only — turnover sign change shouldn't
+        # affect band (sharpe and fitness are constant in both alphas).
         head = {"sharpe": 1.5, "fitness": 1.0, "turnover": 0.5}
         a1 = _alpha(decay_curve=[head], is_sharpe=1.5,
                     is_fitness=1.0, is_turnover=0.3)
@@ -266,6 +268,34 @@ class TestClassifyDriftFromDecay:
                     is_fitness=1.0, is_turnover=0.8)
         assert (classify_drift_from_decay(a1)["severity"]
                 == classify_drift_from_decay(a2)["severity"])
+
+    # P2 fix: drift severity now considers fitness too, not just sharpe.
+
+    def test_fitness_collapse_drives_severity_when_sharpe_holds(self):
+        """Sharpe steady but fitness craters → severity must surface red.
+        Pre-fix this returned green because severity gated on sharpe only."""
+        a = _alpha(
+            decay_curve=[{"sharpe": 1.5, "fitness": 1.0, "turnover": 0.4}],
+            is_sharpe=1.5,         # 0% delta
+            is_fitness=0.4,        # -60% delta → red
+            is_turnover=0.4,
+        )
+        out = classify_drift_from_decay(a)
+        assert out["severity"] == "red"
+        assert out["sharpe_delta_pct"] == 0.0
+        assert out["fitness_delta_pct"] == -60.0
+        assert "fitness_down_60pct" in (out["reason"] or "")
+
+    def test_worst_of_sharpe_fitness_used(self):
+        """sharpe yellow + fitness orange → severity orange (worst-of)."""
+        a = _alpha(
+            decay_curve=[{"sharpe": 1.0, "fitness": 1.0, "turnover": 0.4}],
+            is_sharpe=0.85,        # -15% → yellow
+            is_fitness=0.65,       # -35% → orange
+            is_turnover=0.4,
+        )
+        out = classify_drift_from_decay(a)
+        assert out["severity"] == "orange"
 
 
 # ===========================================================================
@@ -410,15 +440,42 @@ class TestComputeHealthScore:
         assert out["score"] == pytest.approx(85.0, abs=0.1)
         assert out["orphan_pen"] == 100
 
-    def test_unknown_drift_gives_25_penalty(self):
-        # 25 * 0.5 = 12.5 → score = 87.5
+    def test_unknown_drift_skipped_not_penalised(self):
+        # P2 fix: unknown drift is data deficiency, not a quality problem.
+        # Drift weight redistributed across stale + orphan; both green here
+        # → score stays at 100 (was 87.5 under the old "25 penalty" semantics).
         out = compute_health_score(
             self._green_stale(),
             {"severity": "unknown", "reason": "no_baseline_available"},
             self._green_orphan(),
         )
-        assert out["score"] == pytest.approx(87.5, abs=0.1)
-        assert out["drift_pen"] == 25
+        assert out["score"] == pytest.approx(100.0, abs=0.1)
+        assert out["drift_pen"] is None  # signal skipped, not "midpoint"
+
+    def test_unknown_drift_renormalises_other_signals(self):
+        """Drift skipped → stale red still contributes via renormalised weight.
+        Pre-fix: unknown contributed 12.5; now stale's weight scales up to fill."""
+        out = compute_health_score(
+            {"stale_severity": "red", "reason": "stale_31d"},
+            {"severity": "unknown", "reason": "no_baseline_available"},
+            self._green_orphan(),
+        )
+        # weights: stale=0.35, orphan=0.15, applied total = 0.50
+        # weighted_pen = (0.35*90 + 0.15*0) / 0.50 = 31.5/0.5 = 63
+        # score = 100 - 63 = 37 → RED band
+        assert out["score"] == pytest.approx(37.0, abs=0.1)
+        assert out["drift_pen"] is None
+        assert out["stale_pen"] == 90
+
+    def test_unknown_stale_also_skipped(self):
+        """Mirror: a stale_severity not in the band table is also skipped."""
+        out = compute_health_score(
+            {"stale_severity": "unknown", "reason": None},
+            {"severity": "green", "reason": None},
+            self._green_orphan(),
+        )
+        assert out["score"] == pytest.approx(100.0, abs=0.1)
+        assert out["stale_pen"] is None
 
     def test_score_clipped_to_0_100(self):
         # All red + orphan: 0.35*90 + 0.5*90 + 0.15*100 = 31.5+45+15 = 91.5

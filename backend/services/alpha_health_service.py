@@ -120,23 +120,44 @@ def _delta_pct(cur: Optional[float], base: Optional[float]) -> Optional[float]:
     return (cur - base) / abs(base) * 100.0
 
 
-def _drift_severity_from_sharpe(d_sharpe: Optional[float]) -> str:
-    """Map sharpe delta-pct → severity band using settings.DRIFT_*_PCT thresholds.
+_SEVERITY_ORDER = ("green", "yellow", "orange", "red")
 
-    Threshold semantics: configured as **negative** percentages (e.g.
-    DRIFT_RED_PCT=-50.0 means "down 50%"). A drop more severe than RED
-    (i.e. d_sharpe <= DRIFT_RED_PCT) maps to red; smaller drops cascade
-    down; a positive change is green.
+
+def _severity_from_delta(d: Optional[float]) -> str:
+    """Map a single delta-pct → severity using DRIFT_*_PCT thresholds.
+
+    Thresholds are **negative** percentages (e.g. DRIFT_RED_PCT=-50.0 →
+    "down 50%"). A drop more severe than RED (d <= DRIFT_RED_PCT) maps to
+    red; smaller drops cascade down; a non-negative change is green;
+    None → unknown.
     """
-    if d_sharpe is None:
+    if d is None:
         return "unknown"
-    if d_sharpe <= settings.DRIFT_RED_PCT:
+    if d <= settings.DRIFT_RED_PCT:
         return "red"
-    if d_sharpe <= settings.DRIFT_ORANGE_PCT:
+    if d <= settings.DRIFT_ORANGE_PCT:
         return "orange"
-    if d_sharpe <= settings.DRIFT_YELLOW_PCT:
+    if d <= settings.DRIFT_YELLOW_PCT:
         return "yellow"
     return "green"
+
+
+def _drift_severity(deltas: List[Optional[float]]) -> str:
+    """Worst-of severity across multiple delta-pct values.
+
+    All-None → "unknown". Otherwise pick the highest-penalty band among
+    the non-None deltas. Used to combine sharpe + fitness drift so an
+    alpha whose sharpe holds while fitness collapses still surfaces.
+
+    NOTE: turnover delta is intentionally excluded — its sign is
+    semantically ambiguous (turnover up = costlier; turnover down = signal
+    loss). It's recorded in the payload as telemetry only.
+    """
+    sevs = [_severity_from_delta(d) for d in deltas if d is not None]
+    if not sevs:
+        return "unknown"
+    worst_idx = max(_SEVERITY_ORDER.index(s) for s in sevs if s in _SEVERITY_ORDER)
+    return _SEVERITY_ORDER[worst_idx]
 
 
 def classify_drift_from_decay(alpha) -> Optional[Dict[str, Any]]:
@@ -171,12 +192,23 @@ def classify_drift_from_decay(alpha) -> Optional[Dict[str, Any]]:
         "baseline_turnover": base_turnover,
         "current_turnover": cur_turnover,
         "turnover_delta_pct": round(d_turnover, 1) if d_turnover is not None else None,
-        "severity": _drift_severity_from_sharpe(d_sharpe),
-        "reason": (
-            f"sharpe_down_{abs(int(d_sharpe))}pct"
-            if d_sharpe is not None and d_sharpe <= -10 else None
-        ),
+        # Multi-metric severity: worst of sharpe + fitness. Catches the case
+        # where sharpe holds steady but fitness collapses (or vice versa).
+        "severity": _drift_severity([d_sharpe, d_fitness]),
+        "reason": _drift_reason_from_decay(d_sharpe, d_fitness),
     }
+
+
+def _drift_reason_from_decay(
+    d_sharpe: Optional[float], d_fitness: Optional[float],
+) -> Optional[str]:
+    """Compose a reason string mentioning whichever metric(s) dropped >=10%."""
+    parts = []
+    if d_sharpe is not None and d_sharpe <= -10:
+        parts.append(f"sharpe_down_{abs(int(d_sharpe))}pct")
+    if d_fitness is not None and d_fitness <= -10:
+        parts.append(f"fitness_down_{abs(int(d_fitness))}pct")
+    return "+".join(parts) if parts else None
 
 
 def classify_drift_from_baseline(alpha, baseline_stats) -> Dict[str, Any]:
@@ -197,7 +229,9 @@ def classify_drift_from_baseline(alpha, baseline_stats) -> Dict[str, Any]:
         "baseline_sharpe": base_sharpe,
         "current_sharpe": cur_sharpe,
         "sharpe_delta_pct": round(d_sharpe, 1) if d_sharpe is not None else None,
-        "severity": _drift_severity_from_sharpe(d_sharpe),
+        # Cluster baseline only carries sharpe, so single-metric severity is
+        # the correct gate here (no fitness/turnover signal to combine).
+        "severity": _severity_from_delta(d_sharpe),
         "reason": (
             f"sharpe_below_cluster_mean_{abs(int(d_sharpe))}pct"
             if d_sharpe is not None and d_sharpe <= -10 else None
@@ -235,27 +269,51 @@ def classify_orphan(
 # Score
 # ---------------------------------------------------------------------------
 
-_SEV_PEN = {"green": 0, "yellow": 25, "orange": 55, "red": 90, "unknown": 25}
+# Resolved severities only — "unknown" is handled by skipping the signal,
+# not by assigning a midpoint penalty (consistent with P1-A confidence
+# tri-state: missing measurements ≠ bad measurements).
+_SEV_PEN = {"green": 0, "yellow": 25, "orange": 55, "red": 90}
 
 
 def compute_health_score(stale_info, drift_info, orphan_info) -> Dict[str, Any]:
     """Weighted 0-100 health score from per-signal severity penalties.
 
-    Higher score = healthier. ``orphan_pen`` is 100 when ``is_orphan=True``
-    (a stronger signal than mere KB reference); within in-scope alphas
-    this is always 0 because ``classify_orphan`` never sets is_orphan.
+    Higher score = healthier.
+
+    A signal whose severity is "unknown" is **skipped** — its weight is
+    redistributed across the remaining applicable signals via mean-of-
+    weighted-pens normalised to the applied weight sum. This is the same
+    "N/A ≠ fabricated" pattern P1-A uses for confidence_inputs: data
+    deficiency must not look like a quality problem in the report.
+
+    ``orphan_pen`` is 100 when ``is_orphan=True`` (a stronger signal than
+    mere KB reference); within in-scope alphas it's always 0 because
+    ``classify_orphan`` never sets is_orphan.
     """
-    stale_pen = _SEV_PEN.get(stale_info["stale_severity"], 50)
-    drift_pen = _SEV_PEN.get(drift_info["severity"], 25)
-    orphan_pen = 100 if orphan_info.get("is_orphan") else 0
-    weighted = (
-        settings.HEALTH_WEIGHT_STALE * stale_pen
-        + settings.HEALTH_WEIGHT_DRIFT * drift_pen
-        + settings.HEALTH_WEIGHT_ORPHAN * orphan_pen
-    )
+    # None = signal not applicable / data missing → skip in the weighted average.
+    stale_pen = _SEV_PEN.get(stale_info["stale_severity"])
+    drift_pen = _SEV_PEN.get(drift_info["severity"])
+    orphan_pen = 100 if orphan_info.get("is_orphan") else 0  # always applicable
+
+    contributions = []  # list[(weight, penalty)] for applicable signals only
+    if stale_pen is not None:
+        contributions.append((settings.HEALTH_WEIGHT_STALE, stale_pen))
+    if drift_pen is not None:
+        contributions.append((settings.HEALTH_WEIGHT_DRIFT, drift_pen))
+    contributions.append((settings.HEALTH_WEIGHT_ORPHAN, orphan_pen))
+
+    total_w = sum(w for w, _ in contributions)
+    if total_w <= 0:
+        weighted = 0.0
+    else:
+        weighted = sum(w * p for w, p in contributions) / total_w
     score = max(0.0, min(100.0, 100.0 - weighted))
-    return {"score": round(score, 1), "stale_pen": stale_pen,
-            "drift_pen": drift_pen, "orphan_pen": orphan_pen}
+    return {
+        "score": round(score, 1),
+        "stale_pen": stale_pen,
+        "drift_pen": drift_pen,
+        "orphan_pen": orphan_pen,
+    }
 
 
 def to_band(score: float) -> str:
@@ -503,16 +561,17 @@ class AlphaHealthService:
             found_ids.add(r.id)
             entries = kb_index[r.id]
             active_entries = [e for e in entries if e["kb_is_active"]]
+            qs = r.quality_status or "UNKNOWN"
             result.append({
                 "alpha_pk": r.id,
                 "alpha_id": r.alpha_id,
-                "quality_status": r.quality_status,
+                "quality_status": qs,
                 "kb_entry_ids": [e["kb_id"] for e in entries],
                 "kb_active_entry_ids": [e["kb_id"] for e in active_entries],
                 "reason": (
-                    f"kb_active_but_alpha_{r.quality_status}"
+                    f"kb_active_but_alpha_{qs}"
                     if active_entries else
-                    f"kb_softdel_alpha_{r.quality_status}"
+                    f"kb_softdel_alpha_{qs}"
                 ),
             })
         # KB referenced an alpha_pk that no longer exists in `alphas` at all.
