@@ -57,6 +57,8 @@ from backend.tasks.session_watchdog import (
 from backend.tasks.llm_op_monitor import monitor_llm_op_hallucinations
 # P1-C (2026-05-15): daily alpha-library health check task
 from backend.tasks.alpha_health_check import run_alpha_health_check
+# P1-C part 2 (2026-05-15): daily hypothesis-health-check task
+from backend.tasks.hypothesis_health_check import run_hypothesis_health_check
 
 __all__ = [
     # Utilities
@@ -90,4 +92,6 @@ __all__ = [
     "monitor_llm_op_hallucinations",
     # P1-C: daily alpha-library health check
     "run_alpha_health_check",
+    # P1-C part 2: daily hypothesis-health-check
+    "run_hypothesis_health_check",
 ]

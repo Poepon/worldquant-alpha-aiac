@@ -295,6 +295,32 @@ class Settings(BaseSettings):
     HEALTH_WEIGHT_ORPHAN: float = 0.15
     HEALTH_SCORE_TRUNCATE_THRESHOLD: int = 70
 
+    # P1-C part 2 (2026-05-15): hypothesis structured triggers + LLM thesis
+    # scoring. 来源: docs/alphagbm_skills_research_2026-05-15.md skill
+    # `investment-thesis`. Consumed by
+    # backend/services/hypothesis_health_service.py via
+    # ``from backend.config import settings`` (top-level — never inside a
+    # function so monkeypatching works).
+    # Trigger thresholds — note pct values are NEGATIVE (drops):
+    TRIGGER_DROPPED_SHARPE_PCT: float = -30.0       # T1 orange threshold
+    TRIGGER_DROPPED_SHARPE_RED_PCT: float = -50.0   # T1 red threshold
+    TRIGGER_NOPASS_N_ROUNDS: int = 5                # T2 window (rounds)
+    TRIGGER_PASS_RATE_DROP_PCT: float = -50.0       # T3 threshold
+    TRIGGER_PASS_RATE_WINDOW: int = 5               # T3 window (each side)
+    TRIGGER_ATTR_HYPOTHESIS_WINDOW: int = 5         # T4 window (rounds)
+    TRIGGER_ATTR_HYPOTHESIS_SHARE: float = 0.6      # T4 dominance share
+    TRIGGER_STALE_SHARE: float = 0.5                # T5 stale-share threshold
+    TRIGGER_DETAIL_MAX_ENTRIES: int = 50            # trigger_detail FIFO cap
+
+    # LLM scoring controls
+    ENABLE_LLM_THESIS_SCORE_ON_PROMOTED: bool = True
+    ENABLE_LLM_THESIS_SCORE_ON_TRIGGER: bool = True
+    THESIS_SCORE_DAILY_TOKEN_BUDGET: int = 200_000  # per-run budget
+    LLM_SCORE_RETRY_BACKOFF_HOURS: int = 4          # fallback failure retry
+    THESIS_SCORING_MAX_ROUNDS: int = 10             # prompt length cap
+    THESIS_SCORING_MAX_TRIGGER_HITS: int = 3
+    THESIS_SCORE_DUMP_THRESHOLD: int = 70           # JSON output truncate
+
     # PR7 — incremental persistence for T2/T3 tasks. By default, T2/T3 work-
     # flow batches all 8+ seeds before run_with_persistence writes Alpha rows
     # to DB (workflow.run() only returns at END). This means a 1-hour task

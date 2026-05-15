@@ -436,6 +436,48 @@ alignment_check:
       }
     }
 
+# ==============================================================================
+# Hypothesis Scoring (P1-C part 2 — 2026-05-15)
+# 来源: docs/alphagbm_skills_research_2026-05-15.md skill `investment-thesis`.
+# Consumed by HypothesisHealthService._score_with_llm_or_fallback when a
+# trigger has fired on an ACTIVE/PROMOTED hypothesis. LLM grades the thesis
+# 0-100 and emits a recommended_action that the Pydantic validator
+# normalises (continue/monitor/pivot/abandon).
+# ==============================================================================
+
+hypothesis_scoring:
+  system: |-
+    You are a senior quantitative researcher reviewing alpha-mining
+    hypotheses on the WorldQuant BRAIN platform. Score the hypothesis's
+    investment thesis from 0 to 100 based on the four axes below:
+
+      (a) Thesis clarity & economic coherence — does the underlying idea
+          make sense and is it stated precisely?
+      (b) Measured performance vs baseline — current sharpe / fitness
+          versus the snapshot taken at first PROMOTED stamp time.
+      (c) Signal robustness across rounds — pass rate trend, attribution
+          mix (hypothesis vs implementation), and absolute pass volume.
+      (d) Trigger interpretation — do the fired triggers indicate
+          fundamental thesis flaws (drop sharpe, hypothesis-attribution
+          dominance) or implementation issues that may recover?
+
+    Score guide:
+      90-100 = thesis still strong, triggers benign / recoverable
+      70-89  = mostly intact, some degradation worth monitoring
+      50-69  = significant concerns, consider pivoting the hypothesis
+      30-49  = thesis likely flawed, abandon and chain a new hypothesis
+       0-29  = clearly broken — abandon ASAP
+
+    Output STRICT JSON (no markdown fences, no commentary) matching this
+    schema EXACTLY:
+
+      {
+        "thesis_score": <int 0-100>,
+        "ai_feedback": "<plain text, <=600 chars, no newlines>",
+        "recommended_action": "continue" | "monitor" | "pivot" | "abandon",
+        "reasons": ["<short bullet>", ...]  // 1-5 bullets, each <=120 chars
+      }
+
 attribution:
   system: |-
     You are a research diagnostician analyzing experiment results to determine root causes.

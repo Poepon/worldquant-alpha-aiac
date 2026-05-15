@@ -21,7 +21,7 @@ dataclass doesn't track.
 
 from sqlalchemy import (
     Column, Integer, String, Boolean, DateTime, Float, Text,
-    ForeignKey, Index,
+    ForeignKey, Index, text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -53,6 +53,17 @@ class Hypothesis(SQLAlchemyBase):
             "ix_hypotheses_parent_alpha",
             "parent_alpha_id",
             postgresql_where="parent_alpha_id IS NOT NULL",
+        ),
+        # P1-C part 2 (2026-05-15): partial index for the frontend
+        # "active-trigger" list. Mirrors the same partial-where pattern as
+        # ix_hypotheses_region_active above so PG can skip the bulk of
+        # healthy rows.
+        Index(
+            "ix_hypotheses_triggered",
+            "region", "triggered_at",
+            postgresql_where=(
+                "is_triggered IS TRUE AND status IN ('ACTIVE','PROMOTED')"
+            ),
         ),
         {"extend_existing": True},
     )
@@ -128,6 +139,47 @@ class Hypothesis(SQLAlchemyBase):
     # SUPERSEDED — replaced by a child hypothesis (parent_hypothesis_id ref)
     status = Column(String(20), default="PROPOSED", nullable=False, index=True)
     abandon_reason = Column(Text, nullable=True)
+
+    # ---- P1-C part 2 (2026-05-15): structured triggers + LLM thesis scoring ----
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `investment-thesis`.
+    # `is_triggered` is a soft warning flag ORTHOGONAL to `status` — a triggered
+    # hypothesis stays ACTIVE/PROMOTED and continues to be sampled (SFX-16
+    # invariant). It only affects audit + LLM scoring output. To actually stop
+    # sampling, set `is_active=False` (the existing regime-freeze mechanism).
+    is_triggered = Column(
+        Boolean, nullable=False, default=False,
+        server_default=text("false"),
+    )
+    triggered_at = Column(DateTime(timezone=True), nullable=True)
+    # Append-only list of {type, threshold, observed, window_rounds, severity,
+    # reason, hit_at}. 24h dedup-by-(type, window); FIFO-capped at
+    # TRIGGER_DETAIL_MAX_ENTRIES. MFX-7: server_default AND default=list — the
+    # latter is required for sqlite create_all in tests (SQLite ignores
+    # server_default on newly-inserted rows, leaving the column NULL otherwise).
+    trigger_detail = Column(
+        JSONB, nullable=False, default=list,
+        server_default=text("'[]'::jsonb"),
+    )
+    # Frozen snapshot at first PROMOTED stamp time: {stamped_at, n_alphas,
+    # alpha_pks_seed, sharpe_avg, fitness_avg, turnover_avg}. T1 trigger
+    # `dropped_sharpe` compares current AVG vs this baseline AVG (MFX-1
+    # symmetric semantics; n_alphas<3 auto-skips T1 to avoid small-sample
+    # false-positives).
+    baseline_metrics = Column(JSONB, nullable=True)
+    # LLM-emitted 0-100 score; rewritten on each scoring run.
+    thesis_score = Column(Float, nullable=True)
+    last_thesis_score_at = Column(DateTime(timezone=True), nullable=True)
+    # SFX-13: 'ok' | 'fallback_failed' | 'fallback_schema_invalid'. Read by
+    # `_can_call_llm` to use a 4h backoff for failures vs 24h gate for ok runs.
+    last_thesis_score_status = Column(String(30), nullable=True)
+    # LLM-emitted free-text feedback (capped 600 chars).
+    ai_feedback = Column(Text, nullable=True)
+    # Append-only list of {scored_at, thesis_score, status,
+    # recommended_action, ai_feedback}. FIFO-capped at 20 entries.
+    thesis_score_history = Column(
+        JSONB, nullable=False, default=list,
+        server_default=text("'[]'::jsonb"),
+    )
 
     # Plan v5+ Final §简化冷冻: single boolean toggled by monthly regime
     # review instead of full FROZEN/DEPRECATED state machine. is_active=False

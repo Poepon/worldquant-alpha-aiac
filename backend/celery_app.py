@@ -74,6 +74,16 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_alpha_health_check",
         "schedule": crontab(hour=8, minute=0),
     },
+    # P1-C part 2 (2026-05-15): daily hypothesis-health-check at 08:30
+    # Asia/Shanghai. Scheduled AFTER 08:00 alpha-library-health-check so
+    # any sync-induced metric refresh has settled before the hypothesis
+    # aggregates JOIN runs. Output: docs/hypothesis_health_check/<sh-date>.json
+    # (read-mostly — only mutates hypothesis trigger/scoring fields + audit
+    # rows; never touches alphas / quality_status / KB).
+    "hypothesis-health-check": {
+        "task": "backend.tasks.run_hypothesis_health_check",
+        "schedule": crontab(hour=8, minute=30),
+    },
     # V-19.7: revive dead CONTINUOUS_CASCADE sessions. Detects worker crash /
     # silent stalls via task.last_alpha_persisted_at < NOW()-15min and
     # re-dispatches a fresh celery worker. Grace period skips fresh sessions.

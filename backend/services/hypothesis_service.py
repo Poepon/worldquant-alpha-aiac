@@ -22,13 +22,18 @@ of truth is alphas.hypothesis_id JOIN — refresh_stats() reconciles them.
 
 from __future__ import annotations
 
+import json
 import logging
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, asdict, is_dataclass
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, TYPE_CHECKING
 
+import sqlalchemy as sa
 from sqlalchemy import select, update, func, case
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import settings
 from backend.models import (
     Alpha,
     AlphaFailure,
@@ -38,7 +43,40 @@ from backend.models import (
 )
 from backend.services.base import BaseService
 
+if TYPE_CHECKING:  # avoid runtime circular import
+    from backend.services.hypothesis_health_service import LLMThesisScore
+
 logger = logging.getLogger("services.hypothesis")
+
+
+def _safe_avg_num(v) -> Optional[float]:
+    """Stripped-down `_safe_num` for the baseline-stamp helper.
+
+    Avoids importing alpha_health_service here (which would create a
+    cycle hypothesis_service → alpha_health_service → tests of
+    hypothesis_service). Mirrors the same NaN/inf/bool rejection.
+    """
+    import math
+    if v is None or isinstance(v, bool):
+        return None
+    if not isinstance(v, (int, float)):
+        return None
+    if math.isnan(v) or math.isinf(v):
+        return None
+    return float(v)
+
+
+def _hit_to_dict(hit) -> Dict[str, Any]:
+    """Coerce a TriggerHit dataclass / plain dict into a JSONB-safe dict.
+
+    Used by ``mark_triggered`` so callers can pass either dataclass
+    instances (the production path) or plain dicts (test seeding).
+    """
+    if is_dataclass(hit):
+        return asdict(hit)
+    if isinstance(hit, dict):
+        return dict(hit)
+    raise TypeError(f"trigger hit must be dataclass or dict, got {type(hit)!r}")
 
 
 @dataclass
@@ -220,7 +258,15 @@ class HypothesisService(BaseService):
 
     async def mark_promoted(self, hypothesis_id: int) -> bool:
         """ACTIVE/PROPOSED → PROMOTED. Promoted = produced ≥1 PASS alpha;
-        kept indefinitely for KB even after the task ends."""
+        kept indefinitely for KB even after the task ends.
+
+        P1-C part 2 (2026-05-15): on successful UPDATE the method also calls
+        ``_stamp_baseline_if_missing`` under a SAVEPOINT (MFX-3) so the
+        ``baseline_metrics`` snapshot for the dropped_sharpe trigger is
+        recorded at the exact PROMOTED-flip moment. SAVEPOINT isolation
+        means a stamp failure cannot roll back the PROMOTED UPDATE — we
+        log a warning and the next run picks it up.
+        """
         stmt = (
             update(Hypothesis)
             .where(
@@ -233,7 +279,245 @@ class HypothesisService(BaseService):
             .values(status=HypothesisStatus.PROMOTED.value)
         )
         result = await self.db.execute(stmt)
-        return (result.rowcount or 0) > 0
+        promoted = (result.rowcount or 0) > 0
+        if promoted:
+            # MFX-3: wrap the stamp in a SAVEPOINT so its failure cannot
+            # propagate up and rollback the PROMOTED UPDATE. Mirrors the
+            # persistence.py V-27.92 pattern. ``begin_nested()`` on a session
+            # with no active transaction issues an implicit BEGIN first.
+            try:
+                async with self.db.begin_nested():
+                    await self._stamp_baseline_if_missing(hypothesis_id)
+            except Exception as e:  # pragma: no cover — non-fatal best-effort
+                logger.warning(
+                    f"[hypothesis] baseline stamp failed (non-fatal) for "
+                    f"hid={hypothesis_id}: {type(e).__name__}: {e}"
+                )
+        return promoted
+
+    async def _stamp_baseline_if_missing(self, hypothesis_id: int) -> None:
+        """Freeze the (sharpe_avg, fitness_avg, turnover_avg) of all PASS
+        alphas under this hypothesis at the current moment.
+
+        SFX-14: PASS only (not PASS_PROVISIONAL) — provisional starts can
+        be low-sharpe and would warp the baseline towards false-negative
+        T1 triggers. If only PROV alphas exist at PROMOTED time, baseline
+        stays NULL and the next call (after a real PASS lands) fills it in.
+
+        MFX-1: also records ``n_alphas`` so the T1 evaluator can skip
+        small-sample (n<3) baselines.
+
+        MFX-4: orders by ``Alpha.id`` ASC, not ``date_created`` (the
+        BRAIN-supplied timestamp can refer to alphas pre-dating the DB
+        INSERT order). The DB-monotonic PK is the right "first 3 seeds"
+        signal.
+
+        No-op if ``baseline_metrics`` is already populated (idempotent).
+        """
+        h = await self.get_by_id(hypothesis_id)
+        if h is None or h.baseline_metrics is not None:
+            return
+        pass_alphas = (await self.db.execute(
+            select(Alpha)
+            .where(
+                Alpha.hypothesis_id == hypothesis_id,
+                Alpha.quality_status == "PASS",
+            )
+            .order_by(Alpha.id.asc())
+        )).scalars().all()
+        if not pass_alphas:
+            return  # only PROV alphas under this hypothesis — wait
+
+        def _avg(getter):
+            vals = [_safe_avg_num(getter(a)) for a in pass_alphas]
+            vals = [v for v in vals if v is not None]
+            return (sum(vals) / len(vals)) if vals else None
+
+        blob = {
+            "stamped_at": datetime.now(timezone.utc).isoformat(),
+            "n_alphas": len(pass_alphas),
+            # Up to first 3 alpha PKs that contributed — debug breadcrumb.
+            "alpha_pks_seed": [a.id for a in pass_alphas[:3]],
+            "sharpe_avg":   _avg(lambda a: a.is_sharpe),
+            "fitness_avg":  _avg(lambda a: a.is_fitness),
+            "turnover_avg": _avg(lambda a: a.is_turnover),
+        }
+        await self.db.execute(
+            update(Hypothesis)
+            .where(Hypothesis.id == hypothesis_id)
+            .values(baseline_metrics=blob)
+        )
+        logger.info(
+            f"[hypothesis] baseline stamped hid={hypothesis_id} "
+            f"n={blob['n_alphas']} sharpe_avg={blob['sharpe_avg']}"
+        )
+
+    # ------------------------------------------------------------------
+    # P1-C part 2: trigger + LLM scoring helpers
+    # ------------------------------------------------------------------
+
+    def _is_postgres(self) -> bool:
+        """Return True when the bound dialect is PostgreSQL. Used to
+        switch trigger_detail concat between PG-native ``||`` (atomic)
+        and a Python merge fallback (sqlite tests, MFX-5)."""
+        try:
+            bind = self.db.get_bind()
+            return bind.dialect.name == "postgresql"
+        except Exception:
+            return False
+
+    async def mark_triggered(
+        self,
+        hypothesis_id: int,
+        *,
+        hits: List[Any],
+        source: str = "trigger_eval_beat",
+    ) -> bool:
+        """Append novel trigger hits to ``trigger_detail`` and flip
+        ``is_triggered`` to True (idempotent).
+
+        24h dedup: if a hit of the same ``(type, window_rounds)`` already
+        exists with ``hit_at`` within the last 24h, the new hit is silently
+        skipped (avoids the daily beat re-appending the same row forever).
+
+        FIFO cap: ``trigger_detail`` is kept under
+        ``settings.TRIGGER_DETAIL_MAX_ENTRIES`` — oldest entries drop.
+
+        MFX-5: on PG we use the JSONB ``||`` concat operator so concurrent
+        triggers (e.g. manual API + daily beat) never lose a hit. On
+        sqlite (unit tests) there's no real concurrency, so a Python
+        read-modify-write is correct.
+
+        Returns True when at least one new hit was appended OR
+        ``is_triggered`` flipped False→True. Returns False on a fully-deduped
+        no-op so callers can distinguish edges.
+        """
+        if not hits:
+            return False
+        h = await self.get_by_id(hypothesis_id)
+        if h is None:
+            return False
+
+        # Materialize incoming hits as dicts; compute the dedup key set
+        # against existing entries within the 24h window.
+        now_utc = datetime.now(timezone.utc)
+        cutoff = now_utc.timestamp() - 24 * 3600
+        existing = list(h.trigger_detail or [])
+        existing_keys = set()
+        for e in existing:
+            try:
+                hit_at = e.get("hit_at")
+                if not hit_at:
+                    continue
+                t = datetime.fromisoformat(hit_at.replace("Z", "+00:00"))
+                if t.timestamp() < cutoff:
+                    continue
+                existing_keys.add((e.get("type"), e.get("window_rounds")))
+            except Exception:
+                # Malformed legacy entry — ignore in dedup, don't crash.
+                continue
+
+        novel: List[Dict[str, Any]] = []
+        for hit in hits:
+            d = _hit_to_dict(hit)
+            key = (d.get("type"), d.get("window_rounds"))
+            if key in existing_keys:
+                continue
+            existing_keys.add(key)
+            novel.append(d)
+
+        edge = not h.is_triggered  # is this a False → True flip?
+        if not novel and not edge:
+            return False  # fully deduped — no audit-worthy change
+
+        triggered_at_value = h.triggered_at or now_utc
+
+        if self._is_postgres() and novel:
+            # PG: atomic JSONB || concat. Use ``bindparam(type_=JSONB)`` so
+            # SQLAlchemy/asyncpg serialise the python list as JSONB directly.
+            # Passing ``json.dumps(novel)`` into ``cast(..., JSONB)`` would
+            # double-encode (the JSON text gets stored as a JSONB string
+            # containing the array, instead of an actual array).
+            await self.db.execute(
+                update(Hypothesis)
+                .where(Hypothesis.id == hypothesis_id)
+                .values(
+                    trigger_detail=Hypothesis.trigger_detail.op("||")(
+                        sa.bindparam("novel_hits", value=novel, type_=JSONB)
+                    ),
+                    is_triggered=True,
+                    triggered_at=triggered_at_value,
+                )
+            )
+            # Apply FIFO cap if exceeded (in-process read-modify-write —
+            # cheap because the row is already in session cache).
+            await self.db.refresh(h)
+            merged_now = list(h.trigger_detail or [])
+            cap = settings.TRIGGER_DETAIL_MAX_ENTRIES
+            if len(merged_now) > cap:
+                merged_now = merged_now[-cap:]
+                await self.db.execute(
+                    update(Hypothesis)
+                    .where(Hypothesis.id == hypothesis_id)
+                    .values(trigger_detail=merged_now)
+                )
+        else:
+            # sqlite path (unit tests) + PG fallback when no novel hits but
+            # we still need to flip is_triggered. Python merge — safe under
+            # the test event loop where no concurrent updates exist.
+            merged = (existing + novel)[-settings.TRIGGER_DETAIL_MAX_ENTRIES:]
+            await self.db.execute(
+                update(Hypothesis)
+                .where(Hypothesis.id == hypothesis_id)
+                .values(
+                    trigger_detail=merged,
+                    is_triggered=True,
+                    triggered_at=triggered_at_value,
+                )
+            )
+        return True
+
+    async def update_thesis_score(
+        self,
+        hypothesis_id: int,
+        score: "LLMThesisScore",
+        *,
+        scored_at: datetime,
+        status: str,
+    ) -> bool:
+        """Persist an LLM thesis-scoring result.
+
+        ``status`` ∈ {"ok", "fallback_failed", "fallback_schema_invalid"}
+        (SFX-13). Writes ``thesis_score`` / ``ai_feedback`` /
+        ``last_thesis_score_at`` / ``last_thesis_score_status`` and appends
+        a snapshot to ``thesis_score_history`` (FIFO-capped at 20).
+        """
+        if status not in ("ok", "fallback_failed", "fallback_schema_invalid"):
+            raise ValueError(f"invalid status: {status!r}")
+        h = await self.get_by_id(hypothesis_id)
+        if h is None:
+            return False
+        history = list(h.thesis_score_history or [])
+        history.append({
+            "scored_at": scored_at.isoformat() if scored_at else None,
+            "thesis_score": score.thesis_score,
+            "status": status,
+            "recommended_action": score.recommended_action,
+            "ai_feedback": score.ai_feedback,
+        })
+        history = history[-20:]
+        await self.db.execute(
+            update(Hypothesis)
+            .where(Hypothesis.id == hypothesis_id)
+            .values(
+                thesis_score=float(score.thesis_score),
+                ai_feedback=score.ai_feedback,
+                last_thesis_score_at=scored_at,
+                last_thesis_score_status=status,
+                thesis_score_history=history,
+            )
+        )
+        return True
 
     async def mark_abandoned(
         self, hypothesis_id: int, reason: str,
