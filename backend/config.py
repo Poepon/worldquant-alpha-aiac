@@ -316,8 +316,17 @@ class Settings(BaseSettings):
     }
     
     # Multi-Objective Scoring Thresholds
-    SCORE_PASS_THRESHOLD: float = 0.8      # Composite score to pass
-    SCORE_OPTIMIZE_THRESHOLD: float = 0.3  # Score threshold for optimization queue
+    SCORE_PASS_THRESHOLD: float = 0.8      # Composite score to pass (legacy fallback)
+    SCORE_OPTIMIZE_THRESHOLD: float = 0.3  # Score threshold for optimization queue (legacy fallback)
+
+    # Tier-aware score thresholds (P0 #3). Defaults = global values above → zero behaviour change.
+    # Per-tier tuning is a follow-up; setting TIER{N}_SCORE_PASS in .env activates it.
+    TIER1_SCORE_PASS: float = 0.8
+    TIER1_SCORE_OPTIMIZE: float = 0.3
+    TIER2_SCORE_PASS: float = 0.8
+    TIER2_SCORE_OPTIMIZE: float = 0.3
+    TIER3_SCORE_PASS: float = 0.8
+    TIER3_SCORE_OPTIMIZE: float = 0.3
     
     # P0-3: Two-Stage Correlation Check
     CORR_CHECK_THRESHOLD: float = 0.5      # Preliminary score threshold to trigger correlation check

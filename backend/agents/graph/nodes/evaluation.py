@@ -763,8 +763,12 @@ async def node_evaluate(
     prov_turnover_min = prov_cfg.get("turnover_min", turnover_min)
     prov_turnover_max = prov_cfg.get("turnover_max", 0.85)
 
-    score_pass_threshold = getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8)
-    score_optimize_threshold = getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3)
+    # P0 #3: tier-aware score thresholds. tier_cfg["score_pass/optimize"] are
+    # set by get_tier_thresholds() from TIER{N}_SCORE_PASS/OPTIMIZE; their
+    # defaults equal the global 0.8/0.3 constants, so behaviour is unchanged
+    # until per-tier values are explicitly tuned in .env.
+    score_pass_threshold = tier_cfg.get("score_pass", getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8))
+    score_optimize_threshold = tier_cfg.get("score_optimize", getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3))
     corr_check_threshold = getattr(settings, 'CORR_CHECK_THRESHOLD', 0.5)
     logger.info(
         f"[{node_name}] tier={tier_cfg['tier']} sharpe>={sharpe_min} fitness>={fitness_min} "
@@ -1064,141 +1068,60 @@ async def node_evaluate(
             and self_corr_acceptable
         )
 
-        # Determine quality status
-        if hard_gate_pass and (meets_thresholds or score >= score_pass_threshold):
-            # V-16 (2026-05-03): suspicion mode for sharpe > 3.0. Hard flags
-            # downgrade PASS → PASS_PROVISIONAL so the alpha is held for
-            # review rather than entering KB / submission queue. Soft / info
-            # flags only annotate metrics for trace_steps.
-            v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
-            hard_flags = [f for f in v16_flags if f.get("severity") == "hard"]
-            if v16_flags:
-                # V-26.79 (2026-05-13): detach metrics into a fresh dict
-                # before mutating so we don't write through to the metrics
-                # reference that may be shared upstream (LangGraph state,
-                # earlier nodes that populated this object). Pre-fix did
-                # `alpha.metrics["..."] = ...` directly, propagating the
-                # V-16 annotation back into the input state and confusing
-                # replay / debug tooling.
-                alpha.metrics = dict(alpha.metrics) if isinstance(alpha.metrics, dict) else {}
-                alpha.metrics["_v16_suspicion_flags"] = v16_flags
-                logger.warning(
-                    f"[{node_name}] V-16 suspicion mode (sharpe={sharpe:.2f}) | "
-                    f"flags={[f['check'] for f in v16_flags]}"
-                )
-            # Fix C (2026-05-07): BRAIN-aware PASS downgrade.
-            # Internal hard_gate uses SHARPE_MIN=1.0 / FITNESS_MIN=0.5 (探索阈值).
-            # BRAIN submission gate uses higher bar — top-level fitness ≥ ~1.0,
-            # CONCENTRATED_WEIGHT ≤ 10%. Without this check, alpha that pass our
-            # gate but BRAIN already FAIL'd on submittable fields are labelled
-            # PASS and skip the optimization chain forever (see should_optimize
-            # "已接近/达到门槛..." skip branch). Downgrading to PASS_PROVISIONAL
-            # routes them into _collect_optimization_candidates so wrapper /
-            # window optimizations get a chance to push fitness over BRAIN's bar.
-            # V-26.21 (2026-05-13): expand the BRAIN-aware downgrade set.
-            # Original list (LOW_FITNESS / LOW_SHARPE / CONCENTRATED_WEIGHT)
-            # left a theoretical hole — an alpha could PASS via the
-            # `score >= score_pass_threshold` branch in line 903 while BRAIN
-            # had flagged HIGH_TURNOVER / MATCHES_PYRAMID / HIGH_CORRELATION
-            # etc. as failed_checks. 30-day audit
-            # (scripts/v26_21_score_only_pass_audit.py) showed 0% slip-through
-            # today, so this is preemptive — close the hole now before a
-            # prompt change or threshold tweak surfaces it.
-            brain_actionable_fails = [
-                c.get("name") for c in brain_failed_checks or []
-                if c.get("name") in (
-                    "LOW_FITNESS",
-                    "LOW_SHARPE",
-                    "CONCENTRATED_WEIGHT",
-                    "HIGH_TURNOVER",
-                    "LOW_TURNOVER",
-                    "MATCHES_PYRAMID",
-                    "HIGH_CORRELATION",
-                    "SELF_CORRELATION",
-                )
-            ]
-            if hard_flags:
-                alpha.quality_status = "PASS_PROVISIONAL"
-                optimize_count += 1
-            elif not brain_eval['check_details']:
-                # V-27.78: BRAIN returned no checks (session-expiry window,
-                # transient 5xx, etc.) → the BRAIN-side submission gate was
-                # never verified. hard_gate_pass + score>=threshold can still
-                # be True here, reviving the score-only PASS bypass — and the
-                # BRAIN-aware downgrade below can't fire either because
-                # brain_failed_checks is empty. Without a BRAIN verdict the
-                # alpha must NOT be a confident PASS; hold it at PROVISIONAL,
-                # mirroring the unverified-self_corr path.
-                alpha.quality_status = "PASS_PROVISIONAL"
-                optimize_count += 1
-                if isinstance(alpha.metrics, dict):
-                    alpha.metrics["_brain_checks_unverified"] = True
-                logger.info(
-                    f"[{node_name}] PASS→PROVISIONAL: BRAIN returned no checks "
-                    f"(gate unverified) | sharpe={sharpe:.2f}"
-                )
-            elif brain_actionable_fails and not brain_can_submit:
-                alpha.quality_status = "PASS_PROVISIONAL"
-                optimize_count += 1
-                if isinstance(alpha.metrics, dict):
-                    alpha.metrics["_brain_pass_downgrade"] = brain_actionable_fails
-                logger.info(
-                    f"[{node_name}] PASS→PROVISIONAL: BRAIN rejected on {brain_actionable_fails} | "
-                    f"sharpe={sharpe:.2f} fitness={fitness:.2f} expr={(alpha.expression or '')[:80]}"
-                )
-            else:
-                alpha.quality_status = "PASS"
-                pass_count += 1
-        elif near_pass:
-            # V-26.20 (2026-05-13): run V-16 suspicion + annotate BRAIN
-            # actionable fails on the PROVISIONAL path too. The pre-fix code
-            # immediately labelled near_pass alphas PASS_PROVISIONAL without
-            # any further check — a sharpe-4.5 near_pass with hard suspicion
-            # flags (look-ahead / divide-by-zero) entered the KB and optimization
-            # pool unfiltered, polluting both. The flags themselves don't
-            # change the PROV verdict (PROV is already a hold-for-review
-            # state) — they just need to be visible to the KB filter, the
-            # optimization chain ("don't try to upgrade a flagged alpha"),
-            # and downstream submission queueing.
-            v16_flags_prov = _run_suspicion_checks(metrics, alpha.expression or "")
-            if v16_flags_prov:
-                if isinstance(alpha.metrics, dict):
-                    alpha.metrics["_v16_suspicion_flags"] = v16_flags_prov
-                logger.warning(
-                    f"[{node_name}] V-16 suspicion mode on PROVISIONAL "
-                    f"(sharpe={sharpe:.2f}) | flags={[f['check'] for f in v16_flags_prov]}"
-                )
-            # Same brain_actionable_fails set as PASS path. PROV already
-            # holds for review, so we only annotate (no further downgrade).
-            brain_actionable_fails_prov = [
-                c.get("name") for c in brain_failed_checks or []
-                if c.get("name") in (
-                    "LOW_FITNESS",
-                    "LOW_SHARPE",
-                    "CONCENTRATED_WEIGHT",
-                    "HIGH_TURNOVER",
-                    "LOW_TURNOVER",
-                    "MATCHES_PYRAMID",
-                    "HIGH_CORRELATION",
-                    "SELF_CORRELATION",
-                )
-            ]
-            if brain_actionable_fails_prov and isinstance(alpha.metrics, dict):
-                alpha.metrics["_brain_actionable_fails"] = brain_actionable_fails_prov
-            alpha.quality_status = "PASS_PROVISIONAL"
-            optimize_count += 1
-        elif should_opt and score >= score_optimize_threshold:
-            alpha.quality_status = "OPTIMIZE"
-            optimize_count += 1
-        else:
-            alpha.quality_status = "FAIL"
+        # P0 #3: Determine quality status via centralized band router.
+        # Pre-computes shared inputs once — the original decision tree called
+        # _run_suspicion_checks and brain_actionable_fails separately in Band A
+        # (L1073/L1107) and Band B (L1163/L1173); pre-computing here removes the
+        # duplication and makes every input to route_alpha_action() explicit.
+        from backend.alpha_routing import route_alpha_action
+
+        v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
+        hard_v16_flags = [f for f in v16_flags if f.get("severity") == "hard"]
+        # Fix-C / V-26.21: the actionable set covers checks that indicate a
+        # structural BRAIN reject rather than signal weakness, justifying a
+        # downgrade to PASS_PROVISIONAL so the optimization chain gets a chance
+        # to fix fitness/turnover/concentration before queuing submission.
+        brain_actionable_fails_list = [
+            c.get("name") for c in brain_failed_checks or []
+            if c.get("name") in (
+                "LOW_FITNESS",
+                "LOW_SHARPE",
+                "CONCENTRATED_WEIGHT",
+                "HIGH_TURNOVER",
+                "LOW_TURNOVER",
+                "MATCHES_PYRAMID",
+                "HIGH_CORRELATION",
+                "SELF_CORRELATION",
+            )
+        ]
+        decision = route_alpha_action(
+            hard_gate_pass=hard_gate_pass,
+            meets_thresholds=meets_thresholds,
+            score=score,
+            score_pass_threshold=score_pass_threshold,
+            has_v16_hard_flags=bool(hard_v16_flags),
+            brain_checks_present=bool(brain_eval['check_details']),
+            brain_actionable_fails=bool(brain_actionable_fails_list),
+            brain_can_submit=brain_can_submit,
+            near_pass=near_pass,
+            should_optimize=should_opt,
+            score_optimize_threshold=score_optimize_threshold,
+        )
+        alpha.quality_status = decision.status
+
+        if decision.status == "PASS":
+            pass_count += 1
+        elif decision.status == "FAIL":
             fail_count += 1
-            
+        else:  # PASS_PROVISIONAL or OPTIMIZE
+            optimize_count += 1
+
+        if decision.status == "FAIL":
             # Enhanced: Alignment check and attribution for failures
             # This helps distinguish hypothesis failure from implementation failure
             alignment_issues = []
             attribution = "unknown"
-            
+
             # Get hypothesis from alpha if available
             hypothesis_dict = {}
             if hasattr(alpha, 'hypothesis') and alpha.hypothesis:
@@ -1206,13 +1129,13 @@ async def node_evaluate(
                     hypothesis_dict = alpha.hypothesis
                 else:
                     hypothesis_dict = {"statement": alpha.hypothesis}
-            
+
             # Quick alignment check
             if hypothesis_dict and alpha.expression:
                 is_aligned, alignment_issues = quick_alignment_check(
                     hypothesis_dict, alpha.expression, state.fields
                 )
-                
+
                 # Determine attribution
                 result_dict = {
                     "success": False,
@@ -1223,12 +1146,12 @@ async def node_evaluate(
                 attribution = determine_attribution_heuristic(
                     result_dict, alignment_issues, alpha.validation_error
                 )
-                
+
                 if not is_aligned:
                     logger.debug(
                         f"[{node_name}] Alignment issues for {alpha.alpha_id}: {alignment_issues[:2]}"
                     )
-            
+
             # Determine error type
             # P0: BRAIN check FAIL 优先匹配（来自 metrics.checks），它们指向具体
             # settings/结构修法（truncation / neutralization / sub-universe），
@@ -1259,7 +1182,7 @@ async def node_evaluate(
                     error_type = "HIGH_TURNOVER"
                 elif sharpe < 0:
                     error_type = "NEGATIVE_SIGNAL"
-            
+
             if alpha.expression:
                 failure_feedback_queue.append({
                     "expression": alpha.expression,
@@ -1313,6 +1236,40 @@ async def node_evaluate(
             "_pyramid_multiplier": (brain_eval.get('pyramid_info') or {}).get('multiplier', 1.0),
         }
         
+        # Routing annotations — written after the alpha.metrics = {...} assignment
+        # above so they are not lost by the **metrics spread (V-26.79 pattern).
+        # Only PASS / PASS_PROVISIONAL paths annotate; FAIL and OPTIMIZE don't
+        # need per-flag decoration (FAIL attribution is in failure_feedback_queue).
+        if decision.status in ("PASS", "PASS_PROVISIONAL"):
+            alpha.metrics["_routing_reason"] = decision.reason
+            if v16_flags:
+                alpha.metrics["_v16_suspicion_flags"] = v16_flags
+                if decision.reason == "near_pass":
+                    logger.warning(
+                        f"[{node_name}] V-16 suspicion mode on PROVISIONAL "
+                        f"(sharpe={sharpe:.2f}) | flags={[f['check'] for f in v16_flags]}"
+                    )
+                else:
+                    logger.warning(
+                        f"[{node_name}] V-16 suspicion mode (sharpe={sharpe:.2f}) | "
+                        f"flags={[f['check'] for f in v16_flags]}"
+                    )
+            if decision.reason == "brain_checks_unverified":
+                alpha.metrics["_brain_checks_unverified"] = True
+                logger.info(
+                    f"[{node_name}] PASS→PROVISIONAL: BRAIN returned no checks "
+                    f"(gate unverified) | sharpe={sharpe:.2f}"
+                )
+            elif decision.reason == "brain_actionable_fails":
+                alpha.metrics["_brain_pass_downgrade"] = brain_actionable_fails_list
+                logger.info(
+                    f"[{node_name}] PASS→PROVISIONAL: BRAIN rejected on "
+                    f"{brain_actionable_fails_list} | sharpe={sharpe:.2f} "
+                    f"fitness={fitness:.2f} expr={(alpha.expression or '')[:80]}"
+                )
+            elif decision.reason == "near_pass" and brain_actionable_fails_list:
+                alpha.metrics["_brain_actionable_fails"] = brain_actionable_fails_list
+
         _debug_log("F", "nodes.py:evaluate:alpha_detail", f"Alpha evaluated: {alpha.quality_status}", {
             "alpha_id": alpha.alpha_id,
             "expression": alpha.expression[:80] if alpha.expression else None,
