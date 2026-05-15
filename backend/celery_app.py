@@ -65,6 +65,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_phase3_readiness_check",
         "schedule": crontab(day_of_week="mon", hour=4, minute=0),
     },
+    # P1-C (2026-05-15): daily alpha-library health check at 08:00 Asia/Shanghai.
+    # Output: docs/alpha_health_check/<sh-date>.json (read-only, no demotion).
+    # Scheduled at 08:00 (not 07:00) to give 90min buffer after 06:30
+    # refresh-os-correlation-cache + monitor-llm-op-hallucinations, since
+    # the Windows Celery worker is --pool=solo (serial).
+    "alpha-health-check": {
+        "task": "backend.tasks.run_alpha_health_check",
+        "schedule": crontab(hour=8, minute=0),
+    },
     # V-19.7: revive dead CONTINUOUS_CASCADE sessions. Detects worker crash /
     # silent stalls via task.last_alpha_persisted_at < NOW()-15min and
     # re-dispatches a fresh celery worker. Grace period skips fresh sessions.

@@ -55,6 +55,8 @@ from backend.tasks.session_watchdog import (
 )
 # V-22.3 long-term: daily LLM-op-hallucination monitor
 from backend.tasks.llm_op_monitor import monitor_llm_op_hallucinations
+# P1-C (2026-05-15): daily alpha-library health check task
+from backend.tasks.alpha_health_check import run_alpha_health_check
 
 __all__ = [
     # Utilities
@@ -86,4 +88,6 @@ __all__ = [
     "quota_guard_pause_at_threshold",
     # V-22.3 long-term: LLM op hallucination monitor
     "monitor_llm_op_hallucinations",
+    # P1-C: daily alpha-library health check
+    "run_alpha_health_check",
 ]

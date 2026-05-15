@@ -279,6 +279,22 @@ class Settings(BaseSettings):
     DIVERSITY_OPERATOR_WEIGHT: float = 0.25
     DIVERSITY_SETTINGS_WEIGHT: float = 0.15
 
+    # P1-C (2026-05-15): alpha library health check thresholds + weights.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `health-check`.
+    # Consumed by backend/services/alpha_health_service.py via
+    # ``from backend.config import settings`` (top-level import — never
+    # inside a function body, so monkeypatching for tests works).
+    STALE_YELLOW_DAYS: int = 7
+    STALE_ORANGE_DAYS: int = 14
+    STALE_RED_DAYS: int = 30
+    DRIFT_YELLOW_PCT: float = -10.0
+    DRIFT_ORANGE_PCT: float = -30.0
+    DRIFT_RED_PCT: float = -50.0
+    HEALTH_WEIGHT_STALE: float = 0.35
+    HEALTH_WEIGHT_DRIFT: float = 0.50
+    HEALTH_WEIGHT_ORPHAN: float = 0.15
+    HEALTH_SCORE_TRUNCATE_THRESHOLD: int = 70
+
     # PR7 — incremental persistence for T2/T3 tasks. By default, T2/T3 work-
     # flow batches all 8+ seeds before run_with_persistence writes Alpha rows
     # to DB (workflow.run() only returns at END). This means a 1-hour task
