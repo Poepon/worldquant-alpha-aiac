@@ -9,10 +9,15 @@ P2-2: Multi-fidelity evaluation
 This significantly reduces simulation costs while maintaining quality.
 """
 
+import asyncio
+import time
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from loguru import logger
+
+from backend.genetic_optimizer import enumerate_window_perturbations
 
 
 class FidelityLevel(Enum):
@@ -414,13 +419,24 @@ class RobustnessGate:
     本类只做:
       1. 枚举 ``enumerate_window_perturbations`` 变体(deterministic, M-5)。
       2. 用 baseline ``_sim_settings`` 并发 simulate 变体(``return_exceptions=True``,M-3)。
-      3. 每完成一次 simulate 递增 Redis counter ``aiac:robustness_today_used``
-         (TTL 86400s,M-1) — 失败静默不阻塞。
+      3. 每完成一次 simulate 递增 Redis counter
+         ``aiac:robustness_used:<UTC-date>`` (TTL 36h,P2 fix) — 按 UTC 日
+         分桶,与 BRAIN 00:00 UTC 日重置严格对齐;失败静默不阻塞。
       4. 计算 worst / median / ratio / can_submit consistency 并返回。
     """
 
-    REDIS_COUNTER_KEY = "aiac:robustness_today_used"
-    REDIS_COUNTER_TTL = 86400  # seconds — auto-reset across day
+    # P2 fix: key 按 UTC 日期分桶(原 "aiac:robustness_today_used" + 24h
+    # 滑动 TTL 与 BRAIN 00:00 UTC 日重置错位,跨午夜会把昨天的 burns 算
+    # 进今天的 budget,过度保守地 SKIP)。TTL 留 36h 让早上同时存在前
+    # 一日 key + 当天 key,防 worker 时钟 1-2h 偏差时丢计数。
+    REDIS_COUNTER_KEY_PREFIX = "aiac:robustness_used"
+    REDIS_COUNTER_TTL = 36 * 3600  # 36h — covers worker clock skew
+
+    @classmethod
+    def today_key(cls, now_utc: Optional[datetime] = None) -> str:
+        """Return the Redis key for the UTC date `now_utc` (default: now)."""
+        d = (now_utc or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+        return f"{cls.REDIS_COUNTER_KEY_PREFIX}:{d}"
 
     def __init__(
         self,
@@ -452,10 +468,6 @@ class RobustnessGate:
             this call in ``asyncio.wait_for`` to enforce a hard per-alpha
             timeout (S-5).
         """
-        import time
-        import asyncio
-        from backend.genetic_optimizer import enumerate_window_perturbations
-
         t0 = time.time()
         m = alpha.metrics if isinstance(alpha.metrics, dict) else {}
         base_sharpe_raw = m.get("sharpe")
@@ -515,10 +527,9 @@ class RobustnessGate:
                 # 服务端配额按 sim 调用记账,失败也算。
                 if self.redis is not None:
                     try:
-                        await self.redis.incr(self.REDIS_COUNTER_KEY)
-                        await self.redis.expire(
-                            self.REDIS_COUNTER_KEY, self.REDIS_COUNTER_TTL
-                        )
+                        _key = self.today_key()
+                        await self.redis.incr(_key)
+                        await self.redis.expire(_key, self.REDIS_COUNTER_TTL)
                     except Exception:
                         pass  # counter 失败不阻塞主流程
                 return r

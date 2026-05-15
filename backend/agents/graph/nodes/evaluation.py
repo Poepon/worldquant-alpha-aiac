@@ -40,6 +40,9 @@ from backend.alpha_scoring import (
     evaluate_with_brain_checks,
 )
 from backend.services.correlation_service import CorrelationService, CorrSource
+from backend.multi_fidelity_eval import RobustnessGate
+from backend.tasks.session_watchdog import _quota_guard_async
+import redis.asyncio as _rb_redis_aio
 
 
 # =============================================================================
@@ -1927,14 +1930,14 @@ async def node_evaluate(
     robustness_skipped_quota = 0
     robustness_skipped_round_cap = 0
     robustness_skipped_timeout = 0
-    robustness_skipped_other = 0
+    robustness_skipped_baseline_missing = 0  # P3 fix: split _other into 4 buckets
+    robustness_skipped_baseline_zero = 0
+    robustness_skipped_sim_failed = 0
+    robustness_skipped_exception = 0
     robustness_sim_failed_total = 0
 
     if brain is not None and getattr(settings, "ENABLE_ROBUSTNESS_CHECK", False):
         try:
-            from backend.multi_fidelity_eval import RobustnessGate
-            import redis.asyncio as _rb_redis_aio
-
             _rb_n = getattr(settings, "ROBUSTNESS_N_PERTURBATIONS", 4)
             _rb_ratio = getattr(settings, "ROBUSTNESS_MIN_RATIO", 0.7)
             _rb_cap = getattr(settings, "MAX_ROBUSTNESS_PER_ROUND", 5)
@@ -1954,7 +1957,6 @@ async def node_evaluate(
             _rb_today_total = 0
             _rb_limit = getattr(settings, "BRAIN_DAILY_SIMULATE_LIMIT", 1000)
             try:
-                from backend.tasks.session_watchdog import _quota_guard_async
                 _q = await _quota_guard_async()
                 _rb_today_total = int(_q.get("today_total_count", 0) or 0)
                 _rb_limit = int(
@@ -1970,7 +1972,9 @@ async def node_evaluate(
                 _rb_redis = _rb_redis_aio.from_url(
                     settings.REDIS_URL, decode_responses=True
                 )
-                _rb_extra_raw = await _rb_redis.get(RobustnessGate.REDIS_COUNTER_KEY)
+                # P2 fix: per-UTC-day key, aligned with BRAIN 00:00 UTC reset.
+                _rb_today_key = RobustnessGate.today_key()
+                _rb_extra_raw = await _rb_redis.get(_rb_today_key)
                 _rb_robustness_extra = int(_rb_extra_raw or 0)
             except Exception as _rb_r_exc:
                 _rb_redis = None
@@ -2038,7 +2042,7 @@ async def node_evaluate(
                     if _rb_redis is not None:
                         try:
                             _cur_extra_raw = await _rb_redis.get(
-                                RobustnessGate.REDIS_COUNTER_KEY
+                                RobustnessGate.today_key()
                             )
                             _cur_extra = int(_cur_extra_raw or 0)
                             _cur_pct = (
@@ -2067,7 +2071,7 @@ async def node_evaluate(
                             f"{(_rb_alpha.expression or '')[:60]!r}: {_rb_exc}"
                         )
                         _rb_alpha.metrics["_robustness_skipped"] = "exception"
-                        robustness_skipped_other += 1
+                        robustness_skipped_exception += 1
                         continue
 
                     robustness_attempted += 1
@@ -2080,10 +2084,18 @@ async def node_evaluate(
 
                     if result.skip_reason:
                         _rb_alpha.metrics["_robustness_skipped"] = result.skip_reason
+                        # P3 fix: split _other into 4 specific buckets so ops
+                        # can distinguish data-deficit vs sim-failure vs code-bug.
                         if result.skip_reason == "no_window":
                             robustness_skipped_no_window += 1
+                        elif result.skip_reason == "baseline_metrics_missing":
+                            robustness_skipped_baseline_missing += 1
+                        elif result.skip_reason == "baseline_sharpe_zero":
+                            robustness_skipped_baseline_zero += 1
+                        elif result.skip_reason == "all_perturbations_failed":
+                            robustness_skipped_sim_failed += 1
                         else:
-                            robustness_skipped_other += 1
+                            robustness_skipped_exception += 1
                         continue
 
                     # 成功完成 check (passed=True 或 False)
@@ -2387,7 +2399,10 @@ async def node_evaluate(
             "robustness_skipped_quota": robustness_skipped_quota,
             "robustness_skipped_round_cap": robustness_skipped_round_cap,
             "robustness_skipped_timeout": robustness_skipped_timeout,
-            "robustness_skipped_other": robustness_skipped_other,
+            "robustness_skipped_baseline_missing": robustness_skipped_baseline_missing,
+            "robustness_skipped_baseline_zero": robustness_skipped_baseline_zero,
+            "robustness_skipped_sim_failed": robustness_skipped_sim_failed,
+            "robustness_skipped_exception": robustness_skipped_exception,
             "robustness_sim_failed_total": robustness_sim_failed_total,
             "provisional_count": provisional_count,
             "pending_count": pending_count,

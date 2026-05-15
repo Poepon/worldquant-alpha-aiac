@@ -571,7 +571,10 @@ async def test_trace_counters_populated():
         "robustness_skipped_quota",
         "robustness_skipped_round_cap",
         "robustness_skipped_timeout",
-        "robustness_skipped_other",
+        "robustness_skipped_baseline_missing",
+        "robustness_skipped_baseline_zero",
+        "robustness_skipped_sim_failed",
+        "robustness_skipped_exception",
         "robustness_sim_failed_total",
     ):
         assert key in output, f"trace output missing {key}: {sorted(output.keys())}"
@@ -637,7 +640,10 @@ async def test_disabled_zero_trace_drift():
         "robustness_skipped_quota",
         "robustness_skipped_round_cap",
         "robustness_skipped_timeout",
-        "robustness_skipped_other",
+        "robustness_skipped_baseline_missing",
+        "robustness_skipped_baseline_zero",
+        "robustness_skipped_sim_failed",
+        "robustness_skipped_exception",
         "robustness_sim_failed_total",
     ):
         assert output.get(key, 0) == 0, f"counter {key} should be 0 when flag OFF"

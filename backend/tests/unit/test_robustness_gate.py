@@ -118,10 +118,30 @@ class TestEnumerateWindowPerturbations:
         c = enumerate_window_perturbations("ts_rank(close, 22)", n=4)
         assert a == b == c
 
-    def test_ternary_function_returns_empty(self):
-        # ts_co_skewness(x, y, 20) — regex captures (x, y) as second arg, fails \\d+.
-        # M-4: documented hole — third-arg windows missed.
-        assert enumerate_window_perturbations("ts_co_skewness(close, returns, 20)") == []
+    def test_ternary_function_perturbed(self):
+        # P3 fix: ternary ts_co_skewness(x, y, 20) — last positional digit
+        # arg (= window) is now correctly identified by the balanced-paren
+        # parser. Pre-fix the flat regex returned [].
+        variants = enumerate_window_perturbations(
+            "ts_co_skewness(close, returns, 20)", n=4
+        )
+        assert len(variants) == 4
+        # First variant should change ONLY the window, keeping (close, returns) intact.
+        assert variants[0][0].startswith("ts_co_skewness(close, returns, ")
+        assert variants[0][0].endswith(")")
+        assert "ts_co_skewness 20 -> " in variants[0][1]
+
+    def test_nested_inner_calls_perturbed(self):
+        # P3 fix: ts_corr(rank(close), rank(returns), 20) — inner () would
+        # break the flat-regex `[^,]+` second-arg match; balanced-paren
+        # parser handles it.
+        variants = enumerate_window_perturbations(
+            "ts_corr(rank(close), rank(returns), 20)", n=2,
+        )
+        assert len(variants) == 2
+        for new_expr, _desc in variants:
+            assert new_expr.startswith("ts_corr(rank(close), rank(returns), ")
+            assert new_expr.endswith(")")
 
     def test_non_standard_window_still_enumerates(self):
         # Original window 7 not in WINDOW_VALUES; still picks nearest.
@@ -417,7 +437,8 @@ class TestRobustnessGateCheck:
             assert "_sim_settings_reason" not in call
 
     async def test_redis_counter_incremented(self):
-        # M-1: each successful simulate increments aiac:robustness_today_used.
+        # M-1 + P2 fix: each successful simulate increments the per-UTC-day
+        # key (was: a single sliding-TTL "today_used" key).
         redis = MagicMock()
         redis.incr = AsyncMock(return_value=1)
         redis.expire = AsyncMock(return_value=True)
@@ -435,9 +456,11 @@ class TestRobustnessGateCheck:
         assert redis.incr.await_count == 3
         # Every incr followed by expire (TTL refresh)
         assert redis.expire.await_count == 3
-        # Correct key
+        # Key is per-UTC-day; verify it has the right prefix + a date suffix.
+        expected_key = RobustnessGate.today_key()
+        assert expected_key.startswith(RobustnessGate.REDIS_COUNTER_KEY_PREFIX + ":")
         for call in redis.incr.await_args_list:
-            assert call.args[0] == RobustnessGate.REDIS_COUNTER_KEY
+            assert call.args[0] == expected_key
 
     async def test_redis_counter_failure_does_not_break_check(self):
         # Counter failure must NOT block the gate.
