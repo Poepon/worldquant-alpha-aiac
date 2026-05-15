@@ -72,7 +72,10 @@ def _make_sig(
     skeleton: str = "ts_rank(...)",
     region: str = "USA",
     category: str = "static_finding",
-    failure_count: int = 1,
+    # P2 review fix: default ≥ min_failure_count_to_promote (=2) so existing
+    # "upsert behavior" tests still go through the promotion path. Tests that
+    # specifically exercise the singleton-skip behavior pass failure_count=1.
+    failure_count: int = 2,
     last_seen_at: str = None,
 ) -> FailureSignature:
     """Generate a tagged signature. The signature_key embeds _TAG via the
@@ -213,6 +216,106 @@ class TestUpsertPitfalls:
             assert row is not None, (
                 f"SAVEPOINT did not isolate — sig {sig.rule_id} lost"
             )
+
+    @pytest.mark.asyncio
+    async def test_singleton_signature_not_promoted_by_default(self, pg_session):
+        """P2 review fix: default min_failure_count_to_promote=2 keeps
+        single-fire signatures OUT of the KB. The take-profit research
+        principle is 'repeated failures sediment', not every one-off.
+        Counter goes to 'skipped', no row written."""
+        svc = NegativeKnowledgeService(pg_session)
+        # Explicit failure_count=1 (override _make_sig's bumped default).
+        sig = _make_sig(rule_id="RISK_SINGLETON", failure_count=1)
+        counters = await svc.upsert_pitfalls([sig])
+        assert counters["skipped"] == 1
+        assert counters["new"] == 0
+        assert counters["updated"] == 0
+
+        row = (await pg_session.execute(
+            select(KnowledgeEntry).where(
+                KnowledgeEntry.pattern == f"PITFALL::{sig.signature_key}",
+            )
+        )).scalar_one_or_none()
+        assert row is None, "singleton signature should NOT have been written"
+
+    @pytest.mark.asyncio
+    async def test_singleton_promoted_when_explicit_threshold_lower(
+        self, pg_session,
+    ):
+        """Callers can opt back into eager promotion via the kwarg."""
+        svc = NegativeKnowledgeService(pg_session)
+        sig = _make_sig(rule_id="RISK_SINGLETON_EAGER", failure_count=1)
+        counters = await svc.upsert_pitfalls(
+            [sig], min_failure_count_to_promote=1,
+        )
+        assert counters["new"] == 1
+        assert counters["skipped"] == 0
+
+    @pytest.mark.asyncio
+    async def test_curator_deactivate_preserved_on_update(self, pg_session):
+        """P2 review fix: existing.is_active=False set by a curator must
+        survive a subsequent upsert. Pre-fix the UPDATE branch did
+        ``existing.is_active = True`` unconditionally, silently undoing
+        manual ops decisions. Now we only auto-revive rows we authored
+        (created_by='P2D_NEGKB')."""
+        svc = NegativeKnowledgeService(pg_session)
+        sig = _make_sig(rule_id="RISK_CURATOR", failure_count=5)
+        # 1) First write — our row, is_active=True.
+        await svc.upsert_pitfalls([sig])
+        row = (await pg_session.execute(
+            select(KnowledgeEntry).where(
+                KnowledgeEntry.pattern == f"PITFALL::{sig.signature_key}",
+            )
+        )).scalar_one()
+        # 2) Simulate curator: flip is_active=False AND change created_by
+        # to a non-P2D origin (mimics "ops took ownership of this entry").
+        row.is_active = False
+        row.created_by = "CURATOR_MANUAL"
+        pg_session.add(row)
+        await pg_session.commit()
+        # 3) Another failure fires the same signature — should NOT revive.
+        sig_again = _make_sig(rule_id="RISK_CURATOR", failure_count=3)
+        await svc.upsert_pitfalls([sig_again])
+        row_after = (await pg_session.execute(
+            select(KnowledgeEntry).where(
+                KnowledgeEntry.pattern == f"PITFALL::{sig_again.signature_key}",
+            )
+        )).scalar_one()
+        assert row_after.is_active is False, (
+            "curator's deactivation was silently reverted by upsert"
+        )
+        assert row_after.created_by == "CURATOR_MANUAL"
+        # fail_count still updates — counters/last_seen are diagnostic-only.
+        assert (row_after.meta_data or {}).get("fail_count") == 8
+
+    @pytest.mark.asyncio
+    async def test_our_own_deactivated_row_is_revived(self, pg_session):
+        """Symmetric: a row WE wrote and that later went is_active=False
+        (e.g. by a cleanup task that prunes stale rows) SHOULD be revived
+        when the pattern fires again. created_by='P2D_NEGKB' guard
+        permits the auto-revive on our rows only."""
+        svc = NegativeKnowledgeService(pg_session)
+        sig = _make_sig(rule_id="RISK_OURS_REVIVE", failure_count=5)
+        await svc.upsert_pitfalls([sig])
+        row = (await pg_session.execute(
+            select(KnowledgeEntry).where(
+                KnowledgeEntry.pattern == f"PITFALL::{sig.signature_key}",
+            )
+        )).scalar_one()
+        assert row.created_by == "P2D_NEGKB"
+        row.is_active = False
+        pg_session.add(row)
+        await pg_session.commit()
+        sig_again = _make_sig(rule_id="RISK_OURS_REVIVE", failure_count=2)
+        await svc.upsert_pitfalls([sig_again])
+        row_after = (await pg_session.execute(
+            select(KnowledgeEntry).where(
+                KnowledgeEntry.pattern == f"PITFALL::{sig_again.signature_key}",
+            )
+        )).scalar_one()
+        assert row_after.is_active is True, (
+            "our own deactivated row must auto-revive on next failure"
+        )
 
 
 class TestFetchTopPitfalls:

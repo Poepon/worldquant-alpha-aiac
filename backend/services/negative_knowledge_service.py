@@ -187,7 +187,7 @@ class NegativeKnowledgeService(BaseService):
         self,
         signatures: List[FailureSignature],
         *,
-        min_failure_count_to_promote: int = 1,
+        min_failure_count_to_promote: int = 2,
     ) -> Dict[str, int]:
         """Aggregate then UPSERT into knowledge_entries.
 
@@ -195,6 +195,14 @@ class NegativeKnowledgeService(BaseService):
         violation race, JSON shape mismatch, etc.) does not lose the whole
         batch. Counters returned: ``new`` / ``updated`` / ``skipped`` /
         ``errors``.
+
+        ``min_failure_count_to_promote`` default is ``2`` (P2 review fix):
+        the take-profit research principle is "**repeated** failures
+        sediment" — single-fire signatures are mostly noise. Promoting
+        them at count=1 caused KB to fill linearly with one-off events
+        that the retrieve path (``fetch_top_pitfalls`` min_fail_count=3)
+        never surfaces anyway. Callers wanting eager promotion (e.g.
+        scripts re-running over a known-clean window) can override.
         """
         counters: Dict[str, int] = {
             "new": 0, "updated": 0, "skipped": 0, "errors": 0,
@@ -245,7 +253,12 @@ class NegativeKnowledgeService(BaseService):
         existing = (await self.db.execute(stmt)).scalar_one_or_none()
 
         if existing is not None:
-            existing.is_active = True
+            # P2 review fix: do NOT clobber a curator's manual is_active=False.
+            # Only auto-revive rows we authored ourselves ("P2D_NEGKB" created_by);
+            # human-disabled / other-source rows keep their explicit state and
+            # only get their fail_count / last_seen_at updated.
+            if existing.created_by == "P2D_NEGKB" and not existing.is_active:
+                existing.is_active = True
             existing.description = (sig.remediation_hint or "")[:240]
             existing.entry_type = "FAILURE_PITFALL"
             meta = dict(existing.meta_data or {})
