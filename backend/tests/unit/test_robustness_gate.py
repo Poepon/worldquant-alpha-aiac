@@ -122,26 +122,41 @@ class TestEnumerateWindowPerturbations:
         # P3 fix: ternary ts_co_skewness(x, y, 20) — last positional digit
         # arg (= window) is now correctly identified by the balanced-paren
         # parser. Pre-fix the flat regex returned [].
+        from backend.genetic_optimizer import WINDOW_VALUES
         variants = enumerate_window_perturbations(
-            "ts_co_skewness(close, returns, 20)", n=4
+            "ts_co_skewness(close, returns, 20)", n=4,
         )
-        assert len(variants) == 4
-        # First variant should change ONLY the window, keeping (close, returns) intact.
-        assert variants[0][0].startswith("ts_co_skewness(close, returns, ")
-        assert variants[0][0].endswith(")")
-        assert "ts_co_skewness 20 -> " in variants[0][1]
+        # Exact expected outputs: 4 nearest WINDOW_VALUES to 20, in
+        # (abs distance, value) order. Inner args (close, returns) intact.
+        nearest_4 = sorted(
+            (w for w in WINDOW_VALUES if w != 20),
+            key=lambda w: (abs(w - 20), w),
+        )[:4]
+        expected = [
+            (f"ts_co_skewness(close, returns, {w})",
+             f"window_perturbation: ts_co_skewness 20 -> {w}")
+            for w in nearest_4
+        ]
+        assert variants == expected
 
     def test_nested_inner_calls_perturbed(self):
         # P3 fix: ts_corr(rank(close), rank(returns), 20) — inner () would
         # break the flat-regex `[^,]+` second-arg match; balanced-paren
         # parser handles it.
+        from backend.genetic_optimizer import WINDOW_VALUES
         variants = enumerate_window_perturbations(
             "ts_corr(rank(close), rank(returns), 20)", n=2,
         )
-        assert len(variants) == 2
-        for new_expr, _desc in variants:
-            assert new_expr.startswith("ts_corr(rank(close), rank(returns), ")
-            assert new_expr.endswith(")")
+        nearest_2 = sorted(
+            (w for w in WINDOW_VALUES if w != 20),
+            key=lambda w: (abs(w - 20), w),
+        )[:2]
+        expected = [
+            (f"ts_corr(rank(close), rank(returns), {w})",
+             f"window_perturbation: ts_corr 20 -> {w}")
+            for w in nearest_2
+        ]
+        assert variants == expected
 
     def test_non_standard_window_still_enumerates(self):
         # Original window 7 not in WINDOW_VALUES; still picks nearest.

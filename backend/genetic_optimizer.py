@@ -320,27 +320,36 @@ def mutate_operator_substitution(expression: str) -> Tuple[str, str]:
 def mutate_window_parameter(expression: str) -> Tuple[str, str]:
     """
     Mutate window parameter values.
-    
+
     Returns:
         (mutated_expression, description)
+
+    Uses ``_find_window_sites`` (balanced-paren walker) so ternary ops
+    (``ts_corr(x, y, 20)`` / ``ts_co_skewness(x, y, 20)``) and inner
+    nested calls (``ts_corr(rank(close), rank(returns), 20)``) are
+    correctly enumerated — the prior narrow regex
+    ``(ts_*|group_*)(<inner>, NUM)`` was binary-only and silently
+    returned ``no_window_params`` for those forms, leaving GA window
+    mutation a no-op on the most common BRAIN time-series ops.
     """
-    # Pattern: function(field, NUMBER)
-    window_pattern = re.compile(r'(ts_\w+|group_\w+)\s*\(\s*([^,]+)\s*,\s*(\d+)')
-    matches = list(window_pattern.finditer(expression))
-    
-    if not matches:
+    sites = _find_window_sites(expression)
+    if not sites:
         return expression, "no_window_params"
-    
-    # Pick random window to mutate
-    match = random.choice(matches)
-    func_name = match.group(1)
-    original_window = int(match.group(3))
-    
-    # Pick new window value
-    new_window = random.choice([w for w in WINDOW_VALUES if w != original_window])
-    
-    mutated = expression[:match.start(3)] + str(new_window) + expression[match.end(3):]
-    return mutated, f"window: {func_name} {original_window} -> {new_window}"
+
+    site = random.choice(sites)
+    original_window = site["window_value"]
+    new_window = random.choice(
+        [w for w in WINDOW_VALUES if w != original_window]
+    )
+    mutated = (
+        expression[:site["window_start"]]
+        + str(new_window)
+        + expression[site["window_end"]:]
+    )
+    return (
+        mutated,
+        f"window: {site['func_name']} {original_window} -> {new_window}",
+    )
 
 
 _WINDOW_NAME_RE = re.compile(r'(ts_\w+|group_\w+)\s*\(')
