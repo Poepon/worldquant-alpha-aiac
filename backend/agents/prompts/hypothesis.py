@@ -65,15 +65,19 @@ on field family. NOTE: `expected_signal=mean_reversion` is auto-mapped to
 may emit either or both. When the user prompt's pillar-nudge names a target
 pillar, BIAS toward hypotheses in that pillar.
 
-**Macro Context Use (P2-A, 2026-05-16)**:
-When the user prompt's "Macro Context — Economic Mechanism Anchors" section
-is non-empty, your `rationale` MUST explicitly reference the corresponding
-field/category transmission_channel from that section, and your
-`expected_signal` SHOULD align with the narrative's expected_signal_hint
-(if you have reason to deviate, justify it in `rationale`). When the
-section is absent, behave as before.
-
 Output must be valid JSON."""
+
+
+# P2 review fix: the Macro Context Use instruction MOVED out of
+# HYPOTHESIS_SYSTEM (which would render even when ENABLE_MACRO_NARRATIVE_
+# GUIDANCE=False, breaking the byte-for-byte legacy claim) and INTO the
+# user-prompt's macro block — only attached when narratives are present.
+_MACRO_CONTEXT_USE_INSTRUCTION = (
+    "**Use of Macro Context**: Your `rationale` MUST explicitly reference "
+    "the relevant transmission_channel from the section above, and your "
+    "`expected_signal` SHOULD align with the narrative's "
+    "expected_signal_hint (justify any deviation in `rationale`)."
+)
 
 
 DISTILL_SYSTEM = """You are a research assistant helping to identify promising research directions.
@@ -154,8 +158,12 @@ The balance depends on current progress:
     macro_context_block = build_macro_context_block(
         getattr(ctx, "macro_narratives", []) or []
     )
+    # P2 review fix: when block is non-empty, append the "Use of Macro Context"
+    # instruction inline (was previously in HYPOTHESIS_SYSTEM, which always
+    # rendered and broke the byte-for-byte legacy invariant on flag=off).
     macro_block_with_leading_newline = (
-        f"\n{macro_context_block}\n" if macro_context_block else ""
+        f"\n{macro_context_block}\n\n{_MACRO_CONTEXT_USE_INSTRUCTION}\n"
+        if macro_context_block else ""
     )
     
     # Plan v5+ §Phase 1: cross-dataset hypothesis section.

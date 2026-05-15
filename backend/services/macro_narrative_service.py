@@ -146,9 +146,10 @@ class MacroNarrativeService(BaseService):
             # wins" so we overwrite. Note: pattern_hash includes source
             # so seed and llm rows are separate keys; an LLM upsert never
             # clobbers a seed row (different hash).
+            # Reassignment (not in-place mutation) — SQLAlchemy attribute
+            # setter detects the change automatically; flag_modified() not
+            # needed (it's only required when mutating the existing dict).
             existing.meta_data = payload["meta_data"]
-            from sqlalchemy.orm.attributes import flag_modified
-            flag_modified(existing, "meta_data")
             self.db.add(existing)
             return "updated"
 
@@ -208,7 +209,11 @@ class MacroNarrativeService(BaseService):
         if region:
             sql += " AND df.region = :region"
             params["region"] = region
-        sql += " ORDER BY df.field_id LIMIT :lim"
+        # P2 review fix: ORDER BY region FIRST so the task can groupby
+        # and produce region-homogeneous batches. Without this the LLM
+        # gets one region's market context but writes narratives for
+        # cross-region fields, all stamped with batch[0]'s region.
+        sql += " ORDER BY df.region, df.field_id LIMIT :lim"
         params["lim"] = int(limit)
 
         try:

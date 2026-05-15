@@ -128,118 +128,140 @@ async def _run_async() -> Dict[str, Any]:
                 from backend.agents.services.llm_service import LLMService
                 llm_service = LLMService()
 
-                # Per-batch loop
-                for batch_start in range(0, len(missing), batch_size):
-                    batch = missing[batch_start: batch_start + batch_size]
-                    if not batch:
-                        break
+                # P2 review fix: group `missing` by region BEFORE batching so
+                # every batch is region-homogeneous. The list_fields query now
+                # ORDER BYs region, so itertools.groupby is sufficient. Without
+                # this, a single batch can mix USA / EUR / CHN fields and the
+                # LLM gets one region's market context applied to all of them
+                # (then ALL get persisted with batch[0]'s region — wrong).
+                from itertools import groupby
 
-                    # Budget guard (S5)
-                    if redis_cli is not None:
-                        try:
-                            used_raw = redis_cli.get(token_key)
-                            used = int(used_raw) if used_raw else 0
-                        except Exception:
-                            used = 0
-                        # Conservative cost estimate: 300 tokens / field
-                        est = 300 * len(batch)
-                        if used + est > max_token_budget:
-                            llm_counters["batches_skipped_budget"] += 1
-                            logger.warning(
-                                f"[macro_narrative] token budget exceeded "
-                                f"used={used} + est={est} > "
-                                f"max={max_token_budget} — stop batches"
-                            )
+                def _region_key(item):
+                    return (item.get("region") or "").strip() or "USA"
+
+                # Stop the outer loop early if budget exhausted on inner batch.
+                _budget_stop = False
+
+                # Per-batch loop, partitioned by region
+                for region_key, region_iter in groupby(missing, key=_region_key):
+                    if _budget_stop:
+                        break
+                    region_fields = list(region_iter)
+                    for batch_start in range(0, len(region_fields), batch_size):
+                        batch = region_fields[batch_start: batch_start + batch_size]
+                        if not batch:
                             break
 
-                    # Build prompt + call LLM
-                    region_for_batch = batch[0].get("region", "USA") or "USA"
-                    user_prompt = build_macro_narrative_batch_user_prompt(
-                        batch, region=region_for_batch,
-                    )
-                    try:
-                        response = await llm_service.call(
-                            system_prompt=MACRO_NARRATIVE_BATCH_SYSTEM,
-                            user_prompt=user_prompt,
-                            temperature=0.4,
-                            json_mode=True,
+                        # Budget guard (S5)
+                        if redis_cli is not None:
+                            try:
+                                used_raw = redis_cli.get(token_key)
+                                used = int(used_raw) if used_raw else 0
+                            except Exception:
+                                used = 0
+                            # Conservative cost estimate: 300 tokens / field
+                            est = 300 * len(batch)
+                            if used + est > max_token_budget:
+                                llm_counters["batches_skipped_budget"] += 1
+                                logger.warning(
+                                    f"[macro_narrative] token budget exceeded "
+                                    f"used={used} + est={est} > "
+                                    f"max={max_token_budget} — stop batches"
+                                )
+                                # Stop both inner AND outer loop — outer
+                                # checks _budget_stop at the top.
+                                _budget_stop = True
+                                break
+
+                        # Build prompt + call LLM. region_key is the groupby
+                        # key — guaranteed homogeneous within this batch.
+                        region_for_batch = region_key
+                        user_prompt = build_macro_narrative_batch_user_prompt(
+                            batch, region=region_for_batch,
                         )
-                    except Exception as ex:
-                        logger.warning(
-                            f"[macro_narrative] LLM call failed for batch "
-                            f"{batch_start}: {ex}"
-                        )
-                        llm_counters["errors"] += 1
-                        continue
-
-                    parsed = None
-                    if getattr(response, "success", False):
-                        parsed = getattr(response, "parsed", None)
-
-                    items = []
-                    if parsed:
-                        if isinstance(parsed, dict):
-                            items = parsed.get("items") or []
-                        elif isinstance(parsed, str):
-                            items = parse_macro_narrative_batch_response(parsed)
-
-                    if not items:
-                        llm_counters["llm_json_parse_failures"] += 1
-                        continue
-
-                    # S7: case-insensitive exact match field_id
-                    by_fid = {
-                        str(f.get("field_id") or "").strip().lower(): f
-                        for f in batch
-                    }
-                    new_narratives: List[MacroNarrative] = []
-                    for it in items:
-                        rid = str(it.get("field_id") or "").strip().lower()
-                        if not rid:
-                            llm_counters["llm_field_unmatched"] += 1
-                            continue
-                        match = by_fid.get(rid)
-                        if match is None:
-                            llm_counters["llm_field_unmatched"] += 1
-                            continue
-                        new_narratives.append(MacroNarrative(
-                            field_id=match.get("field_id"),
-                            dataset_id=match.get("dataset_id"),
-                            dataset_category=match.get(
-                                "dataset_category_inferred",
-                            ),
-                            region=region_for_batch,
-                            mechanism=(it.get("mechanism") or "")[:500],
-                            transmission_channel=(
-                                it.get("transmission_channel") or ""
-                            )[:500],
-                            expected_signal_hint=(
-                                it.get("expected_signal_hint") or ""
-                            ),
-                            confidence=float(it.get("confidence", 0.5) or 0.5),
-                            source="llm",
-                        ))
-
-                    # UPSERT into KB
-                    if new_narratives:
-                        sub = await svc.upsert_llm_narratives(new_narratives)
-                        for k in ("new", "updated", "skipped", "errors"):
-                            llm_counters[k] += int(sub.get(k, 0))
-
-                    llm_counters["batches_run"] += 1
-
-                    # Token counter increment (best-effort)
-                    if redis_cli is not None:
                         try:
-                            # Conservative: 300 tokens per field actually
-                            # sent (regardless of LLM-reported usage).
-                            redis_cli.incrby(token_key, 300 * len(batch))
-                            # 36h TTL — survives midnight rollover so two
-                            # back-to-back runs in the same UTC day are
-                            # bounded by the same counter.
-                            redis_cli.expire(token_key, 36 * 3600)
-                        except Exception:
-                            pass
+                            response = await llm_service.call(
+                                system_prompt=MACRO_NARRATIVE_BATCH_SYSTEM,
+                                user_prompt=user_prompt,
+                                temperature=0.4,
+                                json_mode=True,
+                            )
+                        except Exception as ex:
+                            logger.warning(
+                                f"[macro_narrative] LLM call failed for batch "
+                                f"{batch_start} (region={region_for_batch}): {ex}"
+                            )
+                            llm_counters["errors"] += 1
+                            continue
+
+                        parsed = None
+                        if getattr(response, "success", False):
+                            parsed = getattr(response, "parsed", None)
+
+                        items = []
+                        if parsed:
+                            if isinstance(parsed, dict):
+                                items = parsed.get("items") or []
+                            elif isinstance(parsed, str):
+                                items = parse_macro_narrative_batch_response(parsed)
+
+                        if not items:
+                            llm_counters["llm_json_parse_failures"] += 1
+                            continue
+
+                        # S7: case-insensitive exact match field_id
+                        by_fid = {
+                            str(f.get("field_id") or "").strip().lower(): f
+                            for f in batch
+                        }
+                        new_narratives: List[MacroNarrative] = []
+                        for it in items:
+                            rid = str(it.get("field_id") or "").strip().lower()
+                            if not rid:
+                                llm_counters["llm_field_unmatched"] += 1
+                                continue
+                            match = by_fid.get(rid)
+                            if match is None:
+                                llm_counters["llm_field_unmatched"] += 1
+                                continue
+                            new_narratives.append(MacroNarrative(
+                                field_id=match.get("field_id"),
+                                dataset_id=match.get("dataset_id"),
+                                dataset_category=match.get(
+                                    "dataset_category_inferred",
+                                ),
+                                region=region_for_batch,
+                                mechanism=(it.get("mechanism") or "")[:500],
+                                transmission_channel=(
+                                    it.get("transmission_channel") or ""
+                                )[:500],
+                                expected_signal_hint=(
+                                    it.get("expected_signal_hint") or ""
+                                ),
+                                confidence=float(it.get("confidence", 0.5) or 0.5),
+                                source="llm",
+                            ))
+
+                        # UPSERT into KB
+                        if new_narratives:
+                            sub = await svc.upsert_llm_narratives(new_narratives)
+                            for k in ("new", "updated", "skipped", "errors"):
+                                llm_counters[k] += int(sub.get(k, 0))
+
+                        llm_counters["batches_run"] += 1
+
+                        # Token counter increment (best-effort)
+                        if redis_cli is not None:
+                            try:
+                                # Conservative: 300 tokens per field actually
+                                # sent (regardless of LLM-reported usage).
+                                redis_cli.incrby(token_key, 300 * len(batch))
+                                # 36h TTL — survives midnight rollover so two
+                                # back-to-back runs in the same UTC day are
+                                # bounded by the same counter.
+                                redis_cli.expire(token_key, 36 * 3600)
+                            except Exception:
+                                pass
 
         payload = {
             "report_date": sh_now.strftime("%Y-%m-%d"),
