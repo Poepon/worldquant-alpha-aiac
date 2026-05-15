@@ -51,6 +51,10 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     # Default model for code_gen (cheaper); override per-call via call(model=...)
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
+    # Optional override of Anthropic API endpoint — leave empty to use the
+    # official api.anthropic.com. Set to a proxy/mirror (e.g. self-hosted
+    # gateway, OpenRouter, vendor-compatible endpoint) when needed.
+    ANTHROPIC_BASE_URL: str = os.getenv("ANTHROPIC_BASE_URL", "")
     
     # Mining Configuration
     DEFAULT_REGION: str = "USA"
@@ -313,6 +317,20 @@ class Settings(BaseSettings):
     NEGATIVE_KNOWLEDGE_TOP_K: int = 5            # max pitfalls fetched per call
     NEGATIVE_KNOWLEDGE_MIN_FAIL_COUNT: int = 3   # promote-to-LLM threshold
     NEGATIVE_KNOWLEDGE_RETROSPECTIVE_WINDOW_HOURS: int = 24
+
+    # P2-A (2026-05-16): Macro-narrative RAG nudge + daily extract task.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `macro-view`.
+    # Both flags default OFF (M9: token budget guard + P2-B/P2-D precedent).
+    # GUIDANCE flag gates the prompt injection inside node_hypothesis;
+    # EXTRACT flag gates the LLM-batch fill-in inside the daily extract
+    # task — seed UPSERTs run unconditionally (idempotent, no cost).
+    # Both flip-on validated independently after 1-2 days of seed-only run.
+    ENABLE_MACRO_NARRATIVE_GUIDANCE: bool = False    # prompt 注入
+    ENABLE_MACRO_NARRATIVE_EXTRACT: bool = False     # LLM 批生成
+    MACRO_NARRATIVE_FIELD_TOP_K: int = 3
+    MACRO_NARRATIVE_LLM_BATCH_SIZE: int = 20
+    MACRO_NARRATIVE_LLM_MAX_PER_DAY: int = 500
+    MACRO_NARRATIVE_CACHE_TTL_SECONDS: int = 600
 
     # P1-C (2026-05-15): alpha library health check thresholds + weights.
     # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `health-check`.

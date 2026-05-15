@@ -90,6 +90,13 @@ class LLMService:
         self.anthropic_model = model if (model and self.provider == 'anthropic') else getattr(
             settings, 'ANTHROPIC_MODEL', 'claude-haiku-4-5'
         )
+        # Optional endpoint override (proxy / mirror). The constructor's
+        # `base_url` doubles as the anthropic override when provider=anthropic;
+        # otherwise we fall back to settings.ANTHROPIC_BASE_URL ("" → SDK default).
+        self.anthropic_base_url = (
+            base_url if (base_url and self.provider == 'anthropic')
+            else (getattr(settings, 'ANTHROPIC_BASE_URL', '') or '')
+        )
 
         # Active model for self.model (back-compat with downstream readers)
         self.model = (
@@ -117,11 +124,17 @@ class LLMService:
                 raise RuntimeError(
                     "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is empty"
                 )
-            self.anthropic_client = anthropic.AsyncAnthropic(api_key=self.anthropic_api_key)
+            # Only pass base_url when explicitly overridden — keeps the SDK
+            # default (https://api.anthropic.com) when ANTHROPIC_BASE_URL="".
+            anthropic_kwargs: Dict[str, Any] = {"api_key": self.anthropic_api_key}
+            if self.anthropic_base_url:
+                anthropic_kwargs["base_url"] = self.anthropic_base_url
+            self.anthropic_client = anthropic.AsyncAnthropic(**anthropic_kwargs)
 
         logger.info(
             f"[LLMService] Initialized | provider={self.provider} model={self.model} "
-            f"openai_base_url={self.base_url}"
+            f"openai_base_url={self.base_url} "
+            f"anthropic_base_url={self.anthropic_base_url or '<sdk default>'}"
         )
 
     async def _ensure_credentials_loaded(self):

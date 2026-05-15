@@ -104,6 +104,16 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_negative_knowledge_extract",
         "schedule": crontab(hour=9, minute=30),
     },
+    # P2-A (2026-05-16): daily macro-narrative extract at 10:00 Asia/Shanghai.
+    # Runs AFTER 09:30 negative-knowledge-extract so KB writes don't compete.
+    # Phase 1 (seed UPSERT) is unconditional + idempotent; Phase 2 (LLM
+    # batch fill-in) is gated by ENABLE_MACRO_NARRATIVE_EXTRACT (default
+    # OFF). Emits docs/macro_narratives/<sh-date>.json. Read-mostly:
+    # only mutates knowledge_entries (entry_type='MACRO_NARRATIVE').
+    "macro-narrative-extract": {
+        "task": "backend.tasks.run_macro_narrative_extract",
+        "schedule": crontab(hour=10, minute=0),
+    },
     # V-19.7: revive dead CONTINUOUS_CASCADE sessions. Detects worker crash /
     # silent stalls via task.last_alpha_persisted_at < NOW()-15min and
     # re-dispatches a fresh celery worker. Grace period skips fresh sessions.

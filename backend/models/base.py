@@ -81,6 +81,7 @@ class KnowledgeEntryType(str, enum.Enum):
     FAILURE_PITFALL = "FAILURE_PITFALL"
     FIELD_BLACKLIST = "FIELD_BLACKLIST"
     OPERATOR_STAT = "OPERATOR_STAT"
+    MACRO_NARRATIVE = "MACRO_NARRATIVE"   # P2-A (2026-05-16)
 
 
 class JobStatus(str, enum.Enum):

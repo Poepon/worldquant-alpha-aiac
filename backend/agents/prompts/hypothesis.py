@@ -19,6 +19,7 @@ from typing import Dict, List, Optional
 from backend.agents.prompts.base import (
     PromptContext,
     build_fields_context,
+    build_macro_context_block,  # P2-A (2026-05-16)
     build_patterns_context,
 )
 
@@ -63,6 +64,14 @@ on field family. NOTE: `expected_signal=mean_reversion` is auto-mapped to
 `pillar=momentum` (short-term reversal is in the PV-momentum family) — you
 may emit either or both. When the user prompt's pillar-nudge names a target
 pillar, BIAS toward hypotheses in that pillar.
+
+**Macro Context Use (P2-A, 2026-05-16)**:
+When the user prompt's "Macro Context — Economic Mechanism Anchors" section
+is non-empty, your `rationale` MUST explicitly reference the corresponding
+field/category transmission_channel from that section, and your
+`expected_signal` SHOULD align with the narrative's expected_signal_hint
+(if you have reason to deviate, justify it in `rationale`). When the
+section is absent, behave as before.
 
 Output must be valid JSON."""
 
@@ -137,6 +146,17 @@ The balance depends on current progress:
     
     # Build field categories overview
     field_overview = build_fields_context(ctx.fields, max_fields=20)
+
+    # P2-A (2026-05-16): macro-narrative context block. Empty when
+    # ctx.macro_narratives is [] (which is the case under the legacy /
+    # flag-off path) so the splice below becomes the empty string and the
+    # template renders byte-for-byte identical to pre-P2-A.
+    macro_context_block = build_macro_context_block(
+        getattr(ctx, "macro_narratives", []) or []
+    )
+    macro_block_with_leading_newline = (
+        f"\n{macro_context_block}\n" if macro_context_block else ""
+    )
     
     # Plan v5+ §Phase 1: cross-dataset hypothesis section.
     # Pool empty = legacy single-anchor; populated = LLM may pick 1-3.
@@ -198,7 +218,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 ## Available Data Fields (Sample)
 
 {field_overview}
-
+{macro_block_with_leading_newline}
 ## Historical Patterns (For Reference Only)
 
 **Approaches that have worked in similar contexts**:

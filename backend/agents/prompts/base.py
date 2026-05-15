@@ -48,6 +48,16 @@ class PromptContext:
     # renders byte-for-byte legacy.
     pillar_hint: Optional[str] = None
 
+    # P2-A (2026-05-16): Macro narratives — RAG-fetched economic mechanism
+    # anchors for the current (dataset, region) + top-K focused fields.
+    # node_hypothesis fills this when ENABLE_MACRO_NARRATIVE_GUIDANCE is on
+    # and MacroNarrativeService.fetch_macro_narratives returns ≥1 row.
+    # Empty list = no nudge → build_macro_context_block returns "" →
+    # build_hypothesis_prompt renders byte-for-byte legacy (the invariant
+    # is field-asserted in test_node_hypothesis_macro.test_flag_off_
+    # byte_for_byte_legacy, M8).
+    macro_narratives: List[Dict] = field(default_factory=list)
+
 
 def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     """Build concise field reference with type info."""
@@ -157,5 +167,39 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
         "Maximum 8 operators per expression",
         "Ensure no look-ahead bias (no future data access)"
     ])
-    
+
     return "\n".join(f"- {c}" for c in constraints)
+
+
+def build_macro_context_block(narratives: List[Dict]) -> str:
+    """P2-A (2026-05-16): render a Macro Context block from narrative dicts.
+
+    Each narrative dict carries the meta_data shape produced by
+    ``backend.macro_narratives.narrative_to_kb_payload`` (or the LLM-batch
+    upsert path in macro_narrative_extract). Empty input returns the empty
+    string so build_hypothesis_prompt can splice it byte-for-byte unchanged
+    (the P2-A flag-off invariant). Caps at 5 entries to bound prompt size.
+    """
+    if not narratives:
+        return ""
+    lines = ["## Macro Context — Economic Mechanism Anchors", ""]
+    for n in narratives[:5]:
+        scope = n.get("scope", "")
+        if scope == "field":
+            label = f"field `{n.get('field_id')}`"
+        elif scope == "category":
+            label = f"category `{n.get('dataset_category')}`"
+        else:
+            label = f"dataset `{n.get('dataset_id', '?')}`"
+        try:
+            conf = float(n.get("confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            conf = 0.0
+        mechanism = (n.get("mechanism", "") or "")[:200]
+        transmission = (n.get("transmission_channel", "") or "")[:200]
+        hint = n.get("expected_signal_hint", "?")
+        lines.append(
+            f"- **{label}** ({hint}, conf={conf:.2f}): {mechanism}\n"
+            f"    transmission: {transmission}"
+        )
+    return "\n".join(lines)

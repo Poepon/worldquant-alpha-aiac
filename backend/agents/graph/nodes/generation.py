@@ -522,6 +522,102 @@ async def node_hypothesis(
             neg_kb_pitfalls = []
             neg_kb_keys_seen = []
 
+    # P2-A (2026-05-16): Macro-narrative RAG nudge — opt-in via
+    # ``ENABLE_MACRO_NARRATIVE_GUIDANCE``. When OFF (default) the entire
+    # block is skipped so prompt rendering is byte-for-byte legacy —
+    # PromptContext.macro_narratives = [] → build_macro_context_block returns
+    # "" → build_hypothesis_prompt template splice produces an empty string
+    # at the insertion point. When ON, top-K narratives (≤5, blended over
+    # field / dataset / category scopes by MacroNarrativeService with field
+    # +0.1 confidence bonus, S4) are attached to PromptContext. Failure of
+    # Redis / DB path is non-fatal: ``macro_narratives`` stays empty and the
+    # prompt falls back to legacy.
+    macro_narratives: List[Dict] = []
+    macro_keys_seen: List[str] = []
+    _macro_enabled = bool(getattr(
+        _gen_settings, "ENABLE_MACRO_NARRATIVE_GUIDANCE", False,
+    ))
+    if _macro_enabled:
+        try:
+            from backend.tasks.redis_pool import get_redis_client  # lazy (M10)
+            from backend.services.macro_narrative_service import (  # lazy (M10)
+                MacroNarrativeService,
+            )
+            _p2a_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            _p2a_cache_key = (
+                f"aiac:macro_narrative:{state.dataset_id}:"
+                f"{state.region}:{_p2a_today}"
+            )
+            _p2a_redis = None
+            try:
+                _p2a_redis = get_redis_client()
+            except Exception:
+                _p2a_redis = None
+            cached = None
+            if _p2a_redis is not None:
+                try:
+                    _p2a_cached = _p2a_redis.get(_p2a_cache_key)
+                    if _p2a_cached is not None:
+                        cached = json.loads(_p2a_cached)
+                except Exception:
+                    cached = None
+
+            if cached is None:
+                # M7: candidate key extraction with the double-key pattern.
+                # state.focused_fields elements may use ``field_id`` (Phase-1
+                # union path) OR ``id`` (distillation path) — extract both.
+                _candidate_keys: List[str] = []
+                for f in (state.focused_fields or state.fields or [])[:10]:
+                    if isinstance(f, dict):
+                        fid = f.get("field_id") or f.get("id")
+                        if fid:
+                            _candidate_keys.append(str(fid))
+                _ttl = int(getattr(
+                    _gen_settings, "MACRO_NARRATIVE_CACHE_TTL_SECONDS", 600,
+                ))
+                _top_k = int(getattr(
+                    _gen_settings, "MACRO_NARRATIVE_FIELD_TOP_K", 3,
+                ))
+                async with resolve_db(config) as _p2a_db:
+                    _mns = MacroNarrativeService(_p2a_db)
+                    cached = await _mns.fetch_macro_narratives(
+                        dataset_id=state.dataset_id,
+                        region=state.region,
+                        key_fields=_candidate_keys,
+                        limit_field=_top_k,
+                        limit_dataset=1,
+                        limit_category=1,
+                    )
+                if _p2a_redis is not None:
+                    try:
+                        _p2a_redis.setex(
+                            _p2a_cache_key, _ttl,
+                            json.dumps(cached, default=str),
+                        )
+                    except Exception:
+                        pass
+
+            macro_narratives = list(cached or [])[:5]
+            macro_keys_seen = [
+                (n.get("field_id") or n.get("dataset_category") or "")
+                for n in macro_narratives
+                if isinstance(n, dict)
+            ]
+            if macro_narratives:
+                logger.info(
+                    f"[{node_name}] P2-A macro nudge | "
+                    f"n={len(macro_narratives)} "
+                    f"dataset={state.dataset_id} region={state.region} "
+                    f"keys={macro_keys_seen}"
+                )
+        except Exception as _p2a_ex:
+            logger.warning(
+                f"[{node_name}] P2-A macro nudge failed (non-fatal): "
+                f"{_p2a_ex}"
+            )
+            macro_narratives = []
+            macro_keys_seen = []
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -547,6 +643,12 @@ async def node_hypothesis(
         exploration_weight=exploration_weight,
         available_dataset_pool=getattr(state, "available_dataset_pool", []) or [],
         pillar_hint=pillar_hint,
+        # P2-A (2026-05-16): only attach when the flag is ON AND we fetched
+        # ≥1 row. Off / fetch-failed paths set macro_narratives=[] so the
+        # template splice produces the empty-string byte-for-byte legacy
+        # render (field assertion in
+        # test_node_hypothesis_macro.test_flag_off_byte_for_byte_legacy, M8).
+        macro_narratives=(macro_narratives if _macro_enabled else []),
     )
     
     # Use new hypothesis builder with experiment trace
@@ -865,6 +967,13 @@ async def node_hypothesis(
                     if neg_kb_keys_seen:
                         primary_h["_negative_knowledge_pitfalls_seen"] = (
                             list(neg_kb_keys_seen)
+                        )
+                    # P2-A N4: stamp the field_id / dataset_category keys
+                    # of macro narratives that were shown to the LLM.
+                    # Non-persisted audit hook (same pattern as P2-D N4).
+                    if macro_keys_seen:
+                        primary_h["_macro_narratives_seen"] = (
+                            list(macro_keys_seen)
                         )
 
                     data = HypothesisCreateData(
