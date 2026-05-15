@@ -15,6 +15,7 @@ to find high-quality variants of promising alphas.
 import re
 import random
 import hashlib
+import statistics
 from typing import List, Dict, Optional, Tuple, Any, Set
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -58,6 +59,67 @@ WRAPPER_PATTERNS = [
 
 
 # =============================================================================
+# Pure-function helpers (used by both Individual and GeneticOptimizer)
+# =============================================================================
+
+def _metrics_from_result(sim_result: Dict[str, Any]) -> Dict[str, float]:
+    """Extract sharpe/fitness/turnover/os_sharpe from a raw simulate() result dict."""
+    is_stats = sim_result.get("is", sim_result.get("train", {})) or {}
+    os_stats = sim_result.get("os", sim_result.get("test", {})) or {}
+    return {
+        "sharpe": float(is_stats.get("sharpe", is_stats.get("Sharpe", 0)) or 0),
+        "fitness": float(is_stats.get("fitness", is_stats.get("Fitness", 0)) or 0),
+        "turnover": float(is_stats.get("turnover", is_stats.get("Turnover", 0)) or 0),
+        "os_sharpe": float(os_stats.get("sharpe", os_stats.get("Sharpe", 0)) or 0),
+    }
+
+
+def compute_overall_fitness(
+    sharpe: float,
+    fitness: float,
+    turnover: float,
+    os_sharpe: float,
+    weights: Dict[str, float] = None,
+    apply_os_consistency: bool = False,
+) -> float:
+    """
+    Compute composite fitness score from component metrics.
+
+    Extracted from Individual.calculate_fitness so GeneticOptimizer methods can
+    call it per grid-config point without mutating an Individual.
+
+    Args:
+        apply_os_consistency: If True, multiply the composite by an IS/OS
+            consistency factor — 0.5 (OS fully collapses) … 1.0 (OS = IS).
+            This is a zero-extra-simulation anti-overfit signal.
+    """
+    w = weights or {
+        "sharpe": 0.50,
+        "fitness": 0.20,
+        "turnover": 0.15,
+        "os_sharpe": 0.15,
+    }
+    sharpe_score = min(1.0, sharpe / 2.0) if sharpe > 0 else 0
+    fitness_score = min(1.0, fitness / 1.5) if fitness > 0 else 0
+    turnover_score = max(0, 1.0 - turnover) if turnover < 1.0 else 0
+    os_score = min(1.0, os_sharpe / 1.5) if os_sharpe > 0 else 0
+
+    overall = (
+        w["sharpe"] * sharpe_score
+        + w["fitness"] * fitness_score
+        + w["turnover"] * turnover_score
+        + w["os_sharpe"] * os_score
+    )
+
+    if apply_os_consistency and sharpe > 0:
+        # Penalise alphas whose OS trails IS badly; OS ≥ IS → factor 1.0,
+        # OS = 0 → factor 0.5.
+        overall *= 0.5 + 0.5 * min(1.0, max(0.0, os_sharpe / sharpe))
+
+    return overall
+
+
+# =============================================================================
 # Data Structures
 # =============================================================================
 
@@ -87,6 +149,11 @@ class Individual:
     # W2: Island provenance — track which sub-population the individual
     # currently lives in so update_individual can route metrics back.
     island_id: int = 0
+
+    # Fidelity tracking (tiered-fidelity anti-overfit)
+    grid_confirmed: bool = False    # True once promotion grid has confirmed this individual
+    fidelity_count: int = 1         # Number of config-points actually simulated (1 = single-run)
+    fitness_dispersion: float = 0.0  # pstdev of per-config overall_fitness; high → config-fragile
     
     @property
     def fingerprint(self) -> str:
@@ -94,25 +161,19 @@ class Individual:
         return hashlib.md5(self.expression.encode()).hexdigest()[:12]
     
     def calculate_fitness(self, weights: Dict[str, float] = None):
-        """Calculate overall fitness from component metrics."""
-        w = weights or {
-            "sharpe": 0.50,
-            "fitness": 0.20,
-            "turnover": 0.15,  # Negative weight (lower is better)
-            "os_sharpe": 0.15,
-        }
-        
-        # Normalize components
-        sharpe_score = min(1.0, self.sharpe / 2.0) if self.sharpe > 0 else 0
-        fitness_score = min(1.0, self.fitness / 1.5) if self.fitness > 0 else 0
-        turnover_score = max(0, 1.0 - self.turnover) if self.turnover < 1.0 else 0
-        os_score = min(1.0, self.os_sharpe / 1.5) if self.os_sharpe > 0 else 0
-        
-        self.overall_fitness = (
-            w["sharpe"] * sharpe_score +
-            w["fitness"] * fitness_score +
-            w["turnover"] * turnover_score +
-            w["os_sharpe"] * os_score
+        """Calculate overall fitness from component metrics.
+
+        Delegates to the module-level ``compute_overall_fitness`` without the
+        IS/OS consistency penalty (apply_os_consistency=False) so that callers
+        outside GeneticOptimizer (e.g. unit tests, seed initialisation) get the
+        same deterministic result as before.  GeneticOptimizer methods that want
+        the IS/OS penalty call compute_overall_fitness directly with the config
+        flag.
+        """
+        self.overall_fitness = compute_overall_fitness(
+            self.sharpe, self.fitness, self.turnover, self.os_sharpe,
+            weights=weights,
+            apply_os_consistency=False,
         )
     
     def to_dict(self) -> Dict[str, Any]:
@@ -127,6 +188,10 @@ class Individual:
             "mutation_type": self.mutation_type,
             "mutation_description": self.mutation_description,
             "passed": self.passed,
+            # Fidelity provenance
+            "grid_confirmed": self.grid_confirmed,
+            "fidelity_count": self.fidelity_count,
+            "fitness_dispersion": round(self.fitness_dispersion, 4),
         }
 
 
@@ -203,6 +268,18 @@ class OptimizationConfig:
     num_islands: int = 4
     migration_interval: int = 5  # generations between elite migrations
     migration_ratio: float = 0.10  # fraction of island swapped on each migration
+
+    # Tiered-fidelity anti-overfit (P0 — see docs/alphagbm_skills_research_2026-05-15.md)
+    # Promotion-grid configs: run top candidates on these universe overrides before
+    # they become elites / migrants / finalists.  Only *evaluation-context* axes
+    # (sub-universe) — not decay/delay/region, which change the alpha itself.
+    # Set to [] to disable the promotion grid (legacy single-fidelity behaviour).
+    fidelity_grid: List[Dict[str, Any]] = field(default_factory=lambda: [
+        {"universe": "TOP1000"},
+        {"universe": "TOP500"},
+    ])
+    promotion_pool_size: int = 3   # per-island: top-N single-run individuals confirmed each gen
+    apply_os_consistency: bool = False  # IS/OS consistency penalty in overall_fitness (opt-in)
 
 
 # =============================================================================
@@ -493,7 +570,10 @@ class GeneticOptimizer:
                 seed.fitness = seed_metrics.get("fitness", 0)
                 seed.turnover = seed_metrics.get("turnover", 0)
                 seed.os_sharpe = seed_metrics.get("os_sharpe", 0)
-                seed.calculate_fitness()
+                seed.overall_fitness = compute_overall_fitness(
+                    seed.sharpe, seed.fitness, seed.turnover, seed.os_sharpe,
+                    apply_os_consistency=self.config.apply_os_consistency,
+                )
                 seed.simulated = True
             island.add(seed)
             self.all_fingerprints.add(seed.fingerprint)
@@ -593,33 +673,126 @@ class GeneticOptimizer:
         sim_result: Dict[str, Any]
     ):
         """
-        Update individual with simulation results.
-        
+        Update individual with a single simulation result (search-fidelity path).
+
+        Signature and behaviour are unchanged from previous versions so existing
+        callers (test_suite.py, integration tests) continue to work.  The
+        individual is marked with fidelity_count=1 and grid_confirmed=False;
+        promotion to grid-confirmed status happens separately via
+        confirm_individual_grid().
+
         Args:
             individual: Individual to update
             sim_result: Simulation result dict
         """
-        # Extract metrics
-        is_stats = sim_result.get("is", sim_result.get("train", {})) or {}
-        os_stats = sim_result.get("os", sim_result.get("test", {})) or {}
-        
-        individual.sharpe = float(is_stats.get("sharpe", is_stats.get("Sharpe", 0)) or 0)
-        individual.fitness = float(is_stats.get("fitness", is_stats.get("Fitness", 0)) or 0)
-        individual.turnover = float(is_stats.get("turnover", is_stats.get("Turnover", 0)) or 0)
-        individual.os_sharpe = float(os_stats.get("sharpe", os_stats.get("Sharpe", 0)) or 0)
-        
-        individual.calculate_fitness()
+        m = _metrics_from_result(sim_result)
+        individual.sharpe = m["sharpe"]
+        individual.fitness = m["fitness"]
+        individual.turnover = m["turnover"]
+        individual.os_sharpe = m["os_sharpe"]
+
+        individual.overall_fitness = compute_overall_fitness(
+            individual.sharpe, individual.fitness, individual.turnover, individual.os_sharpe,
+            apply_os_consistency=self.config.apply_os_consistency,
+        )
         individual.simulated = True
-        
+        individual.fidelity_count = 1
+        individual.grid_confirmed = False
+
         # Check if passed thresholds
         individual.passed = (
             individual.sharpe >= self.config.sharpe_threshold and
             individual.fitness >= self.config.fitness_threshold and
             individual.turnover <= self.config.turnover_threshold
         )
-        
+
         self.simulations_used += 1
     
+    def get_promotion_candidates(self) -> List[Individual]:
+        """
+        Return top ``promotion_pool_size`` simulated-but-not-grid-confirmed
+        individuals per island for the orchestrator to run the promotion grid on.
+
+        Called by run_genetic_optimization *before* evolve() each generation so
+        that elites / migration sources are selected on grid-corrected fitness
+        (not single-run luck).
+        """
+        candidates: List[Individual] = []
+        for island in self.islands:
+            eligible = [
+                i for i in island.individuals
+                if i.simulated and not i.grid_confirmed
+            ]
+            eligible.sort(key=lambda x: x.overall_fitness, reverse=True)
+            candidates.extend(eligible[: self.config.promotion_pool_size])
+        return candidates
+
+    def confirm_individual_grid(
+        self,
+        individual: Individual,
+        grid_results: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Replace an individual's fitness with the robust median from a
+        sub-universe promotion grid (tiered-fidelity anti-overfit).
+
+        Picks the grid config-point whose overall_fitness is the *median*
+        (lower-middle for even K, conservative) and sets the individual's
+        metrics to that **real** config's values — so ``passed`` is always
+        decided on an actual simulation, not a Frankenstein mix of components.
+
+        Also records ``fitness_dispersion`` (pstdev of per-config overall
+        fitness) as a config-fragility signal: high dispersion → overfit risk.
+
+        Args:
+            individual:   The Individual to update in-place.
+            grid_results: List of successful simulate() result dicts from the
+                          promotion grid.  Must not be empty (caller should guard).
+        """
+        if not grid_results:
+            return  # defensive; caller ensures non-empty before calling
+
+        # Compute overall_fitness for each grid config-point
+        per_config: List[Tuple[float, Dict[str, float]]] = []
+        for result in grid_results:
+            m = _metrics_from_result(result)
+            ov = compute_overall_fitness(
+                m["sharpe"], m["fitness"], m["turnover"], m["os_sharpe"],
+                apply_os_consistency=self.config.apply_os_consistency,
+            )
+            per_config.append((ov, m))
+
+        # Sort by overall_fitness; pick lower-middle index (conservative)
+        per_config.sort(key=lambda x: x[0])
+        median_idx = (len(per_config) - 1) // 2
+        median_overall, median_metrics = per_config[median_idx]
+
+        # Update individual to the median config's REAL metrics
+        individual.sharpe = median_metrics["sharpe"]
+        individual.fitness = median_metrics["fitness"]
+        individual.turnover = median_metrics["turnover"]
+        individual.os_sharpe = median_metrics["os_sharpe"]
+        individual.overall_fitness = median_overall
+
+        # Config-fragility signal
+        if len(per_config) >= 2:
+            overalls = [x[0] for x in per_config]
+            individual.fitness_dispersion = statistics.pstdev(overalls)
+        else:
+            individual.fitness_dispersion = 0.0
+
+        individual.fidelity_count = len(grid_results)
+        individual.grid_confirmed = True
+
+        # Recompute passed on the median config's real metrics
+        individual.passed = (
+            individual.sharpe >= self.config.sharpe_threshold
+            and individual.fitness >= self.config.fitness_threshold
+            and individual.turnover <= self.config.turnover_threshold
+        )
+
+        self.simulations_used += len(grid_results)
+
     def evolve(self):
         """
         Evolve every island to its next generation independently, then
@@ -945,64 +1118,100 @@ async def run_genetic_optimization(
     """
     config = config or OptimizationConfig()
     optimizer = GeneticOptimizer(config)
-    
+
+    # Base simulation parameters (shared across all grid points)
+    base_params: Dict[str, Any] = dict(
+        region=region,
+        universe=universe,
+        delay=delay,
+        decay=decay,
+        neutralization=neutralization,
+    )
+
+    use_grid = bool(config.fidelity_grid)
+
+    async def _run_grid(ind: Individual) -> None:
+        """Run promotion-grid sims for *ind* and call confirm_individual_grid."""
+        grid_results = []
+        for override in config.fidelity_grid:
+            if optimizer.simulations_used >= config.max_simulations:
+                break
+            try:
+                r = await simulate_func(
+                    expression=ind.expression, **{**base_params, **override}
+                )
+                if r.get("success"):
+                    grid_results.append(r)
+            except Exception as e:
+                logger.warning(f"[GeneticOpt] grid sim failed ({override}): {e}")
+        if grid_results:
+            optimizer.confirm_individual_grid(ind, grid_results)
+
     # Initialize
     optimizer.initialize(seed_expression, seed_metrics)
-    
-    # Evolution loop
+
+    # ── Evolution loop ────────────────────────────────────────────────────────
     for gen in range(config.generations):
-        # Get candidates to simulate
+
+        # ① Search-fidelity: single sim for unsimulated candidates (K=1)
         candidates = optimizer.get_simulation_candidates(batch_size=10)
-        
         if not candidates:
             logger.info(f"[GeneticOpt] No more candidates at generation {gen}")
             break
-        
-        # Check budget
+
         if optimizer.simulations_used >= config.max_simulations:
-            logger.info(f"[GeneticOpt] Simulation budget exhausted at {optimizer.simulations_used}")
+            logger.info(
+                f"[GeneticOpt] Simulation budget exhausted at {optimizer.simulations_used}"
+            )
             break
-        
-        # Simulate candidates
+
         for ind in candidates:
+            if optimizer.simulations_used >= config.max_simulations:
+                break
             try:
-                result = await simulate_func(
-                    expression=ind.expression,
-                    region=region,
-                    universe=universe,
-                    delay=delay,
-                    decay=decay,
-                    neutralization=neutralization,
-                )
-                
+                result = await simulate_func(expression=ind.expression, **base_params)
                 if result.get("success"):
                     optimizer.update_individual(ind, result)
                 else:
                     ind.simulated = True  # Mark as tried
-                
             except Exception as e:
                 logger.warning(f"[GeneticOpt] Simulation failed: {e}")
                 ind.simulated = True
-        
-        # Evolve
+
+        # ② Promotion-fidelity: grid-confirm top-N per island BEFORE evolve so
+        #    _evolve_island / _migrate select on grid-corrected fitness.
+        #    Overfit "lucky" individuals drop in rank and are excluded from elites.
+        if use_grid:
+            for ind in optimizer.get_promotion_candidates():
+                if optimizer.simulations_used >= config.max_simulations:
+                    break
+                await _run_grid(ind)
+
+        # ③ Evolve (sync): elites + migrants chosen from grid-corrected rankings
         optimizer.evolve()
-        
-        # Adapt mutation rates
         optimizer.adapt_mutation_rates()
-    
+
+    # ── Finalist confirmation ─────────────────────────────────────────────────
+    # Any top-10 individuals that somehow escaped promotion-grid confirmation
+    # (e.g. survived as elites from generation 0) get confirmed before returning.
+    if use_grid:
+        for ind in optimizer.get_best_individuals(10):
+            if not ind.grid_confirmed and optimizer.simulations_used < config.max_simulations:
+                await _run_grid(ind)
+
     # Generate report
     report = optimizer.get_optimization_report()
-    
+
     # Add best variants for downstream use
     best = optimizer.get_best_individuals(10)
     report["best_expressions"] = [i.expression for i in best]
-    
+
     passed = optimizer.get_passed_individuals()
     report["passed_expressions"] = [i.expression for i in passed]
-    
+
     logger.info(
         f"[GeneticOpt] Complete | generations={report['generations']} "
         f"simulations={report['simulations_used']} passed={report['passed_count']}"
     )
-    
+
     return report
