@@ -21,6 +21,7 @@ from backend.agents.prompts.base import (
     build_fields_context,
     build_macro_context_block,  # P2-A (2026-05-16)
     build_patterns_context,
+    build_style_preset_block,   # P2-C (2026-05-16)
 )
 
 
@@ -64,6 +65,14 @@ on field family. NOTE: `expected_signal=mean_reversion` is auto-mapped to
 `pillar=momentum` (short-term reversal is in the PV-momentum family) — you
 may emit either or both. When the user prompt's pillar-nudge names a target
 pillar, BIAS toward hypotheses in that pillar.
+
+**Investment Philosophy Use (P2-C, 2026-05-16)**:
+When an "Investment Philosophy — Current Regime" block is present, treat the
+style_label and philosophy as soft guidance: your hypothesis rationale should
+acknowledge whether you align with the regime's preferred posture (defensive
+in crisis, aggressive in very_calm) or deliberately diverge with a stated
+contrarian justification. Do NOT mention the regime label explicitly inside
+the hypothesis `statement` itself — that field stays evergreen.
 
 Output must be valid JSON."""
 
@@ -216,6 +225,17 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
             f"the system prompt's Five Pillars Classification).\n"
         )
 
+    # P2-C (2026-05-16): Investment Philosophy block. Empty when
+    # ctx.style_preset is None / {} (legacy / flag-off path) so the splice
+    # below renders the empty string at the insertion point and the
+    # template stays byte-for-byte identical to pre-P2-C (MF4 invariant).
+    style_block = build_style_preset_block(
+        getattr(ctx, "style_preset", None)
+    )
+    style_block_with_leading_newline = (
+        f"\n{style_block}\n" if style_block else ""
+    )
+
     return f"""## Research Context
 
 **Dataset**: {ctx.dataset_id}
@@ -226,7 +246,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 ## Available Data Fields (Sample)
 
 {field_overview}
-{macro_block_with_leading_newline}
+{macro_block_with_leading_newline}{style_block_with_leading_newline}
 ## Historical Patterns (For Reference Only)
 
 **Approaches that have worked in similar contexts**:

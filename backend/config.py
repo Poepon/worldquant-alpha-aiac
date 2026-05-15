@@ -412,6 +412,22 @@ class Settings(BaseSettings):
     MACRO_NARRATIVE_LLM_MAX_PER_DAY: int = 500
     MACRO_NARRATIVE_CACHE_TTL_SECONDS: int = 600
 
+    # P2-C (2026-05-16): regime-aware threshold gating + style preset encoding.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skills vix-status /
+    # duan-analysis. All three flags default OFF (S1 + P2-A/B/D 惯例).
+    # regime_at_eval stamp 仅当 strategy.regime 被注入时触发 (任一 effect
+    # flag 为 True 即可,即 ENABLE_REGIME_AWARE_THRESHOLDS 或
+    # ENABLE_STYLE_PRESET_GUIDANCE 之一). 推荐启用顺序:
+    #   1. ENABLE_REGIME_INFERENCE=True 攒 1-2 天 docs/regime_state/<sh-date>.json
+    #   2. ENABLE_REGIME_AWARE_THRESHOLDS=True 让倍率生效 + 数据采集 stamp
+    #   3. ENABLE_STYLE_PRESET_GUIDANCE=True 注入投资哲学 block 进 hypothesis prompt
+    ENABLE_REGIME_INFERENCE: bool = False
+    ENABLE_REGIME_AWARE_THRESHOLDS: bool = False
+    ENABLE_STYLE_PRESET_GUIDANCE: bool = False
+    REGIME_INFERENCE_WINDOW_DAYS: int = 7
+    REGIME_EWMA_ALPHA: float = 0.3
+    REGIME_CACHE_TTL_SECONDS: int = 86400   # 24h
+
     # P1-C (2026-05-15): alpha library health check thresholds + weights.
     # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `health-check`.
     # Consumed by backend/services/alpha_health_service.py via

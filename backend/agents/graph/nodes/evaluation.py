@@ -272,6 +272,11 @@ class _EvalCtx:
     eval_details: list = _dc_field(default_factory=list)
     failure_feedback_queue: list = _dc_field(default_factory=list)
 
+    # P2-C (2026-05-16) MF5: regime label threaded through the ctx so
+    # _evaluate_single_alpha can stamp it on alpha.metrics deterministically.
+    # None = no regime injection happened this round (legacy path).
+    regime_for_eval: Optional[str] = None
+
 
 @dataclass
 class _SingleAlphaEvalResult:
@@ -691,6 +696,34 @@ async def _evaluate_single_alpha(
         "corr_checked": needs_corr_check,
         "optimize_reason": opt_reason if should_opt else None,
     })
+
+    # P2-C (2026-05-16) MF5 + S8 stamp. Fires whenever strategy.regime was
+    # injected (i.e. at least one of ENABLE_REGIME_AWARE_THRESHOLDS /
+    # ENABLE_STYLE_PRESET_GUIDANCE was on at mining_agent time), so the
+    # ``_regime_at_eval`` audit hook stays present even on the data-
+    # collection-only path (AWARE=True + STYLE=False).
+    # ``_regime_applied_thresholds`` is True only when the AWARE flag is
+    # on AND the multipliers were applied — orthogonal to the prompt-side
+    # style block (S8).
+    # V-26.79 defence: re-bind alpha.metrics to a fresh dict before mutating
+    # so we don't punch through into a detached/parent state copy.
+    if ctx.regime_for_eval:
+        try:
+            from backend.config import settings as _p2c_eval_settings
+            if not isinstance(alpha.metrics, dict):
+                alpha.metrics = {}
+            else:
+                alpha.metrics = dict(alpha.metrics)
+            alpha.metrics["_regime_at_eval"] = ctx.regime_for_eval
+            if getattr(
+                _p2c_eval_settings, "ENABLE_REGIME_AWARE_THRESHOLDS", False,
+            ):
+                alpha.metrics["_regime_applied_thresholds"] = True
+        except Exception as _p2c_stamp_ex:
+            logger.warning(
+                f"[{ctx.node_name}] P2-C stamp failed (non-fatal): "
+                f"{_p2c_stamp_ex}"
+            )
 
     return _SingleAlphaEvalResult(
         corr_check_performed=_corr_performed,
@@ -1262,6 +1295,60 @@ async def node_evaluate(
     from backend.agents.graph.tier_thresholds import get_tier_thresholds
 
     tier_cfg = get_tier_thresholds(getattr(state, "factor_tier", None))
+
+    # P2-C (2026-05-16): regime-aware threshold adjustment. The mining_agent
+    # injection block puts ``regime`` + ``style_preset`` onto strategy BEFORE
+    # the workflow runs; we read the regime out of config["configurable"][
+    # "strategy"] (a dict from EvolutionStrategy.to_dict) and, if the
+    # ``ENABLE_REGIME_AWARE_THRESHOLDS`` flag is on AND a regime is present,
+    # scale the tier_cfg in-place. MF5 thread-through: ``_regime_for_eval``
+    # carries forward into ``_EvalCtx`` so the per-alpha stamp downstream
+    # uses the same value (not a re-derived one).
+    #
+    # MF6 invariant verified by apply_regime_multipliers: ``score_optimize``
+    # is NEVER scaled — only ``score_pass`` shifts with regime.
+    #
+    # S2: the ``_regime_at_eval`` stamp on alpha.metrics is gated by
+    # ``_regime_for_eval`` being non-None (i.e. strategy.regime was set),
+    # which only happens when at least one of the two effect flags
+    # (AWARE / STYLE) was True in mining_agent. So even with AWARE=False
+    # + STYLE=True, the stamp is written; the threshold multipliers
+    # below are NOT applied (only the prompt block downstream).
+    _regime_for_eval: Optional[str] = None
+    try:
+        _strategy_blob = (
+            (config.get("configurable", {}) or {}).get("strategy", {})
+            if config else {}
+        )
+        if isinstance(_strategy_blob, dict):
+            _regime_for_eval = _strategy_blob.get("regime")
+    except Exception:
+        _regime_for_eval = None
+
+    if (
+        getattr(settings, "ENABLE_REGIME_AWARE_THRESHOLDS", False)
+        and _regime_for_eval
+    ):
+        try:
+            from backend.regime_classifier import (  # lazy
+                apply_regime_multipliers as _apply_regime_multipliers,
+            )
+            _old_sharpe = tier_cfg.get("sharpe_min")
+            adjusted_tier_cfg = _apply_regime_multipliers(
+                tier_cfg, _regime_for_eval,
+            )
+            logger.info(
+                f"[{node_name}] P2-C regime gate | regime="
+                f"{_regime_for_eval} sharpe: "
+                f"{_old_sharpe}→{adjusted_tier_cfg.get('sharpe_min')}"
+            )
+            tier_cfg = adjusted_tier_cfg
+        except Exception as _p2c_ex:
+            logger.warning(
+                f"[{node_name}] P2-C regime adjust failed "
+                f"(non-fatal): {_p2c_ex}"
+            )
+
     sharpe_min = tier_cfg["sharpe_min"]
     fitness_min = tier_cfg["fitness_min"]
     turnover_min = tier_cfg["turnover_min"]
@@ -1320,6 +1407,10 @@ async def node_evaluate(
         corr_check_threshold=corr_check_threshold,
         eval_details=eval_details,
         failure_feedback_queue=failure_feedback_queue,
+        # P2-C (2026-05-16) MF5: thread the regime label through the ctx
+        # so the per-alpha stamp downstream uses the same value the
+        # multiplier path saw (no re-derivation, no inconsistency window).
+        regime_for_eval=_regime_for_eval,
     )
     eval_errors = 0
 

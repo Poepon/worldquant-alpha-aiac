@@ -61,7 +61,17 @@ class EvolutionStrategy:
     action_summary: str = ""
     reasoning: str = ""
     iteration: int = 0
-    
+
+    # P2-C (2026-05-16): regime-aware threshold gating + style preset encoding.
+    # ``regime`` is the smoothed 5-bucket market label (one of REGIME_ORDER:
+    # crisis/elevated/normal/calm/very_calm) injected by mining_agent.
+    # ``style_preset`` is the serialised RegimePreset dict (style_label,
+    # style_philosophy, pillar_bias, regime). None on both = byte-for-byte
+    # legacy (the three P2-C flags all default OFF; the injection only runs
+    # when at least one effect flag is True).
+    regime: Optional[str] = None
+    style_preset: Optional[Dict[str, Any]] = None
+
     def with_updates(self, **kwargs) -> EvolutionStrategy:
         """Create new strategy with specified updates (immutable pattern)."""
         return replace(self, **kwargs)
@@ -94,6 +104,9 @@ class EvolutionStrategy:
             "action_summary": self.action_summary,
             "reasoning": self.reasoning,
             "iteration": self.iteration,
+            # P2-C (2026-05-16)
+            "regime": self.regime,
+            "style_preset": dict(self.style_preset) if self.style_preset else None,
         }
     
     @classmethod
@@ -105,6 +118,11 @@ class EvolutionStrategy:
         except ValueError:
             mode = StrategyMode.BALANCED
         
+        # P2-C (2026-05-16) — round-trip new optional fields. Missing keys
+        # in legacy serialised blobs default to None so existing call sites
+        # keep working byte-for-byte.
+        _sp_raw = data.get("style_preset")
+        _style_preset = dict(_sp_raw) if isinstance(_sp_raw, dict) else None
         return cls(
             mode=mode,
             temperature=data.get("temperature", 0.7),
@@ -121,6 +139,9 @@ class EvolutionStrategy:
             action_summary=data.get("action_summary", ""),
             reasoning=data.get("reasoning", ""),
             iteration=data.get("iteration", 0),
+            # P2-C (2026-05-16)
+            regime=data.get("regime"),
+            style_preset=_style_preset,
         )
     
     @classmethod

@@ -619,6 +619,43 @@ async def node_hypothesis(
             macro_narratives = []
             macro_keys_seen = []
 
+    # P2-C (2026-05-16): regime-aware style preset injection — opt-in via
+    # ``ENABLE_STYLE_PRESET_GUIDANCE``. The preset itself is injected into
+    # ``strategy`` by mining_agent.run_mining_iteration BEFORE the workflow
+    # starts; here we just read it out of config["configurable"]["strategy"]
+    # and forward it to PromptContext.
+    #
+    # MF4 byte-for-byte invariant: flag=False → ``style_preset`` stays None
+    # in PromptContext + ``_regime_style_seen`` is never stamped on
+    # primary_h, even if strategy.regime was already set (e.g. the AWARE
+    # flag was on but STYLE flag was off, see S2).
+    style_preset: Optional[Dict] = None
+    _p2c_regime: Optional[str] = None
+    _style_enabled = bool(getattr(
+        _gen_settings, "ENABLE_STYLE_PRESET_GUIDANCE", False,
+    ))
+    if _style_enabled:
+        try:
+            _strat_blob = (
+                (config.get("configurable", {}) or {}).get("strategy", {})
+                if config else {}
+            )
+            if isinstance(_strat_blob, dict):
+                _p2c_regime = _strat_blob.get("regime")
+                _preset_blob = _strat_blob.get("style_preset")
+                if _p2c_regime and isinstance(_preset_blob, dict):
+                    style_preset = dict(_preset_blob)
+                    logger.info(
+                        f"[{node_name}] P2-C style preset attached | "
+                        f"regime={_p2c_regime}"
+                    )
+        except Exception as _p2c_ex:
+            logger.warning(
+                f"[{node_name}] P2-C style preset attach failed: {_p2c_ex}"
+            )
+            style_preset = None
+            _p2c_regime = None
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -650,6 +687,10 @@ async def node_hypothesis(
         # render (field assertion in
         # test_node_hypothesis_macro.test_flag_off_byte_for_byte_legacy, M8).
         macro_narratives=(macro_narratives if _macro_enabled else []),
+        # P2-C (2026-05-16): only attach when the flag is ON AND we have
+        # a regime injection. Off path: style_preset = None → builder
+        # returns "" → byte-for-byte legacy.
+        style_preset=(style_preset if _style_enabled else None),
     )
     
     # Use new hypothesis builder with experiment trace
@@ -977,6 +1018,14 @@ async def node_hypothesis(
                         primary_h["_macro_narratives_seen"] = (
                             list(macro_keys_seen)
                         )
+                    # P2-C (2026-05-16) N4 stamp: record the regime label
+                    # the LLM actually saw via the style preset block.
+                    # Only stamps when both (a) the STYLE flag is on AND
+                    # (b) we attached a real preset above. MF4 invariant:
+                    # this key MUST NOT appear when flag=False, even if
+                    # strategy.regime was set by an effect-flag-only run.
+                    if style_preset and _p2c_regime:
+                        primary_h["_regime_style_seen"] = _p2c_regime
 
                     data = HypothesisCreateData(
                         statement=statement,

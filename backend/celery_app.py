@@ -114,6 +114,18 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_macro_narrative_extract",
         "schedule": crontab(hour=10, minute=0),
     },
+    # P2-C (2026-05-16): daily regime-inference task at 10:30 Asia/Shanghai.
+    # Reads docs/alpha_health_check/<sh-date>.json for the last 7 days per
+    # active region (USA/CHN/EUR/ASI/GLB), EWMA-smooths the GREEN+YELLOW
+    # pass-rate into a 5-bucket regime, and writes the result to Redis
+    # (aiac:current_regime:{region}) + docs/regime_state/<sh-date>.json.
+    # Read-mostly: no DB writes — only Redis SETEX + on-disk archive.
+    # Gated by ENABLE_REGIME_INFERENCE (default OFF, S1). Runs LAST so
+    # all upstream JSON sources have settled.
+    "regime-infer": {
+        "task": "backend.tasks.run_regime_infer",
+        "schedule": crontab(hour=10, minute=30),
+    },
     # V-19.7: revive dead CONTINUOUS_CASCADE sessions. Detects worker crash /
     # silent stalls via task.last_alpha_persisted_at < NOW()-15min and
     # re-dispatches a fresh celery worker. Grace period skips fresh sessions.
