@@ -23,10 +23,10 @@
 | 新 daily Celery beat | **6 个**(08:00-10:30 Asia/Shanghai 单调) |
 | 新 docs/<topic>/ JSON 目录 | **6 个**(每日 sh-date 报告) |
 | Alembic head | `c9d4b1a82e57`(P2-B 后保持不变) |
-| `test_suite --regression` baseline | **7 个 metric 全零漂移** |
+| `test_suite --regression` baseline | **post-cleanup 7 metric 全零漂移**(`82aa317` 后;期间 3 metric 因 pre-existing 循环导入未跑) |
 
 **关键交付物**:
-- 17 个主功能 commit + 4 个 follow-up fix
+- 15 个主功能 commit + 4 个 follow-up fix(对齐 § 1.5 总表 19)
 - 一份调研文档 + 本回顾文档
 - 6 个每日报告(在 flag flip 后启动)
 - 一份分 4 周渐进 ops onboarding 顺序(§ 5)
@@ -185,7 +185,7 @@ pytestmark = pytest.mark.skipif(
 - **P2-A M10**:`RAGService.get_macro_narratives` 内 `MacroNarrativeService` lazy + `MacroNarrativeService._infer_category` 内 `infer_dataset_category` lazy(双层)
 - **P2-C MF2**:`mining_agent.run_mining_iteration` 用 `self.db` 而非新建 `AsyncSessionLocal()`(避破 V-26.79 session 污染)
 
-**终极清理(`82aa317`)**:`evaluation.py:44` 唯一残留 top-level `from backend.tasks.session_watchdog import _quota_guard_async` 移到 L2064 函数体内 lazy import + `backend/tests/conftest.py` 加 `import backend.tasks # noqa` warmup 兜底。从此循环根因消除,意外恢复 6 个此前 collect fail 的 test 文件。
+**循环 contained(`82aa317`)**:`evaluation.py:44` 唯一残留 top-level `from backend.tasks.session_watchdog import _quota_guard_async` 移回 L2064 函数体内 lazy import(此前由 `1dab299` review-fix 时移到 top,理由"无循环风险";`82aa317` 因 test collection 顺序敏感再移回——top↔lazy 反复一次,反映项目级反模式)+ `backend/tests/conftest.py` 加 `import backend.tasks # noqa` warmup 兜底。**结构性循环图保留**(`backend/tasks/__init__:27 → mining_tasks:16 → MiningAgent`),仅通过 lazy + warmup 错开 import 顺序——评估为 "contained" 而非 "eliminated"。意外恢复 6 个此前 collect fail 的 test 文件。
 
 ### § 2.6 0 Alembic / 0 新表 / 0 新 index(P2-A/B/C/D 全部)
 
@@ -468,7 +468,7 @@ python -m scripts.v26_retrospective --window-hours 168 --full   # 周报
 | P1-C-2 Hypothesis 触发器 | `backend/services/hypothesis_health_service.py` + `backend/tasks/hypothesis_health_check.py` |
 | P1-D RobustnessGate | `backend/multi_fidelity_eval.py:RobustnessGate` |
 | P1-E Finding | `backend/alpha_semantic_validator.py:Finding/RuleId` |
-| P2-B Five Pillars | `backend/pillar_classifier.py` + `backend/services/pillar_service.py` + `backend/tasks/pillar_balance_check.py` |
+| P2-B Five Pillars | `backend/pillar_classifier.py` + `backend/services/hypothesis_service.py`(pillar 字段)+ `backend/tasks/pillar_balance_check.py` |
 | P2-D negative knowledge | `backend/negative_knowledge.py` + `backend/services/negative_knowledge_service.py` + `backend/tasks/negative_knowledge_extract.py` + `scripts/v26_retrospective.py --full` |
 | P2-A macro narratives | `backend/macro_narratives.py` + `backend/services/macro_narrative_service.py` + `backend/tasks/macro_narrative_extract.py` + `backend/agents/prompts/macro_narrative.py` |
 | P2-C regime-aware | `backend/regime_classifier.py` + `backend/services/regime_inference_service.py` + `backend/tasks/regime_infer.py` |
@@ -501,7 +501,7 @@ python -m scripts.v26_retrospective --window-hours 168 --full   # 周报
 
 ## § 8 总结
 
-**项目交付**:AlphaGBM/skills 26 skill 调研价值悉数转化为 11 个 opt-in 能力,15 项路线图全部实施,**0 prod 改动 / 0 baseline 漂移 / 0 Alembic 历史变化(仅 P2-B 1 列)**。
+**项目交付**:AlphaGBM/skills 26 skill 调研价值悉数转化为 11 个 opt-in 能力,15 项路线图全部实施,**0 prod 改动 / post-cleanup 7 metric baseline 全零漂移 / 2 次 Alembic 改动(P1-C-2 加 audit 表 + 9 列;P2-B 加 1 列;P0/P1-A/B/D/E/P2-A/C/D 全部零 migration)**。
 
 **方法论沉淀**:7 个跨 P2 共享工程模式(opt-in default OFF / byte-for-byte field assertion / 数据采集 vs 注入分离 / inline _pg_reachable / lazy import / 0 Alembic 设计 / 倍率叠加)+ 30 个对抗审查 MUST FIX 复盘,可作为未来 P3 / V-28+ 工作的范本。
 
