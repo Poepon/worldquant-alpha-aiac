@@ -14,12 +14,18 @@ Contains:
 - node_code_gen: Generate alpha expressions
 """
 
+import json
 import time
 import random
 from dataclasses import dataclass
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from loguru import logger
 from langchain_core.runnables import RunnableConfig
+
+from sqlalchemy import select as _sa_select, func as _sa_func
+from backend.config import settings as _gen_settings
+from backend.models import Alpha, Hypothesis
 
 
 # V-26.49 (2026-05-13): proper dataclass for LLM-call failures. Pre-fix used
@@ -215,7 +221,8 @@ async def node_distill_context(
             system_prompt=DISTILL_SYSTEM,
             user_prompt=prompt,
             temperature=0.5,
-            json_mode=True
+            json_mode=True,
+            node_key="distill_context",
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call failed: {llm_err}")
@@ -322,7 +329,333 @@ async def node_hypothesis(
     logger.info(f"[{node_name}] Starting | task={state.task_id} trace_len={len(experiment_trace)}")
     
     target_fields = state.focused_fields if state.focused_fields else state.fields[:20]
-    
+
+    # P2-B (2026-05-15): Five Pillars balance nudge — opt-in via
+    # ``ENABLE_PILLAR_AWARE_SELECTION``. When OFF (default) the entire block
+    # is skipped so prompt rendering is byte-for-byte legacy. When ON we
+    # compute per-pillar shares of the last 7d alpha pool in this region,
+    # check whether the most-deficient pillar exceeds a threshold, and pass
+    # that pillar to PromptContext.pillar_hint so build_hypothesis_prompt
+    # renders an extra nudge block. Failure of the SQL / Redis path is
+    # non-fatal: pillar_hint stays None and the node continues normally.
+    pillar_hint: Optional[str] = None
+    _pillar_aware = bool(getattr(
+        _gen_settings, "ENABLE_PILLAR_AWARE_SELECTION", False,
+    ))
+    if _pillar_aware:
+        try:
+            # M9 fix: Redis 60s TTL cache keyed by (region, utc-date) so the
+            # per-round JOIN doesn't fire on every node_hypothesis invocation.
+            # `redis_pool` is lazy-imported because backend.tasks ↔
+            # backend.agents has a known cycle (commit 4ec6e8f message).
+            from backend.tasks.redis_pool import get_redis_client
+            _p2b_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            _p2b_cache_key = f"aiac:pillar_deficit:{state.region}:{_p2b_today}"
+            _p2b_redis = None
+            try:
+                _p2b_redis = get_redis_client()
+            except Exception:
+                _p2b_redis = None
+            counts = None
+            if _p2b_redis is not None:
+                try:
+                    _p2b_cached = _p2b_redis.get(_p2b_cache_key)
+                    if _p2b_cached is not None:
+                        counts = json.loads(_p2b_cached)
+                except Exception:
+                    counts = None
+
+            if counts is None:
+                # M3 fix: LEFT JOIN from Alpha — legacy alphas where
+                # ``hypothesis_id IS NULL`` must NOT be silently dropped.
+                # They land in the ``unknown`` bucket and are excluded from
+                # share computation (so they don't dilute deficits).
+                # alphas.created_at is TIMESTAMP WITHOUT TIME ZONE — use a
+                # naive UTC cutoff so asyncpg accepts the WHERE clause.
+                _p2b_cutoff = (
+                    datetime.now(timezone.utc) - timedelta(days=7)
+                ).replace(tzinfo=None)
+                async with resolve_db(config) as _p2b_db:
+                    _p2b_stmt = (
+                        _sa_select(
+                            Hypothesis.pillar,
+                            _sa_func.count(Alpha.id),
+                        )
+                        .select_from(Alpha)
+                        .outerjoin(
+                            Hypothesis,
+                            Alpha.hypothesis_id == Hypothesis.id,
+                        )
+                        .where(
+                            Alpha.region == state.region,
+                            Alpha.created_at >= _p2b_cutoff,
+                        )
+                        .group_by(Hypothesis.pillar)
+                    )
+                    _p2b_rows = (await _p2b_db.execute(_p2b_stmt)).all()
+                counts = {(p or "unknown"): int(c) for p, c in _p2b_rows}
+                if _p2b_redis is not None:
+                    try:
+                        _p2b_redis.setex(
+                            _p2b_cache_key, 60, json.dumps(counts),
+                        )
+                    except Exception:
+                        pass  # cache failure must not break the node
+
+            # Compute pillar deficits — ``unknown`` (legacy NULL) is excluded
+            # from the denominator so legacy backlog doesn't dilute fresh
+            # shares. Threshold is deficit relative to target.
+            _p2b_target = getattr(
+                _gen_settings, "PILLAR_TARGET_DISTRIBUTION", {},
+            ) or {}
+            pillared_total = sum(
+                c for p, c in counts.items() if p in _p2b_target
+            ) or 1
+            shares = {
+                p: counts.get(p, 0) / pillared_total for p in _p2b_target
+            }
+            deficits = {
+                p: max(0.0, _p2b_target[p] - shares.get(p, 0.0))
+                for p in _p2b_target
+            }
+            if deficits:
+                top_pillar, top_def = max(
+                    deficits.items(), key=lambda kv: kv[1],
+                )
+                _p2b_skew_t = float(getattr(
+                    _gen_settings, "PILLAR_BALANCE_SKEW_THRESHOLD", 0.4,
+                ))
+                # Trigger when the deficit exceeds threshold * target.
+                if top_def > _p2b_skew_t * _p2b_target.get(top_pillar, 0.2):
+                    pillar_hint = top_pillar
+                    logger.info(
+                        f"[{node_name}] P2-B pillar nudge | shares={shares} "
+                        f"hint={top_pillar} deficit={top_def:.3f}"
+                    )
+        except Exception as _p2b_ex:
+            logger.warning(
+                f"[{node_name}] P2-B pillar nudge failed (non-fatal): "
+                f"{_p2b_ex}"
+            )
+            pillar_hint = None
+
+    # P2-D (2026-05-15): Negative-knowledge nudge — opt-in via
+    # ``ENABLE_NEGATIVE_KNOWLEDGE_NUDGE``. When OFF (default) the entire
+    # block is skipped so prompt rendering is byte-for-byte legacy —
+    # PromptContext.failure_pitfalls = state.pitfalls[:5] unchanged. When
+    # ON, top-K pitfalls (filtered by region + min_fail_count + 14d
+    # recency + non-UNKNOWN skeleton, see negative_knowledge_service.py
+    # fetch_top_pitfalls SQL) are prepended to state.pitfalls. Result is
+    # capped at 5 to match the legacy slice. Failure of the Redis / DB
+    # path is non-fatal: ``neg_kb_pitfalls`` stays empty and the prompt
+    # falls back to legacy.
+    neg_kb_pitfalls: List[Dict] = []
+    neg_kb_keys_seen: List[str] = []
+    _neg_kb_enabled = bool(getattr(
+        _gen_settings, "ENABLE_NEGATIVE_KNOWLEDGE_NUDGE", False,
+    ))
+    if _neg_kb_enabled:
+        try:
+            # Lazy import — backend.services.negative_knowledge_service ↔
+            # backend.tasks has the same known cycle as P2-B (see M9 fix
+            # commentary above for redis_pool). Mirror that pattern.
+            from backend.tasks.redis_pool import get_redis_client
+            from backend.services.negative_knowledge_service import (
+                NegativeKnowledgeService,
+            )
+            _p2d_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            _p2d_cache_key = (
+                f"aiac:neg_knowledge:{state.region}:{_p2d_today}"
+            )
+            _p2d_redis = None
+            try:
+                _p2d_redis = get_redis_client()
+            except Exception:
+                _p2d_redis = None
+            cached_pitfalls = None
+            if _p2d_redis is not None:
+                try:
+                    _p2d_cached = _p2d_redis.get(_p2d_cache_key)
+                    if _p2d_cached is not None:
+                        cached_pitfalls = json.loads(_p2d_cached)
+                except Exception:
+                    cached_pitfalls = None
+
+            if cached_pitfalls is None:
+                _top_k = int(getattr(
+                    _gen_settings, "NEGATIVE_KNOWLEDGE_TOP_K", 5,
+                ))
+                _min_fc = int(getattr(
+                    _gen_settings, "NEGATIVE_KNOWLEDGE_MIN_FAIL_COUNT", 3,
+                ))
+                async with resolve_db(config) as _p2d_db:
+                    _nks = NegativeKnowledgeService(_p2d_db)
+                    cached_pitfalls = await _nks.fetch_top_pitfalls(
+                        region=state.region,
+                        limit=_top_k,
+                        min_fail_count=_min_fc,
+                    )
+                if _p2d_redis is not None:
+                    try:
+                        _p2d_redis.setex(
+                            _p2d_cache_key, 300,
+                            json.dumps(cached_pitfalls, default=str),
+                        )
+                    except Exception:
+                        pass  # cache failure must not break the node
+
+            neg_kb_pitfalls = list(cached_pitfalls or [])
+            neg_kb_keys_seen = [
+                p.get("signature_key", "") for p in neg_kb_pitfalls
+                if isinstance(p, dict) and p.get("signature_key")
+            ]
+            if neg_kb_pitfalls:
+                logger.info(
+                    f"[{node_name}] P2-D nudge | n={len(neg_kb_pitfalls)} "
+                    f"region={state.region} "
+                    f"keys={neg_kb_keys_seen}"
+                )
+        except Exception as _p2d_ex:
+            logger.warning(
+                f"[{node_name}] P2-D negative-knowledge nudge failed "
+                f"(non-fatal): {_p2d_ex}"
+            )
+            neg_kb_pitfalls = []
+            neg_kb_keys_seen = []
+
+    # P2-A (2026-05-16): Macro-narrative RAG nudge — opt-in via
+    # ``ENABLE_MACRO_NARRATIVE_GUIDANCE``. When OFF (default) the entire
+    # block is skipped so prompt rendering is byte-for-byte legacy —
+    # PromptContext.macro_narratives = [] → build_macro_context_block returns
+    # "" → build_hypothesis_prompt template splice produces an empty string
+    # at the insertion point. When ON, top-K narratives (≤5, blended over
+    # field / dataset / category scopes by MacroNarrativeService with field
+    # +0.1 confidence bonus, S4) are attached to PromptContext. Failure of
+    # Redis / DB path is non-fatal: ``macro_narratives`` stays empty and the
+    # prompt falls back to legacy.
+    macro_narratives: List[Dict] = []
+    macro_keys_seen: List[str] = []
+    _macro_enabled = bool(getattr(
+        _gen_settings, "ENABLE_MACRO_NARRATIVE_GUIDANCE", False,
+    ))
+    if _macro_enabled:
+        try:
+            from backend.tasks.redis_pool import get_redis_client  # lazy (M10)
+            from backend.services.macro_narrative_service import (  # lazy (M10)
+                MacroNarrativeService,
+            )
+            _p2a_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            _p2a_cache_key = (
+                f"aiac:macro_narrative:{state.dataset_id}:"
+                f"{state.region}:{_p2a_today}"
+            )
+            _p2a_redis = None
+            try:
+                _p2a_redis = get_redis_client()
+            except Exception:
+                _p2a_redis = None
+            cached = None
+            if _p2a_redis is not None:
+                try:
+                    _p2a_cached = _p2a_redis.get(_p2a_cache_key)
+                    if _p2a_cached is not None:
+                        cached = json.loads(_p2a_cached)
+                except Exception:
+                    cached = None
+
+            if cached is None:
+                # M7: candidate key extraction with the double-key pattern.
+                # state.focused_fields elements may use ``field_id`` (Phase-1
+                # union path) OR ``id`` (distillation path) — extract both.
+                _candidate_keys: List[str] = []
+                for f in (state.focused_fields or state.fields or [])[:10]:
+                    if isinstance(f, dict):
+                        fid = f.get("field_id") or f.get("id")
+                        if fid:
+                            _candidate_keys.append(str(fid))
+                _ttl = int(getattr(
+                    _gen_settings, "MACRO_NARRATIVE_CACHE_TTL_SECONDS", 600,
+                ))
+                _top_k = int(getattr(
+                    _gen_settings, "MACRO_NARRATIVE_FIELD_TOP_K", 3,
+                ))
+                async with resolve_db(config) as _p2a_db:
+                    _mns = MacroNarrativeService(_p2a_db)
+                    cached = await _mns.fetch_macro_narratives(
+                        dataset_id=state.dataset_id,
+                        region=state.region,
+                        key_fields=_candidate_keys,
+                        limit_field=_top_k,
+                        limit_dataset=1,
+                        limit_category=1,
+                    )
+                if _p2a_redis is not None:
+                    try:
+                        _p2a_redis.setex(
+                            _p2a_cache_key, _ttl,
+                            json.dumps(cached, default=str),
+                        )
+                    except Exception:
+                        pass
+
+            macro_narratives = list(cached or [])[:5]
+            macro_keys_seen = [
+                (n.get("field_id") or n.get("dataset_category") or "")
+                for n in macro_narratives
+                if isinstance(n, dict)
+            ]
+            if macro_narratives:
+                logger.info(
+                    f"[{node_name}] P2-A macro nudge | "
+                    f"n={len(macro_narratives)} "
+                    f"dataset={state.dataset_id} region={state.region} "
+                    f"keys={macro_keys_seen}"
+                )
+        except Exception as _p2a_ex:
+            logger.warning(
+                f"[{node_name}] P2-A macro nudge failed (non-fatal): "
+                f"{_p2a_ex}"
+            )
+            macro_narratives = []
+            macro_keys_seen = []
+
+    # P2-C (2026-05-16): regime-aware style preset injection — opt-in via
+    # ``ENABLE_STYLE_PRESET_GUIDANCE``. The preset itself is injected into
+    # ``strategy`` by mining_agent.run_mining_iteration BEFORE the workflow
+    # starts; here we just read it out of config["configurable"]["strategy"]
+    # and forward it to PromptContext.
+    #
+    # MF4 byte-for-byte invariant: flag=False → ``style_preset`` stays None
+    # in PromptContext + ``_regime_style_seen`` is never stamped on
+    # primary_h, even if strategy.regime was already set (e.g. the AWARE
+    # flag was on but STYLE flag was off, see S2).
+    style_preset: Optional[Dict] = None
+    _p2c_regime: Optional[str] = None
+    _style_enabled = bool(getattr(
+        _gen_settings, "ENABLE_STYLE_PRESET_GUIDANCE", False,
+    ))
+    if _style_enabled:
+        try:
+            _strat_blob = (
+                (config.get("configurable", {}) or {}).get("strategy", {})
+                if config else {}
+            )
+            if isinstance(_strat_blob, dict):
+                _p2c_regime = _strat_blob.get("regime")
+                _preset_blob = _strat_blob.get("style_preset")
+                if _p2c_regime and isinstance(_preset_blob, dict):
+                    style_preset = dict(_preset_blob)
+                    logger.info(
+                        f"[{node_name}] P2-C style preset attached | "
+                        f"regime={_p2c_regime}"
+                    )
+        except Exception as _p2c_ex:
+            logger.warning(
+                f"[{node_name}] P2-C style preset attach failed: {_p2c_ex}"
+            )
+            style_preset = None
+            _p2c_regime = None
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -335,9 +668,29 @@ async def node_hypothesis(
         fields=target_fields,
         operators=state.operators[:30],
         success_patterns=state.patterns[:5],
-        failure_pitfalls=state.pitfalls[:5],
+        # P2-D: when flag is on AND we fetched ≥1 pitfall, prepend them to
+        # state.pitfalls. When flag is off OR no pitfalls fetched, fall
+        # back to state.pitfalls[:5] — byte-for-byte legacy (verified by
+        # test_node_hypothesis_negative_knowledge.test_flag_off_byte_for_byte
+        # _legacy).
+        failure_pitfalls=(
+            (neg_kb_pitfalls + (state.pitfalls or []))[:5]
+            if _neg_kb_enabled and neg_kb_pitfalls
+            else state.pitfalls[:5]
+        ),
         exploration_weight=exploration_weight,
         available_dataset_pool=getattr(state, "available_dataset_pool", []) or [],
+        pillar_hint=pillar_hint,
+        # P2-A (2026-05-16): only attach when the flag is ON AND we fetched
+        # ≥1 row. Off / fetch-failed paths set macro_narratives=[] so the
+        # template splice produces the empty-string byte-for-byte legacy
+        # render (field assertion in
+        # test_node_hypothesis_macro.test_flag_off_byte_for_byte_legacy, M8).
+        macro_narratives=(macro_narratives if _macro_enabled else []),
+        # P2-C (2026-05-16): only attach when the flag is ON AND we have
+        # a regime injection. Off path: style_preset = None → builder
+        # returns "" → byte-for-byte legacy.
+        style_preset=(style_preset if _style_enabled else None),
     )
     
     # Use new hypothesis builder with experiment trace
@@ -358,7 +711,8 @@ async def node_hypothesis(
             system_prompt=HYPOTHESIS_SYSTEM,
             user_prompt=prompt,
             temperature=temperature,
-            json_mode=True
+            json_mode=True,
+            node_key="hypothesis",
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call exception: {llm_err}")
@@ -623,6 +977,56 @@ async def node_hypothesis(
                         break
                 if primary_h is not None:
                     statement = (primary_h.get("idea") or primary_h.get("statement") or "").strip()
+                    # P2-B (2026-05-15, M8 fix): resolve pillar BEFORE the
+                    # HypothesisCreateData ctor so persistence happens
+                    # unconditionally. Decision-injection (the nudge above)
+                    # is gated by ENABLE_PILLAR_AWARE_SELECTION, but data
+                    # collection (stamp) is always on — otherwise the
+                    # pillar_balance_check report has nothing to read.
+                    from backend.pillar_classifier import (
+                        normalize_pillar as _p2b_norm,
+                        infer_pillar as _p2b_infer,
+                    )
+                    _llm_pillar_raw = primary_h.get("pillar")
+                    _llm_pillar = _p2b_norm(_llm_pillar_raw)
+                    resolved_pillar = _llm_pillar or _p2b_infer(
+                        hypothesis_pillar=_llm_pillar_raw,
+                        key_fields=primary_h.get("key_fields") or [],
+                        suggested_operators=primary_h.get(
+                            "suggested_operators",
+                        ) or [],
+                        expected_signal=primary_h.get("expected_signal"),
+                    )
+                    # N2: stamp ``_pillar_nudged`` when the LLM actually
+                    # honoured the nudge. Cheap, non-persisted audit hook —
+                    # mirrors the existing ``_v22_13_reused`` pattern.
+                    if pillar_hint and resolved_pillar == pillar_hint:
+                        primary_h["_pillar_nudged"] = pillar_hint
+                    # P2-D N4: stamp which signature_keys were shown to
+                    # the LLM. Independent of whether LLM acted on them —
+                    # used by ops to track nudge surface area / pickup
+                    # rate. Non-persisted; lives only on the in-memory
+                    # ``hypotheses`` list returned to state.
+                    if neg_kb_keys_seen:
+                        primary_h["_negative_knowledge_pitfalls_seen"] = (
+                            list(neg_kb_keys_seen)
+                        )
+                    # P2-A N4: stamp the field_id / dataset_category keys
+                    # of macro narratives that were shown to the LLM.
+                    # Non-persisted audit hook (same pattern as P2-D N4).
+                    if macro_keys_seen:
+                        primary_h["_macro_narratives_seen"] = (
+                            list(macro_keys_seen)
+                        )
+                    # P2-C (2026-05-16) N4 stamp: record the regime label
+                    # the LLM actually saw via the style preset block.
+                    # Only stamps when both (a) the STYLE flag is on AND
+                    # (b) we attached a real preset above. MF4 invariant:
+                    # this key MUST NOT appear when flag=False, even if
+                    # strategy.regime was set by an effect-flag-only run.
+                    if style_preset and _p2c_regime:
+                        primary_h["_regime_style_seen"] = _p2c_regime
+
                     data = HypothesisCreateData(
                         statement=statement,
                         rationale=primary_h.get("rationale") or primary_h.get("reason") or "",
@@ -638,6 +1042,8 @@ async def node_hypothesis(
                         dataset_pool=primary_h.get("selected_datasets") or [],
                         experiment_variant=str(experiment_variant)
                             if experiment_variant is not None else None,
+                        # P2-B (2026-05-15, M8): always stamp the pillar.
+                        pillar=resolved_pillar,
                     )
                     row = await svc.create_hypothesis(data)
                     current_hypothesis_ids.append(row.id)
@@ -654,6 +1060,17 @@ async def node_hypothesis(
             logger.warning(
                 f"[{node_name}] Phase 2 hypothesis persist failed (non-fatal): {_ex}"
             )
+
+    # P2-D S8 audit: flag was on AND we showed N pitfalls to the LLM, but
+    # the parser came back with no valid hypothesis (LLM-side failure).
+    # Surfaces "nudge shown / no LLM signal" cases for ops without blocking
+    # the node.
+    if _neg_kb_enabled and neg_kb_keys_seen and current_hypothesis_id is None:
+        logger.warning(
+            f"[{node_name}] P2-D nudge shown ({len(neg_kb_keys_seen)} "
+            f"pitfalls) but LLM returned no valid hypothesis "
+            f"(region={state.region})"
+        )
 
     return {
         "hypotheses": hypotheses,
@@ -818,7 +1235,8 @@ async def node_code_gen(
             system_prompt=ALPHA_GENERATION_SYSTEM,
             user_prompt=prompt,
             temperature=temperature,
-            json_mode=True
+            json_mode=True,
+            node_key="code_gen",
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call exception: {llm_err}")

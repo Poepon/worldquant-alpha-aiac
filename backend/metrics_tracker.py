@@ -163,6 +163,51 @@ class SessionMetrics:
 
 
 @dataclass
+class NodeMetrics:
+    """Per-LLM-call-site (node) aggregates.
+
+    Used to track tokens / latency / success rate broken down by graph
+    node (hypothesis / code_gen / self_correct / ...) and effort tier.
+    LLMService emits one sample per call via `record_llm_call`; the
+    A/B comparison report (`scripts/ab_thinking_effort.py`) reads
+    snapshots from `get_node_metrics_snapshot`.
+    """
+    node_key: str
+    # effort_breakdown[effort_tier] → call count at that tier (covers the
+    # case where a single node temporarily switched tier during a session)
+    effort_breakdown: Dict[str, int] = field(default_factory=lambda: defaultdict(int))
+    call_count: int = 0
+    tokens_total: int = 0
+    latency_ms_total: int = 0
+    success_count: int = 0
+    failure_count: int = 0
+
+    def record(self, effort: str, tokens: int, latency_ms: int, success: bool) -> None:
+        self.call_count += 1
+        self.effort_breakdown[effort] += 1
+        self.tokens_total += max(0, int(tokens or 0))
+        self.latency_ms_total += max(0, int(latency_ms or 0))
+        if success:
+            self.success_count += 1
+        else:
+            self.failure_count += 1
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "node_key": self.node_key,
+            "effort_breakdown": dict(self.effort_breakdown),
+            "call_count": self.call_count,
+            "tokens_total": self.tokens_total,
+            "latency_ms_total": self.latency_ms_total,
+            "success_count": self.success_count,
+            "failure_count": self.failure_count,
+            "tokens_avg": round(self.tokens_total / self.call_count, 1) if self.call_count else 0.0,
+            "latency_ms_avg": round(self.latency_ms_total / self.call_count, 1) if self.call_count else 0.0,
+            "success_rate": round(self.success_count / self.call_count, 4) if self.call_count else 0.0,
+        }
+
+
+@dataclass
 class KnowledgeMetrics:
     """Metrics about knowledge base evolution."""
     timestamp: datetime = field(default_factory=datetime.now)
@@ -546,3 +591,50 @@ def log_session_summary(
         f"best_sharpe={best_sharpe:.2f} "
         f"duration={duration_minutes:.1f}min"
     )
+
+
+# =============================================================================
+# Per-Node LLM Metrics (module-level accumulator)
+# =============================================================================
+# Decoupled from MetricsTracker / session lifecycle: LLMService is a process-
+# wide singleton and emits one sample per call regardless of which task is
+# active. Snapshot via `get_node_metrics_snapshot()` at round/session
+# boundaries to fold into SessionMetrics; reset with `reset_node_metrics()`
+# in A/B scripts between phases.
+
+_node_metrics: Dict[str, NodeMetrics] = {}
+
+
+def record_llm_call(
+    node_key: str,
+    effort: str,
+    tokens: int,
+    latency_ms: int,
+    success: bool,
+) -> None:
+    """Record one LLM call sample (called from LLMService.call).
+
+    Safe to call from any thread/coroutine; the GIL serializes dict
+    mutation. Failure-isolated — never raises, so a metrics bug can
+    never break the LLM call path.
+    """
+    try:
+        key = node_key or "_unspecified"
+        entry = _node_metrics.get(key)
+        if entry is None:
+            entry = NodeMetrics(node_key=key)
+            _node_metrics[key] = entry
+        entry.record(effort=effort, tokens=tokens, latency_ms=latency_ms, success=success)
+    except Exception:
+        # 严格不抛 — 指标累加不能干扰 LLM 主路径
+        pass
+
+
+def get_node_metrics_snapshot() -> Dict[str, Dict[str, Any]]:
+    """Return a deep snapshot of per-node aggregates (safe for serialization)."""
+    return {k: v.to_dict() for k, v in _node_metrics.items()}
+
+
+def reset_node_metrics() -> None:
+    """Wipe the accumulator (used by A/B scripts between phases / tests)."""
+    _node_metrics.clear()

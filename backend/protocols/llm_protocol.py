@@ -82,17 +82,29 @@ class LLMProtocol(Protocol):
         temperature: float = 0.7,
         json_mode: bool = True,
         max_tokens: int = 4096,
+        *,
+        node_key: Optional[str] = None,
+        thinking_effort: Optional[str] = None,
     ) -> LLMResponse:
         """
         Make an LLM call with automatic retries and logging.
-        
+
         Args:
             system_prompt: System/instruction message
             user_prompt: User/input message
             temperature: Sampling temperature (0.0 to 2.0)
             json_mode: Whether to request JSON output format
             max_tokens: Maximum tokens in response
-            
+            node_key: Optional node identifier (e.g. "hypothesis", "code_gen")
+                — implementations may consult `settings.THINKING_EFFORT_OVERRIDES`
+                to choose a per-node thinking_effort tier. Pass-through and
+                ignored when the resolved provider does not support extended
+                thinking (e.g. openai-compat, non-reasoning models).
+            thinking_effort: Optional explicit thinking_effort override tier
+                ("low" / "medium" / "high" / "xhigh" / "max" / "auto" /
+                "adaptive" / "disabled"). Takes priority over `node_key`
+                table lookup. Ignored on non-thinking providers/models.
+
         Returns:
             LLMResponse with content and metadata
         """

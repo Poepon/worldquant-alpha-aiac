@@ -15,6 +15,7 @@ to find high-quality variants of promising alphas.
 import re
 import random
 import hashlib
+import statistics
 from typing import List, Dict, Optional, Tuple, Any, Set
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -58,6 +59,67 @@ WRAPPER_PATTERNS = [
 
 
 # =============================================================================
+# Pure-function helpers (used by both Individual and GeneticOptimizer)
+# =============================================================================
+
+def _metrics_from_result(sim_result: Dict[str, Any]) -> Dict[str, float]:
+    """Extract sharpe/fitness/turnover/os_sharpe from a raw simulate() result dict."""
+    is_stats = sim_result.get("is", sim_result.get("train", {})) or {}
+    os_stats = sim_result.get("os", sim_result.get("test", {})) or {}
+    return {
+        "sharpe": float(is_stats.get("sharpe", is_stats.get("Sharpe", 0)) or 0),
+        "fitness": float(is_stats.get("fitness", is_stats.get("Fitness", 0)) or 0),
+        "turnover": float(is_stats.get("turnover", is_stats.get("Turnover", 0)) or 0),
+        "os_sharpe": float(os_stats.get("sharpe", os_stats.get("Sharpe", 0)) or 0),
+    }
+
+
+def compute_overall_fitness(
+    sharpe: float,
+    fitness: float,
+    turnover: float,
+    os_sharpe: float,
+    weights: Dict[str, float] = None,
+    apply_os_consistency: bool = False,
+) -> float:
+    """
+    Compute composite fitness score from component metrics.
+
+    Extracted from Individual.calculate_fitness so GeneticOptimizer methods can
+    call it per grid-config point without mutating an Individual.
+
+    Args:
+        apply_os_consistency: If True, multiply the composite by an IS/OS
+            consistency factor — 0.5 (OS fully collapses) … 1.0 (OS = IS).
+            This is a zero-extra-simulation anti-overfit signal.
+    """
+    w = weights or {
+        "sharpe": 0.50,
+        "fitness": 0.20,
+        "turnover": 0.15,
+        "os_sharpe": 0.15,
+    }
+    sharpe_score = min(1.0, sharpe / 2.0) if sharpe > 0 else 0
+    fitness_score = min(1.0, fitness / 1.5) if fitness > 0 else 0
+    turnover_score = max(0, 1.0 - turnover) if turnover < 1.0 else 0
+    os_score = min(1.0, os_sharpe / 1.5) if os_sharpe > 0 else 0
+
+    overall = (
+        w["sharpe"] * sharpe_score
+        + w["fitness"] * fitness_score
+        + w["turnover"] * turnover_score
+        + w["os_sharpe"] * os_score
+    )
+
+    if apply_os_consistency and sharpe > 0:
+        # Penalise alphas whose OS trails IS badly; OS ≥ IS → factor 1.0,
+        # OS = 0 → factor 0.5.
+        overall *= 0.5 + 0.5 * min(1.0, max(0.0, os_sharpe / sharpe))
+
+    return overall
+
+
+# =============================================================================
 # Data Structures
 # =============================================================================
 
@@ -87,6 +149,11 @@ class Individual:
     # W2: Island provenance — track which sub-population the individual
     # currently lives in so update_individual can route metrics back.
     island_id: int = 0
+
+    # Fidelity tracking (tiered-fidelity anti-overfit)
+    grid_confirmed: bool = False    # True once promotion grid has confirmed this individual
+    fidelity_count: int = 1         # Number of config-points actually simulated (1 = single-run)
+    fitness_dispersion: float = 0.0  # pstdev of per-config overall_fitness; high → config-fragile
     
     @property
     def fingerprint(self) -> str:
@@ -94,25 +161,19 @@ class Individual:
         return hashlib.md5(self.expression.encode()).hexdigest()[:12]
     
     def calculate_fitness(self, weights: Dict[str, float] = None):
-        """Calculate overall fitness from component metrics."""
-        w = weights or {
-            "sharpe": 0.50,
-            "fitness": 0.20,
-            "turnover": 0.15,  # Negative weight (lower is better)
-            "os_sharpe": 0.15,
-        }
-        
-        # Normalize components
-        sharpe_score = min(1.0, self.sharpe / 2.0) if self.sharpe > 0 else 0
-        fitness_score = min(1.0, self.fitness / 1.5) if self.fitness > 0 else 0
-        turnover_score = max(0, 1.0 - self.turnover) if self.turnover < 1.0 else 0
-        os_score = min(1.0, self.os_sharpe / 1.5) if self.os_sharpe > 0 else 0
-        
-        self.overall_fitness = (
-            w["sharpe"] * sharpe_score +
-            w["fitness"] * fitness_score +
-            w["turnover"] * turnover_score +
-            w["os_sharpe"] * os_score
+        """Calculate overall fitness from component metrics.
+
+        Delegates to the module-level ``compute_overall_fitness`` without the
+        IS/OS consistency penalty (apply_os_consistency=False) so that callers
+        outside GeneticOptimizer (e.g. unit tests, seed initialisation) get the
+        same deterministic result as before.  GeneticOptimizer methods that want
+        the IS/OS penalty call compute_overall_fitness directly with the config
+        flag.
+        """
+        self.overall_fitness = compute_overall_fitness(
+            self.sharpe, self.fitness, self.turnover, self.os_sharpe,
+            weights=weights,
+            apply_os_consistency=False,
         )
     
     def to_dict(self) -> Dict[str, Any]:
@@ -127,6 +188,10 @@ class Individual:
             "mutation_type": self.mutation_type,
             "mutation_description": self.mutation_description,
             "passed": self.passed,
+            # Fidelity provenance
+            "grid_confirmed": self.grid_confirmed,
+            "fidelity_count": self.fidelity_count,
+            "fitness_dispersion": round(self.fitness_dispersion, 4),
         }
 
 
@@ -204,6 +269,18 @@ class OptimizationConfig:
     migration_interval: int = 5  # generations between elite migrations
     migration_ratio: float = 0.10  # fraction of island swapped on each migration
 
+    # Tiered-fidelity anti-overfit (P0 — see docs/alphagbm_skills_research_2026-05-15.md)
+    # Promotion-grid configs: run top candidates on these universe overrides before
+    # they become elites / migrants / finalists.  Only *evaluation-context* axes
+    # (sub-universe) — not decay/delay/region, which change the alpha itself.
+    # Set to [] to disable the promotion grid (legacy single-fidelity behaviour).
+    fidelity_grid: List[Dict[str, Any]] = field(default_factory=lambda: [
+        {"universe": "TOP1000"},
+        {"universe": "TOP500"},
+    ])
+    promotion_pool_size: int = 3   # per-island: top-N single-run individuals confirmed each gen
+    apply_os_consistency: bool = False  # IS/OS consistency penalty in overall_fitness (opt-in)
+
 
 # =============================================================================
 # Mutation Operators
@@ -243,27 +320,211 @@ def mutate_operator_substitution(expression: str) -> Tuple[str, str]:
 def mutate_window_parameter(expression: str) -> Tuple[str, str]:
     """
     Mutate window parameter values.
-    
+
     Returns:
         (mutated_expression, description)
+
+    Uses ``_find_window_sites`` (balanced-paren walker) so ternary ops
+    (``ts_corr(x, y, 20)`` / ``ts_co_skewness(x, y, 20)``) and inner
+    nested calls (``ts_corr(rank(close), rank(returns), 20)``) are
+    correctly enumerated — the prior narrow regex
+    ``(ts_*|group_*)(<inner>, NUM)`` was binary-only and silently
+    returned ``no_window_params`` for those forms, leaving GA window
+    mutation a no-op on the most common BRAIN time-series ops.
     """
-    # Pattern: function(field, NUMBER)
-    window_pattern = re.compile(r'(ts_\w+|group_\w+)\s*\(\s*([^,]+)\s*,\s*(\d+)')
-    matches = list(window_pattern.finditer(expression))
-    
-    if not matches:
+    sites = _find_window_sites(expression)
+    if not sites:
         return expression, "no_window_params"
-    
-    # Pick random window to mutate
-    match = random.choice(matches)
-    func_name = match.group(1)
-    original_window = int(match.group(3))
-    
-    # Pick new window value
-    new_window = random.choice([w for w in WINDOW_VALUES if w != original_window])
-    
-    mutated = expression[:match.start(3)] + str(new_window) + expression[match.end(3):]
-    return mutated, f"window: {func_name} {original_window} -> {new_window}"
+
+    site = random.choice(sites)
+    original_window = site["window_value"]
+    new_window = random.choice(
+        [w for w in WINDOW_VALUES if w != original_window]
+    )
+    mutated = (
+        expression[:site["window_start"]]
+        + str(new_window)
+        + expression[site["window_end"]:]
+    )
+    return (
+        mutated,
+        f"window: {site['func_name']} {original_window} -> {new_window}",
+    )
+
+
+_WINDOW_NAME_RE = re.compile(r'(ts_\w+|group_\w+)\s*\(')
+_INT_LITERAL_RE = re.compile(r'^\d+$')
+
+
+def _find_window_sites(expression: str) -> List[Dict[str, Any]]:
+    """Walk balanced parens to find every ``(ts_*|group_*)(...)`` call site
+    whose LAST positional arg is an integer literal (= the window).
+
+    Handles binary (``ts_rank(close, 20)``), ternary
+    (``ts_co_skewness(close, returns, 20)``), and arbitrarily-nested
+    inner args (``ts_corr(rank(close), rank(returns), 20)``) — all of which
+    a flat ``[^,]+`` regex cannot match.
+
+    Returns a list of dicts: ``{func_name, window_value, window_start,
+    window_end, call_start}`` — ``window_start/end`` are absolute positions
+    suitable for slice substitution.
+    """
+    sites: List[Dict[str, Any]] = []
+    for nm in _WINDOW_NAME_RE.finditer(expression):
+        open_paren = nm.end() - 1  # absolute index of '('
+        # Walk to matching close paren.
+        depth = 0
+        close = -1
+        for i in range(open_paren, len(expression)):
+            c = expression[i]
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+                if depth == 0:
+                    close = i
+                    break
+        if close < 0:
+            continue  # unbalanced — skip silently
+        body = expression[open_paren + 1:close]
+        # Split body at depth-0 commas to enumerate positional args.
+        arg_spans: List[Tuple[int, int]] = []
+        depth = 0
+        last = 0
+        for j, c in enumerate(body):
+            if c == '(':
+                depth += 1
+            elif c == ')':
+                depth -= 1
+            elif c == ',' and depth == 0:
+                arg_spans.append((last, j))
+                last = j + 1
+        arg_spans.append((last, len(body)))
+        # Find the LAST positional arg that is purely an int literal — that's
+        # the window for every BRAIN ts_*/group_* op we care about.
+        # (Trailing kwargs like ``constant=False`` are non-digit and skipped.)
+        for (a_start, a_end) in reversed(arg_spans):
+            text = body[a_start:a_end]
+            stripped = text.strip()
+            if not _INT_LITERAL_RE.match(stripped):
+                continue
+            # Absolute positions of the literal in `expression`.
+            offset = body[a_start:a_end].index(stripped)
+            abs_start = open_paren + 1 + a_start + offset
+            abs_end = abs_start + len(stripped)
+            sites.append({
+                "func_name": nm.group(1),
+                "window_value": int(stripped),
+                "window_start": abs_start,
+                "window_end": abs_end,
+                "call_start": nm.start(),
+            })
+            break  # at most one window per call site
+    return sites
+
+
+def enumerate_window_perturbations(
+    expression: str,
+    n: int = 4,
+    *,
+    selection_strategy: str = "first",
+) -> List[Tuple[str, str]]:
+    """Generate up to N deterministic unique window-parameter variants.
+
+    Args:
+        expression: alpha expression (may be empty/None — returns []).
+        n: number of variants requested.
+        selection_strategy: 'first' | 'largest' | 'all_in_order'.
+            'first' (default, recommended for determinism): perturb the first
+                ``(ts_*|group_*)`` call site whose last positional arg is an
+                int literal; returns up to ``n`` nearest WINDOW_VALUES.
+            'largest': perturb the site whose original window value is the
+                largest; ties broken by ``call_start`` (earliest wins).
+            'all_in_order': perturb up to ``n`` distinct sites in source order
+                (one nearest variant per site).
+
+    Returns:
+        List of ``(new_expression, description)`` tuples — empty when no
+        matching window site is found (caller treats as ``skip_reason='no_window'``).
+        Order is by ``abs(w - original_window)`` ascending for first/largest,
+        or by site position for all_in_order.  Dedup ensures no duplicate
+        ``new_expression`` rows.
+
+    Edge cases (P3 fix: now handles ternary + nested):
+      - Empty / None expression                                → []
+      - No ``(ts_\\w+|group_\\w+)`` site                        → []
+      - Binary ``ts_rank(close, 20)``                          → ✓
+      - Ternary ``ts_co_skewness(close, returns, 20)``         → ✓ (P3 fix)
+      - Nested ``ts_corr(rank(close), rank(returns), 20)``     → ✓ (P3 fix)
+      - n > available nearest values                           → truncated
+      - Duplicate windows in expression                        → dedup'd
+      - Original window not in WINDOW_VALUES (e.g. 7)          → still works
+    """
+    if not expression:
+        return []
+
+    sites = _find_window_sites(expression)
+    if not sites:
+        return []
+
+    n = max(1, int(n))
+
+    def _nearest_values(original: int, count: int) -> List[int]:
+        """Return up to `count` WINDOW_VALUES nearest to `original`, excluding it.
+
+        Tiebreaker: smaller value first (stable, deterministic)."""
+        ordered = sorted(
+            (w for w in WINDOW_VALUES if w != original),
+            key=lambda w: (abs(w - original), w),
+        )
+        return ordered[:count]
+
+    def _substitute(site: Dict[str, Any], new_window: int) -> str:
+        return (
+            expression[:site["window_start"]]
+            + str(new_window)
+            + expression[site["window_end"]:]
+        )
+
+    out: List[Tuple[str, str]] = []
+    seen_exprs: Set[str] = set()
+
+    if selection_strategy == "all_in_order":
+        for site in sites[:n]:
+            nearest = _nearest_values(site["window_value"], 1)
+            if not nearest:
+                continue
+            new_window = nearest[0]
+            new_expr = _substitute(site, new_window)
+            if new_expr == expression or new_expr in seen_exprs:
+                continue
+            seen_exprs.add(new_expr)
+            out.append((
+                new_expr,
+                f"window_perturbation: {site['func_name']} "
+                f"{site['window_value']} -> {new_window}",
+            ))
+        return out
+
+    if selection_strategy == "largest":
+        # Largest window value; ties broken by earliest call position.
+        chosen = max(sites, key=lambda s: (s["window_value"], -s["call_start"]))
+    else:
+        # 'first' (default) and any unknown strategy falls back to first.
+        chosen = sites[0]
+
+    orig = chosen["window_value"]
+    func_name = chosen["func_name"]
+    for new_window in _nearest_values(orig, n):
+        new_expr = _substitute(chosen, new_window)
+        if new_expr == expression or new_expr in seen_exprs:
+            continue
+        seen_exprs.add(new_expr)
+        out.append((
+            new_expr,
+            f"window_perturbation: {func_name} {orig} -> {new_window}",
+        ))
+    return out
 
 
 def mutate_add_wrapper(expression: str) -> Tuple[str, str]:
@@ -493,7 +754,10 @@ class GeneticOptimizer:
                 seed.fitness = seed_metrics.get("fitness", 0)
                 seed.turnover = seed_metrics.get("turnover", 0)
                 seed.os_sharpe = seed_metrics.get("os_sharpe", 0)
-                seed.calculate_fitness()
+                seed.overall_fitness = compute_overall_fitness(
+                    seed.sharpe, seed.fitness, seed.turnover, seed.os_sharpe,
+                    apply_os_consistency=self.config.apply_os_consistency,
+                )
                 seed.simulated = True
             island.add(seed)
             self.all_fingerprints.add(seed.fingerprint)
@@ -593,33 +857,126 @@ class GeneticOptimizer:
         sim_result: Dict[str, Any]
     ):
         """
-        Update individual with simulation results.
-        
+        Update individual with a single simulation result (search-fidelity path).
+
+        Signature and behaviour are unchanged from previous versions so existing
+        callers (test_suite.py, integration tests) continue to work.  The
+        individual is marked with fidelity_count=1 and grid_confirmed=False;
+        promotion to grid-confirmed status happens separately via
+        confirm_individual_grid().
+
         Args:
             individual: Individual to update
             sim_result: Simulation result dict
         """
-        # Extract metrics
-        is_stats = sim_result.get("is", sim_result.get("train", {})) or {}
-        os_stats = sim_result.get("os", sim_result.get("test", {})) or {}
-        
-        individual.sharpe = float(is_stats.get("sharpe", is_stats.get("Sharpe", 0)) or 0)
-        individual.fitness = float(is_stats.get("fitness", is_stats.get("Fitness", 0)) or 0)
-        individual.turnover = float(is_stats.get("turnover", is_stats.get("Turnover", 0)) or 0)
-        individual.os_sharpe = float(os_stats.get("sharpe", os_stats.get("Sharpe", 0)) or 0)
-        
-        individual.calculate_fitness()
+        m = _metrics_from_result(sim_result)
+        individual.sharpe = m["sharpe"]
+        individual.fitness = m["fitness"]
+        individual.turnover = m["turnover"]
+        individual.os_sharpe = m["os_sharpe"]
+
+        individual.overall_fitness = compute_overall_fitness(
+            individual.sharpe, individual.fitness, individual.turnover, individual.os_sharpe,
+            apply_os_consistency=self.config.apply_os_consistency,
+        )
         individual.simulated = True
-        
+        individual.fidelity_count = 1
+        individual.grid_confirmed = False
+
         # Check if passed thresholds
         individual.passed = (
             individual.sharpe >= self.config.sharpe_threshold and
             individual.fitness >= self.config.fitness_threshold and
             individual.turnover <= self.config.turnover_threshold
         )
-        
+
         self.simulations_used += 1
     
+    def get_promotion_candidates(self) -> List[Individual]:
+        """
+        Return top ``promotion_pool_size`` simulated-but-not-grid-confirmed
+        individuals per island for the orchestrator to run the promotion grid on.
+
+        Called by run_genetic_optimization *before* evolve() each generation so
+        that elites / migration sources are selected on grid-corrected fitness
+        (not single-run luck).
+        """
+        candidates: List[Individual] = []
+        for island in self.islands:
+            eligible = [
+                i for i in island.individuals
+                if i.simulated and not i.grid_confirmed
+            ]
+            eligible.sort(key=lambda x: x.overall_fitness, reverse=True)
+            candidates.extend(eligible[: self.config.promotion_pool_size])
+        return candidates
+
+    def confirm_individual_grid(
+        self,
+        individual: Individual,
+        grid_results: List[Dict[str, Any]],
+    ) -> None:
+        """
+        Replace an individual's fitness with the robust median from a
+        sub-universe promotion grid (tiered-fidelity anti-overfit).
+
+        Picks the grid config-point whose overall_fitness is the *median*
+        (lower-middle for even K, conservative) and sets the individual's
+        metrics to that **real** config's values — so ``passed`` is always
+        decided on an actual simulation, not a Frankenstein mix of components.
+
+        Also records ``fitness_dispersion`` (pstdev of per-config overall
+        fitness) as a config-fragility signal: high dispersion → overfit risk.
+
+        Args:
+            individual:   The Individual to update in-place.
+            grid_results: List of successful simulate() result dicts from the
+                          promotion grid.  Must not be empty (caller should guard).
+        """
+        if not grid_results:
+            return  # defensive; caller ensures non-empty before calling
+
+        # Compute overall_fitness for each grid config-point
+        per_config: List[Tuple[float, Dict[str, float]]] = []
+        for result in grid_results:
+            m = _metrics_from_result(result)
+            ov = compute_overall_fitness(
+                m["sharpe"], m["fitness"], m["turnover"], m["os_sharpe"],
+                apply_os_consistency=self.config.apply_os_consistency,
+            )
+            per_config.append((ov, m))
+
+        # Sort by overall_fitness; pick lower-middle index (conservative)
+        per_config.sort(key=lambda x: x[0])
+        median_idx = (len(per_config) - 1) // 2
+        median_overall, median_metrics = per_config[median_idx]
+
+        # Update individual to the median config's REAL metrics
+        individual.sharpe = median_metrics["sharpe"]
+        individual.fitness = median_metrics["fitness"]
+        individual.turnover = median_metrics["turnover"]
+        individual.os_sharpe = median_metrics["os_sharpe"]
+        individual.overall_fitness = median_overall
+
+        # Config-fragility signal
+        if len(per_config) >= 2:
+            overalls = [x[0] for x in per_config]
+            individual.fitness_dispersion = statistics.pstdev(overalls)
+        else:
+            individual.fitness_dispersion = 0.0
+
+        individual.fidelity_count = len(grid_results)
+        individual.grid_confirmed = True
+
+        # Recompute passed on the median config's real metrics
+        individual.passed = (
+            individual.sharpe >= self.config.sharpe_threshold
+            and individual.fitness >= self.config.fitness_threshold
+            and individual.turnover <= self.config.turnover_threshold
+        )
+
+        self.simulations_used += len(grid_results)
+
     def evolve(self):
         """
         Evolve every island to its next generation independently, then
@@ -945,64 +1302,104 @@ async def run_genetic_optimization(
     """
     config = config or OptimizationConfig()
     optimizer = GeneticOptimizer(config)
-    
+
+    # Base simulation parameters (shared across all grid points)
+    base_params: Dict[str, Any] = dict(
+        region=region,
+        universe=universe,
+        delay=delay,
+        decay=decay,
+        neutralization=neutralization,
+    )
+
+    use_grid = bool(config.fidelity_grid)
+
+    async def _run_grid(ind: Individual) -> None:
+        """Run promotion-grid sims for *ind* and call confirm_individual_grid."""
+        grid_results = []
+        for override in config.fidelity_grid:
+            # simulations_used is batch-incremented by confirm_individual_grid
+            # after the loop, so it does not advance mid-grid — count the
+            # in-progress grid_results here or the guard never fires and the
+            # full grid always runs, overshooting the budget.
+            if optimizer.simulations_used + len(grid_results) >= config.max_simulations:
+                break
+            try:
+                r = await simulate_func(
+                    expression=ind.expression, **{**base_params, **override}
+                )
+                if r.get("success"):
+                    grid_results.append(r)
+            except Exception as e:
+                logger.warning(f"[GeneticOpt] grid sim failed ({override}): {e}")
+        if grid_results:
+            optimizer.confirm_individual_grid(ind, grid_results)
+
     # Initialize
     optimizer.initialize(seed_expression, seed_metrics)
-    
-    # Evolution loop
+
+    # ── Evolution loop ────────────────────────────────────────────────────────
     for gen in range(config.generations):
-        # Get candidates to simulate
+
+        # ① Search-fidelity: single sim for unsimulated candidates (K=1)
         candidates = optimizer.get_simulation_candidates(batch_size=10)
-        
         if not candidates:
             logger.info(f"[GeneticOpt] No more candidates at generation {gen}")
             break
-        
-        # Check budget
+
         if optimizer.simulations_used >= config.max_simulations:
-            logger.info(f"[GeneticOpt] Simulation budget exhausted at {optimizer.simulations_used}")
+            logger.info(
+                f"[GeneticOpt] Simulation budget exhausted at {optimizer.simulations_used}"
+            )
             break
-        
-        # Simulate candidates
+
         for ind in candidates:
+            if optimizer.simulations_used >= config.max_simulations:
+                break
             try:
-                result = await simulate_func(
-                    expression=ind.expression,
-                    region=region,
-                    universe=universe,
-                    delay=delay,
-                    decay=decay,
-                    neutralization=neutralization,
-                )
-                
+                result = await simulate_func(expression=ind.expression, **base_params)
                 if result.get("success"):
                     optimizer.update_individual(ind, result)
                 else:
                     ind.simulated = True  # Mark as tried
-                
             except Exception as e:
                 logger.warning(f"[GeneticOpt] Simulation failed: {e}")
                 ind.simulated = True
-        
-        # Evolve
+
+        # ② Promotion-fidelity: grid-confirm top-N per island BEFORE evolve so
+        #    _evolve_island / _migrate select on grid-corrected fitness.
+        #    Overfit "lucky" individuals drop in rank and are excluded from elites.
+        if use_grid:
+            for ind in optimizer.get_promotion_candidates():
+                if optimizer.simulations_used >= config.max_simulations:
+                    break
+                await _run_grid(ind)
+
+        # ③ Evolve (sync): elites + migrants chosen from grid-corrected rankings
         optimizer.evolve()
-        
-        # Adapt mutation rates
         optimizer.adapt_mutation_rates()
-    
+
+    # ── Finalist confirmation ─────────────────────────────────────────────────
+    # Any top-10 individuals that somehow escaped promotion-grid confirmation
+    # (e.g. survived as elites from generation 0) get confirmed before returning.
+    if use_grid:
+        for ind in optimizer.get_best_individuals(10):
+            if not ind.grid_confirmed and optimizer.simulations_used < config.max_simulations:
+                await _run_grid(ind)
+
     # Generate report
     report = optimizer.get_optimization_report()
-    
+
     # Add best variants for downstream use
     best = optimizer.get_best_individuals(10)
     report["best_expressions"] = [i.expression for i in best]
-    
+
     passed = optimizer.get_passed_individuals()
     report["passed_expressions"] = [i.expression for i in passed]
-    
+
     logger.info(
         f"[GeneticOpt] Complete | generations={report['generations']} "
         f"simulations={report['simulations_used']} passed={report['passed_count']}"
     )
-    
+
     return report

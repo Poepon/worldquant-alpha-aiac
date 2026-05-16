@@ -12,6 +12,7 @@ Contains:
 """
 
 import asyncio
+import math
 import time
 import random
 from typing import Dict, List, Optional, Tuple
@@ -31,11 +32,57 @@ from backend.agents.prompts import (
     quick_alignment_check,
     determine_attribution_heuristic,
 )
+from backend.alpha_routing import route_alpha_action
+from backend.alpha_scoring import (
+    calculate_alpha_score,
+    should_optimize,
+    get_failed_tests,
+    evaluate_with_brain_checks,
+)
+from backend.services.correlation_service import CorrelationService, CorrSource
+from backend.multi_fidelity_eval import RobustnessGate
+# P2 review fix (2026-05-16): _quota_guard_async moved to lazy import inside
+# the robustness block at L2064. Top-level import was the SOLE remaining
+# `backend.tasks` top-level import in backend/agents/, closing the
+# backend.agents ↔ backend.tasks cycle. Pattern matches generation.py:351,
+# persistence.py:458, validation.py:479.
+import redis.asyncio as _rb_redis_aio
 
 
 # =============================================================================
 # Helpers
 # =============================================================================
+
+
+def _safe_metric(metrics: dict, key: str, default: float, fallback_flags: list) -> float:
+    """Read a numeric metric; fall back to `default` on missing/None/NaN/inf/bool/str.
+
+    Mutates `fallback_flags` by appending `key` when fallback is taken.
+
+    Rules:
+      - missing key, None     → default (flag)
+      - NaN / ±inf            → default (flag)
+      - bool                  → default (flag, bool ⊂ int in Python)
+      - str / non-numeric     → default (flag)
+      - finite int/float      → float(value)
+
+    来源: docs/alphagbm_skills_research_2026-05-15.md P1-B
+    """
+    val = metrics.get(key)
+    if val is None:
+        fallback_flags.append(key)
+        return float(default)
+    if isinstance(val, bool):          # must precede isinstance(val, (int, float))
+        fallback_flags.append(key)
+        return float(default)
+    if not isinstance(val, (int, float)):
+        fallback_flags.append(key)
+        return float(default)
+    if math.isnan(val) or math.isinf(val):
+        fallback_flags.append(key)
+        return float(default)
+    return float(val)
+
 
 def _check_is_os_consistency(metrics: Dict, tier: Optional[int] = None) -> bool:
     """V-12: reject alphas whose IS sharpe far exceeds OS sharpe.
@@ -95,167 +142,24 @@ def _check_is_os_consistency(metrics: Dict, tier: Optional[int] = None) -> bool:
 # that survive V-12 because train AND test both look strong (e.g., perfect
 # divide-by-something-tiny throughout the test window).
 
-import re as _re_v16
 from backend.config import settings as _v16_settings
 
 # V-26.68 (2026-05-13): V16_SUSPICION_THRESHOLD now sourced from settings.
 # Module-level alias kept so legacy imports (tests, scripts) still find it.
 V16_SUSPICION_THRESHOLD: float = _v16_settings.V16_SUSPICION_THRESHOLD
 
-# Fields that can be 0 (returns on no-trade days, volume on halts, etc.)
-_V16_DIVIDE_RISKY_DENOMS: set = {
-    "returns", "volume", "amount",
-    # Fundamental fields can be 0 / negative for distressed firms
-    "net_income", "fnd6_newa2v1300_ni",
-    "ebit", "fnd6_newa2v1300_oiadp",
-    "total_equity", "fnd6_newa1v1300_ceq",
-    # Synthetic-zero risks
-    "high", "low",  # rare but high==low on illiquid
-}
-
-# Fields that arrive at announcement boundary; need ts_delay wrapping
-_V16_LOOKAHEAD_FIELDS: tuple = (
-    "actual_eps_value", "actual_sales_value",
-    "actual_cashflow_per_share_value",
-    "actual_dividend_value",
-    # Earnings-event fields
-    "fam_earn_date", "fam_earn_announce",
+# V-P0 (2026-05-15): the three expression-only V-16 checks (divide-by-zero,
+# look-ahead bias, overfit-window) moved to backend/static_alpha_checks.py so
+# they can run pre-simulate inside node_validate — a bad expression should
+# never burn a BRAIN sim, and look-ahead bias must be caught regardless of the
+# sharpe>3 suspicion gate below. Re-export shims keep legacy imports (tests,
+# scripts) working under the old names; new code should import from
+# backend.static_alpha_checks directly.
+from backend.static_alpha_checks import (  # noqa: E402
+    check_divide_by_zero as _v16_check_divide_by_zero,
+    check_lookahead_bias as _v16_check_lookahead,
+    check_overfit_window as _v16_check_overfit_window,
 )
-
-# Standard rolling-window sizes — anything outside is suspicious of
-# parameter mining
-_V16_STANDARD_WINDOWS: set = {1, 2, 3, 5, 10, 15, 20, 30, 60, 90, 120, 240, 480, 1200}
-
-_V16_TS_WINDOW_RE = _re_v16.compile(r"\bts_\w+\s*\([^,()]+,\s*(\d+)\b")
-
-
-def _extract_divide_denominators(expression: str) -> list:
-    """V-26.69 (2026-05-13): paren-balanced extraction of the 2nd
-    argument to every `divide(...)` call in `expression`.
-
-    Pre-fix the V-16 divide check used a flat regex
-    `divide\\(\\s*[^,()]+,\\s*([a-zA-Z_]\\w*)\\s*\\)` which only matched a
-    bare identifier denominator — anything nested (`divide(x, ts_mean(returns, 5))`
-    or arithmetic compounds) was invisible. Now we walk paren depth so
-    the denominator's full sub-expression is captured and any risky
-    field token inside is detected.
-    """
-    out = []
-    n = len(expression)
-    i = 0
-    while i < n:
-        idx = expression.find("divide(", i)
-        if idx == -1:
-            break
-        # Position cursor inside divide('s arg list; depth=0 means at the
-        # comma/close-paren that matches this divide call.
-        depth = 0
-        j = idx + len("divide(")
-        comma_idx = -1
-        while j < n:
-            c = expression[j]
-            if c == "(":
-                depth += 1
-            elif c == ")":
-                if depth == 0:
-                    break
-                depth -= 1
-            elif c == "," and depth == 0:
-                comma_idx = j
-                break
-            j += 1
-        if comma_idx == -1:
-            i = idx + 1
-            continue
-        # Walk to matching close-paren of this divide(...)
-        depth2 = 0
-        k = comma_idx + 1
-        while k < n:
-            c = expression[k]
-            if c == "(":
-                depth2 += 1
-            elif c == ")":
-                if depth2 == 0:
-                    break
-                depth2 -= 1
-            k += 1
-        denom_expr = expression[comma_idx + 1:k].strip()
-        if denom_expr:
-            out.append(denom_expr)
-        i = idx + 1
-    return out
-
-
-def _v16_check_divide_by_zero(expression: str) -> str | None:
-    """Risk 1: divide() with denominator that may be 0 on some dates.
-
-    V-26.69: now extracts the full denominator sub-expression and checks
-    whether any risky field name appears as a token inside it. Catches
-    `divide(x, ts_mean(returns, 5))` and arithmetic-compound denominators
-    that the original shallow regex missed.
-    """
-    if not expression:
-        return None
-    denoms = _extract_divide_denominators(expression)
-    if not denoms:
-        return None
-    for denom_expr in denoms:
-        low = denom_expr.lower()
-        for risky in _V16_DIVIDE_RISKY_DENOMS:
-            if _re_v16.search(rf"\b{_re_v16.escape(risky)}\b", low):
-                return f"divide(_, …{risky}…) — denominator can be 0"
-    return None
-
-
-def _v16_check_lookahead(expression: str) -> str | None:
-    """Risk 2: announcement-type fields must be ts_delay-wrapped.
-
-    V-26.70 (2026-05-13): pre-fix used `find` + `rfind` index comparison
-    which counted ts_delay anywhere before the field — including a
-    sibling `ts_delay(other_field, 1)` that's not actually wrapping the
-    announcement field. Now we require both the field-presence check
-    AND the ts_delay-wrap check to use whole-token (\\b...\\b) regex so:
-
-      - `actual_eps_value_quarterly` doesn't trigger the
-        `actual_eps_value` rule (substring false positive)
-      - sibling ts_delay calls don't satisfy the direct-wrap requirement
-        (the original false negative)
-    """
-    if not expression:
-        return None
-    el = expression.lower()
-    for field in _V16_LOOKAHEAD_FIELDS:
-        field_re = _re_v16.escape(field)
-        # V-26.70: `field` is treated as a token-prefix — the announcement
-        # field family includes suffixed variants like
-        # `actual_eps_value_quarterly`. Word boundary on the LEFT only;
-        # right side allows any word-char continuation. This is the same
-        # token a direct ts_delay wrap must reference.
-        token_re = rf"\b{field_re}\w*"
-        if not _re_v16.search(token_re, el):
-            continue
-        # ts_delay must directly wrap a token in the same family.
-        if _re_v16.search(rf"ts_delay\s*\(\s*{token_re}", el):
-            continue
-        return (
-            f"announcement field '{field}' used without ts_delay direct-wrap "
-            f"(sibling ts_delay does not mitigate lookahead)"
-        )
-    return None
-
-
-def _v16_check_overfit_window(expression: str) -> str | None:
-    """Risk 5: ts_op uses non-standard window size suggesting parameter mining."""
-    if not expression:
-        return None
-    weird = []
-    for m in _V16_TS_WINDOW_RE.finditer(expression):
-        n = int(m.group(1))
-        if n > 1 and n not in _V16_STANDARD_WINDOWS:
-            weird.append(n)
-    if weird:
-        return f"ts_op uses non-standard windows {weird} (standard: 5/10/20/60/120/240)"
-    return None
 
 
 def _v16_check_outliers(metrics: Dict) -> list:
@@ -293,7 +197,7 @@ def _v16_check_cost_vacuum(metrics: Dict) -> str | None:
 
 
 def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
-    """V-16: full 6-risk audit when is_sharpe > V16_SUSPICION_THRESHOLD.
+    """V-16: metric-dependent risk audit when is_sharpe > V16_SUSPICION_THRESHOLD.
 
     Returns list[dict] with shape:
       {"check": str, "severity": "hard" | "soft" | "info", "evidence": str}
@@ -304,6 +208,13 @@ def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
       info — manual-only, e.g. survivorship bias
 
     Returns [] when sharpe ≤ threshold.
+
+    V-P0 (2026-05-15): the three expression-only checks (Risk 1 divide-by-zero,
+    Risk 2 look-ahead bias, Risk 5 overfit-window) moved to node_validate via
+    backend/static_alpha_checks.py — they need no metrics and should run
+    pre-simulate. Only the metric-dependent checks remain here: Risk 3
+    survivorship (info), Risk 4 cost-vacuum, Risk 6 outlier metrics. The
+    `expression` parameter is kept for signature stability of the call sites.
     """
     flags: list = []
     if not isinstance(metrics, dict):
@@ -311,16 +222,6 @@ def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
     sharpe = metrics.get("sharpe") or 0
     if sharpe <= V16_SUSPICION_THRESHOLD:
         return flags
-
-    # Risk 1: divide by zero
-    flag = _v16_check_divide_by_zero(expression)
-    if flag:
-        flags.append({"check": "divide_by_zero", "severity": "soft", "evidence": flag})
-
-    # Risk 2: lookahead bias
-    flag = _v16_check_lookahead(expression)
-    if flag:
-        flags.append({"check": "lookahead_bias", "severity": "hard", "evidence": flag})
 
     # Risk 3: survivorship bias — system-level, manual review only
     flags.append({
@@ -334,16 +235,504 @@ def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
     if flag:
         flags.append({"check": "cost_vacuum", "severity": "hard", "evidence": flag})
 
-    # Risk 5: overfit window
-    flag = _v16_check_overfit_window(expression)
-    if flag:
-        flags.append({"check": "overfit_window", "severity": "soft", "evidence": flag})
-
     # Risk 6: data-anomaly outliers
     for outlier_msg in _v16_check_outliers(metrics):
         flags.append({"check": "outlier_metric", "severity": "hard", "evidence": outlier_msg})
 
     return flags
+
+
+from dataclasses import dataclass, field as _dc_field
+
+
+@dataclass
+class _EvalCtx:
+    """Per-round context bundle passed to _evaluate_single_alpha.
+
+    Avoids threading 20+ parameters through the helper signature.
+    """
+    state: "MiningState"
+    brain: object          # BrainAdapter | None
+    correlation_service: object  # CorrelationService | None
+    node_name: str
+
+    # tier thresholds
+    sharpe_min: float
+    fitness_min: float
+    turnover_min: float
+    turnover_max: float
+    max_correlation: float
+    check_self_corr: bool
+    check_concentrated: bool
+    prov_sharpe_min: float
+    prov_fitness_min: float
+    prov_turnover_min: float
+    prov_turnover_max: float
+    score_pass_threshold: float
+    score_optimize_threshold: float
+    corr_check_threshold: float
+
+    # cross-alpha accumulators (helper appends; caller reads after the loop)
+    eval_details: list = _dc_field(default_factory=list)
+    failure_feedback_queue: list = _dc_field(default_factory=list)
+
+    # P2-C (2026-05-16) MF5: regime label threaded through the ctx so
+    # _evaluate_single_alpha can stamp it on alpha.metrics deterministically.
+    # None = no regime injection happened this round (legacy path).
+    regime_for_eval: Optional[str] = None
+
+
+@dataclass
+class _SingleAlphaEvalResult:
+    """What _evaluate_single_alpha returns for telemetry (alpha is mutated in-place)."""
+    corr_check_performed: bool = False
+    corr_check_skipped_reason: Optional[str] = None
+
+
+async def _evaluate_single_alpha(
+    alpha: "object",
+    ctx: "_EvalCtx",
+) -> _SingleAlphaEvalResult:
+    """Evaluate one alpha candidate in-place, mutating alpha.quality_status and alpha.metrics.
+
+    Returns _SingleAlphaEvalResult with telemetry only (counters live in node_evaluate).
+
+    来源: docs/alphagbm_skills_research_2026-05-15.md P1-B — per-alpha try/except
+    """
+    state = ctx.state
+    brain = ctx.brain
+    correlation_service = ctx.correlation_service
+    node_name = ctx.node_name
+
+    sharpe_min = ctx.sharpe_min
+    fitness_min = ctx.fitness_min
+    turnover_min = ctx.turnover_min
+    turnover_max = ctx.turnover_max
+    max_correlation = ctx.max_correlation
+    check_self_corr = ctx.check_self_corr
+    check_concentrated = ctx.check_concentrated
+    prov_sharpe_min = ctx.prov_sharpe_min
+    prov_fitness_min = ctx.prov_fitness_min
+    prov_turnover_min = ctx.prov_turnover_min
+    prov_turnover_max = ctx.prov_turnover_max
+    score_pass_threshold = ctx.score_pass_threshold
+    score_optimize_threshold = ctx.score_optimize_threshold
+    corr_check_threshold = ctx.corr_check_threshold
+
+    # local telemetry flags
+    _corr_performed: bool = False
+    _corr_skipped_reason: Optional[str] = None
+
+    # P1-B: explicit init instead of locals().get() -- PEP 667 safe
+    self_corr_source: object = "skipped"
+
+    metrics = alpha.metrics or {}
+
+    train_sharpe_val = metrics.get("train_sharpe")
+    train_fitness_val = metrics.get("train_fitness")
+    test_sharpe_val = metrics.get("test_sharpe")
+    test_fitness_val = metrics.get("test_fitness")
+
+    # V-27.77: do NOT fabricate the OS/test leg.
+    if test_sharpe_val is not None and test_fitness_val is not None:
+        test_leg = {"sharpe": test_sharpe_val, "fitness": test_fitness_val}
+    else:
+        test_leg = {}
+
+    # 构建完整的 sim_result，包含 BRAIN 返回的 checks
+    sim_result = {
+        "train": {
+            "sharpe": train_sharpe_val if train_sharpe_val is not None else metrics.get("sharpe", 0),
+            "fitness": train_fitness_val if train_fitness_val is not None else metrics.get("fitness", 0),
+            "turnover": metrics.get("turnover", 0),
+            "returns": metrics.get("returns", 0),
+        },
+        "test": test_leg,
+        "is": {
+            "sharpe": metrics.get("sharpe", 0),
+            "fitness": metrics.get("fitness", 0),
+            "turnover": metrics.get("turnover", 0),
+            "drawdown": metrics.get("drawdown", 0),
+            "longCount": metrics.get("longCount"),
+            "shortCount": metrics.get("shortCount"),
+            "checks": metrics.get("checks", []),  # BRAIN 官方检查结果
+        },
+        "riskNeutralized": metrics.get("riskNeutralized", {}),
+        "investabilityConstrained": metrics.get("investabilityConstrained", {}),
+        "checks": metrics.get("checks", []),  # 顶层也放一份
+        "can_submit": metrics.get("can_submit", False),
+    }
+
+    # 新增：使用 BRAIN 官方检查结果进行快速判断
+    brain_eval = evaluate_with_brain_checks(sim_result)
+    brain_can_submit = brain_eval.get('can_submit', False)
+    brain_failed_checks = brain_eval.get('failed_checks', [])
+
+    # Stage 1: Preliminary score WITHOUT correlation
+    preliminary_score = calculate_alpha_score(
+        sim_result=sim_result,
+        prod_corr=0.0,
+        self_corr=0.0
+    )
+
+    # P1-B: use _safe_metric for sharpe/fitness/turnover to handle NaN/inf/bool/str
+    fallback_flags: list = []
+    sharpe = _safe_metric(metrics, "sharpe", 0.0, fallback_flags)
+    turnover = _safe_metric(metrics, "turnover", 0.0, fallback_flags)
+    fitness = _safe_metric(metrics, "fitness", 0.0, fallback_flags)
+
+    # 使用 BRAIN 官方检查或本地阈值
+    if brain_eval['check_details']:
+        # 有官方检查结果，以官方为准
+        meets_thresholds = brain_can_submit or (not brain_failed_checks)
+    else:
+        # Fallback: 使用本地阈值
+        meets_thresholds = (
+            sharpe >= sharpe_min and
+            turnover <= turnover_max and
+            fitness >= fitness_min
+        )
+
+    # Stage 2: Correlation check for promising candidates
+    prod_corr = 0.0
+    self_corr = 0.0
+    needs_corr_check = check_self_corr and (
+        preliminary_score >= corr_check_threshold or
+        meets_thresholds
+    )
+
+    if needs_corr_check and brain and alpha.alpha_id:
+        _corr_performed = True
+        try:
+            prod_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="PROD")
+            if isinstance(prod_corr_result, dict):
+                prod_corr = float(prod_corr_result.get("max", 0.0) or 0.0)
+        except Exception as e:
+            logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
+
+        self_corr_source = CorrSource.UNKNOWN
+        if correlation_service is not None:
+            try:
+                _corr_raw, self_corr_source = await correlation_service.get_with_fallback(
+                    alpha.alpha_id, region=state.region
+                )
+                self_corr = _corr_raw if _corr_raw is not None else 0.0
+            except Exception as e:
+                logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
+                self_corr_source = CorrSource.UNKNOWN
+
+            if self_corr_source == CorrSource.LOCAL:
+                try:
+                    crisis_by_window = await correlation_service.calc_self_corr_by_window(
+                        alpha_id=alpha.alpha_id, region=state.region
+                    )
+                    if isinstance(alpha.metrics, dict):
+                        alpha.metrics = dict(alpha.metrics)
+                    else:
+                        alpha.metrics = {}
+                    alpha.metrics["_crisis_correlations"] = crisis_by_window
+                    spikes = [
+                        (w, info["max_corr"])
+                        for w, info in crisis_by_window.items()
+                        if info.get("status") == "ok"
+                        and info.get("max_corr", 0.0) >= max_correlation
+                    ]
+                    if spikes:
+                        logger.info(
+                            f"[{node_name}] {alpha.alpha_id} crisis-corr spikes: "
+                            f"{spikes} (global self_corr={self_corr:.3f})"
+                        )
+                except Exception as e:
+                    logger.warning(
+                        f"[{node_name}] crisis-window corr failed for {alpha.alpha_id}: {e}"
+                    )
+        else:
+            try:
+                self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
+                if isinstance(self_corr_result, dict):
+                    self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
+                    self_corr_source = CorrSource.BRAIN
+            except Exception as e:
+                logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
+    else:
+        _corr_skipped_reason = "tier_skipped" if not check_self_corr else "skipped"
+        # tier_skipped means "by tier policy, not because we couldn't measure" —
+        # downstream gate should treat as ok+verified, NOT downgrade to PROVISIONAL
+        self_corr_source = "tier_skipped" if not check_self_corr else "skipped"
+
+    # Final score with correlation penalty
+    score = calculate_alpha_score(
+        sim_result=sim_result,
+        prod_corr=prod_corr,
+        self_corr=self_corr
+    )
+
+    should_opt, opt_reason = should_optimize(sim_result)
+    failed_tests = get_failed_tests(sim_result)
+
+    sub_universe_check = next(
+        (c for c in metrics.get("checks", [])
+         if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
+        None,
+    )
+    sub_universe_ok = (
+        sub_universe_check is None
+        or sub_universe_check.get("result") != "FAIL"
+    )
+    concentrated_check = next(
+        (c for c in metrics.get("checks", [])
+         if c.get("name") == "CONCENTRATED_WEIGHT"),
+        None,
+    )
+    if check_concentrated:
+        concentrated_ok = (
+            concentrated_check is None
+            or concentrated_check.get("result") != "FAIL"
+        )
+    else:
+        concentrated_ok = True
+
+    # PR2: tier-aware self_corr gate
+    if check_self_corr:
+        self_corr_ok = self_corr < max_correlation
+        self_corr_verified = self_corr_source not in (CorrSource.UNKNOWN, "unknown")
+    else:
+        self_corr_ok = True
+        self_corr_verified = True  # tier_skipped, not unknown
+
+    # V-26.76: pass tier so T3 hits the strict 0.4/0.5 floor
+    _tier_val = getattr(state, "factor_tier", None)
+    is_overfit_safe = _check_is_os_consistency(metrics, tier=_tier_val)
+
+    hard_gate_pass = (
+        sharpe >= sharpe_min
+        and fitness >= fitness_min
+        and turnover_min <= turnover <= turnover_max
+        and sub_universe_ok
+        and concentrated_ok
+        and self_corr_ok
+        and self_corr_verified
+        and is_overfit_safe
+    )
+
+    self_corr_acceptable = self_corr_ok or not self_corr_verified
+    near_pass = (
+        sharpe >= prov_sharpe_min
+        and fitness >= prov_fitness_min
+        and prov_turnover_min <= turnover <= prov_turnover_max
+        and sub_universe_ok
+        and concentrated_ok
+        and self_corr_acceptable
+    )
+
+    v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
+    hard_v16_flags = [f for f in v16_flags if f.get("severity") == "hard"]
+    brain_actionable_fails_list = [
+        c.get("name") for c in brain_failed_checks or []
+        if c.get("name") in (
+            "LOW_FITNESS",
+            "LOW_SHARPE",
+            "CONCENTRATED_WEIGHT",
+            "HIGH_TURNOVER",
+            "LOW_TURNOVER",
+            "MATCHES_PYRAMID",
+            "HIGH_CORRELATION",
+            "SELF_CORRELATION",
+        )
+    ]
+    decision = route_alpha_action(
+        hard_gate_pass=hard_gate_pass,
+        meets_thresholds=meets_thresholds,
+        score=score,
+        score_pass_threshold=score_pass_threshold,
+        has_v16_hard_flags=bool(hard_v16_flags),
+        brain_checks_present=bool(brain_eval['check_details']),
+        brain_actionable_fails=bool(brain_actionable_fails_list),
+        brain_can_submit=brain_can_submit,
+        near_pass=near_pass,
+        should_optimize=should_opt,
+        score_optimize_threshold=score_optimize_threshold,
+    )
+    alpha.quality_status = decision.status
+
+    if decision.status == "FAIL":
+        # Enhanced: Alignment check and attribution for failures
+        alignment_issues = []
+        attribution = "unknown"
+
+        hypothesis_dict = {}
+        if hasattr(alpha, 'hypothesis') and alpha.hypothesis:
+            if isinstance(alpha.hypothesis, dict):
+                hypothesis_dict = alpha.hypothesis
+            else:
+                hypothesis_dict = {"statement": alpha.hypothesis}
+
+        if hypothesis_dict and alpha.expression:
+            is_aligned, alignment_issues = quick_alignment_check(
+                hypothesis_dict, alpha.expression, state.fields
+            )
+
+            result_dict = {
+                "success": False,
+                "sharpe": sharpe,
+                "fitness": fitness,
+                "turnover": turnover,
+            }
+            attribution = determine_attribution_heuristic(
+                result_dict, alignment_issues, alpha.validation_error
+            )
+
+            if not is_aligned:
+                logger.debug(
+                    f"[{node_name}] Alignment issues for {alpha.alpha_id}: {alignment_issues[:2]}"
+                )
+
+        error_type = "QUALITY_FAIL"
+        brain_fail_priority = (
+            "CONCENTRATED_WEIGHT",
+            "LOW_SUB_UNIVERSE_SHARPE",
+            "HIGH_PROD_CORRELATION",
+            "HIGH_SELF_CORRELATION",
+        )
+        brain_fails = {
+            c.get("name"): c
+            for c in metrics.get("checks", []) or []
+            if c.get("result") == "FAIL"
+        }
+        for name in brain_fail_priority:
+            if name in brain_fails:
+                error_type = name
+                break
+        if error_type == "QUALITY_FAIL":
+            if sharpe < sharpe_min:
+                error_type = "LOW_SHARPE"
+            elif fitness < fitness_min:
+                error_type = "LOW_FITNESS"
+            elif turnover > turnover_max:
+                error_type = "HIGH_TURNOVER"
+            elif sharpe < 0:
+                error_type = "NEGATIVE_SIGNAL"
+
+        if alpha.expression:
+            ctx.failure_feedback_queue.append({
+                "expression": alpha.expression,
+                "error_type": error_type,
+                "metrics": metrics,
+                "region": state.region,
+                "dataset_id": state.dataset_id,
+                "hypothesis": hypothesis_dict.get("statement", ""),
+                "alignment_issues": alignment_issues,
+                "attribution": attribution,
+            })
+
+    # Store detailed metrics with BRAIN checks info
+    # P1-B: append _metrics_fallback_flags to the spread
+    alpha.metrics = {
+        **metrics,
+        "_score": round(score, 4),
+        "_preliminary_score": round(preliminary_score, 4),
+        "_prod_corr": round(prod_corr, 4) if prod_corr else None,
+        "_self_corr": (
+            round(self_corr, 4)
+            if self_corr_source in (CorrSource.LOCAL, CorrSource.BRAIN)
+            else None
+        ),
+        "_self_corr_source": str(self_corr_source),
+        "_corr_checked": needs_corr_check,
+        "_should_optimize": should_opt,
+        "_optimize_reason": opt_reason,
+        "_failed_tests": failed_tests,
+        "_brain_can_submit": brain_can_submit,
+        "_brain_failed_checks": brain_failed_checks,
+        "_brain_pending_checks": brain_eval.get('pending_checks', []),
+        "_pyramid_multiplier": (brain_eval.get('pyramid_info') or {}).get('multiplier', 1.0),
+        "_metrics_fallback_flags": fallback_flags,
+    }
+
+    # Routing annotations
+    if decision.status in ("PASS", "PASS_PROVISIONAL"):
+        alpha.metrics["_routing_reason"] = decision.reason
+        if v16_flags:
+            alpha.metrics["_v16_suspicion_flags"] = v16_flags
+            if decision.reason == "near_pass":
+                logger.warning(
+                    f"[{node_name}] V-16 suspicion mode on PROVISIONAL "
+                    f"(sharpe={sharpe:.2f}) | flags={[f['check'] for f in v16_flags]}"
+                )
+            else:
+                logger.warning(
+                    f"[{node_name}] V-16 suspicion mode (sharpe={sharpe:.2f}) | "
+                    f"flags={[f['check'] for f in v16_flags]}"
+                )
+        if decision.reason == "brain_checks_unverified":
+            alpha.metrics["_brain_checks_unverified"] = True
+            logger.info(
+                f"[{node_name}] PASS→PROVISIONAL: BRAIN returned no checks "
+                f"(gate unverified) | sharpe={sharpe:.2f}"
+            )
+        elif decision.reason == "brain_actionable_fails":
+            alpha.metrics["_brain_pass_downgrade"] = brain_actionable_fails_list
+            logger.info(
+                f"[{node_name}] PASS→PROVISIONAL: BRAIN rejected on "
+                f"{brain_actionable_fails_list} | sharpe={sharpe:.2f} "
+                f"fitness={fitness:.2f} expr={(alpha.expression or '')[:80]}"
+            )
+        elif decision.reason == "near_pass" and brain_actionable_fails_list:
+            alpha.metrics["_brain_actionable_fails"] = brain_actionable_fails_list
+
+    _debug_log("F", "nodes.py:evaluate:alpha_detail", f"Alpha evaluated: {alpha.quality_status}", {
+        "alpha_id": alpha.alpha_id,
+        "expression": alpha.expression[:80] if alpha.expression else None,
+        "sharpe": round(sharpe, 3),
+        "fitness": round(fitness, 3),
+        "turnover": round(turnover, 3),
+        "score": round(score, 3),
+        "status": alpha.quality_status
+    })
+
+    ctx.eval_details.append({
+        "id": alpha.alpha_id,
+        "status": alpha.quality_status,
+        "score": round(score, 4),
+        "sharpe": sharpe,
+        "fitness": fitness,
+        "turnover": turnover,
+        "corr_checked": needs_corr_check,
+        "optimize_reason": opt_reason if should_opt else None,
+    })
+
+    # P2-C (2026-05-16) MF5 + S8 stamp. Fires whenever strategy.regime was
+    # injected (i.e. at least one of ENABLE_REGIME_AWARE_THRESHOLDS /
+    # ENABLE_STYLE_PRESET_GUIDANCE was on at mining_agent time), so the
+    # ``_regime_at_eval`` audit hook stays present even on the data-
+    # collection-only path (AWARE=True + STYLE=False).
+    # ``_regime_applied_thresholds`` is True only when the AWARE flag is
+    # on AND the multipliers were applied — orthogonal to the prompt-side
+    # style block (S8).
+    # V-26.79 defence: re-bind alpha.metrics to a fresh dict before mutating
+    # so we don't punch through into a detached/parent state copy.
+    if ctx.regime_for_eval:
+        try:
+            from backend.config import settings as _p2c_eval_settings
+            if not isinstance(alpha.metrics, dict):
+                alpha.metrics = {}
+            else:
+                alpha.metrics = dict(alpha.metrics)
+            alpha.metrics["_regime_at_eval"] = ctx.regime_for_eval
+            if getattr(
+                _p2c_eval_settings, "ENABLE_REGIME_AWARE_THRESHOLDS", False,
+            ):
+                alpha.metrics["_regime_applied_thresholds"] = True
+        except Exception as _p2c_stamp_ex:
+            logger.warning(
+                f"[{ctx.node_name}] P2-C stamp failed (non-fatal): "
+                f"{_p2c_stamp_ex}"
+            )
+
+    return _SingleAlphaEvalResult(
+        corr_check_performed=_corr_performed,
+        corr_check_skipped_reason=_corr_skipped_reason,
+    )
 
 
 # =============================================================================
@@ -738,6 +1127,19 @@ async def node_simulate(
         updated.metrics = res.get("metrics", {}) or {}
         updated.simulation_error = res.get("error")
 
+        # P1-E follow-up (M-4 incomplete fix): node_validate stamps
+        # `_validation_findings` and `_risk_bounds` into pre-simulate
+        # alpha.metrics so persistence (which writes alpha.metrics to
+        # JSONB) can carry them to KB. The unconditional `updated.metrics =
+        # res.get("metrics")` above DROPS those annotations before
+        # persistence ever sees them. Carry them across explicitly.
+        # `setdefault` so a (hypothetical) BRAIN metrics dict containing
+        # the same key does not get overwritten by stale validation data.
+        if isinstance(current.metrics, dict):
+            for _k, _v in current.metrics.items():
+                if _k.startswith("_validation_") or _k == "_risk_bounds":
+                    updated.metrics.setdefault(_k, _v)
+
         # V-27.61: a retryable failure (429 / slot-acquire timeout / stale
         # slot counter — brain_adapter.simulate_alpha returns retryable=True
         # for these) is TRANSIENT, not a verdict on the alpha. Keep
@@ -755,12 +1157,26 @@ async def node_simulate(
         else:
             updated.is_simulated = True
 
-        # A1: stamp smart-settings metadata into metrics for audit / KB insight
+        # A1: stamp the resolved sim-settings into metrics for audit / KB insight,
+        # and so node_evaluate's signal-vs-control dual-run can re-simulate the
+        # control with the SAME settings — otherwise Δsharpe mixes signal-core
+        # difference with sim-settings difference and the attribution is invalid.
         if smart_enabled and i in smart_settings_per_idx:
             updated.metrics = {
                 **updated.metrics,
                 "_sim_settings": smart_settings_per_idx[i],
                 "_sim_settings_reason": smart_reasons_per_idx.get(i, ""),
+            }
+        else:
+            updated.metrics = {
+                **updated.metrics,
+                "_sim_settings": {
+                    "region": state.region,
+                    "universe": state.universe,
+                    "delay": _v16_settings.SIM_DEFAULT_DELAY,
+                    "decay": _v16_settings.SIM_DEFAULT_DECAY,
+                    "neutralization": _v16_settings.SIM_DEFAULT_NEUTRALIZATION,
+                },
             }
 
         if updated.simulation_success:
@@ -852,14 +1268,6 @@ async def node_evaluate(
         - pending_alphas (with quality_status and score)
         - trace_steps
     """
-    from backend.alpha_scoring import (
-        calculate_alpha_score,
-        should_optimize,
-        get_failed_tests,
-        evaluate_with_brain_checks,  # 新增：BRAIN官方检查
-    )
-    from backend.services.correlation_service import CorrelationService, CorrSource
-
     start_time = time.time()
     node_name = "EVALUATE"
 
@@ -874,9 +1282,6 @@ async def node_evaluate(
     # already guards this with model_copy(); node_evaluate mutates both
     # top-level fields and the nested metrics dict, so it needs a DEEP copy.
     updated_alphas = [a.model_copy(deep=True) for a in state.pending_alphas]
-    pass_count = 0
-    fail_count = 0
-    optimize_count = 0
     corr_checks_performed = 0
     corr_checks_skipped = 0
 
@@ -894,6 +1299,60 @@ async def node_evaluate(
     from backend.agents.graph.tier_thresholds import get_tier_thresholds
 
     tier_cfg = get_tier_thresholds(getattr(state, "factor_tier", None))
+
+    # P2-C (2026-05-16): regime-aware threshold adjustment. The mining_agent
+    # injection block puts ``regime`` + ``style_preset`` onto strategy BEFORE
+    # the workflow runs; we read the regime out of config["configurable"][
+    # "strategy"] (a dict from EvolutionStrategy.to_dict) and, if the
+    # ``ENABLE_REGIME_AWARE_THRESHOLDS`` flag is on AND a regime is present,
+    # scale the tier_cfg in-place. MF5 thread-through: ``_regime_for_eval``
+    # carries forward into ``_EvalCtx`` so the per-alpha stamp downstream
+    # uses the same value (not a re-derived one).
+    #
+    # MF6 invariant verified by apply_regime_multipliers: ``score_optimize``
+    # is NEVER scaled — only ``score_pass`` shifts with regime.
+    #
+    # S2: the ``_regime_at_eval`` stamp on alpha.metrics is gated by
+    # ``_regime_for_eval`` being non-None (i.e. strategy.regime was set),
+    # which only happens when at least one of the two effect flags
+    # (AWARE / STYLE) was True in mining_agent. So even with AWARE=False
+    # + STYLE=True, the stamp is written; the threshold multipliers
+    # below are NOT applied (only the prompt block downstream).
+    _regime_for_eval: Optional[str] = None
+    try:
+        _strategy_blob = (
+            (config.get("configurable", {}) or {}).get("strategy", {})
+            if config else {}
+        )
+        if isinstance(_strategy_blob, dict):
+            _regime_for_eval = _strategy_blob.get("regime")
+    except Exception:
+        _regime_for_eval = None
+
+    if (
+        getattr(settings, "ENABLE_REGIME_AWARE_THRESHOLDS", False)
+        and _regime_for_eval
+    ):
+        try:
+            from backend.regime_classifier import (  # lazy
+                apply_regime_multipliers as _apply_regime_multipliers,
+            )
+            _old_sharpe = tier_cfg.get("sharpe_min")
+            adjusted_tier_cfg = _apply_regime_multipliers(
+                tier_cfg, _regime_for_eval,
+            )
+            logger.info(
+                f"[{node_name}] P2-C regime gate | regime="
+                f"{_regime_for_eval} sharpe: "
+                f"{_old_sharpe}→{adjusted_tier_cfg.get('sharpe_min')}"
+            )
+            tier_cfg = adjusted_tier_cfg
+        except Exception as _p2c_ex:
+            logger.warning(
+                f"[{node_name}] P2-C regime adjust failed "
+                f"(non-fatal): {_p2c_ex}"
+            )
+
     sharpe_min = tier_cfg["sharpe_min"]
     fitness_min = tier_cfg["fitness_min"]
     turnover_min = tier_cfg["turnover_min"]
@@ -914,8 +1373,12 @@ async def node_evaluate(
     prov_turnover_min = prov_cfg.get("turnover_min", turnover_min)
     prov_turnover_max = prov_cfg.get("turnover_max", 0.85)
 
-    score_pass_threshold = getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8)
-    score_optimize_threshold = getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3)
+    # P0 #3: tier-aware score thresholds. tier_cfg["score_pass/optimize"] are
+    # set by get_tier_thresholds() from TIER{N}_SCORE_PASS/OPTIMIZE; their
+    # defaults equal the global 0.8/0.3 constants, so behaviour is unchanged
+    # until per-tier values are explicitly tuned in .env.
+    score_pass_threshold = tier_cfg.get("score_pass", getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8))
+    score_optimize_threshold = tier_cfg.get("score_optimize", getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3))
     corr_check_threshold = getattr(settings, 'CORR_CHECK_THRESHOLD', 0.5)
     logger.info(
         f"[{node_name}] tier={tier_cfg['tier']} sharpe>={sharpe_min} fitness>={fitness_min} "
@@ -925,566 +1388,87 @@ async def node_evaluate(
     
     eval_details = []
     failure_feedback_queue = []
-    
+
+    # P1-B: bundle context for per-alpha helper
+    _ctx = _EvalCtx(
+        state=state,
+        brain=brain,
+        correlation_service=correlation_service,
+        node_name=node_name,
+        sharpe_min=sharpe_min,
+        fitness_min=fitness_min,
+        turnover_min=turnover_min,
+        turnover_max=turnover_max,
+        max_correlation=max_correlation,
+        check_self_corr=check_self_corr,
+        check_concentrated=check_concentrated,
+        prov_sharpe_min=prov_sharpe_min,
+        prov_fitness_min=prov_fitness_min,
+        prov_turnover_min=prov_turnover_min,
+        prov_turnover_max=prov_turnover_max,
+        score_pass_threshold=score_pass_threshold,
+        score_optimize_threshold=score_optimize_threshold,
+        corr_check_threshold=corr_check_threshold,
+        eval_details=eval_details,
+        failure_feedback_queue=failure_feedback_queue,
+        # P2-C (2026-05-16) MF5: thread the regime label through the ctx
+        # so the per-alpha stamp downstream uses the same value the
+        # multiplier path saw (no re-derivation, no inconsistency window).
+        regime_for_eval=_regime_for_eval,
+    )
+    eval_errors = 0
+
     for i, alpha in enumerate(updated_alphas):
-        # Hard rule: anything that didn't simulate successfully cannot be PASS,
-        # regardless of any earlier transient status. Metrics are missing, so
-        # gates are unverifiable.
+        # Hard rule: anything that didn't simulate successfully cannot be PASS.
         if not alpha.is_simulated or not alpha.simulation_success:
-            # V-27.61: a retryable sim failure (429 / slot timeout / stale
-            # counter) is transient — don't bury it as a terminal FAIL,
-            # which would pollute the KB and the failure_feedback_queue.
-            # Leave quality_status at PENDING: it's neither counted as a
-            # fail nor persisted (node_save_results only writes PASS / PROV);
-            # mining moves on with a fresh expression next round.
             if isinstance(alpha.metrics, dict) and alpha.metrics.get("_sim_retryable"):
+                # V-27.61 + P1-B: stamp PENDING explicitly so the post-loop
+                # tally classifies retryable as PENDING, not FAIL.
+                alpha.quality_status = "PENDING"
                 logger.info(
                     f"[{node_name}] retryable sim failure held at PENDING "
                     f"(not FAIL) | expr={(alpha.expression or '')[:60]}"
                 )
+                updated_alphas[i] = alpha
                 continue
             alpha.quality_status = "FAIL"
-            fail_count += 1
+            updated_alphas[i] = alpha
             continue
 
-        metrics = alpha.metrics or {}
-        
-        train_sharpe_val = metrics.get("train_sharpe")
-        train_fitness_val = metrics.get("train_fitness")
-        test_sharpe_val = metrics.get("test_sharpe")
-        test_fitness_val = metrics.get("test_fitness")
-
-        # V-27.77: do NOT fabricate the OS/test leg. When BRAIN returned no
-        # separate test metrics, leave sim_result["test"] empty —
-        # _extract_os_stats falls back gracefully (test → os → pnl.os → {}).
-        # The old `metrics.get("sharpe",0) * 0.8` invented an OS sharpe out of
-        # thin air and fed it to calculate_alpha_score / should_optimize /
-        # get_failed_tests (V-26.19 only fixed the hard_gate link via
-        # _check_is_os_consistency, not the scoring link).
-        if test_sharpe_val is not None and test_fitness_val is not None:
-            test_leg = {"sharpe": test_sharpe_val, "fitness": test_fitness_val}
-        else:
-            test_leg = {}
-
-        # 构建完整的 sim_result，包含 BRAIN 返回的 checks
-        sim_result = {
-            "train": {
-                "sharpe": train_sharpe_val if train_sharpe_val is not None else metrics.get("sharpe", 0),
-                "fitness": train_fitness_val if train_fitness_val is not None else metrics.get("fitness", 0),
-                "turnover": metrics.get("turnover", 0),
-                "returns": metrics.get("returns", 0),
-            },
-            "test": test_leg,
-            "is": {
-                "sharpe": metrics.get("sharpe", 0),
-                "fitness": metrics.get("fitness", 0),
-                "turnover": metrics.get("turnover", 0),
-                "drawdown": metrics.get("drawdown", 0),
-                "longCount": metrics.get("longCount"),
-                "shortCount": metrics.get("shortCount"),
-                "checks": metrics.get("checks", []),  # BRAIN 官方检查结果
-            },
-            "riskNeutralized": metrics.get("riskNeutralized", {}),
-            "investabilityConstrained": metrics.get("investabilityConstrained", {}),
-            "checks": metrics.get("checks", []),  # 顶层也放一份
-            "can_submit": metrics.get("can_submit", False),
-        }
-        
-        # 新增：使用 BRAIN 官方检查结果进行快速判断
-        brain_eval = evaluate_with_brain_checks(sim_result)
-        brain_can_submit = brain_eval.get('can_submit', False)
-        brain_failed_checks = brain_eval.get('failed_checks', [])
-        # V-26.77 (2026-05-13): removed dead `pyramid_multiplier` extraction —
-        # the variable was assigned and never read. Pyramid bonus is now
-        # handled inside calculate_alpha_score via brain_eval directly.
-
-        # Stage 1: Preliminary score WITHOUT correlation
-        preliminary_score = calculate_alpha_score(
-            sim_result=sim_result,
-            prod_corr=0.0,
-            self_corr=0.0
-        )
-        
-        sharpe = metrics.get("sharpe", 0) or 0
-        turnover = metrics.get("turnover", 0) or 0
-        fitness = metrics.get("fitness", 0) or 0
-        
-        # 使用 BRAIN 官方检查或本地阈值
-        if brain_eval['check_details']:
-            # 有官方检查结果，以官方为准
-            meets_thresholds = brain_can_submit or (not brain_failed_checks)
-        else:
-            # Fallback: 使用本地阈值
-            meets_thresholds = (
-                sharpe >= sharpe_min and
-                turnover <= turnover_max and
-                fitness >= fitness_min
-            )
-        
-        # Stage 2: Correlation check for promising candidates
-        # PR2: T1/T2 tier skips self_corr entirely (check_self_corr=False).
-        # The 8-12 LLM-guided wrapper variants per seed are necessarily
-        # PnL-correlated; gating them on self_corr would FAIL the whole T2
-        # batch. self_corr is only meaningful at T3 (vs already-submitted OS
-        # pool), which is where we keep the strict gate.
-        prod_corr = 0.0
-        self_corr = 0.0
-        needs_corr_check = check_self_corr and (
-            preliminary_score >= corr_check_threshold or
-            meets_thresholds
-        )
-
-        if needs_corr_check and brain and alpha.alpha_id:
-            corr_checks_performed += 1
-            try:
-                prod_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="PROD")
-                if isinstance(prod_corr_result, dict):
-                    prod_corr = float(prod_corr_result.get("max", 0.0) or 0.0)
-            except Exception as e:
-                logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
-
-            # W0.5: prefer local PnL-matrix; fall back to BRAIN API; finally
-            # mark UNKNOWN so hard_gate downgrades to PASS_PROVISIONAL.
-            # V-27.158: self_corr_source carries CorrSource enum values from
-            # get_with_fallback; the "tier_skipped"/"skipped" branch below is
-            # a separate tier-policy axis (not a CorrSource) and stays a
-            # plain string — StrEnum makes the mixed comparisons safe.
-            self_corr_source = CorrSource.UNKNOWN
-            if correlation_service is not None:
-                try:
-                    _corr_raw, self_corr_source = await correlation_service.get_with_fallback(
-                        alpha.alpha_id, region=state.region
-                    )
-                    # get_with_fallback returns None for CorrSource.UNKNOWN
-                    # (V-26.77 follow-up #5: the service no longer fakes 0.0
-                    # for "not measured"). Keep self_corr numeric for the
-                    # score / hard_gate arithmetic below — self_corr_verified
-                    # (derived from source) is what actually gates PASS, so a
-                    # 0.0 placeholder here is inert when source is UNKNOWN.
-                    self_corr = _corr_raw if _corr_raw is not None else 0.0
-                except Exception as e:
-                    logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
-                    self_corr_source = CorrSource.UNKNOWN
-
-                # Crisis-window stress test: piggyback on the same local PnL
-                # cache that just resolved self_corr. Only runs when the
-                # cache produced a real value ("local") — if the global
-                # max-corr couldn't be measured the per-window slice has
-                # even less data to work with. Failures are non-fatal: the
-                # crisis read is advisory, not a hard gate.
-                if self_corr_source == CorrSource.LOCAL:
-                    try:
-                        crisis_by_window = await correlation_service.calc_self_corr_by_window(
-                            alpha_id=alpha.alpha_id, region=state.region
-                        )
-                        if isinstance(alpha.metrics, dict):
-                            alpha.metrics = dict(alpha.metrics)
-                        else:
-                            alpha.metrics = {}
-                        alpha.metrics["_crisis_correlations"] = crisis_by_window
-                        spikes = [
-                            (w, info["max_corr"])
-                            for w, info in crisis_by_window.items()
-                            if info.get("status") == "ok"
-                            and info.get("max_corr", 0.0) >= max_correlation
-                        ]
-                        if spikes:
-                            logger.info(
-                                f"[{node_name}] {alpha.alpha_id} crisis-corr spikes: "
-                                f"{spikes} (global self_corr={self_corr:.3f})"
-                            )
-                    except Exception as e:
-                        logger.warning(
-                            f"[{node_name}] crisis-window corr failed for {alpha.alpha_id}: {e}"
-                        )
-            else:
-                try:
-                    self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
-                    if isinstance(self_corr_result, dict):
-                        self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
-                        self_corr_source = CorrSource.BRAIN
-                except Exception as e:
-                    logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")
-        else:
-            corr_checks_skipped += 1
-            # tier_skipped means "by tier policy, not because we couldn't measure" —
-            # downstream gate should treat as ok+verified, NOT downgrade to PROVISIONAL
-            self_corr_source = "tier_skipped" if not check_self_corr else "skipped"
-        
-        # Final score with correlation penalty
-        score = calculate_alpha_score(
-            sim_result=sim_result,
-            prod_corr=prod_corr,
-            self_corr=self_corr
-        )
-        
-        should_opt, opt_reason = should_optimize(sim_result)
-        failed_tests = get_failed_tests(sim_result)
-
-        # Hard skill gate (BRAIN red-line on IS metrics) — see plan §
-        # "BRAIN Gate 真实值校准". PASS requires ALL of:
-        #   sharpe >= SHARPE_MIN AND fitness >= FITNESS_MIN
-        #   AND 0.01 <= turnover <= TURNOVER_MAX
-        #   AND sub-universe check not FAIL
-        #   AND self_corr < MAX_CORRELATION
-        sub_universe_check = next(
-            (c for c in metrics.get("checks", [])
-             if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
-            None,
-        )
-        sub_universe_ok = (
-            sub_universe_check is None
-            or sub_universe_check.get("result") != "FAIL"
-        )
-        # Post-Step1 (2026-04-30): BRAIN /check rejects ~25% of project's PASS
-        # alphas on CONCENTRATED_WEIGHT (single position > 10% on some date).
-        # Local hard_gate now mirrors that rule using sim_result's checks block.
-        concentrated_check = next(
-            (c for c in metrics.get("checks", [])
-             if c.get("name") == "CONCENTRATED_WEIGHT"),
-            None,
-        )
-        # PR2: T1 skips concentrated_weight check (raw signal evaluation only).
-        # T2/T3 keep BRAIN's CONCENTRATED_WEIGHT rule.
-        if check_concentrated:
-            concentrated_ok = (
-                concentrated_check is None
-                or concentrated_check.get("result") != "FAIL"
-            )
-        else:
-            concentrated_ok = True
-
-        # PR2: tier-aware self_corr gate. T1/T2 force ok+verified so PASS path
-        # is reachable for wrapper variants; T3 uses real self_corr value.
-        self_corr_source = locals().get("self_corr_source", "skipped")
-        if check_self_corr:
-            self_corr_ok = self_corr < max_correlation
-            # V-27.158: CorrSource.UNKNOWN compares equal to "unknown"
-            # (StrEnum), so this covers both the enum and any legacy string.
-            self_corr_verified = self_corr_source not in (CorrSource.UNKNOWN, "unknown")
-        else:
-            self_corr_ok = True
-            self_corr_verified = True  # tier_skipped, not unknown
-
-        # V-12 (2026-05-03): IS-only PASS bar lets train_sharpe >> test_sharpe
-        # alphas through. Spike data showed T2 train_avg=3.94 / test_avg=0.40
-        # (90% decay), with top alphas like sharpe=16.2/test=0.0 — pure IS
-        # overfit. Require OS consistency for high-IS-sharpe alphas: above
-        # sharpe=2 we need a positive os_sharpe with retention >= 0.3 (or 0.4
-        # if sharpe>5). Lower-IS alphas pass without OS check (their own bar
-        # is conservative enough).
-        # V-26.76: pass tier so T3 hits the strict 0.4/0.5 floor.
-        is_overfit_safe = _check_is_os_consistency(metrics, tier=tier_cfg["tier"])
-
-        hard_gate_pass = (
-            sharpe >= sharpe_min
-            and fitness >= fitness_min
-            and turnover_min <= turnover <= turnover_max
-            and sub_universe_ok
-            and concentrated_ok
-            and self_corr_ok
-            and self_corr_verified
-            and is_overfit_safe
-        )
-
-        # PASS_PROVISIONAL: 近成功池 (sharpe + fitness>=0.6 + turnover [0.01,0.85])
-        # 用于 KB 学习/island 优化种子，但不视为可提交
-        #
-        # 议题 B (PnL 硬闸门，规模无关替代 expression injection):
-        #   self_corr 由 correlation_service 用 OS PnL 矩阵实测得出 (W0.5)。
-        #   - 已验证且 >= 0.7 (self_corr_ok=False, verified=True) → 直接 FAIL，
-        #     不污染 PROVISIONAL 池 (重复 alpha 没必要进 KB 学习)
-        #   - 未验证 (verified=False, cache miss + API fail) → 仍允许 PROVISIONAL
-        #     (defensive：宁可保留候选也不丢真信号)
-        #   - skipped (前置门没过自然没算 corr) → ok=True, verified=True (skipped
-        #     != unknown), 不影响其他门的判定
-        # 这套机制对 OS 池规模无关 — 不论 5 还是 10000 条提交 alpha,
-        # 单条 alpha 的 corrwith 都是 O(N列) ~50ms 量级。
-        self_corr_acceptable = self_corr_ok or not self_corr_verified
-        # PR2: PROVISIONAL bar uses tier-specific looser thresholds (plan §"PASS_PROVISIONAL 阈值").
-        # T1: sharpe>0.5, fitness>0.3, turnover<0.85
-        # T2: sharpe>0.8, fitness>0.6, turnover<0.65
-        # T3: sharpe>=1.3, fitness>=0.8, turnover<0.70
-        near_pass = (
-            sharpe >= prov_sharpe_min
-            and fitness >= prov_fitness_min
-            # V-26.80: symmetric provisional band; see prov_turnover_min above.
-            and prov_turnover_min <= turnover <= prov_turnover_max
-            and sub_universe_ok
-            and concentrated_ok
-            and self_corr_acceptable
-        )
-
-        # Determine quality status
-        if hard_gate_pass and (meets_thresholds or score >= score_pass_threshold):
-            # V-16 (2026-05-03): suspicion mode for sharpe > 3.0. Hard flags
-            # downgrade PASS → PASS_PROVISIONAL so the alpha is held for
-            # review rather than entering KB / submission queue. Soft / info
-            # flags only annotate metrics for trace_steps.
-            v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
-            hard_flags = [f for f in v16_flags if f.get("severity") == "hard"]
-            if v16_flags:
-                # V-26.79 (2026-05-13): detach metrics into a fresh dict
-                # before mutating so we don't write through to the metrics
-                # reference that may be shared upstream (LangGraph state,
-                # earlier nodes that populated this object). Pre-fix did
-                # `alpha.metrics["..."] = ...` directly, propagating the
-                # V-16 annotation back into the input state and confusing
-                # replay / debug tooling.
-                alpha.metrics = dict(alpha.metrics) if isinstance(alpha.metrics, dict) else {}
-                alpha.metrics["_v16_suspicion_flags"] = v16_flags
-                logger.warning(
-                    f"[{node_name}] V-16 suspicion mode (sharpe={sharpe:.2f}) | "
-                    f"flags={[f['check'] for f in v16_flags]}"
-                )
-            # Fix C (2026-05-07): BRAIN-aware PASS downgrade.
-            # Internal hard_gate uses SHARPE_MIN=1.0 / FITNESS_MIN=0.5 (探索阈值).
-            # BRAIN submission gate uses higher bar — top-level fitness ≥ ~1.0,
-            # CONCENTRATED_WEIGHT ≤ 10%. Without this check, alpha that pass our
-            # gate but BRAIN already FAIL'd on submittable fields are labelled
-            # PASS and skip the optimization chain forever (see should_optimize
-            # "已接近/达到门槛..." skip branch). Downgrading to PASS_PROVISIONAL
-            # routes them into _collect_optimization_candidates so wrapper /
-            # window optimizations get a chance to push fitness over BRAIN's bar.
-            # V-26.21 (2026-05-13): expand the BRAIN-aware downgrade set.
-            # Original list (LOW_FITNESS / LOW_SHARPE / CONCENTRATED_WEIGHT)
-            # left a theoretical hole — an alpha could PASS via the
-            # `score >= score_pass_threshold` branch in line 903 while BRAIN
-            # had flagged HIGH_TURNOVER / MATCHES_PYRAMID / HIGH_CORRELATION
-            # etc. as failed_checks. 30-day audit
-            # (scripts/v26_21_score_only_pass_audit.py) showed 0% slip-through
-            # today, so this is preemptive — close the hole now before a
-            # prompt change or threshold tweak surfaces it.
-            brain_actionable_fails = [
-                c.get("name") for c in brain_failed_checks or []
-                if c.get("name") in (
-                    "LOW_FITNESS",
-                    "LOW_SHARPE",
-                    "CONCENTRATED_WEIGHT",
-                    "HIGH_TURNOVER",
-                    "LOW_TURNOVER",
-                    "MATCHES_PYRAMID",
-                    "HIGH_CORRELATION",
-                    "SELF_CORRELATION",
-                )
-            ]
-            if hard_flags:
-                alpha.quality_status = "PASS_PROVISIONAL"
-                optimize_count += 1
-            elif not brain_eval['check_details']:
-                # V-27.78: BRAIN returned no checks (session-expiry window,
-                # transient 5xx, etc.) → the BRAIN-side submission gate was
-                # never verified. hard_gate_pass + score>=threshold can still
-                # be True here, reviving the score-only PASS bypass — and the
-                # BRAIN-aware downgrade below can't fire either because
-                # brain_failed_checks is empty. Without a BRAIN verdict the
-                # alpha must NOT be a confident PASS; hold it at PROVISIONAL,
-                # mirroring the unverified-self_corr path.
-                alpha.quality_status = "PASS_PROVISIONAL"
-                optimize_count += 1
-                if isinstance(alpha.metrics, dict):
-                    alpha.metrics["_brain_checks_unverified"] = True
-                logger.info(
-                    f"[{node_name}] PASS→PROVISIONAL: BRAIN returned no checks "
-                    f"(gate unverified) | sharpe={sharpe:.2f}"
-                )
-            elif brain_actionable_fails and not brain_can_submit:
-                alpha.quality_status = "PASS_PROVISIONAL"
-                optimize_count += 1
-                if isinstance(alpha.metrics, dict):
-                    alpha.metrics["_brain_pass_downgrade"] = brain_actionable_fails
-                logger.info(
-                    f"[{node_name}] PASS→PROVISIONAL: BRAIN rejected on {brain_actionable_fails} | "
-                    f"sharpe={sharpe:.2f} fitness={fitness:.2f} expr={(alpha.expression or '')[:80]}"
-                )
-            else:
-                alpha.quality_status = "PASS"
-                pass_count += 1
-        elif near_pass:
-            # V-26.20 (2026-05-13): run V-16 suspicion + annotate BRAIN
-            # actionable fails on the PROVISIONAL path too. The pre-fix code
-            # immediately labelled near_pass alphas PASS_PROVISIONAL without
-            # any further check — a sharpe-4.5 near_pass with hard suspicion
-            # flags (look-ahead / divide-by-zero) entered the KB and optimization
-            # pool unfiltered, polluting both. The flags themselves don't
-            # change the PROV verdict (PROV is already a hold-for-review
-            # state) — they just need to be visible to the KB filter, the
-            # optimization chain ("don't try to upgrade a flagged alpha"),
-            # and downstream submission queueing.
-            v16_flags_prov = _run_suspicion_checks(metrics, alpha.expression or "")
-            if v16_flags_prov:
-                if isinstance(alpha.metrics, dict):
-                    alpha.metrics["_v16_suspicion_flags"] = v16_flags_prov
-                logger.warning(
-                    f"[{node_name}] V-16 suspicion mode on PROVISIONAL "
-                    f"(sharpe={sharpe:.2f}) | flags={[f['check'] for f in v16_flags_prov]}"
-                )
-            # Same brain_actionable_fails set as PASS path. PROV already
-            # holds for review, so we only annotate (no further downgrade).
-            brain_actionable_fails_prov = [
-                c.get("name") for c in brain_failed_checks or []
-                if c.get("name") in (
-                    "LOW_FITNESS",
-                    "LOW_SHARPE",
-                    "CONCENTRATED_WEIGHT",
-                    "HIGH_TURNOVER",
-                    "LOW_TURNOVER",
-                    "MATCHES_PYRAMID",
-                    "HIGH_CORRELATION",
-                    "SELF_CORRELATION",
-                )
-            ]
-            if brain_actionable_fails_prov and isinstance(alpha.metrics, dict):
-                alpha.metrics["_brain_actionable_fails"] = brain_actionable_fails_prov
-            alpha.quality_status = "PASS_PROVISIONAL"
-            optimize_count += 1
-        elif should_opt and score >= score_optimize_threshold:
-            alpha.quality_status = "OPTIMIZE"
-            optimize_count += 1
-        else:
+        try:
+            _single_result = await _evaluate_single_alpha(alpha, _ctx)
+            if _single_result.corr_check_performed:
+                corr_checks_performed += 1
+            elif _single_result.corr_check_skipped_reason:
+                corr_checks_skipped += 1
+        except Exception as _eval_exc:
+            # P1-B fear-score fallback: one bad alpha does NOT crash the batch
+            eval_errors += 1
             alpha.quality_status = "FAIL"
-            fail_count += 1
-            
-            # Enhanced: Alignment check and attribution for failures
-            # This helps distinguish hypothesis failure from implementation failure
-            alignment_issues = []
-            attribution = "unknown"
-            
-            # Get hypothesis from alpha if available
-            hypothesis_dict = {}
-            if hasattr(alpha, 'hypothesis') and alpha.hypothesis:
-                if isinstance(alpha.hypothesis, dict):
-                    hypothesis_dict = alpha.hypothesis
-                else:
-                    hypothesis_dict = {"statement": alpha.hypothesis}
-            
-            # Quick alignment check
-            if hypothesis_dict and alpha.expression:
-                is_aligned, alignment_issues = quick_alignment_check(
-                    hypothesis_dict, alpha.expression, state.fields
-                )
-                
-                # Determine attribution
-                result_dict = {
-                    "success": False,
-                    "sharpe": sharpe,
-                    "fitness": fitness,
-                    "turnover": turnover,
-                }
-                attribution = determine_attribution_heuristic(
-                    result_dict, alignment_issues, alpha.validation_error
-                )
-                
-                if not is_aligned:
-                    logger.debug(
-                        f"[{node_name}] Alignment issues for {alpha.alpha_id}: {alignment_issues[:2]}"
-                    )
-            
-            # Determine error type
-            # P0: BRAIN check FAIL 优先匹配（来自 metrics.checks），它们指向具体
-            # settings/结构修法（truncation / neutralization / sub-universe），
-            # 比 sharpe/fitness/turnover 通用归因更可操作。
-            error_type = "QUALITY_FAIL"
-            brain_fail_priority = (
-                "CONCENTRATED_WEIGHT",
-                "LOW_SUB_UNIVERSE_SHARPE",
-                "HIGH_PROD_CORRELATION",
-                "HIGH_SELF_CORRELATION",
-            )
-            brain_fails = {
-                c.get("name"): c
-                for c in metrics.get("checks", []) or []
-                if c.get("result") == "FAIL"
+            prior_metrics = alpha.metrics or {}
+            existing_flags = prior_metrics.get("_metrics_fallback_flags")
+            if not isinstance(existing_flags, list):
+                existing_flags = []
+            alpha.metrics = {
+                **prior_metrics,
+                "_eval_error": f"{type(_eval_exc).__name__}: {_eval_exc}"[:500],
+                "_metrics_fallback_flags": existing_flags + ["__eval_exception__"],
             }
-            for name in brain_fail_priority:
-                if name in brain_fails:
-                    error_type = name
-                    break
-            if error_type == "QUALITY_FAIL":
-                # Fallback: 通用 metric-band 归因
-                if sharpe < sharpe_min:
-                    error_type = "LOW_SHARPE"
-                elif fitness < fitness_min:
-                    error_type = "LOW_FITNESS"
-                elif turnover > turnover_max:
-                    error_type = "HIGH_TURNOVER"
-                elif sharpe < 0:
-                    error_type = "NEGATIVE_SIGNAL"
-            
-            if alpha.expression:
-                failure_feedback_queue.append({
-                    "expression": alpha.expression,
-                    "error_type": error_type,
-                    "metrics": metrics,
-                    "region": state.region,
-                    "dataset_id": state.dataset_id,
-                    # New: attribution info for knowledge filtering
-                    "hypothesis": hypothesis_dict.get("statement", ""),
-                    "alignment_issues": alignment_issues,
-                    "attribution": attribution,
-                })
-        
-        # Store detailed metrics with BRAIN checks info
-        alpha.metrics = {
-            **metrics,
-            "_score": round(score, 4),
-            "_preliminary_score": round(preliminary_score, 4),
-            "_prod_corr": round(prod_corr, 4) if prod_corr else None,
-            # V-26.77 follow-up #2 (2026-05-14): falsy guard `if self_corr`
-            # collapsed 0.0 -> None, masking BOTH "BRAIN cache miss" (src=
-            # unknown) AND "actually uncorrelated" (src=local/brain, 0.0).
-            # Audit work for alpha 8003: a local-source 0.5669 happened
-            # to be falsy-truthy and stored; later 0.0-unknown overwrote
-            # it. New rule: store the value when the source is trusted
-            # ('local' or 'brain'), regardless of magnitude; store None
-            # only when the source is 'unknown' / 'tier_skipped' / 'skipped'.
-            # `_self_corr_source` is now stamped alongside so a reader can
-            # distinguish "uncorrelated alpha" from "no signal".
-            "_self_corr": (
-                round(self_corr, 4)
-                if self_corr_source in (CorrSource.LOCAL, CorrSource.BRAIN)
-                else None
-            ),
-            # str() so a CorrSource enum is stored as its plain value in JSONB
-            # (StrEnum already serialises that way, but be explicit).
-            "_self_corr_source": str(self_corr_source),
-            "_corr_checked": needs_corr_check,
-            "_should_optimize": should_opt,
-            "_optimize_reason": opt_reason,
-            "_failed_tests": failed_tests,
-            # BRAIN 官方检查信息
-            "_brain_can_submit": brain_can_submit,
-            "_brain_failed_checks": brain_failed_checks,
-            "_brain_pending_checks": brain_eval.get('pending_checks', []),
-            # V-26.77 follow-up (2026-05-14): pyramid_multiplier was previously
-            # extracted into a local variable then stamped here; the variable
-            # was removed but this stamping line was missed, raising NameError
-            # on every iteration. Read directly from brain_eval to restore the
-            # diagnostic field without resurrecting the dead local.
-            "_pyramid_multiplier": (brain_eval.get('pyramid_info') or {}).get('multiplier', 1.0),
-        }
-        
-        _debug_log("F", "nodes.py:evaluate:alpha_detail", f"Alpha evaluated: {alpha.quality_status}", {
-            "alpha_id": alpha.alpha_id,
-            "expression": alpha.expression[:80] if alpha.expression else None,
-            "sharpe": round(sharpe, 3),
-            "fitness": round(fitness, 3),
-            "turnover": round(turnover, 3),
-            "score": round(score, 3),
-            "status": alpha.quality_status
-        })
-        
-        eval_details.append({
-            "id": alpha.alpha_id,
-            "status": alpha.quality_status,
-            "score": round(score, 4),
-            "sharpe": sharpe,
-            "fitness": fitness,
-            "turnover": turnover,
-            "corr_checked": needs_corr_check,
-            "optimize_reason": opt_reason if should_opt else None,
-        })
-        
+            _ctx.eval_details.append({
+                "id": alpha.alpha_id,
+                "status": "FAIL",
+                "score": None,
+                "sharpe": None,
+                "fitness": None,
+                "turnover": None,
+                "corr_checked": False,
+                "optimize_reason": None,
+                "_eval_error": f"{type(_eval_exc).__name__}: {_eval_exc}"[:200],
+            })
+            logger.exception(
+                f"[{node_name}] per-alpha eval crashed for "
+                f"{alpha.alpha_id or (alpha.expression or '')[:60]}; marking FAIL"
+            )
         updated_alphas[i] = alpha
 
     # PR5 — T1 sign-flip retry. For each FAIL alpha whose |sharpe| ≥
@@ -1610,11 +1594,16 @@ async def node_evaluate(
                             region=state.region,
                             universe=state.universe,
                         )
+                        _flip_sim_settings = dict(smart)
                         sim_result = await brain.simulate_alpha(
                             expression=flipped_expr,
                             **smart,
                         )
                     else:
+                        _flip_sim_settings = {
+                            "region": state.region,
+                            "universe": state.universe,
+                        }
                         sim_result = await brain.simulate_alpha(
                             expression=flipped_expr,
                             region=state.region,
@@ -1629,6 +1618,9 @@ async def node_evaluate(
                     continue
 
                 flip_metrics = sim_result.get("metrics") or {}
+                # Stamp the settings actually used so node_evaluate's dual-run can
+                # replay the control with identical settings (see _sim_settings).
+                flip_metrics["_sim_settings"] = _flip_sim_settings
                 new_sharpe = flip_metrics.get("sharpe") or 0
                 new_fitness = flip_metrics.get("fitness") or 0
                 new_turnover = flip_metrics.get("turnover") or 0
@@ -1691,7 +1683,6 @@ async def node_evaluate(
                         new_alpha.metrics["_v16_suspicion_flags"] = v16_flags
                     if hard_flags:
                         new_alpha.quality_status = "PASS_PROVISIONAL"
-                        optimize_count += 1
                         flip_retry_prov += 1
                         logger.warning(
                             f"[{node_name}] V-16 downgrades flip-retry PASS → PROV | "
@@ -1699,7 +1690,6 @@ async def node_evaluate(
                         )
                     else:
                         new_alpha.quality_status = "PASS"
-                        pass_count += 1
                         flip_retry_pass += 1
                 elif (
                     new_sharpe >= prov_sharpe_min
@@ -1708,11 +1698,9 @@ async def node_evaluate(
                     and sub_universe_ok
                 ):
                     new_alpha.quality_status = "PASS_PROVISIONAL"
-                    optimize_count += 1
                     flip_retry_prov += 1
                 else:
                     new_alpha.quality_status = "FAIL"
-                    fail_count += 1
 
                 updated_alphas.append(new_alpha)
                 flip_retry_count += 1
@@ -1728,20 +1716,653 @@ async def node_evaluate(
             for _flip_slot in flip_claimed_slots:
                 _flip_release_slot(*_flip_slot)
 
+    # P0: signal-vs-control 双跑归因 (docs/alphagbm_skills_research_2026-05-15.md).
+    # 为每个 PASS alpha 模拟一个"对照"表达式(T1 信号核剥成裸字段、保留 T2/T3 结构),
+    # 用 Δ(sharpe_signal − sharpe_control) 归因业绩来源。
+    # Δ 大 → 信号在做功 → 保持 PASS / "hypothesis"。
+    # Δ 小 → 结构产物 → PASS 降级 PASS_PROVISIONAL / "implementation"。
+    # 整块为 best-effort:任何失败仅跳过单个 alpha,评估继续。
+    # opt-in via ENABLE_SIGNAL_CONTROL_DUAL_RUN(默认 False,避免意外耗配额)。
+    dual_run_count = 0
+    dual_run_downgraded = 0
+    dual_run_no_control = 0
+    dual_run_sim_failed = 0
+    if brain is not None and getattr(settings, "ENABLE_SIGNAL_CONTROL_DUAL_RUN", False):
+        from backend.factor_tier_classifier import derive_control_expression
+        from backend.agents.prompts.alignment import determine_attribution_dual_run
+        _dr_delta_min = getattr(settings, "SIGNAL_CONTROL_DELTA_SHARPE_MIN", 0.3)
+        _dr_cap = getattr(settings, "SIGNAL_CONTROL_CAP", 5)
+
+        # 仅对 PASS 跑对照(直接提交池、"走运结构"风险最高)。
+        # flip-retry 提升出的新 PASS 也包含在内(它们已追加到 updated_alphas)。
+        # 按 sharpe 降序取 top-cap:最高分的最值得审查。
+        _dr_candidates = sorted(
+            [
+                a for a in updated_alphas
+                if a.quality_status == "PASS"
+                and a.is_simulated and a.simulation_success
+                and isinstance(a.metrics, dict)
+            ],
+            key=lambda a: a.metrics.get("sharpe", 0) or 0,
+            reverse=True,
+        )[:_dr_cap]
+
+        if _dr_candidates:
+            logger.info(
+                f"[{node_name}] signal-vs-control dual-run: "
+                f"{len(_dr_candidates)} PASS candidate(s) | delta_min={_dr_delta_min}"
+            )
+
+        for _dr_alpha in _dr_candidates:
+            _ctrl_expr = derive_control_expression(_dr_alpha.expression or "")
+            if not _ctrl_expr:
+                dual_run_no_control += 1
+                _dr_alpha.metrics["_dual_run_skipped"] = "no_clean_control"
+                logger.debug(
+                    f"[{node_name}] dual-run: no clean control for "
+                    f"{(_dr_alpha.expression or '')[:80]!r}"
+                )
+                continue
+            # Simulate the control with the SAME settings the signal alpha used
+            # (stamped into metrics["_sim_settings"] by node_simulate / flip-retry).
+            # Without this, Δsharpe mixes signal-core difference with sim-settings
+            # difference and the attribution is invalid. Fall back to region/
+            # universe only if the stamp is somehow absent.
+            _ctl_sim_kwargs = dict(_dr_alpha.metrics.get("_sim_settings") or {
+                "region": state.region,
+                "universe": state.universe,
+            })
+            _ctl_sim_kwargs["expression"] = _ctrl_expr
+            try:
+                _ctl_result = await brain.simulate_alpha(**_ctl_sim_kwargs)
+            except Exception as _dr_exc:
+                dual_run_sim_failed += 1
+                logger.warning(
+                    f"[{node_name}] dual-run control sim failed for "
+                    f"{_ctrl_expr[:80]!r}: {_dr_exc}"
+                )
+                continue
+            if not _ctl_result.get("success"):
+                dual_run_sim_failed += 1
+                logger.debug(
+                    f"[{node_name}] dual-run: control sim returned failure for {_ctrl_expr[:80]!r}"
+                )
+                continue
+            _ctl_metrics = _ctl_result.get("metrics") or {}
+            _attr, _conf, _evid = determine_attribution_dual_run(
+                signal_result=_dr_alpha.metrics,
+                control_result=_ctl_metrics,
+                delta_sharpe_min=_dr_delta_min,
+            )
+            _dr_alpha.metrics["_control_expression"] = _ctrl_expr
+            _dr_alpha.metrics["_control_sharpe"] = _ctl_metrics.get("sharpe")
+            _dr_alpha.metrics["_control_fitness"] = _ctl_metrics.get("fitness")
+            _dr_alpha.metrics["_delta_sharpe"] = round(
+                (_dr_alpha.metrics.get("sharpe") or 0)
+                - (_ctl_metrics.get("sharpe") or 0),
+                4,
+            )
+            _dr_alpha.metrics["_dual_run_attribution"] = _attr
+            _dr_alpha.metrics["_dual_run_confidence"] = round(_conf, 3)
+            _dr_alpha.metrics["_dual_run_evidence"] = _evid
+            dual_run_count += 1
+            # 结构产物 → PASS 降级为 PASS_PROVISIONAL(镜像 flip-retry V-16 降级模式)
+            if _attr in ("implementation", "both"):
+                _dr_alpha.quality_status = "PASS_PROVISIONAL"
+                _dr_alpha.metrics["_routing_reason"] = "dual_run_downgrade"
+                dual_run_downgraded += 1
+                logger.warning(
+                    f"[{node_name}] signal-vs-control: PASS → PROV | "
+                    f"expr={(_dr_alpha.expression or '')[:60]!r} "
+                    f"Δsharpe={_dr_alpha.metrics['_delta_sharpe']} "
+                    f"attribution={_attr}"
+                )
+            else:
+                logger.info(
+                    f"[{node_name}] signal-vs-control: PASS confirmed | "
+                    f"expr={(_dr_alpha.expression or '')[:60]!r} "
+                    f"Δsharpe={_dr_alpha.metrics['_delta_sharpe']} "
+                    f"attribution={_attr}"
+                )
+
+    # ── Shared baseline setup ─────────────────────────────────────────────────
+    # expected_signal lookup + category_resolver are needed by both the
+    # graded-score block (below) and the baseline screening block (further down).
+    # Computed once here so both blocks share the SAME resolver — previously
+    # graded-score's BaselineProvider was constructed without one and could
+    # never fall back to the coarse cell, inflating false "no baseline" counts.
+    _shared_baseline_cfg_needed = (
+        getattr(settings, "ENABLE_GRADED_SCORE", False)
+        or getattr(settings, "BASELINE_SCREEN_ENABLED", False)
+    )
+    _shared_expected_signal: str = "unknown"
+    def _shared_resolve_category(_ds):  # default no-op resolver
+        return None
+    if _shared_baseline_cfg_needed:
+        for _h in (state.hypotheses or []):
+            if isinstance(_h, dict) and _h.get("expected_signal"):
+                _shared_expected_signal = _h["expected_signal"]
+                break
+        if _shared_expected_signal == "unknown" and getattr(state, "current_hypothesis_id", None):
+            try:
+                from backend.database import AsyncSessionLocal
+                from backend.models import Hypothesis as _SharedHyp
+                async with AsyncSessionLocal() as _shared_db:
+                    _shared_row = await _shared_db.get(_SharedHyp, state.current_hypothesis_id)
+                    if _shared_row and _shared_row.expected_signal:
+                        _shared_expected_signal = _shared_row.expected_signal
+            except Exception:
+                pass
+
+        _cat_map: Dict[str, str] = {}
+        for _f in (state.fields or []):
+            if isinstance(_f, dict):
+                _ds = _f.get("dataset_id")
+                _cat = _f.get("category") or _f.get("dataset_category")
+                if _ds and _cat:
+                    _cat_map[_ds] = _cat
+        _default_cat = getattr(state, "dataset_category", None) or None
+
+        def _shared_resolve_category(ds_id):
+            return _cat_map.get(ds_id) or _default_cat
+
+    # P1-A: graded-score — 百分位归一化 + 非均匀权重 + confidence 维度
+    # (docs/alphagbm_skills_research_2026-05-15.md 原则①).
+    # Advisory layer: compute_graded_score produces percentile/grade/confidence
+    # alongside the existing raw _score.  A PASS alpha with low confidence
+    # (applicable inputs < SCORE_CONFIDENCE_MIN) is downgraded to PASS_PROVISIONAL —
+    # confidence is the real decision gate, not the grade.
+    # calculate_alpha_score / route_alpha_action / band thresholds are untouched.
+    # Opt-in via ENABLE_GRADED_SCORE (default False).  Setup failures degrade
+    # the whole block; per-alpha failures are isolated and counted.
+    graded_count = 0
+    graded_downgraded = 0
+    graded_no_baseline = 0
+    graded_failed = 0
+    if getattr(settings, "ENABLE_GRADED_SCORE", False):
+        try:
+            from backend.alpha_scoring import compute_graded_score
+            from backend.agents.services.baseline_provider import BaselineProvider
+
+            _gs_conf_min = getattr(settings, "SCORE_CONFIDENCE_MIN", 0.5)
+            _gs_cap = getattr(settings, "SCORE_GRADED_CAP", 0)
+            _gs_weights = {
+                "test_sharpe":           getattr(settings, "SCORE_WEIGHT_TEST_SHARPE", 0.55),
+                "train_sharpe":          getattr(settings, "SCORE_WEIGHT_TRAIN_SHARPE", 0.25),
+                "fitness":               getattr(settings, "SCORE_WEIGHT_FITNESS", 0.20),
+                "prod_corr_penalty":     getattr(settings, "SCORE_WEIGHT_PROD_CORR_PENALTY", 0.30),
+                "turnover_penalty":      getattr(settings, "SCORE_WEIGHT_TURNOVER_PENALTY", 0.15),
+                "investability_penalty": getattr(settings, "SCORE_WEIGHT_INVESTABILITY_PENALTY", 0.20),
+            }
+            # request-scoped; uses the shared category_resolver so insufficient
+            # fine cells fall back to the coarse cell — same as baseline block.
+            _gs_bp = BaselineProvider(category_resolver=_shared_resolve_category)
+            _gs_tier = tier_cfg.get("tier")
+
+            _gs_candidates = [
+                a for a in updated_alphas
+                if a.quality_status == "PASS"
+                and a.is_simulated and a.simulation_success
+                and isinstance(a.metrics, dict)
+            ]
+            if _gs_cap > 0:
+                _gs_candidates = sorted(
+                    _gs_candidates,
+                    key=lambda a: a.metrics.get("sharpe", 0) or 0,
+                    reverse=True,
+                )[:_gs_cap]
+
+            for _gs_alpha in _gs_candidates:
+                try:
+                    # Baseline lookup
+                    _gs_stats = None
+                    try:
+                        _gs_stats = await _gs_bp.get_baseline(
+                            expected_signal=_shared_expected_signal,
+                            dataset_id=state.dataset_id or "",
+                            region=state.region,
+                        )
+                    except Exception as _gs_bl_exc:
+                        logger.warning(
+                            f"[{node_name}] graded-score baseline lookup failed: {_gs_bl_exc}"
+                        )
+                    _gs_baseline_usable = (
+                        _gs_stats is not None and getattr(_gs_stats, "usable", False)
+                    )
+                    if not _gs_baseline_usable:
+                        graded_no_baseline += 1
+
+                    # calculate_alpha_score reads flat keys (sharpe/fitness/turnover)
+                    # from sim_result["train"/"test"]. alpha.metrics IS flat with those
+                    # keys → wrapping it satisfies the extractor without a snapshot.
+                    _gs_sim = {"train": _gs_alpha.metrics, "test": _gs_alpha.metrics}
+
+                    # Tri-state confidence_inputs (P1-A fix):
+                    #   True  = real measurement on file (incl. true 0.0)
+                    #   False = expected for this alpha but missing/fabricated
+                    #   None  = not applicable for this tier/context → SKIPPED
+                    # Old code conflated "not measured" with "measured zero" and
+                    # counted N/A as fabricated, systematically downgrading
+                    # tier-1 / cold-start alphas.
+                    if bool(_gs_alpha.metrics.get("_corr_checked")):
+                        # Once corr-check ran, any value (incl. true 0.0) is real.
+                        _prod_corr_input: Optional[bool] = True
+                    else:
+                        _prod_corr_input = None  # corr-check didn't run for this alpha
+
+                    if _gs_tier in (2, 3):
+                        # Only tier-2/3 are expected to carry self_corr.
+                        _self_corr_input: Optional[bool] = (
+                            _gs_alpha.metrics.get("_self_corr") is not None
+                        )
+                    else:
+                        _self_corr_input = None  # tier-1 / unknown — N/A
+
+                    # P1-B integration: a metric that was fallback-replaced
+                    # (NaN/inf/missing → default by _safe_metric) is `not None`
+                    # but no longer a real measurement. Treat as "expected but
+                    # missing" so confidence drops, per fear-score's
+                    # "fallback 标记 + confidence=真实数据占比" pairing.
+                    _core_metric_keys = ("sharpe", "fitness", "turnover")
+                    _fallback_flags = _gs_alpha.metrics.get("_metrics_fallback_flags") or []
+                    _core_fellback = any(f in _core_metric_keys for f in _fallback_flags)
+                    _gs_conf_inputs: Dict[str, Optional[bool]] = {
+                        "prod_corr_real":   _prod_corr_input,
+                        "self_corr_real":   _self_corr_input,
+                        "baseline_real":    _gs_baseline_usable,
+                        "metrics_complete": (
+                            all(
+                                _gs_alpha.metrics.get(k) is not None
+                                for k in _core_metric_keys
+                            )
+                            and not _core_fellback
+                        ),
+                    }
+                    _gs = compute_graded_score(
+                        _gs_sim,
+                        prod_corr=_gs_alpha.metrics.get("_prod_corr") or 0.0,
+                        self_corr=_gs_alpha.metrics.get("_self_corr") or 0.0,
+                        weights=_gs_weights,
+                        baseline_stats=_gs_stats,
+                        confidence_inputs=_gs_conf_inputs,
+                    )
+                    _gs_alpha.metrics["_score_pct"] = round(_gs.percentile, 4)
+                    _gs_alpha.metrics["_score_grade"] = _gs.grade
+                    _gs_alpha.metrics["_score_grade_action"] = _gs.grade_action
+                    _gs_alpha.metrics["_score_confidence"] = round(_gs.confidence, 3)
+                    _gs_alpha.metrics["_score_evidence"] = _gs.evidence
+                    graded_count += 1
+
+                    if _gs.confidence < _gs_conf_min:
+                        _gs_alpha.quality_status = "PASS_PROVISIONAL"
+                        _gs_alpha.metrics["_routing_reason"] = "graded_low_confidence"
+                        graded_downgraded += 1
+                        logger.warning(
+                            f"[{node_name}] graded-score: PASS → PROV | "
+                            f"expr={(_gs_alpha.expression or '')[:60]!r} "
+                            f"confidence={_gs.confidence:.3f} < {_gs_conf_min} "
+                            f"grade={_gs.grade}"
+                        )
+                    else:
+                        logger.info(
+                            f"[{node_name}] graded-score: PASS kept | "
+                            f"expr={(_gs_alpha.expression or '')[:60]!r} "
+                            f"grade={_gs.grade} pct={_gs.percentile:.3f} "
+                            f"confidence={_gs.confidence:.3f}"
+                        )
+                except Exception as _gs_alpha_exc:
+                    graded_failed += 1
+                    logger.warning(
+                        f"[{node_name}] graded-score: per-alpha failure for "
+                        f"{(_gs_alpha.expression or '')[:60]!r}: {_gs_alpha_exc}"
+                    )
+                    continue
+        except Exception as _gs_block_exc:
+            # Setup-level guard: import / config failure leaves all alphas
+            # un-graded; evaluation continues as if ENABLE_GRADED_SCORE were False.
+            logger.warning(
+                f"[{node_name}] graded-score block setup failed (degrading): {_gs_block_exc}"
+            )
+
+    # ── P1-D: What-if window-perturbation robustness gate ────────────────────
+    # Source: docs/alphagbm_skills_research_2026-05-15.md skill `pnl-simulator`.
+    # M-9 insertion site: graded-score block 之后,baseline-screen 块之前(独立段)。
+    # 既不污染 graded-score 共享 baseline setup,也不影响 baseline-screen 的 soft-signal
+    # 注释。本块只动 quality_status (PASS → PASS_PROVISIONAL 降级)+ metrics stamp。
+    # 整块为 best-effort:任何失败仅跳过单个 alpha,评估继续。
+    # opt-in via ENABLE_ROBUSTNESS_CHECK (默认 False,避免意外烧 BRAIN 配额)。
+    robustness_attempted = 0
+    robustness_passed = 0
+    robustness_failed_downgrade = 0
+    robustness_skipped_no_window = 0
+    robustness_skipped_quota = 0
+    robustness_skipped_round_cap = 0
+    robustness_skipped_timeout = 0
+    robustness_skipped_baseline_missing = 0  # P3 fix: split _other into 4 buckets
+    robustness_skipped_baseline_zero = 0
+    robustness_skipped_sim_failed = 0
+    robustness_skipped_exception = 0
+    robustness_sim_failed_total = 0
+
+    if brain is not None and getattr(settings, "ENABLE_ROBUSTNESS_CHECK", False):
+        try:
+            _rb_n = getattr(settings, "ROBUSTNESS_N_PERTURBATIONS", 4)
+            _rb_ratio = getattr(settings, "ROBUSTNESS_MIN_RATIO", 0.7)
+            _rb_cap = getattr(settings, "MAX_ROBUSTNESS_PER_ROUND", 5)
+            _rb_qpct = getattr(settings, "ROBUSTNESS_SKIP_QUOTA_PCT", 0.65)
+            _rb_hot_pct = getattr(settings, "ROBUSTNESS_HOTCHECK_QUOTA_PCT", 0.85)
+            _rb_alpha_timeout = getattr(
+                settings, "ROBUSTNESS_PER_ALPHA_TIMEOUT_SEC", 600
+            )
+            _rb_strategy = getattr(
+                settings, "ROBUSTNESS_SELECTION_STRATEGY", "first"
+            )
+
+            # M-2:复用 _quota_guard_async(单 SQL,handles Alpha.created_at naive
+            # vs AlphaFailure.created_at tz-aware 不一致)。失败 → pct=0.0 放行。
+            _rb_redis = None
+            _rb_robustness_extra = 0
+            _rb_today_total = 0
+            _rb_limit = getattr(settings, "BRAIN_DAILY_SIMULATE_LIMIT", 1000)
+            try:
+                # P2 review fix (2026-05-16): lazy import to break agents↔tasks cycle.
+                from backend.tasks.session_watchdog import _quota_guard_async
+                _q = await _quota_guard_async()
+                _rb_today_total = int(_q.get("today_total_count", 0) or 0)
+                _rb_limit = int(
+                    _q.get("limit")
+                    or getattr(settings, "BRAIN_DAILY_SIMULATE_LIMIT", 1000)
+                )
+            except Exception as _rb_q_exc:
+                logger.warning(
+                    f"[{node_name}] robustness quota pre-check failed (degrading): {_rb_q_exc}"
+                )
+
+            try:
+                _rb_redis = _rb_redis_aio.from_url(
+                    settings.REDIS_URL, decode_responses=True
+                )
+                # P2 fix: per-UTC-day key, aligned with BRAIN 00:00 UTC reset.
+                _rb_today_key = RobustnessGate.today_key()
+                _rb_extra_raw = await _rb_redis.get(_rb_today_key)
+                _rb_robustness_extra = int(_rb_extra_raw or 0)
+            except Exception as _rb_r_exc:
+                _rb_redis = None
+                _rb_robustness_extra = 0
+                logger.warning(
+                    f"[{node_name}] robustness redis init failed (counter disabled): {_rb_r_exc}"
+                )
+
+            _rb_used_pct = (
+                (_rb_today_total + _rb_robustness_extra) / max(_rb_limit, 1)
+            )
+
+            if _rb_used_pct >= _rb_qpct:
+                logger.warning(
+                    f"[{node_name}] robustness ROUND SKIPPED quota_pct={_rb_used_pct:.2f} >= {_rb_qpct}"
+                )
+                for _rb_alpha in updated_alphas:
+                    if (
+                        _rb_alpha.quality_status == "PASS"
+                        and isinstance(_rb_alpha.metrics, dict)
+                        and _rb_alpha.metrics.get("_robustness_passed") is None
+                        and _rb_alpha.metrics.get("_robustness_skipped") is None
+                    ):
+                        _rb_alpha.metrics["_robustness_skipped"] = "quota_exhausted"
+                        robustness_skipped_quota += 1
+            else:
+                # Top-sharpe PASS only (scope per plan); cap to MAX_ROBUSTNESS_PER_ROUND.
+                _rb_candidates = sorted(
+                    [
+                        a for a in updated_alphas
+                        if a.quality_status == "PASS"
+                        and a.is_simulated
+                        and a.simulation_success
+                        and isinstance(a.metrics, dict)
+                    ],
+                    key=lambda a: a.metrics.get("sharpe", 0) or 0,
+                    reverse=True,
+                )
+                _rb_in_cap = _rb_candidates[:_rb_cap]
+                for _rb_alpha in _rb_candidates[_rb_cap:]:
+                    if (
+                        _rb_alpha.metrics.get("_robustness_passed") is None
+                        and _rb_alpha.metrics.get("_robustness_skipped") is None
+                    ):
+                        _rb_alpha.metrics["_robustness_skipped"] = "round_cap"
+                        robustness_skipped_round_cap += 1
+
+                gate = RobustnessGate(
+                    brain,
+                    n_perturbations=_rb_n,
+                    min_ratio=_rb_ratio,
+                    selection_strategy=_rb_strategy,
+                    redis_client=_rb_redis,
+                )
+
+                for _rb_alpha in _rb_in_cap:
+                    # idempotent: 已 stamp 的 alpha 跳过(防止双跑 / 重入)
+                    if (
+                        _rb_alpha.metrics.get("_robustness_passed") is not None
+                        or _rb_alpha.metrics.get("_robustness_skipped") is not None
+                    ):
+                        continue
+
+                    # M-7 hot-check:每完成一个 alpha 检查 counter,超 0.85 后续 skip
+                    if _rb_redis is not None:
+                        try:
+                            _cur_extra_raw = await _rb_redis.get(
+                                RobustnessGate.today_key()
+                            )
+                            _cur_extra = int(_cur_extra_raw or 0)
+                            _cur_pct = (
+                                (_rb_today_total + _cur_extra) / max(_rb_limit, 1)
+                            )
+                            if _cur_pct >= _rb_hot_pct:
+                                _rb_alpha.metrics["_robustness_skipped"] = "quota_exhausted"
+                                robustness_skipped_quota += 1
+                                continue
+                        except Exception:
+                            pass
+
+                    # S-5 per-alpha hard timeout
+                    try:
+                        result = await asyncio.wait_for(
+                            gate.check(_rb_alpha),
+                            timeout=_rb_alpha_timeout,
+                        )
+                    except asyncio.TimeoutError:
+                        _rb_alpha.metrics["_robustness_skipped"] = "per_alpha_timeout"
+                        robustness_skipped_timeout += 1
+                        continue
+                    except Exception as _rb_exc:
+                        logger.warning(
+                            f"[{node_name}] robustness raised for "
+                            f"{(_rb_alpha.expression or '')[:60]!r}: {_rb_exc}"
+                        )
+                        _rb_alpha.metrics["_robustness_skipped"] = "exception"
+                        robustness_skipped_exception += 1
+                        continue
+
+                    robustness_attempted += 1
+                    robustness_sim_failed_total += result.sim_failed_count
+                    _rb_alpha.metrics["_robustness_baseline_sharpe"] = round(
+                        result.baseline_sharpe, 4
+                    )
+                    _rb_alpha.metrics["_robustness_n_run"] = result.perturbation_count
+                    _rb_alpha.metrics["_robustness_elapsed_ms"] = result.elapsed_ms
+
+                    if result.skip_reason:
+                        _rb_alpha.metrics["_robustness_skipped"] = result.skip_reason
+                        # P3 fix: split _other into 4 specific buckets so ops
+                        # can distinguish data-deficit vs sim-failure vs code-bug.
+                        if result.skip_reason == "no_window":
+                            robustness_skipped_no_window += 1
+                        elif result.skip_reason == "baseline_metrics_missing":
+                            robustness_skipped_baseline_missing += 1
+                        elif result.skip_reason == "baseline_sharpe_zero":
+                            robustness_skipped_baseline_zero += 1
+                        elif result.skip_reason == "all_perturbations_failed":
+                            robustness_skipped_sim_failed += 1
+                        else:
+                            robustness_skipped_exception += 1
+                        continue
+
+                    # 成功完成 check (passed=True 或 False)
+                    _rb_alpha.metrics["_robustness_worst_sharpe"] = result.worst_sharpe
+                    _rb_alpha.metrics["_robustness_worst_ratio"] = result.worst_ratio
+                    _rb_alpha.metrics["_robustness_passed"] = result.passed
+                    _rb_alpha.metrics["_robustness_can_submit_consistency"] = (
+                        result.can_submit_consistency
+                    )  # S-7 观测信号
+
+                    if result.passed:
+                        robustness_passed += 1
+                        logger.info(
+                            f"[{node_name}] robustness PASS | "
+                            f"expr={(_rb_alpha.expression or '')[:60]!r} "
+                            f"baseline={result.baseline_sharpe:.3f} "
+                            f"worst={result.worst_sharpe:.3f} "
+                            f"ratio={result.worst_ratio:.3f}"
+                        )
+                    else:
+                        _rb_alpha.quality_status = "PASS_PROVISIONAL"
+                        # M-6 idempotent:不覆盖 graded-score / dual-run 已 stamp 的 _routing_reason
+                        _rb_alpha.metrics.setdefault(
+                            "_routing_reason", "robustness_downgrade"
+                        )
+                        _rb_alpha.metrics["_robustness_failed"] = True  # M-8 KB-skip flag
+                        _rb_alpha.metrics["_skip_optimize_pool"] = True  # M-8 防 OPTIMIZE 池二次烧
+                        robustness_failed_downgrade += 1
+                        logger.warning(
+                            f"[{node_name}] robustness: PASS → PROV | "
+                            f"expr={(_rb_alpha.expression or '')[:60]!r} "
+                            f"baseline={result.baseline_sharpe:.3f} "
+                            f"worst={result.worst_sharpe:.3f} "
+                            f"ratio={result.worst_ratio:.3f} < {_rb_ratio}"
+                        )
+
+            # Close async redis client gracefully so its socket releases
+            # before the node returns (matters in test fixtures / aiosqlite).
+            if _rb_redis is not None:
+                try:
+                    await _rb_redis.close()
+                except Exception:
+                    pass
+        except Exception as _rb_block_exc:
+            logger.warning(
+                f"[{node_name}] robustness block setup failed (degrading): {_rb_block_exc}"
+            )
+
+    # P0: baseline + Nσ-residual screening (docs/alphagbm_skills_research_2026-05-15.md).
+    # Annotates each successfully-simulated alpha with its residual against the
+    # (hypothesis-family × dataset × region) grid baseline. SOFT SIGNAL ONLY —
+    # never touches quality_status / hard_gate / near_pass / submission gates;
+    # the residual is consumed downstream by _identify_optimization_candidates
+    # to prioritise the optimization budget. Opt-in via BASELINE_SCREEN_ENABLED.
+    # The whole block is best-effort: any failure leaves alphas un-annotated and
+    # evaluation proceeds exactly as before.
+    baseline_discoveries = 0
+    baseline_below = 0
+    baseline_insufficient = 0
+    if getattr(settings, "BASELINE_SCREEN_ENABLED", False):
+        try:
+            from backend.agents.services.baseline_provider import BaselineProvider
+            from backend.baseline_screener import (
+                BELOW,
+                DISCOVERY,
+                INSUFFICIENT_DATA,
+                classify_residual,
+                residual_sigma,
+            )
+
+            # expected_signal + category_resolver come from the shared baseline
+            # setup block above (computed once, reused by graded-score too).
+            expected_signal = _shared_expected_signal
+            provider = BaselineProvider(
+                metric_col="is_sharpe",
+                category_resolver=_shared_resolve_category,
+            )
+            metric_key = getattr(settings, "BASELINE_METRIC", "sharpe")
+            discovery_sigma = getattr(settings, "BASELINE_DISCOVERY_SIGMA", 2.0)
+            below_sigma = getattr(settings, "BASELINE_BELOW_SIGMA", -1.0)
+
+            for i, alpha in enumerate(updated_alphas):
+                if not (alpha.is_simulated and alpha.simulation_success):
+                    continue
+                metrics = alpha.metrics if isinstance(alpha.metrics, dict) else {}
+                metric_val = metrics.get(metric_key)
+                stats = await provider.get_baseline(
+                    expected_signal, state.dataset_id, state.region
+                )
+                sigma = residual_sigma(metric_val, stats)
+                cls = classify_residual(sigma, discovery_sigma, below_sigma)
+                # Detach metrics before mutating so we don't write through to a
+                # dict shared with the LangGraph input state (see V-26.79).
+                alpha.metrics = dict(metrics)
+                alpha.metrics["baseline_residual_sigma"] = (
+                    round(sigma, 4) if sigma is not None else None
+                )
+                alpha.metrics["baseline_cell"] = stats.cell_key
+                alpha.metrics["baseline_n"] = stats.count
+                alpha.metrics["baseline_class"] = cls
+                updated_alphas[i] = alpha
+                if cls == DISCOVERY:
+                    baseline_discoveries += 1
+                elif cls == BELOW:
+                    baseline_below += 1
+                elif cls == INSUFFICIENT_DATA:
+                    baseline_insufficient += 1
+
+            logger.info(
+                f"[{node_name}] baseline screen | discoveries={baseline_discoveries} "
+                f"below={baseline_below} insufficient={baseline_insufficient} "
+                f"signal={expected_signal}"
+            )
+        except Exception as e:
+            logger.warning(f"[{node_name}] baseline screen skipped (error): {e}")
+
+    # P1-B: single source of truth for counters — replaces 12 scattered +=1/-=1 sites.
+    # Invariant: pass + optimize + fail + pending == N. provisional_count is a
+    # subset of optimize (PROV enters optimize bucket but is also reported
+    # separately for visibility, consistent with P1-A's PROV→optimize mapping).
+    # PENDING (V-27.61 retryable sim) is its OWN bucket so transient BRAIN 429s
+    # / slot timeouts do NOT inflate fail_count and mislead operators.
+    pass_count = 0
+    optimize_count = 0
+    fail_count = 0
+    pending_count = 0
+    provisional_count = 0
+    for _tally_alpha in updated_alphas:
+        _qs = _tally_alpha.quality_status
+        if _qs == "PASS":
+            pass_count += 1
+        elif _qs == "PASS_PROVISIONAL":
+            provisional_count += 1
+            optimize_count += 1
+        elif _qs == "OPTIMIZE":
+            optimize_count += 1
+        elif _qs == "PENDING":
+            pending_count += 1
+        else:
+            fail_count += 1       # FAIL / None / unknown
+
     duration_ms = int((time.time() - start_time) * 1000)
-    
+
     _debug_log("E", "nodes.py:evaluate:result", "Evaluation complete", {
         "pass": pass_count,
         "optimize": optimize_count,
         "fail": fail_count,
+        "pending": pending_count,
         "corr_checked": corr_checks_performed,
         "corr_skipped": corr_checks_skipped,
         "duration_ms": duration_ms,
         "pass_rate": round(pass_count / max(1, pass_count + optimize_count + fail_count) * 100, 1)
     })
-    
+
     logger.info(
-        f"[{node_name}] Complete | pass={pass_count} optimize={optimize_count} fail={fail_count} "
+        f"[{node_name}] Complete | pass={pass_count} optimize={optimize_count} "
+        f"fail={fail_count} pending={pending_count} "
         f"corr_checked={corr_checks_performed} corr_skipped={corr_checks_skipped}"
     )
     
@@ -1870,6 +2491,32 @@ async def node_evaluate(
             "flip_retry_count": flip_retry_count,
             "flip_retry_pass": flip_retry_pass,
             "flip_retry_prov": flip_retry_prov,
+            "baseline_discoveries": baseline_discoveries,
+            "baseline_below": baseline_below,
+            "baseline_insufficient": baseline_insufficient,
+            "dual_run_count": dual_run_count,
+            "dual_run_downgraded": dual_run_downgraded,
+            "dual_run_no_control": dual_run_no_control,
+            "dual_run_sim_failed": dual_run_sim_failed,
+            "graded_count": graded_count,
+            "graded_downgraded": graded_downgraded,
+            "graded_no_baseline": graded_no_baseline,
+            "graded_failed": graded_failed,
+            "robustness_attempted": robustness_attempted,
+            "robustness_passed": robustness_passed,
+            "robustness_failed_downgrade": robustness_failed_downgrade,
+            "robustness_skipped_no_window": robustness_skipped_no_window,
+            "robustness_skipped_quota": robustness_skipped_quota,
+            "robustness_skipped_round_cap": robustness_skipped_round_cap,
+            "robustness_skipped_timeout": robustness_skipped_timeout,
+            "robustness_skipped_baseline_missing": robustness_skipped_baseline_missing,
+            "robustness_skipped_baseline_zero": robustness_skipped_baseline_zero,
+            "robustness_skipped_sim_failed": robustness_skipped_sim_failed,
+            "robustness_skipped_exception": robustness_skipped_exception,
+            "robustness_sim_failed_total": robustness_sim_failed_total,
+            "provisional_count": provisional_count,
+            "pending_count": pending_count,
+            "eval_errors": eval_errors,
             "details": eval_details[:20]
         },
         duration_ms,

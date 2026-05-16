@@ -21,7 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 from loguru import logger
 
+from backend.config import settings
 from backend.models import Alpha, KnowledgeEntry
+from backend.pillar_classifier import PILLAR_VALUES
 
 
 # =============================================================================
@@ -34,23 +36,27 @@ class ExplorationRecord:
     dataset_id: str
     region: str
     universe: str
-    
+
     # Expression components
     fields_used: List[str] = field(default_factory=list)
     operators_used: List[str] = field(default_factory=list)
     operator_skeleton: str = ""
-    
+
     # Settings
     delay: int = 1
     decay: int = 0
     neutralization: str = "NONE"
-    
+
     # Results
     was_successful: bool = False
     sharpe: float = 0.0
-    
+
     # Timestamp
     timestamp: datetime = field(default_factory=datetime.now)
+
+    # P2-B (2026-05-15): Five Pillars factor classification (None for legacy
+    # records / records where pillar inference was deliberately skipped).
+    pillar: Optional[str] = None
     
     @property
     def fingerprint(self) -> str:
@@ -74,23 +80,28 @@ class DiversityScore:
     field_diversity: float = 0.0
     operator_diversity: float = 0.0
     settings_diversity: float = 0.0
-    
+    # P2-B (2026-05-15): Five Pillars sub-score — only contributes to
+    # ``overall_score`` when ENABLE_PILLAR_AWARE_SELECTION is True AND a
+    # non-None pillar is supplied. Otherwise stays 0.0 and is ignored.
+    pillar_diversity: float = 0.0
+
     # Combined score
     overall_score: float = 0.0
-    
+
     # Suggestions
     suggestions: List[str] = field(default_factory=list)
-    
+
     # Metadata
     similar_attempts: int = 0
     last_similar_attempt: Optional[datetime] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "dataset_diversity": round(self.dataset_diversity, 3),
             "field_diversity": round(self.field_diversity, 3),
             "operator_diversity": round(self.operator_diversity, 3),
             "settings_diversity": round(self.settings_diversity, 3),
+            "pillar_diversity": round(self.pillar_diversity, 3),
             "overall_score": round(self.overall_score, 3),
             "similar_attempts": self.similar_attempts,
             "suggestions": self.suggestions,
@@ -104,6 +115,29 @@ class ExplorationSuggestion:
     suggestion: str  # Human-readable suggestion
     priority: float  # 0-1, higher = more important
     underexplored_items: List[str] = field(default_factory=list)
+
+
+# =============================================================================
+# P1-A: Percentile-rank helper (stable normalization without magic numbers)
+# =============================================================================
+
+def _percentile_rank(value: float, distribution: List[float]) -> float:
+    """Fraction of distribution values that are <= value.
+
+    Replaces the old '*5 magic number' and 'max_count+1' normalization with a
+    stable, session-relative saturation measure.  Higher rank → more saturated
+    → lower diversity.
+
+    Returns 0.5 (neutral) when distribution is empty or all-zero.
+    Clamps result to [0.0, 1.0].
+    """
+    if not distribution:
+        return 0.5
+    non_zero = [v for v in distribution if v > 0]
+    if not non_zero:
+        return 0.0  # value is as low as everything; treat as very diverse
+    rank = sum(1 for v in distribution if v <= value) / len(distribution)
+    return max(0.0, min(1.0, rank))
 
 
 # =============================================================================
@@ -137,31 +171,59 @@ class DiversityTracker:
         tracker.record_attempt(record)
     """
     
-    def __init__(self, db: Optional[AsyncSession] = None):
+    def __init__(self, db: Optional[AsyncSession] = None, weights: Optional[Dict[str, float]] = None):
         self.db = db
-        
+
+        # P1-A: component weights — from caller or config; default = historical
+        # hardcoded values (0.30/0.30/0.25/0.15) so old instantiations are zero-change.
+        # P2-B (2026-05-15): ``pillar`` is an additive 5th weight (default 0.20
+        # via DIVERSITY_PILLAR_WEIGHT). When the 5th weight is loaded the old
+        # 4 weights are PRESERVED unchanged — overall_score only renormalises
+        # to a 5-way sum when ENABLE_PILLAR_AWARE_SELECTION is on AND the
+        # caller passes a non-None pillar (see evaluate_diversity).
+        if weights is not None:
+            self.weights = weights
+        else:
+            try:
+                self.weights = {
+                    "dataset":  getattr(settings, "DIVERSITY_DATASET_WEIGHT", 0.30),
+                    "field":    getattr(settings, "DIVERSITY_FIELD_WEIGHT", 0.30),
+                    "operator": getattr(settings, "DIVERSITY_OPERATOR_WEIGHT", 0.25),
+                    "settings": getattr(settings, "DIVERSITY_SETTINGS_WEIGHT", 0.15),
+                    "pillar":   getattr(settings, "DIVERSITY_PILLAR_WEIGHT",   0.20),
+                }
+            except Exception:
+                self.weights = {
+                    "dataset": 0.30, "field": 0.30,
+                    "operator": 0.25, "settings": 0.15,
+                    "pillar": 0.20,
+                }
+
         # In-memory tracking (session-level)
         self.attempts: List[ExplorationRecord] = []
         self.fingerprints: Set[str] = set()
-        
+
         # Usage counts
         self.dataset_usage: Dict[str, int] = defaultdict(int)
         self.field_usage: Dict[str, int] = defaultdict(int)
         self.operator_usage: Dict[str, int] = defaultdict(int)
         self.setting_usage: Dict[str, int] = defaultdict(int)
-        
+        # P2-B: per-pillar usage / success (5th dimension).
+        self.pillar_usage: Dict[str, int] = defaultdict(int)
+        self.pillar_success: Dict[str, int] = defaultdict(int)
+
         # Success tracking
         self.dataset_success: Dict[str, int] = defaultdict(int)
         self.operator_success: Dict[str, int] = defaultdict(int)
-        
+
         # Configuration
         self.region: str = "USA"
         self.max_attempts_memory: int = 1000
-        
+
         # All available items (populated from DB or config)
         self.available_datasets: Set[str] = set()
         self.available_operators: Set[str] = set()
-        
+
         self._initialized = False
     
     async def initialize(
@@ -275,16 +337,24 @@ class DiversityTracker:
     def _update_usage_counts(self, record: ExplorationRecord):
         """Update usage counters from a record."""
         self.dataset_usage[record.dataset_id] += 1
-        
+
         for field in record.fields_used:
             self.field_usage[field] += 1
-        
+
         for op in record.operators_used:
             self.operator_usage[op] += 1
-        
+
         setting_key = f"{record.delay}-{record.decay}-{record.neutralization}"
         self.setting_usage[setting_key] += 1
-        
+
+        # P2-B: tally pillar usage when the record carries one. Legacy records
+        # with pillar=None are skipped (no synthetic ``unknown`` bucket — we
+        # don't want to dilute fresh ratios with backlog).
+        if getattr(record, "pillar", None):
+            self.pillar_usage[record.pillar] += 1
+            if record.was_successful:
+                self.pillar_success[record.pillar] += 1
+
         if record.was_successful:
             self.dataset_success[record.dataset_id] += 1
             for op in record.operators_used:
@@ -320,11 +390,12 @@ class DiversityTracker:
         operators: List[str],
         delay: int = 1,
         decay: int = 0,
-        neutralization: str = "NONE"
+        neutralization: str = "NONE",
+        pillar: Optional[str] = None,
     ) -> DiversityScore:
         """
         Evaluate diversity of a proposed alpha combination.
-        
+
         Args:
             dataset_id: Proposed dataset
             fields: Proposed fields
@@ -332,60 +403,73 @@ class DiversityTracker:
             delay: Trading delay
             decay: Decay setting
             neutralization: Neutralization setting
-        
+            pillar: Optional Five Pillars classification (P2-B). When None OR
+                ``ENABLE_PILLAR_AWARE_SELECTION`` is False, the 5th dim is
+                ignored and ``overall_score`` is computed via the 4-dim P1-A
+                formula (byte-for-byte). When provided AND the flag is on,
+                the 5-dim weighted sum runs with weights renormalised to
+                sum to 1.0 (so pillar=0.20 means it contributes 20% of the
+                final score regardless of how the other 4 weights total).
+
         Returns:
             DiversityScore with assessment and suggestions
         """
         score = DiversityScore()
         suggestions = []
         
+        # P1-A: all sub-scores use percentile_rank for stable normalization.
+        # percentile_rank(value, distribution) = fraction of distribution values
+        # that are <= value.  diversity = 1 − saturation_rank (higher usage
+        # = higher rank = lower diversity).  Empty distribution → 0.5 neutral.
+
         # 1. Dataset diversity
         ds_count = self.dataset_usage.get(dataset_id, 0)
-        total_ds_attempts = sum(self.dataset_usage.values()) or 1
-        ds_freq = ds_count / total_ds_attempts
-        
-        # Higher score for less-explored datasets
-        score.dataset_diversity = max(0, 1.0 - ds_freq * 5)
-        
+        score.dataset_diversity = 1.0 - _percentile_rank(
+            ds_count, list(self.dataset_usage.values())
+        )
+
         if ds_count > 10:
             suggestions.append(f"Dataset '{dataset_id}' heavily explored ({ds_count} attempts)")
-        
+
         # 2. Field diversity
         if fields:
             field_counts = [self.field_usage.get(f, 0) for f in fields]
             avg_field_usage = sum(field_counts) / len(field_counts) if field_counts else 0
-            max_field_count = max(self.field_usage.values()) if self.field_usage else 1
-            score.field_diversity = max(0, 1.0 - avg_field_usage / (max_field_count + 1))
-            
+            score.field_diversity = 1.0 - _percentile_rank(
+                avg_field_usage, list(self.field_usage.values())
+            )
+
             overused_fields = [f for f, c in zip(fields, field_counts) if c > 5]
             if overused_fields:
                 suggestions.append(f"Fields heavily used: {overused_fields[:3]}")
         else:
             score.field_diversity = 1.0
-        
+
         # 3. Operator diversity
         if operators:
             op_counts = [self.operator_usage.get(op.lower(), 0) for op in operators]
             avg_op_usage = sum(op_counts) / len(op_counts) if op_counts else 0
-            max_op_count = max(self.operator_usage.values()) if self.operator_usage else 1
-            score.operator_diversity = max(0, 1.0 - avg_op_usage / (max_op_count + 1))
-            
+            score.operator_diversity = 1.0 - _percentile_rank(
+                avg_op_usage, list(self.operator_usage.values())
+            )
+
             # Suggest underused operators
             underused = self._get_underused_operators(operators)
             if underused:
                 suggestions.append(f"Consider operators: {underused[:5]}")
         else:
             score.operator_diversity = 1.0
-        
+
         # 4. Settings diversity
         setting_key = f"{delay}-{decay}-{neutralization}"
         setting_count = self.setting_usage.get(setting_key, 0)
-        max_setting_count = max(self.setting_usage.values()) if self.setting_usage else 1
-        score.settings_diversity = max(0, 1.0 - setting_count / (max_setting_count + 1))
-        
+        score.settings_diversity = 1.0 - _percentile_rank(
+            setting_count, list(self.setting_usage.values())
+        )
+
         if setting_count > 20:
             suggestions.append(f"Setting combo '{setting_key}' overused ({setting_count} times)")
-        
+
         # Check fingerprint collision
         temp_record = ExplorationRecord(
             dataset_id=dataset_id,
@@ -398,21 +482,62 @@ class DiversityTracker:
             decay=decay,
             neutralization=neutralization
         )
-        
+
         if temp_record.fingerprint in self.fingerprints:
             score.similar_attempts += 1
             suggestions.append("Nearly identical combination was tried before")
-        
-        # Calculate overall score
-        score.overall_score = (
-            0.30 * score.dataset_diversity +
-            0.30 * score.field_diversity +
-            0.25 * score.operator_diversity +
-            0.15 * score.settings_diversity
+
+        # P2-B (2026-05-15): Five Pillars sub-score — only computed when the
+        # caller provided a non-None pillar. Otherwise stays at 0.0 and is
+        # ignored by the byte-for-byte P1-A path below.
+        if pillar:
+            pcount = self.pillar_usage.get(pillar, 0)
+            score.pillar_diversity = 1.0 - _percentile_rank(
+                pcount, list(self.pillar_usage.values()),
+            )
+
+        # M4 fix — overall_score formula gating:
+        #   - ENABLE_PILLAR_AWARE_SELECTION=False OR pillar is None → use the
+        #     legacy 4-dim P1-A formula (direct weighted sum on the four old
+        #     weights, no renormalisation). Behavior is byte-for-byte
+        #     identical to pre-P2-B; ``test_diversity_weights.py`` passes.
+        #   - ENABLE_PILLAR_AWARE_SELECTION=True AND pillar is non-None →
+        #     run the 5-dim weighted sum with weights renormalised to total
+        #     1.0 so pillar contributes its configured share.
+        _p2b_div_enabled = bool(getattr(
+            settings, "ENABLE_PILLAR_AWARE_SELECTION", False,
+        ))
+        _use_pillar = (
+            _p2b_div_enabled
+            and pillar is not None
+            and "pillar" in self.weights
         )
-        
+        if _use_pillar:
+            w = self.weights
+            total = (
+                w["dataset"] + w["field"] + w["operator"]
+                + w["settings"] + w.get("pillar", 0.0)
+            )
+            if total > 0:
+                score.overall_score = (
+                    w["dataset"]  / total * score.dataset_diversity +
+                    w["field"]    / total * score.field_diversity +
+                    w["operator"] / total * score.operator_diversity +
+                    w["settings"] / total * score.settings_diversity +
+                    w.get("pillar", 0.0) / total * score.pillar_diversity
+                )
+        else:
+            # Byte-for-byte P1-A 4-dim formula (DO NOT touch — P1-A
+            # ``test_overall_score_is_weighted_sum`` asserts on this exact form).
+            score.overall_score = (
+                self.weights["dataset"]  * score.dataset_diversity +
+                self.weights["field"]    * score.field_diversity +
+                self.weights["operator"] * score.operator_diversity +
+                self.weights["settings"] * score.settings_diversity
+            )
+
         score.suggestions = suggestions
-        
+
         return score
     
     def _get_underused_operators(self, current_ops: List[str]) -> List[str]:
@@ -519,6 +644,37 @@ class DiversityTracker:
         
         return suggestions[:n]
     
+    def get_pillar_balance(self) -> Dict[str, Any]:
+        """P2-B observability — expose pillar coverage / skew / deficits.
+
+        Reads in-session ``pillar_usage`` only (no DB hit). Targets come from
+        ``settings.PILLAR_TARGET_DISTRIBUTION``; deficits are clamped at 0
+        (over-represented pillars don't get a negative number).
+        """
+        target = getattr(settings, "PILLAR_TARGET_DISTRIBUTION", {}) or {}
+        total = sum(self.pillar_usage.values())
+        by = {p: self.pillar_usage.get(p, 0) for p in PILLAR_VALUES}
+        shares = {p: (c / total if total else 0.0) for p, c in by.items()}
+        deficits = {
+            p: max(0.0, target.get(p, 0.0) - shares.get(p, 0.0))
+            for p in PILLAR_VALUES
+        }
+        skew = (max(shares.values()) - min(shares.values())) if shares else 0.0
+        next_p = (
+            max(deficits.items(), key=lambda kv: kv[1])[0]
+            if deficits else "other"
+        )
+        return {
+            "by_pillar": by,
+            "shares": {k: round(v, 3) for k, v in shares.items()},
+            "skew": round(skew, 3),
+            "target": target,
+            "deficits": {k: round(v, 3) for k, v in deficits.items()},
+            "next_pillar": (
+                next_p if deficits.get(next_p, 0) > 0 else None
+            ),
+        }
+
     def get_diversity_stats(self) -> Dict[str, Any]:
         """Get statistics about exploration diversity."""
         return {

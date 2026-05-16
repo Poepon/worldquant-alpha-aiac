@@ -126,7 +126,65 @@ class MiningAgent:
         # Use default strategy if none provided
         if strategy is None:
             strategy = EvolutionStrategy.default()
-        
+
+        # P2-C (2026-05-16): inject the current market regime + style preset
+        # into ``strategy`` so downstream nodes (node_evaluate / node_hypothesis)
+        # can pick them up via config["configurable"]["strategy"]. Two effect
+        # flags can drive injection:
+        #   ENABLE_REGIME_AWARE_THRESHOLDS — node_evaluate scales tier_cfg
+        #   ENABLE_STYLE_PRESET_GUIDANCE   — node_hypothesis renders the
+        #                                     Investment Philosophy block
+        # Both default OFF (S1). With both OFF the block is fully skipped so
+        # strategy.regime / strategy.style_preset stay None → byte-for-byte
+        # legacy (no Redis call, no log line, no observable behavioural
+        # change anywhere in the workflow).
+        #
+        # MF2: we use ``self.db`` (the mining session) rather than spinning
+        # up a fresh AsyncSessionLocal — RegimeInferenceService.get_cached_
+        # regime is Redis-only so the DB session is just there to satisfy
+        # BaseService's ctor contract, and reusing self.db avoids the
+        # V-26.79 transactional pollution risk.
+        from backend.config import settings as _p2c_settings
+        if (
+            getattr(_p2c_settings, "ENABLE_REGIME_AWARE_THRESHOLDS", False)
+            or getattr(_p2c_settings, "ENABLE_STYLE_PRESET_GUIDANCE", False)
+        ):
+            try:
+                # Lazy imports to avoid any circular-import surface area
+                # at module load time.
+                from backend.services.regime_inference_service import (
+                    RegimeInferenceService,
+                )
+                from backend.regime_classifier import REGIME_PRESETS
+                from dataclasses import replace as _dc_replace
+                _svc = RegimeInferenceService(self.db)
+                _cached = await _svc.get_cached_regime(
+                    region=getattr(task, "region", "USA"),
+                )
+                if _cached and _cached in REGIME_PRESETS:
+                    _preset = REGIME_PRESETS[_cached]
+                    _style_dict = {
+                        "regime": _preset.regime,
+                        "style_label": _preset.style_label,
+                        "style_philosophy": _preset.style_philosophy,
+                        "pillar_bias": list(_preset.pillar_bias),
+                    }
+                    strategy = _dc_replace(
+                        strategy,
+                        regime=_cached,
+                        style_preset=_style_dict,
+                    )
+                    logger.info(
+                        f"[MiningAgent] P2-C regime injected | "
+                        f"regime={_cached} task.region="
+                        f"{getattr(task, 'region', 'USA')}"
+                    )
+            except Exception as _p2c_ex:
+                logger.warning(
+                    f"[MiningAgent] P2-C regime fetch failed (non-fatal): "
+                    f"{_p2c_ex}"
+                )
+
         logger.info(
             f"[MiningAgent] Starting iteration {iteration} | "
             f"mode={strategy.mode.value} temp={strategy.temperature:.2f} "
@@ -684,11 +742,19 @@ class MiningAgent:
             # Consider alphas that were optimized or simulated but failed quality
             status = getattr(a, "quality_status", None)
             is_sim = getattr(a, "is_simulated", False)
-            
+
             if not is_sim:
                 continue
-                
+
             metrics = getattr(a, "metrics", {}) or {}
+
+            # P1-D (M-8): alphas downgraded by the window-perturbation
+            # robustness gate carry ``_skip_optimize_pool=True``. They have
+            # already burned config-fragility budget upstream — re-running GA
+            # on them would double-burn BRAIN quota for a candidate the gate
+            # already said is not robust. Skip them here.
+            if metrics.get("_skip_optimize_pool"):
+                continue
 
             # If explicit optimize status, always include
             if status == "OPTIMIZE":
@@ -717,7 +783,16 @@ class MiningAgent:
                     "metrics": metrics,
                     "reason": reason
                 })
-        
+
+        # P0 baseline screening: spend the optimization budget first on alphas
+        # that genuinely beat their (hypothesis-family × dataset) cell baseline.
+        # baseline_residual_sigma is a soft signal — it only reorders the top-5
+        # cut here, it never gates PASS/FAIL. Missing annotation sorts as 0.0.
+        candidates.sort(
+            key=lambda c: (c.get("metrics") or {}).get("baseline_residual_sigma") or 0.0,
+            reverse=True,
+        )
+
         return candidates[:5]  # Limit to top 5
     
     async def _evolve_strategy(

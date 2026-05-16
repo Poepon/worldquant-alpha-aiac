@@ -12,7 +12,10 @@ Reference: 优化.md Section 3.1, BRAIN Alpha submission requirements
 
 from typing import Dict, Optional, Any, Tuple, List
 from dataclasses import dataclass, field
+from statistics import NormalDist
 import logging
+
+from backend.baseline_screener import residual_sigma as _residual_sigma
 
 logger = logging.getLogger(__name__)
 
@@ -556,6 +559,159 @@ def calculate_alpha_score(
     )
     
     return score
+
+
+# =============================================================================
+# P1-A: Graded scoring — percentile normalization + non-uniform weights + confidence
+# docs/alphagbm_skills_research_2026-05-15.md 原则①
+# =============================================================================
+
+# 5 grades, each carrying a single bound action per research principle ①
+# "每档绑定明确动作". Checked in order: first band where pct >= cutoff wins.
+_GRADE_BANDS: List[Tuple[float, str, str]] = [
+    (0.90, "A", "submit_priority"),  # top decile vs cell history
+    (0.70, "B", "pass_normal"),      # top 30%
+    (0.50, "C", "review"),           # above median
+    (0.30, "D", "optimize"),         # below median
+    (0.00, "E", "fail_lean"),        # bottom 30%
+]
+
+
+@dataclass
+class GradedScore:
+    """Structured scoring output with percentile, grade, and confidence.
+
+    raw_score:   Identical to calculate_alpha_score() — no change to routing.
+    percentile:  normal-CDF(residual_sigma(test_sharpe, baseline_stats)); 0.5
+                 when baseline is missing/unusable (neutral fallback). NOTE: the
+                 N(0,1) approximation understates tail percentiles when sharpe's
+                 empirical distribution is heavy-tailed; v1 acceptable because
+                 grade boundaries already carry margin; replace with true
+                 empirical percentile rank in a future iteration.
+    grade:       A-E per _GRADE_BANDS above.
+    grade_action: Bound action for this grade.
+    confidence:  Tri-state — measures real information content. Inputs are
+                 either True (real measurement), False (expected-but-fabricated),
+                 or None (not applicable for this alpha's tier/context). Only
+                 True/False inputs count toward the ratio; None is skipped.
+                 All-None or empty → 0.5 neutral.
+    evidence:    Human-readable trace of what was measured vs fabricated vs N/A.
+    """
+    raw_score: float
+    percentile: float
+    grade: str
+    grade_action: str
+    confidence: float
+    evidence: List[str]
+
+
+def compute_graded_score(
+    sim_result: Dict[str, Any],
+    *,
+    prod_corr: float = 0.0,
+    self_corr: float = 0.0,
+    weights: Optional[Dict[str, float]] = None,
+    baseline_stats: Optional[Any] = None,    # BaselineStats | None (avoid circular import)
+    confidence_inputs: Optional[Dict[str, Optional[bool]]] = None,
+) -> GradedScore:
+    """Structured layer over calculate_alpha_score: percentile + grade + confidence.
+
+    Keeps calculate_alpha_score() as the single source of truth for raw_score;
+    does NOT replicate the scoring formula.
+
+    Percentile derivation:
+        z = residual_sigma(test_sharpe, baseline_stats)  [from baseline_screener]
+        pct = statistics.NormalDist().cdf(z)
+        Fallback to 0.5 when baseline is None / not usable / z is None.
+
+    Confidence (tri-state):
+        Each input flag is one of:
+          True  — real measurement available
+          False — measurement was *expected* but missing/fabricated
+          None  — not applicable for this alpha (e.g. tier-1 doesn't run
+                  self_corr) → SKIPPED, doesn't penalise confidence
+        confidence = real_count / (real_count + fabricated_count)
+        All-None or empty → 0.5 neutral.
+
+    来源: docs/alphagbm_skills_research_2026-05-15.md P1-A — 百分位归一化 +
+    非均匀权重 + confidence 维度
+    """
+    evidence: List[str] = []
+
+    # ── raw_score ──────────────────────────────────────────────────────────────
+    raw_score = calculate_alpha_score(
+        sim_result=sim_result,
+        prod_corr=prod_corr,
+        self_corr=self_corr,
+        weights=weights,
+    )
+
+    # ── percentile via normal CDF of residual sigma ────────────────────────────
+    percentile = 0.5  # neutral fallback
+    try:
+        if baseline_stats is not None and getattr(baseline_stats, "usable", False):
+            os_stats = _extract_os_stats(sim_result)
+            test_sharpe = _safe_float(
+                os_stats.get("sharpe") or os_stats.get("Sharpe")
+            )
+            z = _residual_sigma(test_sharpe, baseline_stats)
+            if z is not None:
+                percentile = NormalDist().cdf(z)
+                # Clamp to [0.001, 0.999] to avoid exact 0/1 at extreme z
+                percentile = max(0.001, min(0.999, percentile))
+                evidence.append(
+                    f"baseline={baseline_stats.cell_key} "
+                    f"mean={baseline_stats.mean:.3f} std={baseline_stats.std:.3f} "
+                    f"test_sharpe={test_sharpe:.3f} z={z:.3f} pct={percentile:.4f}"
+                )
+            else:
+                evidence.append("percentile=0.5 (baseline unusable / test_sharpe missing)")
+        else:
+            evidence.append("percentile=0.5 (no baseline available)")
+    except Exception as _exc:
+        evidence.append(f"percentile=0.5 (error: {_exc})")
+
+    # ── grade: cut percentile into 5 bands ────────────────────────────────────
+    grade = "E"
+    grade_action = "fail_lean"
+    for cutoff, g, action in _GRADE_BANDS:
+        if percentile >= cutoff:
+            grade = g
+            grade_action = action
+            break
+
+    # ── confidence (tri-state): only True/False inputs count; None = skip ─────
+    if not confidence_inputs:
+        confidence = 0.5
+        evidence.append("confidence=0.5 (no confidence_inputs provided — neutral)")
+    else:
+        real_keys        = [k for k, v in confidence_inputs.items() if v is True]
+        fabricated_keys  = [k for k, v in confidence_inputs.items() if v is False]
+        na_keys          = [k for k, v in confidence_inputs.items() if v is None]
+        applicable_count = len(real_keys) + len(fabricated_keys)
+        if applicable_count == 0:
+            # All inputs N/A → no information → neutral
+            confidence = 0.5
+            evidence.append(
+                f"confidence=0.5 (all inputs N/A: {na_keys})"
+            )
+        else:
+            confidence = len(real_keys) / applicable_count
+        if na_keys:
+            evidence.append(f"na_inputs={na_keys} (skipped — not applicable)")
+        if fabricated_keys:
+            evidence.append(f"fabricated_inputs={fabricated_keys} (expected but missing)")
+        elif applicable_count > 0:
+            evidence.append("all_inputs_real=True")
+
+    return GradedScore(
+        raw_score=round(raw_score, 6),
+        percentile=round(percentile, 6),
+        grade=grade,
+        grade_action=grade_action,
+        confidence=round(confidence, 6),
+        evidence=evidence,
+    )
 
 
 def _extract_is_stats(sim_result: Dict) -> Dict:

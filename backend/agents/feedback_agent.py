@@ -458,7 +458,8 @@ class FeedbackAgent:
                 system_prompt=FAILURE_ANALYSIS_SYSTEM,
                 user_prompt=prompt,
                 temperature=0.5,
-                json_mode=True
+                json_mode=True,
+                node_key="failure_analysis",
             )
             
             if response.success and response.parsed:
@@ -845,7 +846,8 @@ class FeedbackAgent:
                 system_prompt=ROUND_ANALYSIS_SYSTEM,
                 user_prompt=prompt,
                 temperature=0.7,
-                json_mode=True
+                json_mode=True,
+                node_key="round_analysis",
             )
             
             if response.success and response.parsed:

@@ -654,6 +654,45 @@ class RAGService:
 
         return pitfalls
     
+    # =========================================================================
+    # P2-A (2026-05-16) — Macro-narrative retrieval (lazy-import wrapper)
+    # =========================================================================
+    async def get_macro_narratives(
+        self,
+        *,
+        dataset_id: Optional[str],
+        region: Optional[str],
+        key_fields: Optional[List[str]] = None,
+        limit_field: int = 3,
+        limit_dataset: int = 1,
+        limit_category: int = 1,
+    ) -> List[Dict]:
+        """Thin wrapper around MacroNarrativeService.fetch_macro_narratives.
+
+        M10: import is LAZY because the service module imports back into
+        ``backend.agents.services.rag_service`` for ``infer_dataset_category``
+        — a top-level import here would form a cycle.
+
+        Failure-on-fetch is non-fatal — returns an empty list so the
+        caller (node_hypothesis) renders the legacy prompt unchanged.
+        """
+        try:
+            from backend.services.macro_narrative_service import (  # lazy (M10)
+                MacroNarrativeService,
+            )
+            svc = MacroNarrativeService(self.db)
+            return await svc.fetch_macro_narratives(
+                dataset_id=dataset_id,
+                region=region,
+                key_fields=key_fields,
+                limit_field=limit_field,
+                limit_dataset=limit_dataset,
+                limit_category=limit_category,
+            )
+        except Exception as e:
+            logger.warning(f"[RAG] get_macro_narratives failed: {e}")
+            return []
+
     async def get_field_blacklist(self, region: str = None) -> List[str]:
         """Get list of blacklisted fields."""
         query = select(KnowledgeEntry).where(

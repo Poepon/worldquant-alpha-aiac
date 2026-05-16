@@ -9,10 +9,15 @@ P2-2: Multi-fidelity evaluation
 This significantly reduces simulation costs while maintaining quality.
 """
 
+import asyncio
+import time
+from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
 from enum import Enum
 from loguru import logger
+
+from backend.genetic_optimizer import enumerate_window_perturbations
 
 
 class FidelityLevel(Enum):
@@ -367,3 +372,242 @@ class MultiFidelityEvaluator:
                 "full_sims": full_sims,
             }
         }
+
+
+# =============================================================================
+# P1-D: What-if window-perturbation robustness gate.
+# Source: docs/alphagbm_skills_research_2026-05-15.md skill `pnl-simulator`.
+#
+# 单 alpha 的 window 参数扰动鲁棒性检验 — 单元独立,由 evaluation 节点内联调用。
+# 不绑定 MultiFidelityEvaluator 主流程(后者尚未集成);只复用文件作为对齐研究文档
+# P1-D 落地容器的约定。
+#
+# - quota 守卫与 round-cap 由 evaluation.py 内联块管理(M-1/M-7/M-8)。
+# - 本类只数 Redis robustness counter(M-1)且使用 return_exceptions(M-3)。
+# =============================================================================
+
+
+@dataclass
+class RobustnessResult:
+    """Outcome of a single-alpha window-perturbation robustness check.
+
+    Fields are JSON-safe so the caller can stamp subsets into ``alpha.metrics``.
+    """
+    baseline_sharpe: float
+    perturbation_count: int  # 成功 simulate 的变体数
+    perturbation_sharpes: List[float] = field(default_factory=list)
+    perturbation_can_submits: List[bool] = field(default_factory=list)  # S-7
+    worst_sharpe: float = 0.0
+    median_sharpe: float = 0.0
+    worst_ratio: float = 0.0
+    can_submit_consistency: float = 1.0  # S-7: 与 baseline can_submit 一致的比例
+    passed: bool = False
+    perturbations_used: List[str] = field(default_factory=list)
+    perturbation_expressions: List[str] = field(default_factory=list)
+    sim_failed_count: int = 0
+    elapsed_ms: int = 0
+    skip_reason: Optional[str] = None
+    # skip_reason ∈ {None, 'no_window', 'baseline_sharpe_zero',
+    #               'baseline_metrics_missing', 'all_perturbations_failed',
+    #               'per_alpha_timeout', 'exception'}
+
+
+class RobustnessGate:
+    """Single-alpha window-perturbation robustness gate.
+
+    Pure I/O class — quota 守卫与 round-cap 由 evaluation.py 内联块管理;
+    本类只做:
+      1. 枚举 ``enumerate_window_perturbations`` 变体(deterministic, M-5)。
+      2. 用 baseline ``_sim_settings`` 并发 simulate 变体(``return_exceptions=True``,M-3)。
+      3. 每完成一次 simulate 递增 Redis counter
+         ``aiac:robustness_used:<UTC-date>`` (TTL 36h,P2 fix) — 按 UTC 日
+         分桶,与 BRAIN 00:00 UTC 日重置严格对齐;失败静默不阻塞。
+      4. 计算 worst / median / ratio / can_submit consistency 并返回。
+    """
+
+    # P2 fix: key 按 UTC 日期分桶(原 "aiac:robustness_today_used" + 24h
+    # 滑动 TTL 与 BRAIN 00:00 UTC 日重置错位,跨午夜会把昨天的 burns 算
+    # 进今天的 budget,过度保守地 SKIP)。TTL 留 36h 让早上同时存在前
+    # 一日 key + 当天 key,防 worker 时钟 1-2h 偏差时丢计数。
+    REDIS_COUNTER_KEY_PREFIX = "aiac:robustness_used"
+    REDIS_COUNTER_TTL = 36 * 3600  # 36h — covers worker clock skew
+
+    @classmethod
+    def today_key(cls, now_utc: Optional[datetime] = None) -> str:
+        """Return the Redis key for the UTC date `now_utc` (default: now)."""
+        d = (now_utc or datetime.now(timezone.utc)).strftime("%Y-%m-%d")
+        return f"{cls.REDIS_COUNTER_KEY_PREFIX}:{d}"
+
+    def __init__(
+        self,
+        brain_adapter,
+        *,
+        n_perturbations: int = 4,
+        min_ratio: float = 0.7,
+        selection_strategy: str = "first",
+        redis_client=None,
+    ):
+        self.brain = brain_adapter
+        self.n = max(1, int(n_perturbations))
+        self.min_ratio = float(min_ratio)
+        self.selection_strategy = selection_strategy
+        self.redis = redis_client  # async redis client; None disables counter
+
+    async def check(self, alpha) -> RobustnessResult:
+        """Run robustness check for a single alpha candidate.
+
+        Args:
+            alpha: object with ``expression`` (str) and ``metrics`` (dict)
+                attributes. ``metrics`` should carry ``sharpe`` (baseline) and
+                ``_sim_settings`` (region/universe/delay/decay/neutralization)
+                stamped by node_simulate.
+
+        Returns:
+            RobustnessResult — never raises (per-variant failures collapse
+            into sim_failed_count + skip_reason).  Caller still SHOULD wrap
+            this call in ``asyncio.wait_for`` to enforce a hard per-alpha
+            timeout (S-5).
+        """
+        t0 = time.time()
+        m = alpha.metrics if isinstance(alpha.metrics, dict) else {}
+        base_sharpe_raw = m.get("sharpe")
+        if base_sharpe_raw is None:
+            return RobustnessResult(
+                baseline_sharpe=0.0,
+                perturbation_count=0,
+                skip_reason="baseline_metrics_missing",
+                elapsed_ms=int((time.time() - t0) * 1000),
+            )
+        try:
+            base_sharpe = float(base_sharpe_raw)
+        except (TypeError, ValueError):
+            return RobustnessResult(
+                baseline_sharpe=0.0,
+                perturbation_count=0,
+                skip_reason="baseline_metrics_missing",
+                elapsed_ms=int((time.time() - t0) * 1000),
+            )
+        if abs(base_sharpe) < 1e-9:
+            return RobustnessResult(
+                baseline_sharpe=base_sharpe,
+                perturbation_count=0,
+                skip_reason="baseline_sharpe_zero",
+                elapsed_ms=int((time.time() - t0) * 1000),
+            )
+        base_can_submit = bool(m.get("can_submit"))
+
+        variants = enumerate_window_perturbations(
+            getattr(alpha, "expression", "") or "",
+            n=self.n,
+            selection_strategy=self.selection_strategy,
+        )
+        if not variants:
+            return RobustnessResult(
+                baseline_sharpe=base_sharpe,
+                perturbation_count=0,
+                skip_reason="no_window",
+                elapsed_ms=int((time.time() - t0) * 1000),
+            )
+
+        # Reuse baseline sim-settings so Δsharpe isolates the window change.
+        sim_kwargs = dict(m.get("_sim_settings") or {})
+        sim_kwargs.pop("expression", None)  # set per-variant
+        # Drop keys not in BrainAdapter.simulate_alpha signature (defensive —
+        # _sim_settings may carry extras like _sim_settings_reason mirror).
+        _allowed_kwargs = {
+            "region", "universe", "delay", "decay",
+            "neutralization", "truncation", "test_period",
+        }
+        sim_kwargs = {k: v for k, v in sim_kwargs.items() if k in _allowed_kwargs}
+
+        async def _one(expr: str):
+            try:
+                r = await self.brain.simulate_alpha(expression=expr, **sim_kwargs)
+                # M-1: counter每次 simulate 都计入(无论 success / failure)— BRAIN
+                # 服务端配额按 sim 调用记账,失败也算。
+                if self.redis is not None:
+                    try:
+                        _key = self.today_key()
+                        await self.redis.incr(_key)
+                        await self.redis.expire(_key, self.REDIS_COUNTER_TTL)
+                    except Exception:
+                        pass  # counter 失败不阻塞主流程
+                return r
+            except Exception as e:
+                # 不再泄露异常;返回 failure shape 让上层逐变体记账。
+                return {"success": False, "error": str(e)}
+
+        # M-3:return_exceptions=True 防 CancelledError 撕裂整 gather
+        sim_results = await asyncio.gather(
+            *[_one(v[0]) for v in variants],
+            return_exceptions=True,
+        )
+
+        sharpes: List[float] = []
+        descs: List[str] = []
+        exprs: List[str] = []
+        can_submits: List[bool] = []
+        sim_failed = 0
+        for (expr, desc), res in zip(variants, sim_results):
+            if isinstance(res, BaseException):
+                # CancelledError / 其他未捕获;_one 已经 except Exception,但 BaseException
+                # 子类(如 CancelledError)落到 gather 的 return_exceptions 路径。
+                sim_failed += 1
+                continue
+            if not isinstance(res, dict) or not res.get("success"):
+                sim_failed += 1
+                continue
+            mres = res.get("metrics") or {}
+            s = mres.get("sharpe")
+            if s is None:
+                sim_failed += 1
+                continue
+            try:
+                s_f = float(s)
+            except (TypeError, ValueError):
+                sim_failed += 1
+                continue
+            sharpes.append(s_f)
+            descs.append(desc)
+            exprs.append(expr)
+            # can_submit lives at top-level on real BRAIN responses, sometimes
+            # also mirrored inside metrics — accept either.
+            cs = res.get("can_submit")
+            if cs is None:
+                cs = mres.get("can_submit")
+            can_submits.append(bool(cs))
+
+        elapsed_ms = int((time.time() - t0) * 1000)
+        if not sharpes:
+            return RobustnessResult(
+                baseline_sharpe=base_sharpe,
+                perturbation_count=0,
+                sim_failed_count=sim_failed,
+                elapsed_ms=elapsed_ms,
+                skip_reason="all_perturbations_failed",
+            )
+
+        # baseline > 0 → worst = min;baseline < 0 → worst = max (代表"最差"取决于符号)
+        worst = min(sharpes) if base_sharpe > 0 else max(sharpes)
+        worst_ratio = worst / abs(base_sharpe)
+        sorted_sharpes = sorted(sharpes)
+        median = sorted_sharpes[len(sorted_sharpes) // 2]
+        can_submit_consistency = (
+            sum(1 for c in can_submits if c == base_can_submit) / len(can_submits)
+        )
+
+        return RobustnessResult(
+            baseline_sharpe=base_sharpe,
+            perturbation_count=len(sharpes),
+            perturbation_sharpes=[round(s, 4) for s in sharpes],
+            perturbation_can_submits=can_submits,
+            worst_sharpe=round(worst, 4),
+            median_sharpe=round(median, 4),
+            worst_ratio=round(worst_ratio, 4),
+            can_submit_consistency=round(can_submit_consistency, 3),
+            passed=worst_ratio >= self.min_ratio,
+            perturbations_used=descs,
+            perturbation_expressions=exprs,
+            sim_failed_count=sim_failed,
+            elapsed_ms=elapsed_ms,
+        )

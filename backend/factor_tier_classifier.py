@@ -701,6 +701,83 @@ def is_t1_expression(expression: str) -> bool:
     return classify_tier(expression) == 1
 
 
+def derive_control_expression(expression: str) -> Optional[str]:
+    """Derive a signal-vs-control "control" expression for an alpha.
+
+    Strips the T1 signal core (ts_op(field, ...)) down to its bare field,
+    keeping all structural wrappers (T2 cross-sectional / T3 trade_when /
+    negation) intact.  The caller simulates both expressions and compares
+    Δ(sharpe_signal − sharpe_control) to attribute whether performance comes
+    from the hypothesis signal or from the structural wrapper.
+
+    Supported shapes:
+        T1  ts_rank(close, 20)                              → close
+        T2  group_neutralize(ts_rank(close,20), industry)   → group_neutralize(close, industry)
+        T2s ts_decay_linear(ts_rank(close,5), 10)           → ts_decay_linear(close, 10)
+        T3  trade_when(cond, group_rank(ts_zscore(r,5)), -1)→ trade_when(cond, group_rank(r), -1)
+        neg multiply(-1, ts_rank(close, 20))                → multiply(-1, close)
+
+    Returns None when no clean control can be derived:
+        - Quasi-T1 multi-field arithmetic (divide(ebit,ev)) — no single signal core
+        - classify_tier == None — unknown / unsupported structure
+        - Empty or malformed expression
+
+    来源: docs/alphagbm_skills_research_2026-05-15.md P0 — signal-vs-control 双跑归因
+    """
+    if not expression or not expression.strip():
+        return None
+
+    def _control(expr: str) -> Optional[str]:
+        s = _strip_outer_parens(expr.strip())
+        if not s:
+            return None
+
+        # Transparent: negation wrappers preserve tier semantics.
+        # Recurse into inner; rebuild multiply(-1, <sub>) so the control
+        # remains structurally parallel to the signal.
+        neg_inner = _is_negation_wrapper(s)
+        if neg_inner is not None:
+            sub = _control(neg_inner)
+            return None if sub is None else f"multiply(-1, {sub})"
+
+        parsed = _top_level_call(s)
+        if not parsed:
+            return None
+        op, args = parsed
+
+        # T3: trade_when(condition, inner_expr, exit_rule, ...)
+        # Recurse into the alpha expression (args[1]); keep condition and exit.
+        if op == "trade_when":
+            if len(args) < 2:
+                return None
+            sub = _control(args[1])
+            if sub is None:
+                return None
+            new_args = [args[0], sub] + args[2:]
+            return f"trade_when({', '.join(new_args)})"
+
+        # T1 kernel: ts_op(field, scalar_params...). Strip to bare field.
+        # _is_t1 guarantees args[0] is a single known field identifier.
+        if _is_t1(s):
+            return _strip_outer_parens(args[0].strip())
+
+        # T2 wrapper (group_* / vec_* / pure-xs / smoothing-ts).
+        # Recurse into the first arg (T1 inner); keep all remaining args verbatim.
+        t2_ops = _group_ops() | _vec_ops() | _BUILTIN_PURE_XS_OPS | _T2_SMOOTHING_OPS
+        if op in t2_ops and args:
+            sub = _control(args[0])
+            if sub is None:
+                return None
+            new_args = [sub] + args[1:]
+            return f"{op}({', '.join(new_args)})"
+
+        # Everything else (Quasi-T1 multi-field, _is_t2_composite, subtract-
+        # group_mean residualize, completely unknown structure) → no clean control.
+        return None
+
+    return _control(expression)
+
+
 def extract_tier1_seed(expression: str) -> Optional[str]:
     """Strip one wrapper layer from a T2 (or T3-via-T2) expression to get its T1 kernel.
 
@@ -804,7 +881,7 @@ def _dedup_and_validate(
             result = validator.validate(expr)
             if not result.valid:
                 logger.warning(
-                    f"[T{target_tier} expand] dropped invalid: {expr[:80]} errors={result.errors}"
+                    f"[T{target_tier} expand] dropped invalid: {expr[:80]} errors={result.error_messages}"
                 )
                 n_invalid += 1
                 continue

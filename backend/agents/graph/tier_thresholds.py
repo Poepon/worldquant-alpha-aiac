@@ -33,6 +33,8 @@ def get_tier_thresholds(tier: Optional[int]) -> Dict:
             "self_corr_max": None,  # T1 不查 self_corr
             "check_self_corr": False,
             "check_concentrated": False,
+            "score_pass": settings.TIER1_SCORE_PASS,
+            "score_optimize": settings.TIER1_SCORE_OPTIMIZE,
             "provisional": {
                 "sharpe_min": settings.TIER1_PROVISIONAL_SHARPE_MIN,
                 "fitness_min": settings.TIER1_PROVISIONAL_FITNESS_MIN,
@@ -59,6 +61,8 @@ def get_tier_thresholds(tier: Optional[int]) -> Dict:
             "self_corr_max": settings.TIER2_SELF_CORR_MAX,
             "check_self_corr": settings.ENABLE_T2_SELF_CORR_CHECK,
             "check_concentrated": True,
+            "score_pass": settings.TIER2_SCORE_PASS,
+            "score_optimize": settings.TIER2_SCORE_OPTIMIZE,
             "provisional": {
                 "sharpe_min": settings.TIER2_PROVISIONAL_SHARPE_MIN,
                 "fitness_min": settings.TIER2_PROVISIONAL_FITNESS_MIN,
@@ -77,6 +81,8 @@ def get_tier_thresholds(tier: Optional[int]) -> Dict:
             "self_corr_max": settings.TIER3_SELF_CORR_MAX,
             "check_self_corr": True,
             "check_concentrated": True,
+            "score_pass": settings.TIER3_SCORE_PASS,
+            "score_optimize": settings.TIER3_SCORE_OPTIMIZE,
             "provisional": {
                 "sharpe_min": settings.TIER3_PROVISIONAL_SHARPE_MIN,
                 "fitness_min": settings.TIER3_PROVISIONAL_FITNESS_MIN,
@@ -95,6 +101,8 @@ def get_tier_thresholds(tier: Optional[int]) -> Dict:
         "self_corr_max": settings.MAX_CORRELATION,
         "check_self_corr": True,
         "check_concentrated": True,
+        "score_pass": settings.SCORE_PASS_THRESHOLD,
+        "score_optimize": settings.SCORE_OPTIMIZE_THRESHOLD,
         "provisional": None,  # legacy path 由 evaluation.py 现有 PROVISIONAL 逻辑处理
     }
 

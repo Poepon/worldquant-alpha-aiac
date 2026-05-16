@@ -1,13 +1,17 @@
 """Tests for V-16 suspicion-mode checks (sharpe > 3.0 audit).
 
-Six risk categories (Plan v5+ §V-16):
-  1. Divide-by-zero    — divide(_, FIELD) where FIELD can be 0
-  2. Lookahead bias    — actual_*_value used without ts_delay wrapping
+V-P0 (2026-05-15): the three expression-only checks (divide-by-zero,
+look-ahead bias, overfit-window) moved to backend/static_alpha_checks.py and
+now run pre-simulate inside node_validate. `_run_suspicion_checks` keeps only
+the metric-dependent checks:
   3. Survivorship bias — info-only flag (BRAIN universe selection)
   4. Cost vacuum       — turnover > 0.50 + sharpe > 5
-  5. Overfit window    — ts_op uses non-standard window size
   6. Outlier metrics   — returns > 100% / drawdown=0 with non-trivial sharpe /
                           fitness/sharpe inconsistency
+
+The migrated static checks (Risk 1/2/5) are covered by
+test_static_alpha_checks.py; the `_v16_check_*` names below are re-export
+shims kept for backward compatibility — these tests also verify the shims.
 
 Severity:
   hard — downgrades PASS → PASS_PROVISIONAL
@@ -196,21 +200,27 @@ class TestEnd2End:
         flags = _run_suspicion_checks(metrics, "divide(close, returns)")
         assert flags == []
 
-    def test_lookahead_is_hard_severity(self):
+    def test_lookahead_no_longer_in_suspicion_checks(self):
+        # V-P0: look-ahead bias moved to node_validate (pre-simulate). It must
+        # NOT appear in the post-simulate _run_suspicion_checks output anymore,
+        # even at sharpe > 3.0.
         metrics = {"sharpe": 4.5, "drawdown": 0.10, "fitness": 3.0, "turnover": 0.20}
         flags = _run_suspicion_checks(
             metrics, "rank(actual_eps_value_quarterly)"
         )
-        lookahead = [f for f in flags if f["check"] == "lookahead_bias"]
-        assert len(lookahead) == 1
-        assert lookahead[0]["severity"] == "hard"
+        assert [f for f in flags if f["check"] == "lookahead_bias"] == []
 
-    def test_overfit_window_is_soft(self):
+    def test_overfit_window_no_longer_in_suspicion_checks(self):
+        # V-P0: overfit-window moved to node_validate (pre-simulate).
         metrics = {"sharpe": 4.0, "drawdown": 0.10, "fitness": 3.0, "turnover": 0.15}
         flags = _run_suspicion_checks(metrics, "ts_rank(close, 137)")
-        overfit = [f for f in flags if f["check"] == "overfit_window"]
-        assert len(overfit) == 1
-        assert overfit[0]["severity"] == "soft"
+        assert [f for f in flags if f["check"] == "overfit_window"] == []
+
+    def test_divide_by_zero_no_longer_in_suspicion_checks(self):
+        # V-P0: divide-by-zero moved to node_validate (pre-simulate).
+        metrics = {"sharpe": 4.0, "drawdown": 0.10, "fitness": 3.0, "turnover": 0.15}
+        flags = _run_suspicion_checks(metrics, "divide(close, returns)")
+        assert [f for f in flags if f["check"] == "divide_by_zero"] == []
 
     def test_non_dict_metrics_safe(self):
         # Defensive: malformed metrics

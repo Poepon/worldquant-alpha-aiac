@@ -380,6 +380,69 @@ def determine_attribution_heuristic(
     return "unknown"
 
 
+def determine_attribution_dual_run(
+    signal_result: Dict,
+    control_result: Dict,
+    delta_sharpe_min: float,
+) -> Tuple[str, float, List[str]]:
+    """Signal-vs-control attribution based on Δ(sharpe_signal − sharpe_control).
+
+    Derives attribution by comparing the alpha's performance against a "control"
+    expression (T1 signal core stripped to raw field, T2/T3 wrappers preserved).
+    A large positive Δ proves the hypothesis-driven signal is doing real work;
+    a small Δ reveals the T2/T3 structure alone carries the performance.
+
+    Returns (attribution, confidence, evidence) where attribution is:
+      "hypothesis"     — Δ ≥ +threshold → signal materially outperforms control;
+                         the hypothesis signal is making the alpha work.
+      "implementation" — |Δ| < threshold → signal ≈ control; performance is a
+                         structural artifact (the wrapper carries it, not the signal).
+      "both"           — Δ ≤ −threshold → control beats signal; the ts-transformation
+                         is actively counterproductive — both hypothesis and
+                         implementation are suspect.
+
+    confidence measures classification certainty: it is 0.5 at either decision
+    boundary (±threshold) — where the verdict is a near-coin-flip — and rises
+    toward 1.0 as Δ moves away from the nearest boundary in *either* direction
+    (deep into any zone). It is comparable across all three attribution labels.
+
+    来源: docs/alphagbm_skills_research_2026-05-15.md P0 — signal-vs-control 双跑归因
+    """
+    sig_sharpe = signal_result.get("sharpe") or 0
+    ctl_sharpe = control_result.get("sharpe") or 0
+    if not isinstance(sig_sharpe, (int, float)):
+        sig_sharpe = 0.0
+    if not isinstance(ctl_sharpe, (int, float)):
+        ctl_sharpe = 0.0
+
+    delta = sig_sharpe - ctl_sharpe
+    evidence: List[str] = [
+        f"signal_sharpe={sig_sharpe:.3f}",
+        f"control_sharpe={ctl_sharpe:.3f}",
+        f"delta_sharpe={delta:.3f} (threshold={delta_sharpe_min})",
+    ]
+
+    # confidence (Direction A — classification certainty): distance from the
+    # nearest decision boundary (±threshold). 0.5 exactly on a boundary, rising
+    # to 1.0 as Δ moves away into any zone. A verdict near a boundary is a
+    # near-coin-flip → low confidence; deep in a zone → high confidence.
+    boundary_dist = abs(abs(delta) - delta_sharpe_min)
+    confidence = min(1.0, 0.5 + boundary_dist / (2.0 * max(delta_sharpe_min, 0.1)))
+
+    if delta >= delta_sharpe_min:
+        evidence.append("signal materially outperforms control — hypothesis signal is doing work")
+        return "hypothesis", confidence, evidence
+
+    if delta <= -delta_sharpe_min:
+        evidence.append("control outperforms signal — ts-transformation is counterproductive")
+        return "both", confidence, evidence
+
+    evidence.append(
+        "signal ≈ control — performance is a structural artifact, hypothesis signal is inert"
+    )
+    return "implementation", confidence, evidence
+
+
 # =============================================================================
 # KNOWLEDGE FILTER
 # =============================================================================

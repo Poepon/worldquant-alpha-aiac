@@ -590,6 +590,15 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                         continue
                     if not alpha.expression:
                         continue
+                    # P1-D: skip KB SUCCESS_PATTERN for alphas downgraded by
+                    # the robustness gate. The alpha row is still persisted for
+                    # audit (quality_status remains PROV) but MUST NOT enter
+                    # the KB — "只有扰动下仍稳健的进 KB" is the P1-D goal.
+                    if (
+                        isinstance(alpha.metrics, dict)
+                        and alpha.metrics.get("_robustness_failed")
+                    ):
+                        continue
                     # V-27.73: symmetric with _incremental_save_alphas'
                     # `not alpha.alpha_id` skip (V-26.92). A sim that returned
                     # None has no alpha_id — it can't enter the alphas table,

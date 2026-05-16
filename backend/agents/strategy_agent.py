@@ -373,7 +373,8 @@ class StrategyAgent:
                 system_prompt=STRATEGY_SYSTEM_PROMPT,
                 user_prompt=prompt,
                 temperature=0.5,
-                json_mode=True
+                json_mode=True,
+                node_key="strategy",
             )
             
             if response.success and response.parsed:

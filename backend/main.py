@@ -11,7 +11,7 @@ from backend.config import settings
 from backend.database import init_db
 
 # Import all routers
-from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, factor_library, mining_session, correlation
+from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, factor_library, mining_session, correlation, ops
 
 
 @asynccontextmanager
@@ -19,7 +19,7 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
     # Startup: Initialize database
     await init_db()
-    
+
     # Load operator registry from database
     try:
         from backend.alpha_semantic_validator import load_operators_from_db
@@ -29,10 +29,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         from loguru import logger
         logger.error(f"[Startup] Failed to load operators from DB: {e}")
-    
+
+    # P3 (2026-05-16): start the runtime feature-flag refresher so flips
+    # made via /ops/feature-flags propagate to settings.ENABLE_X within
+    # one polling interval (default 60s). Each Celery worker starts its
+    # own equivalent in worker_process_init (see backend/celery_app.py).
+    try:
+        from backend.feature_flag_runtime import start_async_refresher
+        start_async_refresher()
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"[Startup] Failed to start feature-flag refresher: {e}")
+
     yield
-    # Shutdown: Cleanup if needed
-    pass
+
+    # Shutdown: stop background refreshers
+    try:
+        from backend.feature_flag_runtime import stop_async_refresher
+        await stop_async_refresher()
+    except Exception:
+        pass
 
 
 app = FastAPI(
@@ -67,6 +83,8 @@ app.include_router(factor_library.router, prefix=settings.API_V1_STR)
 app.include_router(mining_session.router, prefix=settings.API_V1_STR)
 # Crisis-window correlation stress test (portfolio matrix + per-window summary)
 app.include_router(correlation.router, prefix=settings.API_V1_STR)
+# P3 (2026-05-16): ops console — feature flags + manual task triggers + monitoring dashboards
+app.include_router(ops.router, prefix=settings.API_V1_STR)
 
 # Keep existing routers if needed
 try:

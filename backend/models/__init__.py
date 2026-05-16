@@ -39,7 +39,10 @@ from backend.models.alpha import (
 )
 
 # Status transition audit
-from backend.models.transition import AlphaStatusTransition
+from backend.models.transition import (
+    AlphaStatusTransition,
+    HypothesisStatusTransition,
+)
 
 # Hypothesis (Phase 2 B1) + per-round stats (V-27.92)
 from backend.models.hypothesis import Hypothesis, HypothesisRoundStats
@@ -74,6 +77,8 @@ from backend.models.config import (
     BrainAuthToken,
     WQBCredential,
     LLMProvider,
+    FeatureFlagOverride,
+    FeatureFlagAudit,
 )
 
 __all__ = [
@@ -98,6 +103,7 @@ __all__ = [
     "AlphaFailure",
     "AlphaPnl",
     "AlphaStatusTransition",
+    "HypothesisStatusTransition",
     # Hypothesis (Phase 2)
     "Hypothesis",
     "HypothesisRoundStats",
@@ -124,4 +130,6 @@ __all__ = [
     "BrainAuthToken",
     "WQBCredential",
     "LLMProvider",
+    "FeatureFlagOverride",
+    "FeatureFlagAudit",
 ]

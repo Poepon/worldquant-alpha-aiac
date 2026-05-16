@@ -5,6 +5,7 @@ Handles mining tasks, feedback loops, and scheduled jobs
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_process_init, worker_process_shutdown
 import asyncio
 
 from backend.config import settings
@@ -16,6 +17,30 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=["backend.tasks"]
 )
+
+
+# P3 (2026-05-16): each worker process needs its own feature-flag override
+# refresher because ``backend.config._flag_override_cache`` is per-process
+# (a plain Python dict, not shared memory). Without this, an ops console
+# flip via /ops/feature-flags would only take effect on the FastAPI side;
+# Celery workers would keep using the env defaults until restart.
+@worker_process_init.connect
+def _start_feature_flag_refresher(**_kwargs):  # pragma: no cover - signal hook
+    try:
+        from backend.feature_flag_runtime import start_sync_refresher
+        start_sync_refresher()
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"[celery_app] feature-flag refresher start failed: {e}")
+
+
+@worker_process_shutdown.connect
+def _stop_feature_flag_refresher(**_kwargs):  # pragma: no cover - signal hook
+    try:
+        from backend.feature_flag_runtime import stop_sync_refresher
+        stop_sync_refresher()
+    except Exception:
+        pass
 
 # Celery configuration
 celery_app.conf.update(
@@ -64,6 +89,67 @@ celery_app.conf.beat_schedule = {
     "phase3-readiness-check": {
         "task": "backend.tasks.run_phase3_readiness_check",
         "schedule": crontab(day_of_week="mon", hour=4, minute=0),
+    },
+    # P1-C (2026-05-15): daily alpha-library health check at 08:00 Asia/Shanghai.
+    # Output: docs/alpha_health_check/<sh-date>.json (read-only, no demotion).
+    # Scheduled at 08:00 (not 07:00) to give 90min buffer after 06:30
+    # refresh-os-correlation-cache + monitor-llm-op-hallucinations, since
+    # the Windows Celery worker is --pool=solo (serial).
+    "alpha-health-check": {
+        "task": "backend.tasks.run_alpha_health_check",
+        "schedule": crontab(hour=8, minute=0),
+    },
+    # P1-C part 2 (2026-05-15): daily hypothesis-health-check at 08:30
+    # Asia/Shanghai. Scheduled AFTER 08:00 alpha-library-health-check so
+    # any sync-induced metric refresh has settled before the hypothesis
+    # aggregates JOIN runs. Output: docs/hypothesis_health_check/<sh-date>.json
+    # (read-mostly — only mutates hypothesis trigger/scoring fields + audit
+    # rows; never touches alphas / quality_status / KB).
+    "hypothesis-health-check": {
+        "task": "backend.tasks.run_hypothesis_health_check",
+        "schedule": crontab(hour=8, minute=30),
+    },
+    # P2-B (2026-05-15): daily pillar-balance check at 09:00 Asia/Shanghai.
+    # Runs AFTER both 08:00 alpha-library-health-check + 08:30 hypothesis-
+    # health-check so any sync-induced refresh has settled before the
+    # alpha+hypothesis outerjoin runs. Pure read-only — emits
+    # docs/pillar_balance/<sh-date>.json (no DB mutation).
+    "pillar-balance-check": {
+        "task": "backend.tasks.run_pillar_balance_check",
+        "schedule": crontab(hour=9, minute=0),
+    },
+    # P2-D (2026-05-15): daily negative-knowledge extract at 09:30
+    # Asia/Shanghai. Aggregates 24h of failure signals (Alpha.metrics
+    # findings / robustness / failed_tests, AlphaFailure error_type,
+    # HypothesisRoundStats attribution='hypothesis') and UPSERTs to
+    # knowledge_entries (entry_type='FAILURE_PITFALL'). Emits
+    # docs/negative_knowledge/<sh-date>.json. Read-mostly: only mutates
+    # knowledge_entries.
+    "negative-knowledge-extract": {
+        "task": "backend.tasks.run_negative_knowledge_extract",
+        "schedule": crontab(hour=9, minute=30),
+    },
+    # P2-A (2026-05-16): daily macro-narrative extract at 10:00 Asia/Shanghai.
+    # Runs AFTER 09:30 negative-knowledge-extract so KB writes don't compete.
+    # Phase 1 (seed UPSERT) is unconditional + idempotent; Phase 2 (LLM
+    # batch fill-in) is gated by ENABLE_MACRO_NARRATIVE_EXTRACT (default
+    # OFF). Emits docs/macro_narratives/<sh-date>.json. Read-mostly:
+    # only mutates knowledge_entries (entry_type='MACRO_NARRATIVE').
+    "macro-narrative-extract": {
+        "task": "backend.tasks.run_macro_narrative_extract",
+        "schedule": crontab(hour=10, minute=0),
+    },
+    # P2-C (2026-05-16): daily regime-inference task at 10:30 Asia/Shanghai.
+    # Reads docs/alpha_health_check/<sh-date>.json for the last 7 days per
+    # active region (USA/CHN/EUR/ASI/GLB), EWMA-smooths the GREEN+YELLOW
+    # pass-rate into a 5-bucket regime, and writes the result to Redis
+    # (aiac:current_regime:{region}) + docs/regime_state/<sh-date>.json.
+    # Read-mostly: no DB writes — only Redis SETEX + on-disk archive.
+    # Gated by ENABLE_REGIME_INFERENCE (default OFF, S1). Runs LAST so
+    # all upstream JSON sources have settled.
+    "regime-infer": {
+        "task": "backend.tasks.run_regime_infer",
+        "schedule": crontab(hour=10, minute=30),
     },
     # V-19.7: revive dead CONTINUOUS_CASCADE sessions. Detects worker crash /
     # silent stalls via task.last_alpha_persisted_at < NOW()-15min and

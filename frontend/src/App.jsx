@@ -10,6 +10,7 @@ import FactorLibrary from './pages/FactorLibrary'
 import CrisisStressTest from './pages/CrisisStressTest'
 import ConfigCenter from './pages/ConfigCenter'
 import DataManagement from './pages/DataManagement'
+import OpsLayout from './pages/ops/OpsLayout'
 
 const { Content } = Layout
 
@@ -32,6 +33,8 @@ function App() {
             <Route path="/correlation" element={<CrisisStressTest />} />
             <Route path="/data" element={<DataManagement />} />
             <Route path="/config" element={<ConfigCenter />} />
+            {/* P3 (2026-05-16): Ops Console — feature flags + monitoring */}
+            <Route path="/ops/*" element={<OpsLayout />} />
           </Routes>
         </Content>
       </Layout>

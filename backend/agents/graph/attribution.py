@@ -157,6 +157,7 @@ async def classify_attribution_llm(
             user_prompt=user,
             temperature=0.2,  # mostly-deterministic classification
             json_mode=True,
+            node_key="attribution",
         )
     except Exception as e:
         logger.warning(f"[B5 v2] LLM attribution call failed, fallback to heuristic: {e}")

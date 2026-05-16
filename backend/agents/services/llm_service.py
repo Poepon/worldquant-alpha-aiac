@@ -26,6 +26,46 @@ except ImportError:
     _ANTHROPIC_AVAILABLE = False
 
 
+# Anthropic reasoning models that reject `temperature` at the API layer.
+# Same pattern as OpenAI's o-series — reasoning is opaque, so the param is
+# deprecated and a 400 is returned if passed. Match by prefix so dated /
+# context-variant ids (e.g. "claude-opus-4-7[1m]", "claude-opus-4-7-20260301")
+# are covered.
+_ANTHROPIC_NO_TEMPERATURE_PREFIXES: Tuple[str, ...] = ("claude-opus-4-7",)
+
+# Anthropic reasoning models that support extended thinking. Same prefix
+# pattern as the no-temperature list; kept separate because the two
+# capabilities are technically independent (e.g. a future opus could still
+# accept temperature without thinking, or vice versa).
+_ANTHROPIC_THINKING_PREFIXES: Tuple[str, ...] = ("claude-opus-4-7",)
+
+# Reasoning-effort tier → thinking budget_tokens. 1024 is Anthropic's hard
+# minimum (per /thinking docs). Tier names match Anthropic's model capability
+# metadata (low/medium/high/max) plus our intermediate "xhigh" between high
+# and max (mirrors OpenAI o-series x-high reasoning_effort).
+_ANTHROPIC_THINKING_BUDGETS: Dict[str, int] = {
+    "low":    1024,
+    "medium": 4096,
+    "high":   16384,
+    "xhigh":  32000,
+    "max":    64000,   # Anthropic official top tier — budget < max_tokens still applies
+}
+
+# Tier name aliases — "auto" is the user-friendly name for Anthropic's
+# `thinking.type=adaptive` (model self-allocates budget).
+_ANTHROPIC_EFFORT_ALIASES: Dict[str, str] = {
+    "auto": "adaptive",
+}
+
+
+def _anthropic_supports_temperature(model: str) -> bool:
+    return not any(model.startswith(p) for p in _ANTHROPIC_NO_TEMPERATURE_PREFIXES)
+
+
+def _anthropic_supports_thinking(model: str) -> bool:
+    return any(model.startswith(p) for p in _ANTHROPIC_THINKING_PREFIXES)
+
+
 class LLMResponse(BaseModel):
     """Standard LLM response wrapper."""
     content: str
@@ -90,6 +130,19 @@ class LLMService:
         self.anthropic_model = model if (model and self.provider == 'anthropic') else getattr(
             settings, 'ANTHROPIC_MODEL', 'claude-haiku-4-5'
         )
+        # Optional endpoint override (proxy / mirror). The constructor's
+        # `base_url` doubles as the anthropic override when provider=anthropic;
+        # otherwise we fall back to settings.ANTHROPIC_BASE_URL ("" → SDK default).
+        self.anthropic_base_url = (
+            base_url if (base_url and self.provider == 'anthropic')
+            else (getattr(settings, 'ANTHROPIC_BASE_URL', '') or '')
+        )
+        # Extended-thinking reasoning effort (opus-4-7 family). Settings-driven
+        # so call() signature stays Protocol-stable. Normalize to lowercase;
+        # unknown values fall back to "xhigh" at use-time.
+        self.anthropic_thinking_effort = (
+            getattr(settings, 'ANTHROPIC_THINKING_EFFORT', 'xhigh') or 'xhigh'
+        ).strip().lower()
 
         # Active model for self.model (back-compat with downstream readers)
         self.model = (
@@ -117,11 +170,24 @@ class LLMService:
                 raise RuntimeError(
                     "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is empty"
                 )
-            self.anthropic_client = anthropic.AsyncAnthropic(api_key=self.anthropic_api_key)
+            # Only pass base_url when explicitly overridden — keeps the SDK
+            # default (https://api.anthropic.com) when ANTHROPIC_BASE_URL="".
+            anthropic_kwargs: Dict[str, Any] = {"api_key": self.anthropic_api_key}
+            if self.anthropic_base_url:
+                anthropic_kwargs["base_url"] = self.anthropic_base_url
+            self.anthropic_client = anthropic.AsyncAnthropic(**anthropic_kwargs)
 
+        # Pre-resolve thinking-tier display name for logging only.
+        _thinking_tag = (
+            self.anthropic_thinking_effort
+            if (self.provider == 'anthropic' and _anthropic_supports_thinking(self.model))
+            else 'n/a'
+        )
         logger.info(
             f"[LLMService] Initialized | provider={self.provider} model={self.model} "
-            f"openai_base_url={self.base_url}"
+            f"openai_base_url={self.base_url} "
+            f"anthropic_base_url={self.anthropic_base_url or '<sdk default>'} "
+            f"thinking={_thinking_tag}"
         )
 
     async def _ensure_credentials_loaded(self):
@@ -157,7 +223,53 @@ class LLMService:
 
     def invalidate_credentials_cache(self):
         self._credentials_loaded = False
-    
+
+    def _resolve_effort(
+        self,
+        node_key: Optional[str],
+        thinking_effort: Optional[str],
+    ) -> str:
+        """Resolve the effective thinking_effort tier for this call.
+
+        Priority (high → low):
+          1. explicit `thinking_effort` arg
+          2. settings.THINKING_EFFORT_OVERRIDES[node_key]  (kill-switch gated)
+          3. self.anthropic_thinking_effort  (service instance default)
+          4. 'xhigh'                          (final safety net)
+        """
+        candidates = [thinking_effort]
+        if node_key and getattr(settings, 'ENABLE_PER_NODE_THINKING_EFFORT', True):
+            overrides = getattr(settings, 'THINKING_EFFORT_OVERRIDES', None) or {}
+            candidates.append(overrides.get(node_key))
+        candidates.append(self.anthropic_thinking_effort)
+        candidates.append('xhigh')
+        for c in candidates:
+            if c:
+                return c.strip().lower()
+        return 'xhigh'
+
+    def _emit_metrics(
+        self,
+        node_key: Optional[str],
+        effort: str,
+        tokens: int,
+        latency_ms: int,
+        success: bool,
+    ) -> None:
+        """Push one per-call sample to metrics_tracker (best-effort)."""
+        try:
+            from backend.metrics_tracker import record_llm_call
+            record_llm_call(
+                node_key=node_key or "_unspecified",
+                effort=effort,
+                tokens=tokens,
+                latency_ms=latency_ms,
+                success=success,
+            )
+        except Exception:
+            # metrics 累加失败不影响 LLM 主流程 — 这是侧效输出
+            pass
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -169,25 +281,43 @@ class LLMService:
         user_prompt: str,
         temperature: float = 0.7,
         json_mode: bool = True,
-        max_tokens: int = 4096
+        max_tokens: int = 4096,
+        *,
+        node_key: Optional[str] = None,
+        thinking_effort: Optional[str] = None,
     ) -> LLMResponse:
         """
         Make an LLM call with automatic retries and logging.
-        
+
         Args:
             system_prompt: System message
             user_prompt: User message
             temperature: Sampling temperature
             json_mode: Whether to request JSON output
             max_tokens: Maximum response tokens
-            
+            node_key: Optional node identifier; Service consults
+                settings.THINKING_EFFORT_OVERRIDES to pick per-node thinking
+                effort. See `_resolve_effort` for full priority chain.
+            thinking_effort: Optional explicit effort override; highest
+                priority in the resolve chain (above node_key table lookup).
+
         Returns:
             LLMResponse with content and metadata
         """
         start_time = time.time()
         call_id = f"{int(start_time * 1000) % 100000}"
-        
-        logger.debug(f"[LLMService] Call started | id={call_id} json_mode={json_mode}")
+
+        # Resolve per-call effort (three-tier priority):
+        #   1. explicit `thinking_effort` arg
+        #   2. settings.THINKING_EFFORT_OVERRIDES[node_key] (gated by
+        #      ENABLE_PER_NODE_THINKING_EFFORT kill-switch)
+        #   3. self.anthropic_thinking_effort (service instance default)
+        effort_active = self._resolve_effort(node_key, thinking_effort)
+
+        logger.debug(
+            f"[LLMService] Call started | id={call_id} json_mode={json_mode} "
+            f"node={node_key or '-'} effort={effort_active}"
+        )
         
         try:
             await self._ensure_credentials_loaded()
@@ -197,17 +327,63 @@ class LLMService:
             # (Anthropic doesn't have a response_format flag; the existing
             # prompts already say "Output Schema: JSON ...").
             if self.provider == 'anthropic':
-                resp = await self.anthropic_client.messages.create(
-                    model=self.model,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    system=[{
+                # Reasoning models (opus-4-7 family) reject `temperature`;
+                # only send it when the model still accepts it.
+                anth_kwargs: Dict[str, Any] = {
+                    "model": self.model,
+                    "max_tokens": max_tokens,
+                    "system": [{
                         "type": "text",
                         "text": system_prompt,
                         "cache_control": {"type": "ephemeral"},
                     }],
-                    messages=[{"role": "user", "content": user_prompt}],
-                )
+                    "messages": [{"role": "user", "content": user_prompt}],
+                }
+                if _anthropic_supports_temperature(self.model):
+                    anth_kwargs["temperature"] = temperature
+
+                # Extended thinking — opus-4-7 family only; caller's max_tokens
+                # is preserved as the *output* budget (thinking adds on top).
+                thinking_enabled = False
+                # `effort_active` already resolved via the three-tier priority
+                # chain above; alias-normalize "auto" → "adaptive" so downstream
+                # branches only need canonical tier names.
+                effort = _ANTHROPIC_EFFORT_ALIASES.get(effort_active, effort_active)
+                if (
+                    _anthropic_supports_thinking(self.model)
+                    and effort
+                    and effort != 'disabled'
+                ):
+                    thinking_enabled = True
+                    if effort == 'adaptive':
+                        anth_kwargs['thinking'] = {
+                            "type": "adaptive",
+                            "display": "omitted",
+                        }
+                    else:
+                        budget = _ANTHROPIC_THINKING_BUDGETS.get(
+                            effort, _ANTHROPIC_THINKING_BUDGETS['xhigh']
+                        )
+                        # Spec: 1024 <= budget_tokens < max_tokens. Bump
+                        # max_tokens so the original `max_tokens` arg is
+                        # honored as output budget on top of thinking.
+                        anth_kwargs['max_tokens'] = budget + max(max_tokens, 1024)
+                        anth_kwargs['thinking'] = {
+                            "type": "enabled",
+                            "budget_tokens": budget,
+                            "display": "omitted",
+                        }
+
+                # The SDK forces streaming when total expected output exceeds
+                # its 10-minute non-streaming budget — that's always the case
+                # with thinking enabled at medium+ effort. Use the stream
+                # context manager and aggregate to the same final Message
+                # shape so the downstream code path stays identical.
+                if thinking_enabled:
+                    async with self.anthropic_client.messages.stream(**anth_kwargs) as stream:
+                        resp = await stream.get_final_message()
+                else:
+                    resp = await self.anthropic_client.messages.create(**anth_kwargs)
                 # Extract text from the first content block (TextBlock)
                 content = ""
                 for block in resp.content:
@@ -277,9 +453,11 @@ class LLMService:
             
             logger.info(
                 f"[LLMService] Call success | id={call_id} "
+                f"node={node_key or '-'} effort={effort_active} "
                 f"tokens={tokens_used} latency={latency_ms}ms"
             )
-            
+            self._emit_metrics(node_key, effort_active, tokens_used, latency_ms, success=True)
+
             return LLMResponse(
                 content=content,
                 parsed=parsed,
@@ -288,11 +466,15 @@ class LLMService:
                 latency_ms=latency_ms,
                 success=True
             )
-            
+
         except Exception as e:
             latency_ms = int((time.time() - start_time) * 1000)
-            logger.error(f"[LLMService] Call failed | id={call_id} error={e}")
-            
+            logger.error(
+                f"[LLMService] Call failed | id={call_id} "
+                f"node={node_key or '-'} effort={effort_active} error={e}"
+            )
+            self._emit_metrics(node_key, effort_active, 0, latency_ms, success=False)
+
             return LLMResponse(
                 content="",
                 model=self.model,

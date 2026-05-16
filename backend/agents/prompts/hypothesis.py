@@ -19,7 +19,9 @@ from typing import Dict, List, Optional
 from backend.agents.prompts.base import (
     PromptContext,
     build_fields_context,
+    build_macro_context_block,  # P2-A (2026-05-16)
     build_patterns_context,
+    build_style_preset_block,   # P2-C (2026-05-16)
 )
 
 
@@ -42,7 +44,49 @@ Your role is to generate investment hypotheses for testing. The approach is empi
 3. Actionable: Clear enough to implement directly
 4. Focused: One direction per hypothesis, not "A or B might work"
 
+**Five Pillars Classification (P2-B, 2026-05-15)**:
+Each hypothesis MUST be tagged with a `pillar` field describing the factor
+family it tests. Pick ONE:
+
+- **momentum** — trend / continuation / short-term reversal on PV (returns,
+  close, vwap, volume). Operators: ts_delta, ts_arg_max, ts_av_diff.
+- **value** — undervaluation / valuation mean-reversion. Fields: eps, pe, pb,
+  book_value, enterprise_value, revenue, sales, ebit, dividend.
+- **quality** — profitability / capital efficiency / earnings stability.
+  Fields: roic, roe, margins, cash_flow, accrual, debt_to_equity.
+- **volatility** — risk / dispersion / realized or implied vol. Fields:
+  implied_volatility, opt8_*, intraday high/low range. Operators: ts_std_dev.
+- **sentiment** — analyst / news / consensus revisions / surprise. Fields:
+  snt*_*, anl*_*, est*_*, news_*, surprise, recommendation.
+- **other** — does not fit (use sparingly; >20% other-share is flagged).
+
+Pick based on the ECONOMIC mechanism your hypothesis exploits, NOT purely
+on field family. NOTE: `expected_signal=mean_reversion` is auto-mapped to
+`pillar=momentum` (short-term reversal is in the PV-momentum family) — you
+may emit either or both. When the user prompt's pillar-nudge names a target
+pillar, BIAS toward hypotheses in that pillar.
+
+**Investment Philosophy Use (P2-C, 2026-05-16)**:
+When an "Investment Philosophy — Current Regime" block is present, treat the
+style_label and philosophy as soft guidance: your hypothesis rationale should
+acknowledge whether you align with the regime's preferred posture (defensive
+in crisis, aggressive in very_calm) or deliberately diverge with a stated
+contrarian justification. Do NOT mention the regime label explicitly inside
+the hypothesis `statement` itself — that field stays evergreen.
+
 Output must be valid JSON."""
+
+
+# P2 review fix: the Macro Context Use instruction MOVED out of
+# HYPOTHESIS_SYSTEM (which would render even when ENABLE_MACRO_NARRATIVE_
+# GUIDANCE=False, breaking the byte-for-byte legacy claim) and INTO the
+# user-prompt's macro block — only attached when narratives are present.
+_MACRO_CONTEXT_USE_INSTRUCTION = (
+    "**Use of Macro Context**: Your `rationale` MUST explicitly reference "
+    "the relevant transmission_channel from the section above, and your "
+    "`expected_signal` SHOULD align with the narrative's "
+    "expected_signal_hint (justify any deviation in `rationale`)."
+)
 
 
 DISTILL_SYSTEM = """You are a research assistant helping to identify promising research directions.
@@ -115,6 +159,21 @@ The balance depends on current progress:
     
     # Build field categories overview
     field_overview = build_fields_context(ctx.fields, max_fields=20)
+
+    # P2-A (2026-05-16): macro-narrative context block. Empty when
+    # ctx.macro_narratives is [] (which is the case under the legacy /
+    # flag-off path) so the splice below becomes the empty string and the
+    # template renders byte-for-byte identical to pre-P2-A.
+    macro_context_block = build_macro_context_block(
+        getattr(ctx, "macro_narratives", []) or []
+    )
+    # P2 review fix: when block is non-empty, append the "Use of Macro Context"
+    # instruction inline (was previously in HYPOTHESIS_SYSTEM, which always
+    # rendered and broke the byte-for-byte legacy invariant on flag=off).
+    macro_block_with_leading_newline = (
+        f"\n{macro_context_block}\n\n{_MACRO_CONTEXT_USE_INSTRUCTION}\n"
+        if macro_context_block else ""
+    )
     
     # Plan v5+ §Phase 1: cross-dataset hypothesis section.
     # Pool empty = legacy single-anchor; populated = LLM may pick 1-3.
@@ -148,6 +207,35 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
     else:
         cross_dataset_section = ""
 
+    # P2-B (2026-05-15): conditional Five-Pillars nudge block — rendered only
+    # when node_hypothesis fed ctx.pillar_hint (i.e. the recent alpha pool is
+    # skewed toward another pillar and the planner wants to rebalance).
+    # When ctx.pillar_hint is None / unset, the block is empty so prompt
+    # output is byte-for-byte the legacy form (opt-in invariant).
+    pillar_nudge_block = ""
+    pillar_hint = getattr(ctx, "pillar_hint", None)
+    if pillar_hint:
+        pillar_nudge_block = (
+            "\n## P2-B Pillar Balance Nudge\n\n"
+            f"The recent alpha pool is over-concentrated. The system requests "
+            f"that AT LEAST ONE of your hypotheses targets the "
+            f"under-represented pillar: **{pillar_hint}**. Mark that "
+            f"hypothesis with `pillar: \"{pillar_hint}\"` and choose fields / "
+            f"operators aligned with that pillar's economic mechanism (see "
+            f"the system prompt's Five Pillars Classification).\n"
+        )
+
+    # P2-C (2026-05-16): Investment Philosophy block. Empty when
+    # ctx.style_preset is None / {} (legacy / flag-off path) so the splice
+    # below renders the empty string at the insertion point and the
+    # template stays byte-for-byte identical to pre-P2-C (MF4 invariant).
+    style_block = build_style_preset_block(
+        getattr(ctx, "style_preset", None)
+    )
+    style_block_with_leading_newline = (
+        f"\n{style_block}\n" if style_block else ""
+    )
+
     return f"""## Research Context
 
 **Dataset**: {ctx.dataset_id}
@@ -158,7 +246,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 ## Available Data Fields (Sample)
 
 {field_overview}
-
+{macro_block_with_leading_newline}{style_block_with_leading_newline}
 ## Historical Patterns (For Reference Only)
 
 **Approaches that have worked in similar contexts**:
@@ -170,7 +258,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 Note: These are observations, not rules. What failed before may work in different contexts.
 {trace_section}
 {strategy_section}
-
+{pillar_nudge_block}
 ## Task
 
 Generate 3-5 investment hypotheses for this dataset.
@@ -195,6 +283,7 @@ Generate 3-5 investment hypotheses for this dataset.
       "statement": "Clear, testable hypothesis in one sentence",
       "rationale": "Economic or behavioral reasoning behind this hypothesis",
       "expected_signal": "momentum | mean_reversion | value | other",
+      "pillar": "momentum | value | quality | volatility | sentiment | other",
       "key_fields": ["field1", "field2"],
       "suggested_approach": "Brief description of how to test this",
       "confidence": "high | medium | low",

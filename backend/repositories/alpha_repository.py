@@ -6,6 +6,7 @@ filtering by task, metrics, and deduplication checks.
 """
 
 import logging
+from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
@@ -13,7 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.repositories.base_repository import BaseRepository
 from backend.protocols.repository_protocol import PaginationParams, PaginatedResult
-from backend.models import Alpha, MiningTask
+from backend.models import Alpha, MiningTask, Hypothesis, DatasetMetadata
 
 logger = logging.getLogger("repositories.alpha")
 
@@ -287,13 +288,97 @@ class AlphaRepository(BaseRepository[Alpha]):
             Alpha.region,
             func.count(Alpha.id).label("count")
         ).group_by(Alpha.region)
-        
+
         if task_id is not None:
             query = query.where(Alpha.task_id == task_id)
-        
+
         result = await self.db.execute(query)
         return {row.region: row.count for row in result.all() if row.region}
-    
+
+    # =========================================================================
+    # Baseline Grid Sampling (P0: fit-baseline + Nσ-residual screening)
+    # =========================================================================
+
+    async def get_cell_metric_samples(
+        self,
+        expected_signal: str,
+        region: str,
+        metric_col: str = "is_sharpe",
+        dataset_id: Optional[str] = None,
+        category: Optional[str] = None,
+        lookback_days: int = 120,
+        limit: int = 2000,
+    ) -> List[float]:
+        """
+        Fetch historical metric samples for one baseline grid cell.
+
+        The cell is (hypothesis-family × dataset × region):
+          - hypothesis-family = Hypothesis.expected_signal
+          - region            = Alpha.region
+          - dataset scope:
+              * dataset_id given -> FINE cell   (single dataset)
+              * category given   -> COARSE cell (all datasets in that category)
+              * neither          -> region-wide fallback
+
+        Population = all successfully-backtested alphas (metric not null) in the
+        lookback window — NOT just PASS — so the baseline represents a typical
+        attempt in the cell, and the residual measures how much an alpha beats it.
+
+        Args:
+            expected_signal: hypothesis family tag (momentum / value / ...)
+            region: trading region
+            metric_col: Alpha column to sample (default "is_sharpe")
+            dataset_id: when set, restrict to this dataset (fine cell)
+            category: when set and dataset_id is None, restrict to this dataset
+                category via the datasets table (coarse cell)
+            lookback_days: only consider alphas created within this window
+            limit: cap on number of samples returned
+
+        Returns:
+            List of metric float values for the cell.
+        """
+        metric_attr = getattr(Alpha, metric_col, None)
+        if metric_attr is None:
+            logger.warning(
+                f"get_cell_metric_samples: unknown metric column '{metric_col}'"
+            )
+            return []
+
+        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+        query = (
+            select(metric_attr)
+            .join(Hypothesis, Alpha.hypothesis_id == Hypothesis.id)
+            .where(
+                Hypothesis.expected_signal == expected_signal,
+                Alpha.region == region,
+                metric_attr.isnot(None),
+                Alpha.date_created >= cutoff,
+            )
+        )
+
+        if dataset_id is not None:
+            query = query.where(Alpha.dataset_id == dataset_id)
+        elif category is not None:
+            # Subquery (not a join) so multiple universe rows per dataset in the
+            # datasets table can't multiply the alpha sample rows.
+            ds_subq = (
+                select(DatasetMetadata.dataset_id)
+                .where(
+                    DatasetMetadata.category == category,
+                    DatasetMetadata.region == region,
+                )
+                .distinct()
+            )
+            query = query.where(Alpha.dataset_id.in_(ds_subq))
+
+        # Order by recency so the limit keeps the most recent samples — the
+        # baseline should reflect recent attempts, not an arbitrary DB-order slice.
+        query = query.order_by(Alpha.date_created.desc()).limit(limit)
+
+        result = await self.db.execute(query)
+        return [float(v) for v in result.scalars().all() if v is not None]
+
     # =========================================================================
     # Bulk Operations
     # =========================================================================

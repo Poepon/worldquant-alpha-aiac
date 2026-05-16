@@ -9,6 +9,24 @@ const client = axios.create({
   },
 })
 
+// P3 (2026-05-16): inject the ops console token into every request when
+// it's present in localStorage. Backend reads X-Ops-Token and matches
+// against OPS_API_TOKEN env var; empty env disables the check in dev.
+// We attach the header unconditionally — backend ignores it on non-/ops
+// routes, and dev mode treats any value as fine.
+client.interceptors.request.use((config) => {
+  try {
+    const token = window.localStorage.getItem('ops_token')
+    if (token) {
+      config.headers = config.headers || {}
+      config.headers['X-Ops-Token'] = token
+    }
+  } catch (_) {
+    // localStorage unavailable (private mode etc.) — silently skip
+  }
+  return config
+})
+
 // API functions
 const api = {
   // Datasets & Fields
@@ -347,6 +365,221 @@ const api = {
     const { data } = await client.get(`/correlation/alpha/${alphaId}/crisis`, {
       params: { region },
     })
+    return data
+  },
+
+  // ---------------------------------------------------------------------
+  // Ops Console (P3 — 2026-05-16)
+  // Feature flags + manual task triggers backing /ops/* dashboards.
+  // ---------------------------------------------------------------------
+
+  // Feature flags
+  listFeatureFlags: async () => {
+    const { data } = await client.get('/ops/flags')
+    return data
+  },
+
+  setFeatureFlag: async (name, value, note = null) => {
+    const { data } = await client.patch(`/ops/flags/${name}`, { value, note })
+    return data
+  },
+
+  clearFeatureFlag: async (name) => {
+    const { data } = await client.delete(`/ops/flags/${name}/override`)
+    return data
+  },
+
+  listFeatureFlagAudit: async (limit = 50) => {
+    const { data } = await client.get('/ops/flags/audit', { params: { limit } })
+    return data
+  },
+
+  refreshAllFlags: async () => {
+    const { data } = await client.post('/ops/flags/refresh-all')
+    return data
+  },
+
+  // Ops task triggers
+  triggerOpsTask: async (name, kwargs = null) => {
+    const { data } = await client.post('/ops/tasks/trigger', { name, kwargs })
+    return data
+  },
+
+  listRecentOpsRuns: async (taskName = null, limit = 20) => {
+    const params = { limit }
+    if (taskName) params.task_name = taskName
+    const { data } = await client.get('/ops/tasks/recent-runs', { params })
+    return data
+  },
+
+  // Ops Phase 2 — Alpha Health
+  getOpsAlphaHealthLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/alpha-health/latest', { params })
+    return data
+  },
+
+  getOpsAlphaHealthHistory: async (days = 30) => {
+    const { data } = await client.get('/ops/alpha-health/history', { params: { days } })
+    return data
+  },
+
+  getOpsAlphaHealthRecords: async ({ band = null, region = null, limit = 200, date = null } = {}) => {
+    const params = { limit }
+    if (band) params.band = band
+    if (region) params.region = region
+    if (date) params.date = date
+    const { data } = await client.get('/ops/alpha-health/alphas', { params })
+    return data
+  },
+
+  rerunOpsAlphaHealth: async () => {
+    const { data } = await client.post('/ops/alpha-health/rerun')
+    return data
+  },
+
+  // Ops Phase 2 — Hypothesis Health
+  getOpsHypothesisHealthLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/hypothesis-health/latest', { params })
+    return data
+  },
+
+  getOpsHypothesisHealthHistory: async (days = 30) => {
+    const { data } = await client.get('/ops/hypothesis-health/history', { params: { days } })
+    return data
+  },
+
+  getOpsHypothesisTransitions: async (hypothesisId = null, limit = 100) => {
+    const params = { limit }
+    if (hypothesisId) params.hypothesis_id = hypothesisId
+    const { data } = await client.get('/ops/hypothesis-health/transitions', { params })
+    return data
+  },
+
+  rerunOpsHypothesisHealth: async () => {
+    const { data } = await client.post('/ops/hypothesis-health/rerun')
+    return data
+  },
+
+  // Ops Phase 2 — Overview
+  getOpsOverview: async () => {
+    const { data } = await client.get('/ops/overview')
+    return data
+  },
+
+  // Ops Phase 3 — P2-B Pillar Balance
+  getOpsPillarLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/pillar/latest', { params })
+    return data
+  },
+  getOpsPillarHistory: async (days = 14) => {
+    const { data } = await client.get('/ops/pillar/history', { params: { days } })
+    return data
+  },
+  getOpsPillarDeficit: async (region, skewThreshold = 0) => {
+    const { data } = await client.get('/ops/pillar/deficit-recommendation', {
+      params: { region, skew_threshold: skewThreshold },
+    })
+    return data
+  },
+  rerunOpsPillar: async () => {
+    const { data } = await client.post('/ops/pillar/rerun')
+    return data
+  },
+
+  // Ops Phase 3 — P2-D Negative Knowledge
+  getOpsNegativeTop: async ({ region = null, category = null, limit = 20 } = {}) => {
+    const params = { limit }
+    if (region) params.region = region
+    if (category) params.category = category
+    const { data } = await client.get('/ops/negative-knowledge/top', { params })
+    return data
+  },
+  getOpsNegativeCategoryBreakdown: async (region = null) => {
+    const params = region ? { region } : {}
+    const { data } = await client.get('/ops/negative-knowledge/category-breakdown', { params })
+    return data
+  },
+  getOpsNegativeTimeline: async (days = 30, region = null) => {
+    const params = { days }
+    if (region) params.region = region
+    const { data } = await client.get('/ops/negative-knowledge/timeline', { params })
+    return data
+  },
+  togglePitfall: async (entryId, isActive) => {
+    const { data } = await client.patch(
+      `/ops/negative-knowledge/entries/${entryId}`,
+      { is_active: isActive },
+    )
+    return data
+  },
+  rerunOpsNegative: async () => {
+    const { data } = await client.post('/ops/negative-knowledge/rerun')
+    return data
+  },
+
+  // Ops Phase 3 — P2-A Macro Narrative
+  getOpsMacroLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/macro/latest', { params })
+    return data
+  },
+  getOpsMacroCoverage: async () => {
+    const { data } = await client.get('/ops/macro/coverage')
+    return data
+  },
+  getOpsMacroByScope: async (scope, { datasetCategory = null, limit = 200 } = {}) => {
+    const params = { scope, limit }
+    if (datasetCategory) params.dataset_category = datasetCategory
+    const { data } = await client.get('/ops/macro/by-scope', { params })
+    return data
+  },
+  getOpsMacroTokenBudget: async (utcDate = null) => {
+    const params = utcDate ? { utc_date: utcDate } : {}
+    const { data } = await client.get('/ops/macro/token-budget', { params })
+    return data
+  },
+  rerunOpsMacro: async () => {
+    const { data } = await client.post('/ops/macro/rerun')
+    return data
+  },
+
+  // Ops Phase 3 — P2-C Regime
+  getOpsRegimeCurrent: async (region = 'USA') => {
+    const { data } = await client.get('/ops/regime/current', { params: { region } })
+    return data
+  },
+  getOpsRegimeSnapshot: async (region = 'USA') => {
+    const { data } = await client.get('/ops/regime/snapshot', { params: { region } })
+    return data
+  },
+  getOpsRegimeHistory: async (region = 'USA', days = 14) => {
+    const { data } = await client.get('/ops/regime/history', {
+      params: { region, days },
+    })
+    return data
+  },
+  rerunOpsRegime: async (region = null) => {
+    const params = region ? { region } : {}
+    const { data } = await client.post('/ops/regime/rerun', null, { params })
+    return data
+  },
+
+  // Ops Phase 4 — LLM op hallucination monitor
+  getOpsLLMOpLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/llm-op/latest', { params })
+    return data
+  },
+  getOpsLLMOpDeactivatedKB: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/llm-op/deactivated-kb', { params })
+    return data
+  },
+  rerunOpsLLMOp: async () => {
+    const { data } = await client.post('/ops/llm-op/rerun')
     return data
   },
 }

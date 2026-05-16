@@ -4,8 +4,74 @@ Centralized settings management using Pydantic
 """
 
 import os
+import json
+import logging
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Any, Optional, Dict
+
+_config_logger = logging.getLogger(__name__)
+
+
+def _load_thinking_overrides() -> Dict[str, str]:
+    """Load per-node thinking_effort overrides.
+
+    Defaults to the conservative tier table (post red-team review):
+    hypothesis/code_gen = xhigh, self_correct = low, distill/attribution
+    = disabled, strategy/round_analysis/failure_analysis = high. The env
+    variable THINKING_EFFORT_OVERRIDES, if set, must be a JSON object;
+    its keys merge over the defaults (partial-override semantics). On
+    parse failure we warn-log and fall back to defaults — backend MUST
+    NOT crash on a malformed override.
+    """
+    defaults = {
+        "hypothesis":       "xhigh",
+        "code_gen":         "xhigh",
+        "self_correct":     "low",
+        "distill_context":  "disabled",
+        "attribution":      "disabled",
+        "strategy":         "high",
+        "round_analysis":   "high",
+        "failure_analysis": "high",
+    }
+    env_val = os.getenv("THINKING_EFFORT_OVERRIDES")
+    if not env_val:
+        return defaults
+    try:
+        parsed = json.loads(env_val)
+        if not isinstance(parsed, dict):
+            raise ValueError("THINKING_EFFORT_OVERRIDES must be a JSON object")
+        # Partial-override: env keys win, missing keys keep defaults.
+        return {**defaults, **{str(k): str(v) for k, v in parsed.items()}}
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        _config_logger.warning(
+            "[config] THINKING_EFFORT_OVERRIDES parse failed, using defaults | error=%s",
+            e,
+        )
+        return defaults
+
+
+# Module-level cache — loaded once at import time. Bypasses BaseSettings's
+# automatic env JSON parsing (which would crash Settings() construction on
+# malformed JSON); the helper above handles env + fault tolerance directly.
+_THINKING_EFFORT_OVERRIDES_CACHE: Dict[str, str] = _load_thinking_overrides()
+
+
+# ---------------------------------------------------------------------------
+# Runtime feature-flag override cache (P3 — ops dashboard, 2026-05-16)
+# ---------------------------------------------------------------------------
+# Read by ``Settings.__getattribute__`` for any attribute starting with
+# ``ENABLE_``. Written by FeatureFlagService.set/clear (write-through) and
+# by the lifespan / worker_process_init refresher loops every 60s.
+#
+# This dict lives in ``backend.config`` (not in feature_flag_service) so the
+# Settings hook below doesn't need a lazy import on every attribute read —
+# Pydantic accesses many attributes per request and the cumulative import
+# overhead would matter. FeatureFlagService imports this module-level dict
+# directly: ``from backend.config import _flag_override_cache``.
+#
+# The dict starts empty. A flag without an entry here means "no override —
+# fall back to the env default that Pydantic loaded at startup".
+_flag_override_cache: Dict[str, Any] = {}
 
 
 class Settings(BaseSettings):
@@ -51,7 +117,43 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     # Default model for code_gen (cheaper); override per-call via call(model=...)
     ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5")
-    
+    # Optional override of Anthropic API endpoint — leave empty to use the
+    # official api.anthropic.com. Set to a proxy/mirror (e.g. self-hosted
+    # gateway, OpenRouter, vendor-compatible endpoint) when needed.
+    ANTHROPIC_BASE_URL: str = os.getenv("ANTHROPIC_BASE_URL", "")
+    # Anthropic extended-thinking reasoning effort (opus-4-7 family).
+    # Tier names match Anthropic's model capability metadata (low/medium/high/max)
+    # plus an intermediate "xhigh" and the alias "auto" → adaptive.
+    # Levels:
+    #   "disabled" → no thinking block (legacy / fastest)
+    #   "low"      → budget_tokens=1024   (Anthropic minimum)
+    #   "medium"   → budget_tokens=4096
+    #   "high"     → budget_tokens=16384
+    #   "xhigh"    → budget_tokens=32000  (DEFAULT — between high and max)
+    #   "max"      → budget_tokens=64000  (Anthropic official top effort tier)
+    #   "auto"     → model self-allocates budget (alias for Anthropic adaptive mode)
+    #   "adaptive" → same as "auto"
+    # Ignored on non-reasoning models (haiku/sonnet); openai-compat providers
+    # also ignore this setting.
+    ANTHROPIC_THINKING_EFFORT: str = os.getenv("ANTHROPIC_THINKING_EFFORT", "xhigh")
+
+    # Per-node thinking_effort kill-switch. False → LLMService ignores the
+    # per-node table and falls back to ANTHROPIC_THINKING_EFFORT for every
+    # call. One env line + reload is enough to disable runaway costs.
+    ENABLE_PER_NODE_THINKING_EFFORT: bool = (
+        os.getenv("ENABLE_PER_NODE_THINKING_EFFORT", "true").strip().lower()
+        in ("1", "true", "yes")
+    )
+
+    # Per-node thinking_effort overrides. Keys are prompt registry keys
+    # (see backend/agents/prompts/registry.py); values are effort tiers
+    # (low/medium/high/xhigh/max/auto/adaptive/disabled). Loaded module-level
+    # to bypass Pydantic's env JSON validation (which would crash on bad JSON);
+    # see _load_thinking_overrides() for env handling + fault tolerance.
+    @property
+    def THINKING_EFFORT_OVERRIDES(self) -> Dict[str, str]:
+        return _THINKING_EFFORT_OVERRIDES_CACHE
+
     # Mining Configuration
     DEFAULT_REGION: str = "USA"
     DEFAULT_UNIVERSE: str = "TOP3000"
@@ -248,6 +350,147 @@ class Settings(BaseSettings):
     T1_FLIP_RETRY_SHARPE: float = 0.5  # min |sharpe| to trigger flip; below = noise
     T1_FLIP_RETRY_CAP: int = 5  # max flips per round
 
+    # Signal-vs-control 双跑归因 — 一个 PASS alpha 被识别后,模拟一个"对照"表达式
+    # (T1 信号核剥成裸字段、保留 T2/T3 结构包装);Δ(sharpe_signal − sharpe_control)
+    # 归因业绩来源。Δ 小 = PASS 是结构产物(包装在做功,非假设信号)→ PASS 降级为
+    # PASS_PROVISIONAL,拦在直接提交池外。每轮上限 SIGNAL_CONTROL_CAP。
+    # 设 ENABLE_SIGNAL_CONTROL_DUAL_RUN=False 全局关闭(默认 opt-in,避免意外增加
+    # BRAIN 模拟配额消耗)。来源:docs/alphagbm_skills_research_2026-05-15.md P0。
+    ENABLE_SIGNAL_CONTROL_DUAL_RUN: bool = False  # opt-in(额外 BRAIN 模拟)
+    SIGNAL_CONTROL_DELTA_SHARPE_MIN: float = 0.3  # 信号被信任所需的最小 Δsharpe
+    SIGNAL_CONTROL_CAP: int = 5  # 每轮对照模拟次数上限
+
+    # P1-A: Graded scoring — 百分位归一化 + 非均匀权重 + confidence 维度
+    # (docs/alphagbm_skills_research_2026-05-15.md 原则①). Advisory layer;
+    # 老 calculate_alpha_score / routing 阈值不变。opt-in。
+    # 开启后:每个 PASS alpha 用 sharpe 相对 cell 历史基线算出百分位,切 5 档(A-E),
+    # 附带 confidence(真实输入占比);低 confidence 的 PASS → PASS_PROVISIONAL。
+    ENABLE_GRADED_SCORE: bool = False
+    SCORE_WEIGHT_TEST_SHARPE: float = 0.55        # 与 alpha_scoring.default_weights 逐位一致
+    SCORE_WEIGHT_TRAIN_SHARPE: float = 0.25
+    SCORE_WEIGHT_FITNESS: float = 0.20
+    SCORE_WEIGHT_PROD_CORR_PENALTY: float = 0.30
+    SCORE_WEIGHT_TURNOVER_PENALTY: float = 0.15
+    SCORE_WEIGHT_INVESTABILITY_PENALTY: float = 0.20
+    SCORE_CONFIDENCE_MIN: float = 0.5             # PASS confidence 低于此 → 降级 PROVISIONAL
+    SCORE_GRADED_CAP: int = 0                     # 0 = 全部 PASS;>0 仅对 sharpe top-N 跑
+
+    # P1-A: diversity_tracker 权重(替换 evaluate_diversity 内硬编码 0.30/0.30/0.25/0.15)
+    DIVERSITY_DATASET_WEIGHT: float = 0.30
+    DIVERSITY_FIELD_WEIGHT: float = 0.30
+    DIVERSITY_OPERATOR_WEIGHT: float = 0.25
+    DIVERSITY_SETTINGS_WEIGHT: float = 0.15
+
+    # P2-B (2026-05-15): Five Pillars factor classification.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `compare`.
+    # diversity_tracker 5 维启用走重归一化路径 — pillar 是新增第 5 维,默认 0.20。
+    # 老 4 维 weight (0.30/0.30/0.25/0.15) **不动** — ENABLE_PILLAR_AWARE_SELECTION
+    # OFF / pillar=None 时 evaluate_diversity 行为 byte-for-byte 等同 P1-A。
+    DIVERSITY_PILLAR_WEIGHT: float = 0.20
+    # Pillar-aware selection 开关 — 默认 OFF。开启时 node_hypothesis 跑 deficit
+    # 检查 + prompt nudge,diversity_tracker 走 5 维重归一化加权。
+    # 1-2 周观察 docs/pillar_balance/<sh-date>.json 后再切换。
+    ENABLE_PILLAR_AWARE_SELECTION: bool = False
+    # 6 桶 + other 的目标分布 — pillar_balance_check 报告内 deficit 计算基准。
+    PILLAR_TARGET_DISTRIBUTION: dict = {
+        "momentum":   0.25,
+        "value":      0.20,
+        "quality":    0.20,
+        "volatility": 0.15,
+        "sentiment":  0.10,
+        "other":      0.10,
+    }
+    # nudge 触发阈值:max(deficit) > threshold * target.share。
+    # 例 target=0.20 + threshold=0.4 → 0.20−share ≥ 0.08 时 nudge 该 pillar。
+    PILLAR_BALANCE_SKEW_THRESHOLD: float = 0.4
+
+    # P2-D (2026-05-15): Negative-knowledge nudge + daily extract task.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skills `take-profit`
+    # + `health-check`. Default OFF — the nudge block in
+    # backend/agents/graph/nodes/generation.py is skipped byte-for-byte when
+    # ENABLE_NEGATIVE_KNOWLEDGE_NUDGE is False (PromptContext.failure_pitfalls
+    # = state.pitfalls[:5] unchanged). Switch to True after observing 1-2 days
+    # of docs/negative_knowledge/<sh-date>.json.
+    ENABLE_NEGATIVE_KNOWLEDGE_NUDGE: bool = False
+    NEGATIVE_KNOWLEDGE_TOP_K: int = 5            # max pitfalls fetched per call
+    NEGATIVE_KNOWLEDGE_MIN_FAIL_COUNT: int = 3   # promote-to-LLM threshold
+    NEGATIVE_KNOWLEDGE_RETROSPECTIVE_WINDOW_HOURS: int = 24
+
+    # P2-A (2026-05-16): Macro-narrative RAG nudge + daily extract task.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `macro-view`.
+    # Both flags default OFF (M9: token budget guard + P2-B/P2-D precedent).
+    # GUIDANCE flag gates the prompt injection inside node_hypothesis;
+    # EXTRACT flag gates the LLM-batch fill-in inside the daily extract
+    # task — seed UPSERTs run unconditionally (idempotent, no cost).
+    # Both flip-on validated independently after 1-2 days of seed-only run.
+    ENABLE_MACRO_NARRATIVE_GUIDANCE: bool = False    # prompt 注入
+    ENABLE_MACRO_NARRATIVE_EXTRACT: bool = False     # LLM 批生成
+    MACRO_NARRATIVE_FIELD_TOP_K: int = 3
+    MACRO_NARRATIVE_LLM_BATCH_SIZE: int = 20
+    MACRO_NARRATIVE_LLM_MAX_PER_DAY: int = 500
+    MACRO_NARRATIVE_CACHE_TTL_SECONDS: int = 600
+
+    # P2-C (2026-05-16): regime-aware threshold gating + style preset encoding.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skills vix-status /
+    # duan-analysis. All three flags default OFF (S1 + P2-A/B/D 惯例).
+    # regime_at_eval stamp 仅当 strategy.regime 被注入时触发 (任一 effect
+    # flag 为 True 即可,即 ENABLE_REGIME_AWARE_THRESHOLDS 或
+    # ENABLE_STYLE_PRESET_GUIDANCE 之一). 推荐启用顺序:
+    #   1. ENABLE_REGIME_INFERENCE=True 攒 1-2 天 docs/regime_state/<sh-date>.json
+    #   2. ENABLE_REGIME_AWARE_THRESHOLDS=True 让倍率生效 + 数据采集 stamp
+    #   3. ENABLE_STYLE_PRESET_GUIDANCE=True 注入投资哲学 block 进 hypothesis prompt
+    ENABLE_REGIME_INFERENCE: bool = False
+    ENABLE_REGIME_AWARE_THRESHOLDS: bool = False
+    ENABLE_STYLE_PRESET_GUIDANCE: bool = False
+    REGIME_INFERENCE_WINDOW_DAYS: int = 7
+    REGIME_EWMA_ALPHA: float = 0.3
+    REGIME_CACHE_TTL_SECONDS: int = 86400   # 24h
+
+    # P1-C (2026-05-15): alpha library health check thresholds + weights.
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `health-check`.
+    # Consumed by backend/services/alpha_health_service.py via
+    # ``from backend.config import settings`` (top-level import — never
+    # inside a function body, so monkeypatching for tests works).
+    STALE_YELLOW_DAYS: int = 7
+    STALE_ORANGE_DAYS: int = 14
+    STALE_RED_DAYS: int = 30
+    DRIFT_YELLOW_PCT: float = -10.0
+    DRIFT_ORANGE_PCT: float = -30.0
+    DRIFT_RED_PCT: float = -50.0
+    HEALTH_WEIGHT_STALE: float = 0.35
+    HEALTH_WEIGHT_DRIFT: float = 0.50
+    HEALTH_WEIGHT_ORPHAN: float = 0.15
+    HEALTH_SCORE_TRUNCATE_THRESHOLD: int = 70
+
+    # P1-C part 2 (2026-05-15): hypothesis structured triggers + LLM thesis
+    # scoring. 来源: docs/alphagbm_skills_research_2026-05-15.md skill
+    # `investment-thesis`. Consumed by
+    # backend/services/hypothesis_health_service.py via
+    # ``from backend.config import settings`` (top-level — never inside a
+    # function so monkeypatching works).
+    # Trigger thresholds — note pct values are NEGATIVE (drops):
+    TRIGGER_DROPPED_SHARPE_PCT: float = -30.0       # T1 orange threshold
+    TRIGGER_DROPPED_SHARPE_RED_PCT: float = -50.0   # T1 red threshold
+    TRIGGER_NOPASS_N_ROUNDS: int = 5                # T2 window (rounds)
+    TRIGGER_PASS_RATE_DROP_PCT: float = -50.0       # T3 threshold
+    TRIGGER_PASS_RATE_WINDOW: int = 5               # T3 window (each side)
+    TRIGGER_ATTR_HYPOTHESIS_WINDOW: int = 5         # T4 window (rounds)
+    TRIGGER_ATTR_HYPOTHESIS_SHARE: float = 0.6      # T4 dominance share
+    TRIGGER_STALE_SHARE: float = 0.5                # T5 stale-share threshold
+    TRIGGER_DETAIL_MAX_ENTRIES: int = 50            # trigger_detail FIFO cap
+
+    # LLM scoring controls
+    ENABLE_LLM_THESIS_SCORE_ON_PROMOTED: bool = True
+    ENABLE_LLM_THESIS_SCORE_ON_TRIGGER: bool = True
+    # Per-RUN(not per-day)token budget — counter resets every Celery beat
+    # invocation. Renamed in P2 review fix; the old "DAILY" name was misleading
+    # because nothing tracked spend across runs.
+    THESIS_SCORE_PER_RUN_TOKEN_BUDGET: int = 200_000
+    LLM_SCORE_RETRY_BACKOFF_HOURS: int = 4          # fallback failure retry
+    THESIS_SCORING_MAX_ROUNDS: int = 10             # prompt length cap
+    THESIS_SCORING_MAX_TRIGGER_HITS: int = 3
+    THESIS_SCORE_DUMP_THRESHOLD: int = 70           # JSON output truncate
+
     # PR7 — incremental persistence for T2/T3 tasks. By default, T2/T3 work-
     # flow batches all 8+ seeds before run_with_persistence writes Alpha rows
     # to DB (workflow.run() only returns at END). This means a 1-hour task
@@ -316,8 +559,17 @@ class Settings(BaseSettings):
     }
     
     # Multi-Objective Scoring Thresholds
-    SCORE_PASS_THRESHOLD: float = 0.8      # Composite score to pass
-    SCORE_OPTIMIZE_THRESHOLD: float = 0.3  # Score threshold for optimization queue
+    SCORE_PASS_THRESHOLD: float = 0.8      # Composite score to pass (legacy fallback)
+    SCORE_OPTIMIZE_THRESHOLD: float = 0.3  # Score threshold for optimization queue (legacy fallback)
+
+    # Tier-aware score thresholds (P0 #3). Defaults = global values above → zero behaviour change.
+    # Per-tier tuning is a follow-up; setting TIER{N}_SCORE_PASS in .env activates it.
+    TIER1_SCORE_PASS: float = 0.8
+    TIER1_SCORE_OPTIMIZE: float = 0.3
+    TIER2_SCORE_PASS: float = 0.8
+    TIER2_SCORE_OPTIMIZE: float = 0.3
+    TIER3_SCORE_PASS: float = 0.8
+    TIER3_SCORE_OPTIMIZE: float = 0.3
     
     # P0-3: Two-Stage Correlation Check
     CORR_CHECK_THRESHOLD: float = 0.5      # Preliminary score threshold to trigger correlation check
@@ -345,6 +597,18 @@ class Settings(BaseSettings):
     MEDIUM_TEST_PERIOD: str = "P1Y0M"
     FULL_TEST_PERIOD: str = "P2Y0M"
     MAX_FULL_EVALS_PER_BATCH: int = 10
+
+    # P0: Baseline + Nσ-residual screening (docs/alphagbm_skills_research_2026-05-15.md).
+    # Fits a (hypothesis-family × dataset × region) performance baseline and
+    # annotates each alpha with its residual sigma. Soft signal only — affects
+    # optimization priority, never the PASS/FAIL hard gates. Opt-in.
+    BASELINE_SCREEN_ENABLED: bool = False  # Opt-in feature
+    BASELINE_METRIC: str = "sharpe"        # in-memory metrics dict key to score
+    BASELINE_MIN_SAMPLES: int = 30         # min cell samples to trust a baseline
+    BASELINE_DISCOVERY_SIGMA: float = 2.0  # residual >= this -> DISCOVERY
+    BASELINE_BELOW_SIGMA: float = -1.0     # residual <= this -> BELOW
+    BASELINE_LOOKBACK_DAYS: int = 120      # history window for cell samples
+    BASELINE_SAMPLE_LIMIT: int = 2000      # cap on samples fetched per cell
     
     # Evolution Strategy Defaults
     DEFAULT_TEMPERATURE: float = 0.7
@@ -496,6 +760,24 @@ class Settings(BaseSettings):
         "tariff_2025": ["2025-04-01", "2025-05-31"],
     }
 
+    # P1-D: 参数扰动鲁棒性检验 (window perturbation).
+    # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `pnl-simulator`.
+    # opt-in (default OFF) — 默认不烧 BRAIN 配额。
+    # 集成位置: backend/agents/graph/nodes/evaluation.py graded-score 块之后、
+    # baseline-screen 块之前的独立内联段(M-9)。
+    # quota 配置:
+    #   ROBUSTNESS_SKIP_QUOTA_PCT 整轮 pre-check(today_total + redis_extra >= pct*limit
+    #   → skip 全部 alpha);默认 0.65 留 35% buffer。
+    #   ROBUSTNESS_HOTCHECK_QUOTA_PCT 单 alpha 完成后 hot-check;默认 0.85。
+    ENABLE_ROBUSTNESS_CHECK: bool = False
+    ROBUSTNESS_N_PERTURBATIONS: int = 4
+    ROBUSTNESS_MIN_RATIO: float = 0.7
+    MAX_ROBUSTNESS_PER_ROUND: int = 5
+    ROBUSTNESS_SKIP_QUOTA_PCT: float = 0.65
+    ROBUSTNESS_HOTCHECK_QUOTA_PCT: float = 0.85
+    ROBUSTNESS_PER_ALPHA_TIMEOUT_SEC: int = 600
+    ROBUSTNESS_SELECTION_STRATEGY: str = "first"
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
     
@@ -503,6 +785,31 @@ class Settings(BaseSettings):
         case_sensitive = True
         env_file = ".env"
         extra = "ignore"
+
+    # ----------------------------------------------------------------------
+    # Runtime feature-flag override hook (P3 — ops dashboard, 2026-05-16)
+    # ----------------------------------------------------------------------
+    # Intercepts attribute reads ONLY for names beginning with "ENABLE_". For
+    # those, if a runtime override exists in ``_flag_override_cache`` (set
+    # by FeatureFlagService.set + the cross-process refresher), return the
+    # override; otherwise fall through to the env/default value Pydantic
+    # already loaded. Every other attribute access — including all of
+    # Pydantic's own internal reads of ``__class__`` / ``__fields__`` /
+    # ``model_config`` etc — bypasses the hook entirely.
+    #
+    # Why ``object.__getattribute__`` and not ``super()``: Pydantic's
+    # BaseSettings has a custom ``__getattribute__`` that we don't want to
+    # call recursively from inside ours. The ``object.__getattribute__``
+    # call goes straight to CPython's resolution and avoids any chance of
+    # re-entry into this hook.
+    #
+    # Performance: the prefix check is a single startswith call (~50 ns).
+    # We do NOT do an isinstance check on `name` — Python guarantees attribute
+    # names are str, and validating it costs more than just running startswith.
+    def __getattribute__(self, name: str) -> Any:  # noqa: D401
+        if name.startswith("ENABLE_") and name in _flag_override_cache:
+            return _flag_override_cache[name]
+        return object.__getattribute__(self, name)
 
 
 settings = Settings()
