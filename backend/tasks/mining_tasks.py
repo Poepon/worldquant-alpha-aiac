@@ -208,12 +208,30 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             def _release_lock():
                 release_cascade_lock(cascade_lock_key, cascade_lock_token)
 
-            # Update status to RUNNING
-            await db.execute(
-                update(MiningTask)
-                .where(MiningTask.id == task_id)
-                .values(status="RUNNING")
-            )
+            # Update status to RUNNING + freeze BRAIN role snapshot
+            # (P3-Brain plan §8.3). 改 instance-level 写 + 单 commit 替代 bulk
+            # UPDATE,因为 bulk UPDATE 不会 flush instance-level task.config
+            # 改动。merge 模式保留 hypothesis_centric_variant 等 task_service
+            # create_task 时塞入的 config keys + 未来任何 task.config key。
+            # config JSONB 未用 MutableDict 包裹 — 必须整体重新赋值整个 dict
+            # object 才能触发 SQLAlchemy instrumented setter。
+            #
+            # 早 commit 是必须的:后续 _prefetch_round_isolated 用独立 session,
+            # 读不到本 session 的 uncommitted 修改(R4-C10)。
+            # _prefetch_round_isolated 路径只读 snapshot,绝不写入(R5-#1 防回归)。
+            task.status = "RUNNING"
+            if not isinstance(task.config, dict):
+                task.config = {}
+            if "brain_role_snapshot" not in task.config:
+                task.config = {
+                    **task.config,
+                    "brain_role_snapshot": {
+                        "brain_consultant_mode_at_start": settings.ENABLE_BRAIN_CONSULTANT_MODE,
+                        "effective_default_test_period": settings.effective_default_test_period,
+                        "effective_sharpe_submit_min": settings.effective_sharpe_submit_min,
+                        "effective_region_universes": dict(settings.effective_region_universes),
+                    },
+                }
             await db.commit()
 
             # Create or attach ExperimentRun

@@ -26,6 +26,7 @@ from sqlalchemy import select
 
 from backend.celery_app import celery_app
 from backend.tasks import run_async
+from backend.tasks._role_helpers import read_role_snapshot
 
 
 @celery_app.task(name="backend.tasks.refresh_kb_referenced_alphas")
@@ -119,8 +120,14 @@ async def _refresh_kb_referenced_alphas_async() -> Dict:
             alpha.metrics_snapshot_at = _dt.utcnow()
             refreshed += 1
 
-            # 3. Re-evaluate against tier-specific thresholds
-            t = get_tier_thresholds(alpha.factor_tier)
+            # 3. Re-evaluate against tier-specific thresholds.
+            # BRAIN role-switch (P3-Brain): read task-snapshot sharpe override
+            # so running tasks don't get re-judged by Consultant 1.58 mid-run.
+            _role_snapshot = await read_role_snapshot(alpha.task_id, db)
+            t = get_tier_thresholds(
+                alpha.factor_tier,
+                sharpe_submit_min_override=_role_snapshot.get("effective_sharpe_submit_min"),
+            )
             sharpe_ok = (alpha.is_sharpe or 0) >= t["sharpe_min"]
             fitness_ok = (alpha.is_fitness or 0) >= t["fitness_min"]
             turnover_ok = t["turnover_min"] <= (alpha.is_turnover or 0) <= t["turnover_max"]

@@ -367,7 +367,10 @@ class ExperimentConfig:
             field_scoring_enabled=overrides.get("field_scoring_enabled", False),
             diversity_filter_enabled=overrides.get("diversity_filter_enabled", False),
             multi_fidelity_enabled=settings.MULTI_FIDELITY_ENABLED,
-            sharpe_min=settings.SHARPE_MIN,
+            # P3-Brain: use effective value (Consultant max(SHARPE_MIN, 1.58) / User SHARPE_MIN).
+            # ExperimentRecord 是记录字段,不直接参与门控 — running task 内的实际门控
+            # 由 MiningState.effective_sharpe_submit_min 控制(plan §5.3)。
+            sharpe_min=settings.effective_sharpe_submit_min,
             fitness_min=settings.FITNESS_MIN,
             turnover_max=settings.TURNOVER_MAX,
             corr_check_threshold=settings.CORR_CHECK_THRESHOLD,

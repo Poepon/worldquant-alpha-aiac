@@ -1,9 +1,13 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
+  Alert,
   Button,
   Card,
+  Checkbox,
+  Descriptions,
   Drawer,
   Empty,
+  Modal,
   Popconfirm,
   Space,
   Spin,
@@ -19,12 +23,13 @@ import {
   HistoryOutlined,
   InfoCircleOutlined,
   ReloadOutlined,
+  SwapOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
 
 import api from '../../services/api'
 
-const { Title, Text } = Typography
+const { Title, Text, Paragraph } = Typography
 
 // Colors for the "source" badge — mirrors what the docs/ops_dashboard_guide
 // will recommend so operators learn one color scheme across all /ops/* pages.
@@ -36,7 +41,185 @@ const SOURCE_TAG_COLORS = {
 
 // Order the groups appear top→bottom in the page. Anything not in this
 // list falls back to alphabetic order.
-const GROUP_ORDER = ['P0', 'P1', 'P2-A', 'P2-B', 'P2-C', 'P2-D']
+const GROUP_ORDER = ['P0', 'P1', 'P2-A', 'P2-B', 'P2-C', 'P2-D', 'P3-Brain']
+
+/**
+ * OpsBrainRoleCard (P3-Brain — 2026-05-16)
+ *
+ * Manual switch for BRAIN Consultant mode. Backend at /ops/brain/* — only
+ * activates after user confirms they received BRAIN upgrade email.
+ * Direction-C semantics (see plan §14):
+ *   - Data-consistency capabilities (Sharpe / testPeriod): frozen per task snapshot
+ *   - Endpoint-selection capabilities (multi-sim / PROD-corr): global flag, immediate
+ * So switching mid-run is safe for in-flight tasks' Sharpe/testPeriod but
+ * immediately stops them from calling Consultant-only endpoints.
+ */
+function OpsBrainRoleCard() {
+  const [state, setState] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [switching, setSwitching] = useState(false)
+  const [modalOpen, setModalOpen] = useState(false)
+  const [acknowledged, setAcknowledged] = useState(false)
+
+  const fetchState = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await api.getBrainRoleState()
+      setState(data)
+    } catch (e) {
+      message.error(`加载 BRAIN role state 失败:${e?.response?.data?.detail || e.message}`)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchState()
+  }, [fetchState])
+
+  const isConsultant = state?.mode === 'CONSULTANT'
+
+  const openSwitchModal = () => {
+    setAcknowledged(false)
+    setModalOpen(true)
+  }
+
+  const handleConfirmSwitch = async () => {
+    setSwitching(true)
+    try {
+      const fn = isConsultant ? api.deactivateConsultant : api.activateConsultant
+      const result = await fn()
+      message.success(
+        isConsultant
+          ? '已切回 USER 模式(running task 的 Sharpe/testPeriod 不变;multi-sim/PROD-corr 立即降级)'
+          : `已切到 CONSULTANT 模式${result?.sync_enqueued ? '(后台全球数据同步已触发)' : ''}`,
+      )
+      setModalOpen(false)
+      await fetchState()
+    } catch (e) {
+      message.error(`切换失败:${e?.response?.data?.detail || e.message}`)
+    } finally {
+      setSwitching(false)
+    }
+  }
+
+  return (
+    <Card
+      size="small"
+      style={{ marginTop: 16 }}
+      title={
+        <Space>
+          <SwapOutlined />
+          BRAIN 模式
+          {state && (
+            <Tag color={isConsultant ? 'gold' : 'green'}>
+              {state.mode}
+            </Tag>
+          )}
+        </Space>
+      }
+      extra={
+        <Space>
+          <Button onClick={fetchState} loading={loading} size="small">
+            刷新
+          </Button>
+          {state && (
+            <Button
+              type={isConsultant ? 'default' : 'primary'}
+              onClick={openSwitchModal}
+              size="small"
+            >
+              {isConsultant ? '切回 USER 模式' : '切换到 CONSULTANT 模式'}
+            </Button>
+          )}
+        </Space>
+      }
+    >
+      {loading && !state ? (
+        <Spin />
+      ) : state ? (
+        <>
+          <Descriptions column={2} size="small" bordered>
+            <Descriptions.Item label="上次切换">
+              {state.last_switched_at
+                ? `${new Date(state.last_switched_at).toLocaleString()} (by ${state.last_switched_by || '—'})`
+                : '从未'}
+            </Descriptions.Item>
+            <Descriptions.Item label="正在运行 task">
+              {state.running_tasks_count} 个(快照已冻结,不受切换影响)
+            </Descriptions.Item>
+            <Descriptions.Item label="effective Sharpe 提交门槛">
+              {state.effective_sharpe_submit_min}
+            </Descriptions.Item>
+            <Descriptions.Item label="effective testPeriod">
+              {state.effective_default_test_period}
+            </Descriptions.Item>
+            <Descriptions.Item label="effective regions" span={2}>
+              <Space wrap>
+                {Object.entries(state.effective_region_universes).map(([r, u]) => (
+                  <Tag key={r}>{`${r}/${u}`}</Tag>
+                ))}
+              </Space>
+            </Descriptions.Item>
+          </Descriptions>
+        </>
+      ) : (
+        <Empty description="无 state 数据" />
+      )}
+
+      <Modal
+        title={isConsultant ? '切回 USER 模式' : '切换到 CONSULTANT 模式'}
+        open={modalOpen}
+        onCancel={() => setModalOpen(false)}
+        onOk={handleConfirmSwitch}
+        okButtonProps={{ disabled: !acknowledged, loading: switching }}
+        okText={isConsultant ? '确认切回 USER' : '确认切换到 CONSULTANT'}
+        cancelText="取消"
+        width={640}
+      >
+        {!isConsultant ? (
+          <>
+            <Alert
+              type="warning"
+              showIcon
+              message="请确认你已收到 BRAIN 平台 Consultant 升级邮件"
+              style={{ marginBottom: 12 }}
+            />
+            <Paragraph>切换到 CONSULTANT 模式后:</Paragraph>
+            <ul>
+              <li>立即触发后台 5 region 同步(USA/CHN/HKG/JPN/EUR,预计 10-30 分钟)</li>
+              <li>新发起 task 使用 testPeriod=P0Y、Sharpe 提交门槛抬到 1.58</li>
+              <li>当前 {state?.running_tasks_count ?? 0} 个 running task <b>不受影响</b>(读启动时冻结的配置)</li>
+              <li><b>安全网</b>:若 BRAIN 在下次 submit_alpha 时返回 PROD-corr 403(账号实际未授权),系统会<b>自动切回 USER</b> 并写 audit 日志</li>
+            </ul>
+          </>
+        ) : (
+          <>
+            <Alert
+              type="info"
+              showIcon
+              message="切回 USER 模式 — 应用层立即停止调用 Consultant-only BRAIN endpoint"
+              style={{ marginBottom: 12 }}
+            />
+            <Paragraph>切回 USER 模式后:</Paragraph>
+            <ul>
+              <li>已在跑的 Consultant task 的 <b>Sharpe 门槛、testPeriod 设置</b> 仍按启动时配置(数据一致性保留)</li>
+              <li><b>Multi-simulation 立即降级为 single-sim 循环</b>(吞吐率下降 ~10-30x;若 task 还有大量 alpha 待 sim,evaluate 时间会显著拉长)</li>
+              <li><b>PROD-correlation 第 3 门 gate 立即停跑</b>;该 task 后续提交的 alpha 只过 self_corr precheck — BRAIN 服务端可能在 submit 时拒</li>
+              <li>如需完全停止 task,在任务详情页用 "intervene" 操作收尾(/api/v1/tasks/&#123;id&#125;/intervene → status=COMPLETED)</li>
+            </ul>
+          </>
+        )}
+        <Checkbox
+          checked={acknowledged}
+          onChange={(e) => setAcknowledged(e.target.checked)}
+        >
+          我已阅读并理解上述变化
+        </Checkbox>
+      </Modal>
+    </Card>
+  )
+}
 
 /**
  * Feature Flag Console (P3 — 2026-05-16)
@@ -278,6 +461,9 @@ export default function FeatureFlagsConsole() {
         翻转开关后写入 DB + 当前进程立即生效;其他 worker 进程在 60s 内同步,或点
         "全量刷新" 强制本进程刷新。重置 = 清除 override 回落到 env 默认。
       </Text>
+
+      {/* P3-Brain — BRAIN Consultant mode 手动切换卡片(在 flag table 之前) */}
+      <OpsBrainRoleCard />
 
       {loading && flags.length === 0 ? (
         <div style={{ textAlign: 'center', padding: 40 }}>

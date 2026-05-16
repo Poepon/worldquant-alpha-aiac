@@ -399,6 +399,22 @@ const api = {
     return data
   },
 
+  // BRAIN role switch (P3-Brain — manual Consultant mode toggle)
+  getBrainRoleState: async () => {
+    const { data } = await client.get('/ops/brain/role-state')
+    return data
+  },
+
+  activateConsultant: async () => {
+    const { data } = await client.post('/ops/brain/activate-consultant')
+    return data
+  },
+
+  deactivateConsultant: async () => {
+    const { data } = await client.post('/ops/brain/deactivate-consultant')
+    return data
+  },
+
   // Ops task triggers
   triggerOpsTask: async (name, kwargs = null) => {
     const { data } = await client.post('/ops/tasks/trigger', { name, kwargs })

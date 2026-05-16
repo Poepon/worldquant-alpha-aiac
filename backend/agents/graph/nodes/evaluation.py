@@ -1033,6 +1033,9 @@ async def node_simulate(
                 tier=getattr(state, "factor_tier", None),
                 region=state.region,
                 universe=state.universe,
+                # P3-Brain: 从 task-startup snapshot 传 test_period(plan §8.4)
+                # 避免 Consultant 切换中途 simulate 不同 alpha 用不同 test_period。
+                test_period=getattr(state, "effective_default_test_period", None),
             )
             smart_settings_per_idx[local_i] = smart
             smart_reasons_per_idx[local_i] = settings_reason(
@@ -1298,7 +1301,13 @@ async def node_evaluate(
     # globals via the tier=None fallback inside tier_thresholds.
     from backend.agents.graph.tier_thresholds import get_tier_thresholds
 
-    tier_cfg = get_tier_thresholds(getattr(state, "factor_tier", None))
+    # BRAIN role-switch (P3-Brain): pass task-startup snapshot to keep running
+    # tasks consistent across Consultant flag toggles (avoids re-judging
+    # mid-round alphas with new sharpe bar).
+    tier_cfg = get_tier_thresholds(
+        getattr(state, "factor_tier", None),
+        sharpe_submit_min_override=getattr(state, "effective_sharpe_submit_min", None),
+    )
 
     # P2-C (2026-05-16): regime-aware threshold adjustment. The mining_agent
     # injection block puts ``regime`` + ``style_preset`` onto strategy BEFORE
@@ -1593,6 +1602,9 @@ async def node_evaluate(
                             tier=tier_cfg["tier"],
                             region=state.region,
                             universe=state.universe,
+                            # P3-Brain: flip-retry 同 round 内必须保持 test_period
+                            # 一致(否则 sharpe 不可比)。从 task snapshot 传。
+                            test_period=getattr(state, "effective_default_test_period", None),
                         )
                         _flip_sim_settings = dict(smart)
                         sim_result = await brain.simulate_alpha(

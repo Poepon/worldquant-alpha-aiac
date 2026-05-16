@@ -165,6 +165,23 @@ class Settings(BaseSettings):
     FITNESS_MIN: float = 1.0
     MAX_CORRELATION: float = 0.7
 
+    # ----- BRAIN Consultant Mode (P3-Brain — manual role switch) -----
+    # 走 ENABLE_BRAIN_CONSULTANT_MODE bool 复用现有 __getattribute__ hook
+    # (line 809-812)。不引入 BRAIN_ROLE 业务字段(被 SUPPORTED_FLAGS 哲学禁止,
+    # 见 feature_flag_service.py:25)。手动从 ops dashboard 翻 — 收到 BRAIN
+    # 升级邮件后由用户翻一次,系统不做自动探测。
+    ENABLE_BRAIN_CONSULTANT_MODE: bool = False
+    CONSULTANT_SHARPE_SUBMIT_MIN: float = 1.58
+    CONSULTANT_DEFAULT_TEST_PERIOD: str = "P0Y"
+    # phase 1 已验证 region+universe;phase 2 TWN/KOR/GLB/AMR 在后续 PR 实测后加。
+    CONSULTANT_REGION_UNIVERSES: dict = {
+        "USA": "TOP3000",
+        "CHN": "TOP2000A",
+        "HKG": "TOP500",
+        "JPN": "TOP1600",
+        "EUR": "TOP2500",
+    }
+
     # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
     # T1: 裸 ts_op 信号；2026-05-07 P0 收紧到 BRAIN 提交 gate
     # 旧值 0.8/0.5 是 探索 bar — batch 276-283 产生 8 条 PASS 全部 can_submit=False
@@ -780,7 +797,41 @@ class Settings(BaseSettings):
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-    
+
+    # ----------------------------------------------------------------------
+    # BRAIN Consultant Mode — effective_* synthesizers (P3-Brain)
+    # ----------------------------------------------------------------------
+    # 合成 ENABLE_BRAIN_CONSULTANT_MODE 与各 *_MIN/*_PERIOD/*_REGION 字段。
+    # 只读 — caller 拿到的是 "当下" 值。Task 启动时把这些值冻结到
+    # MiningTask.config["brain_role_snapshot"] 透传到 MiningState,后续
+    # round 内读快照而非 settings(避免 running task 中途切换被新阈值重判)。
+    #
+    # IMPORTANT: 不要把任何 effective_* 名注册进 FeatureFlagService.SUPPORTED_FLAGS。
+    # _env_default() 用 object.__getattribute__ 取 env 默认值,会触发 property
+    # 描述符执行 — 对 effective_* 返回的是合成值而非 env default,语义不对。
+    # effective_* 永远只读、永远是合成器,不是可翻的开关。
+    @property
+    def effective_default_test_period(self) -> str:
+        """sim 默认 test_period — Consultant=P0Y / User=P2Y0M。"""
+        if self.ENABLE_BRAIN_CONSULTANT_MODE:
+            return self.CONSULTANT_DEFAULT_TEST_PERIOD
+        return self.FULL_TEST_PERIOD                          # "P2Y0M" — line 598
+
+    @property
+    def effective_sharpe_submit_min(self) -> float:
+        """提交 sharpe 门槛 — Consultant 取 max(SHARPE_MIN, 1.58)。"""
+        if self.ENABLE_BRAIN_CONSULTANT_MODE:
+            return max(self.SHARPE_MIN, self.CONSULTANT_SHARPE_SUBMIT_MIN)
+        return self.SHARPE_MIN
+
+    @property
+    def effective_region_universes(self) -> dict:
+        """sync_datasets 遍历的 (region, universe) 字典 — Consultant phase1 全球 5
+        region,User 只 USA。"""
+        if self.ENABLE_BRAIN_CONSULTANT_MODE:
+            return dict(self.CONSULTANT_REGION_UNIVERSES)
+        return {"USA": "TOP3000"}
+
     class Config:
         case_sensitive = True
         env_file = ".env"

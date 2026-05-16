@@ -448,13 +448,62 @@ class MockBrainAdapter:
         alpha_id: str,
         check_type: str = "PROD",
     ) -> Dict[str, Any]:
-        """Return mock correlation data."""
+        """Mock returning {status_code, data} shape (P3-Brain plan §6.1).
+
+        Configurable via set_correlation_response(); defaults to 200 + benign max=0.3.
+        """
         self._call_history.append({
             "method": "check_correlation",
             "alpha_id": alpha_id,
             "check_type": check_type,
         })
-        return {"correlations": [], "max_correlation": 0.3}
+        return getattr(
+            self,
+            "_check_correlation_response",
+            {"status_code": 200, "data": {"max": 0.3, "min": -0.1, "records": []}},
+        )
+
+    async def check_correlation_with_poll(
+        self,
+        alpha_id: str,
+        check_type: str = "PROD",
+        *,
+        max_polls: int = 3,
+        poll_interval: float = 5.0,
+    ) -> Dict[str, Any]:
+        """Mock poll wrapper. Default OK; configurable via set_correlation_response()."""
+        self._call_history.append({
+            "method": "check_correlation_with_poll",
+            "alpha_id": alpha_id,
+            "check_type": check_type,
+        })
+        return getattr(
+            self,
+            "_check_correlation_poll_response",
+            {"status": "OK", "data": {"max": 0.3}},
+        )
+
+    def set_correlation_response(
+        self,
+        *,
+        status: str = "OK",
+        data: Optional[Dict[str, Any]] = None,
+        status_code: int = 200,
+    ) -> None:
+        """Test helper — control what check_correlation* returns.
+
+        status: "OK" | "PENDING" | "AUTH_DENIED" | "ERROR"
+        data: payload dict (only relevant for OK status)
+        status_code: HTTP status_code for plain check_correlation() raw shape
+        """
+        self._check_correlation_response = {
+            "status_code": status_code,
+            "data": data or {},
+        }
+        if status == "OK":
+            self._check_correlation_poll_response = {"status": "OK", "data": data or {"max": 0.3}}
+        else:
+            self._check_correlation_poll_response = {"status": status}
 
     async def get_before_and_after_performance(
         self,

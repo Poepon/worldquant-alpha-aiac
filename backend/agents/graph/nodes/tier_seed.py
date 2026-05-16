@@ -147,7 +147,12 @@ async def node_tier_seed_load(
     # 3. Re-evaluate quality_status against tier-specific thresholds.
     # We use predecessor tier's thresholds — the seed's PASS bar is judged by
     # what tier it BELONGS to, not the tier we're wrapping into.
-    prior_thresholds = get_tier_thresholds(prior_tier)
+    # BRAIN role-switch (P3-Brain): use task-startup snapshot to keep running
+    # tasks consistent across Consultant flag toggles.
+    prior_thresholds = get_tier_thresholds(
+        prior_tier,
+        sharpe_submit_min_override=getattr(state, "effective_sharpe_submit_min", None),
+    )
     survivors: List[Alpha] = []
     demoted = 0
     for alpha in rows:

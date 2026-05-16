@@ -9,7 +9,7 @@ Contains tasks for syncing data from BRAIN platform:
 """
 
 from datetime import datetime, timezone, timedelta
-from typing import Dict
+from typing import Dict, Optional
 from sqlalchemy import select, func, text
 from loguru import logger
 
@@ -19,6 +19,7 @@ from backend.adapters.brain_adapter import BrainAdapter
 from backend.models import DatasetMetadata, DataField, Operator, Alpha
 from backend.services.correlation_service import CorrelationService
 from backend.tasks import run_async
+from backend.tasks._role_helpers import read_role_snapshot
 
 
 @celery_app.task(name="backend.tasks.refresh_portfolio_skeletons_all")
@@ -207,7 +208,13 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
 
             # Re-evaluate against tier-specific thresholds; demote PASS rows
             # whose metrics drifted below the bar so KB stays clean.
-            t = get_tier_thresholds(alpha.factor_tier)
+            # BRAIN role-switch (P3-Brain): read task-snapshot sharpe override
+            # so running tasks don't get re-judged by Consultant 1.58 mid-run.
+            _role_snapshot = await read_role_snapshot(alpha.task_id, db)
+            t = get_tier_thresholds(
+                alpha.factor_tier,
+                sharpe_submit_min_override=_role_snapshot.get("effective_sharpe_submit_min"),
+            )
             sharpe_ok = (alpha.is_sharpe or 0) >= t["sharpe_min"]
             fitness_ok = (alpha.is_fitness or 0) >= t["fitness_min"]
             turnover_ok = (
@@ -274,14 +281,25 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
 
 
 @celery_app.task(name="backend.tasks.sync_datasets")
-def sync_datasets():
+def sync_datasets(regions: Optional[list] = None, **_extra_kwargs):
     """
-    Sync dataset metadata from BRAIN (scheduled).
-    
-    Syncs datasets for all major regions.
+    Sync dataset metadata from BRAIN (scheduled or manual).
+
+    Args:
+        regions: list of region codes to sync. If None, walks
+                 settings.effective_region_universes (User=USA only,
+                 Consultant=phase-1 global 5 regions).
+        **_extra_kwargs: rolling-upgrade tolerance — old beat schedule may
+                         pass no args, new caller may pass regions=[...] AND
+                         legacy worker shouldn't TypeError on unknown kwargs.
+
+    BRAIN role-switch (P3-Brain plan §7): each region uses its own universe
+    (USA=TOP3000, HKG=TOP500, JPN=TOP1600, etc.) — multi-region sync requires
+    per-region universe, not a single DEFAULT_UNIVERSE. Per-region try/except
+    so a 4xx on one region doesn't kill the rest.
     """
-    logger.info("Syncing datasets from BRAIN...")
-    
+    logger.info(f"Syncing datasets from BRAIN... regions={regions}")
+
     async def _run():
         # V-27.3: the beat sync was INSERT-only — it skipped already-existing
         # rows (never refreshing field_count / value_score / pyramid_multiplier
@@ -291,11 +309,21 @@ def sync_datasets():
         # to mining — the daily beat was effectively a no-op. Now mirrors the
         # manual sync_datasets_from_brain: per (region, universe), UPDATE
         # existing rows + INSERT new ones with the full field set.
+        #
+        # P3-Brain plan §7: regions kwarg优先 (FastAPI 进程 resolve 后传给
+        # worker,绕开 worker 进程 60s flag cache 滞后);kwarg=None 时从
+        # settings.effective_region_universes 读(beat schedule 路径)。
         from backend.config import settings as _settings
-        universe = getattr(_settings, "DEFAULT_UNIVERSE", "TOP3000")
+        if regions:
+            # Caller specified regions explicitly — look up universe per region.
+            _region_universes = {
+                r: _settings.effective_region_universes.get(r, "TOP3000")
+                for r in regions
+            }
+        else:
+            _region_universes = _settings.effective_region_universes
         async with AsyncSessionLocal() as db:
             async with BrainAdapter() as brain:
-                regions = ["USA", "CHN", "ASI", "EUR"]
                 new_count = 0
                 updated_count = 0
                 # V-27.3: collect newly-inserted (dataset, region) pairs so
@@ -306,8 +334,14 @@ def sync_datasets():
                 # can't use it ("visible but empty shell").
                 field_sync_targets: list = []
 
-                for region in regions:
-                    datasets = await brain.get_datasets(region=region, universe=universe)
+                for region, universe in _region_universes.items():
+                    try:
+                        datasets = await brain.get_datasets(region=region, universe=universe)
+                    except Exception as ex:
+                        logger.warning(
+                            f"[sync_datasets] region={region}/{universe} failed: {ex} — continue"
+                        )
+                        continue
 
                     for ds in datasets:
                         result = await db.execute(
@@ -358,7 +392,11 @@ def sync_datasets():
                                 coverage=ds.get("coverage"),
                             ))
                             new_count += 1
-                            field_sync_targets.append((ds.get("id"), region))
+                            # P3-Brain: capture per-(dataset, region, universe) tuple
+                            # — multi-region sync uses different universes (HKG=TOP500
+                            # etc.), can't rely on closure `universe` (would be the
+                            # last region's universe by enqueue time).
+                            field_sync_targets.append((ds.get("id"), region, universe))
 
                 await db.commit()
 
@@ -366,16 +404,16 @@ def sync_datasets():
                 # (existing ones already have DataField rows from a prior
                 # sync). Bounded by new_count so the beat doesn't fan out a
                 # field-sync task per dataset every day.
-                for _dsid, _reg in field_sync_targets:
+                for _dsid, _reg, _uni in field_sync_targets:
                     sync_fields_from_brain.delay(
                         dataset_id=_dsid,
                         region=_reg,
-                        universe=universe,
+                        universe=_uni,
                         delay=1,
                     )
 
                 logger.info(
-                    f"Synced datasets (universe={universe}): "
+                    f"Synced datasets ({len(_region_universes)} regions): "
                     f"{new_count} new, {updated_count} updated; "
                     f"{len(field_sync_targets)} field syncs queued"
                 )

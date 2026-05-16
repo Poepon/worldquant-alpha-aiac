@@ -80,7 +80,7 @@ def smart_simulation_settings(
     tier: Optional[int] = None,
     region: str = "USA",
     universe: str = "TOP3000",
-    test_period: str = "P2Y0M",
+    test_period: Optional[str] = None,
     field_category: Optional[str] = None,
     overrides: Optional[Dict] = None,
 ) -> Dict:
@@ -93,6 +93,11 @@ def smart_simulation_settings(
       3. Field category hint
       4. Caller overrides
 
+    test_period: None sentinel → use settings.effective_default_test_period
+    (Consultant=P0Y / User=P2Y0M). Callers with task context should pass
+    state.effective_default_test_period explicitly to keep running tasks
+    consistent across BRAIN role switches (plan §8.4).
+
     Returns a dict with keys:
         region, universe, delay, decay, neutralization, truncation, test_period
 
@@ -100,6 +105,9 @@ def smart_simulation_settings(
         await brain.simulate_alpha(expression=expr,
                                     **smart_simulation_settings(expr, tier=2))
     """
+    if test_period is None:
+        from backend.config import settings
+        test_period = settings.effective_default_test_period
     s = _tier_defaults(tier)
     s.update({"region": region, "universe": universe, "test_period": test_period})
 

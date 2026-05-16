@@ -346,6 +346,11 @@ class MiningWorkflow:
         # Initialize state
         configurable = (config or {}).get("configurable", {}) if config else {}
         available_dataset_pool = configurable.get("available_dataset_pool", []) or []
+        # BRAIN Consultant 模式 task-snapshot 透传(P3-Brain plan §8.3):
+        # task.config["brain_role_snapshot"] 由 mining_tasks.run_mining_task
+        # 在 task 启动时写入。round 内读这里的快照而非 settings,保证
+        # Consultant 切换不影响 running task(R2-M3/M4 + 方向 C)。
+        _role_snapshot = (task.config or {}).get("brain_role_snapshot") or {} if isinstance(task.config, dict) else {}
         initial_state = MiningState(
             task_id=task.id,
             region=task.region,
@@ -356,6 +361,10 @@ class MiningWorkflow:
             num_alphas_target=num_alphas,
             factor_tier=factor_tier,
             available_dataset_pool=available_dataset_pool,
+            brain_consultant_mode_at_start=_role_snapshot.get("brain_consultant_mode_at_start"),
+            effective_default_test_period=_role_snapshot.get("effective_default_test_period"),
+            effective_sharpe_submit_min=_role_snapshot.get("effective_sharpe_submit_min"),
+            effective_region_universes_at_start=_role_snapshot.get("effective_region_universes"),
         )
         
         # Compile and run

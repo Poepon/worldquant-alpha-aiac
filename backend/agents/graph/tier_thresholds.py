@@ -8,6 +8,15 @@ Each factor tier (T1/T2/T3) has its own PASS bar reflecting its role in the pipe
 
 evaluation.node_evaluate calls get_tier_thresholds(state.factor_tier) to obtain the dict
 and routes concentrated_ok / self_corr_ok per tier rules.
+
+BRAIN role-switch (P3-Brain, 2026-05-16) — tier_thresholds 控制 PROVISIONAL 内部分流
+(T1=quality / T2=throughput / T3=submission-ready);真正 submission gate 走
+fallback path (tier=None) 的 sharpe_min。优先取 caller 传入的 sharpe_submit_min_override
+(来自 MiningTask.config["brain_role_snapshot"] 的 task 启动快照),fallback 到
+settings.effective_sharpe_submit_min。这样 running task 在 Consultant 切换前后
+依然按启动时的 sharpe 门槛走,避免中途切换破坏 round 内一致性(R2-M3/M4)。
+T1/T2/T3 内部分流 sharpe 不受 override 影响 — 它们是 PROVISIONAL 标签,不是
+submission gate。新增 TIER4_* 等字段时也不应参与 effective_sharpe_submit_min。
 """
 
 from typing import Dict, Optional
@@ -15,12 +24,22 @@ from typing import Dict, Optional
 from backend.config import settings
 
 
-def get_tier_thresholds(tier: Optional[int]) -> Dict:
+def get_tier_thresholds(
+    tier: Optional[int],
+    *,
+    sharpe_submit_min_override: Optional[float] = None,
+) -> Dict:
     """Return PASS + PASS_PROVISIONAL thresholds for the given tier.
 
     tier=None or any value not in {1, 2, 3} falls back to legacy global thresholds
     (SHARPE_MIN / FITNESS_MIN / TURNOVER_MAX / MAX_CORRELATION). This keeps the
     classic AUTONOMOUS path working when ENABLE_FACTOR_TIERING is False.
+
+    sharpe_submit_min_override: when not None, overrides the fallback-path sharpe_min
+    (T1/T2/T3 internal labels unaffected). Callers with task context (state.effective_*
+    or task.config["brain_role_snapshot"]) pass this to keep running tasks consistent
+    across BRAIN role switches. Callers without task context (e.g. dry-run scripts)
+    leave as None → walks settings.effective_sharpe_submit_min.
     """
     if tier == 1:
         return {
@@ -90,10 +109,17 @@ def get_tier_thresholds(tier: Optional[int]) -> Dict:
                 "subuniv_dynamic_factor": 0.7,  # PROVISIONAL: BRAIN limit × 0.7
             },
         }
-    # tier=None / 0 / unknown → fall back to legacy global thresholds
+    # tier=None / 0 / unknown → fall back to legacy global thresholds.
+    # Effective sharpe submission gate:优先 task 启动快照(避免中途切换),
+    # fallback settings.effective_sharpe_submit_min(当前全局)。
+    _sharpe_min = (
+        sharpe_submit_min_override
+        if sharpe_submit_min_override is not None
+        else settings.effective_sharpe_submit_min
+    )
     return {
         "tier": None,
-        "sharpe_min": settings.SHARPE_MIN,
+        "sharpe_min": _sharpe_min,
         "fitness_min": settings.FITNESS_MIN,
         "turnover_min": 0.01,
         "turnover_max": settings.TURNOVER_MAX,

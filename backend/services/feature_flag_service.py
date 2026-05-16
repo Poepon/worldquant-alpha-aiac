@@ -125,6 +125,13 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="P2-D",
         description="hypothesis prompt 加近期 top pitfalls 警告段",
     ),
+    # --- P3-Brain 角色切换 ---
+    "ENABLE_BRAIN_CONSULTANT_MODE": FlagSpec(
+        name="ENABLE_BRAIN_CONSULTANT_MODE",
+        flag_type="bool",
+        group="P3-Brain",
+        description="BRAIN Consultant 模式 — 解锁 multi-sim/PROD-corr/全球 region/Sharpe≥1.58。仅在收到 BRAIN 升级邮件后翻。",
+    ),
 }
 
 
@@ -262,6 +269,49 @@ class FeatureFlagService(BaseService):
                 source="env" if env_default is not None else "default",
             ))
         return out
+
+    async def get_one(self, name: str) -> Optional[FlagState]:
+        """Return a single flag's FlagState (env_default + override + updated_at/by).
+
+        Used by /ops/brain/role-state to fetch the last-switched timestamp for
+        ENABLE_BRAIN_CONSULTANT_MODE. O(1) — direct row query, no full table scan.
+        Returns None when name is not in SUPPORTED_FLAGS.
+        """
+        spec = SUPPORTED_FLAGS.get(name)
+        if spec is None:
+            return None
+        from backend.config import settings  # lazy
+        env_default = object.__getattribute__(settings, name) if hasattr(settings, name) else None
+        row = (await self.db.execute(
+            select(FeatureFlagOverride).where(FeatureFlagOverride.flag_name == name)
+        )).scalar_one_or_none()
+        if row is None:
+            return FlagState(
+                name=name, flag_type=spec.flag_type, group=spec.group,
+                description=spec.description, env_default=env_default,
+                override_value=None, effective_value=env_default,
+                source="env" if env_default is not None else "default",
+            )
+        try:
+            decoded = _decode_value(row.flag_value, spec.flag_type)
+        except Exception as ex:
+            logger.warning(
+                "[feature_flag] get_one decode failed for %s — falling back to env default: %s",
+                name, ex,
+            )
+            return FlagState(
+                name=name, flag_type=spec.flag_type, group=spec.group,
+                description=spec.description, env_default=env_default,
+                override_value=None, effective_value=env_default,
+                source="env" if env_default is not None else "default",
+            )
+        return FlagState(
+            name=name, flag_type=spec.flag_type, group=spec.group,
+            description=spec.description, env_default=env_default,
+            override_value=decoded, effective_value=decoded,
+            source="runtime-override",
+            updated_at=row.updated_at, updated_by=row.updated_by, note=row.note,
+        )
 
     async def load_overrides_into_cache(self) -> Dict[str, Any]:
         """Pull every override row, decode, and replace ``_flag_override_cache``.

@@ -256,6 +256,21 @@ class MiningState(BaseModel):
     current_seed: Optional[Dict] = None
 
     # -------------------------------------------------------------------------
+    # BRAIN Consultant mode snapshot (P3-Brain, 2026-05-16)
+    # -------------------------------------------------------------------------
+    # 从 MiningTask.config["brain_role_snapshot"] 透传 — task 启动时冻结当下
+    # settings.effective_*,后续 round 内读快照而非 settings,保证 Consultant
+    # 切换不影响 running task(数据一致性:Sharpe/testPeriod;endpoint 选择
+    # 类如 multi-sim/PROD-corr 仍读全局 flag,方向 C — 见 plan §14)。
+    # 全 Optional + default=None,兼容 30+ 现有测试构造点(不传也不破)+
+    # 对未来启用 LangGraph checkpoint 反序列化友好(workflow.py:131 checkpointer
+    # 目前未启用)。这些字段只在 task 启动时写一次,后续 round 只读 getattr。
+    brain_consultant_mode_at_start: Optional[bool] = None
+    effective_default_test_period: Optional[str] = None
+    effective_sharpe_submit_min: Optional[float] = None
+    effective_region_universes_at_start: Optional[Dict[str, str]] = None
+
+    # -------------------------------------------------------------------------
     # Control Flags
     # -------------------------------------------------------------------------
     should_stop: bool = False

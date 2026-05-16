@@ -632,6 +632,23 @@ class BrainAdapter:
         Falls back to bounded-concurrency single simulations when the account
         lacks Consultant-level multi-simulation permission (BRAIN returns 403).
         """
+        # P3-Brain §14.2:严格能力隔离 — User 模式不主动调 Consultant multi-sim
+        # endpoint。现有 brain:no_multisim Redis TTL latch + 403 fallback 仍保留
+        # 作为防御纵深(Consultant 突然被 BRAIN 撤权时),但默认路径应用层主动
+        # 隔离,不让 User 状态下的 POST /simulations list payload 抵达 BRAIN。
+        #
+        # 注:此处违反"adapter 不感知业务 mode"分层 — 工程取舍。理由:
+        #   (a) 1 处入口 shortcut < 改 3 个调用方 (evaluation:1061/1101 + mining_service:145)
+        #   (b) brain_adapter.py:31 已 import settings(连接参数),非首例
+        #   (c) legacy mining_service.py:145 路径无 state 上下文,无法走 task
+        #       快照路线 — 入口 shortcut 是唯一干净选择
+        # 未来若加第二个 endpoint-level mode 字段,应考虑提升到 protocols 层。
+        if not settings.ENABLE_BRAIN_CONSULTANT_MODE:
+            return await self._simulate_via_single(
+                expressions, region, universe, delay, decay,
+                neutralization, truncation, test_period,
+            )
+
         # V-27.94/118: cross-process multi-sim latch via Redis. Key present
         # ⇒ account known to lack multi-sim permission, latch still warm
         # (TTL = re-probe window) → straight to single-sim fallback. Key
@@ -1579,11 +1596,58 @@ class BrainAdapter:
         return {}
 
     async def check_correlation(self, alpha_id: str, check_type: str = "PROD") -> Dict:
+        """Return correlation report wrapped with status_code.
+
+        P3-Brain (plan §6.1): caller needs to distinguish HTTP 200/empty,
+        HTTP 403 (no Consultant permission → auto-revert safety net), and
+        network/5xx errors. Old shape (bare dict / empty on any failure)
+        loses that info — callers using check_correlation_with_poll get the
+        classified status; legacy callers expecting a dict can still treat
+        result["data"] as the correlation payload.
+
+        Returns:
+            {"status_code": int, "data": Dict}
+            status_code=0 on exception/network failure (caller decides retry).
+        """
         try:
             response = await self._request("GET", f"{self.BASE_URL}/alphas/{alpha_id}/correlations/{check_type}")
-            return response.json() if response.status_code == 200 else {}
-        except Exception:
-            return {}
+            return {
+                "status_code": response.status_code,
+                "data": response.json() if response.status_code == 200 else {},
+            }
+        except Exception as ex:
+            logger.warning(f"[check_correlation] {alpha_id}/{check_type} exception: {ex}")
+            return {"status_code": 0, "data": {}}
+
+    async def check_correlation_with_poll(
+        self,
+        alpha_id: str,
+        check_type: str = "PROD",
+        *,
+        max_polls: int = 3,
+        poll_interval: float = 5.0,
+    ) -> Dict:
+        """Poll-aware wrapper around check_correlation with status classification.
+
+        BRAIN async-computes correlation:首次调用常 200 + 空 records(还在算)→ retry。
+        403 = 账号无 Consultant 权限 → AUTH_DENIED(触发安全网 auto-revert)。
+        Returns:
+            {"status": "OK", "data": {...}}        — 200 + max present
+            {"status": "PENDING"}                  — exhausted retries while empty
+            {"status": "AUTH_DENIED"}              — 403 from BRAIN
+            {"status": "ERROR"}                    — 其它意外(目前折回 PENDING)
+        """
+        for attempt in range(max_polls):
+            result = await self.check_correlation(alpha_id, check_type)
+            sc = result["status_code"]
+            data = result["data"]
+            if sc == 403:
+                return {"status": "AUTH_DENIED"}
+            if sc == 200 and "max" in data:
+                return {"status": "OK", "data": data}
+            if attempt < max_polls - 1:
+                await asyncio.sleep(poll_interval)
+        return {"status": "PENDING"}
 
     async def get_user_alphas(self, limit: int = 100, offset: int = 0, stage: str = None, search: str = None, start_date: str = None) -> Dict:
         """

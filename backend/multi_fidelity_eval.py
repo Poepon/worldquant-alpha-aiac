@@ -58,10 +58,13 @@ class FidelityConfig:
     
     @classmethod
     def full(cls) -> "FidelityConfig":
+        # P3-Brain: 接通 settings.effective_* — Consultant=P0Y+1.58 / User=P2Y0M+SHARPE_MIN
+        # (quick/medium 不受 role 影响,保持硬编码)。plan §4。
+        from backend.config import settings
         return cls(
             level=FidelityLevel.FULL,
-            test_period="P2Y0M",  # 2 years
-            min_sharpe=1.5,
+            test_period=settings.effective_default_test_period,
+            min_sharpe=settings.effective_sharpe_submit_min,
             min_fitness=0.6,
             max_turnover=0.7
         )

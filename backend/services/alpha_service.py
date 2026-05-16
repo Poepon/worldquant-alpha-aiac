@@ -492,36 +492,99 @@ class AlphaService(BaseService):
                     CorrelationService,
                     CorrSource,
                 )
-                corr_svc = CorrelationService(brain_adapter)
-                corr, src = await corr_svc.get_with_fallback(
-                    alpha.alpha_id, region=alpha.region
-                )
-                # V-27.126 followup: BRAIN_PENDING means the corr job is still
-                # computing (corr is None). Distinct from UNKNOWN ("could not
-                # measure") — here we genuinely will know soon, so refuse now
-                # and let the caller retry rather than submitting blind into a
-                # possibly-high corr that would waste the slot.
-                if src == CorrSource.BRAIN_PENDING:
-                    return {
-                        "submitted": False,
-                        "reason": (
-                            "self_corr 仍在 BRAIN 侧计算中(corr pending)— "
-                            "稍后重试"
-                        ),
-                        "self_corr_source": src,
-                        "retryable": True,
-                    }
-                # src=UNKNOWN → corr is None → inconclusive, do NOT block.
-                if src != CorrSource.UNKNOWN and corr is not None and corr >= 0.7:
-                    return {
-                        "submitted": False,
-                        "reason": (
-                            f"self_corr {corr:.3f} >= 0.7 ({src}) — BRAIN would "
-                            f"reject; submitting would waste a slot"
-                        ),
-                        "self_corr": corr,
-                        "self_corr_source": src,
-                    }
+                # P3-Brain plan §6.4:self_corr cache 命中跳过 BRAIN /correlations/SELF
+                # 重试。key submit:self_corr_passed:{id} 二态 "1"(R4-C6:避免
+                # float(corr) parse fragility — None/"nan" 时抛)。TTL 300s 允许
+                # PROD-corr PENDING 重试窗口快速重提交,避免每次都浪费 self_corr 调用。
+                _self_corr_skip = False
+                _self_corr_cache_key = f"submit:self_corr_passed:{alpha.alpha_id}"
+                if _redis is not None:
+                    try:
+                        _cached = await _redis.get(_self_corr_cache_key)
+                        if _cached == "1":
+                            _self_corr_skip = True
+                            logger.info(
+                                f"[submit_alpha] self_corr cache hit ({_self_corr_cache_key}), "
+                                f"skipping BRAIN /correlations/SELF"
+                            )
+                    except Exception as _cache_e:
+                        logger.debug(f"[submit_alpha] self_corr cache read failed: {_cache_e}")
+
+                if not _self_corr_skip:
+                    corr_svc = CorrelationService(brain_adapter)
+                    corr, src = await corr_svc.get_with_fallback(
+                        alpha.alpha_id, region=alpha.region
+                    )
+                    # V-27.126 followup: BRAIN_PENDING means the corr job is still
+                    # computing (corr is None). Distinct from UNKNOWN ("could not
+                    # measure") — here we genuinely will know soon, so refuse now
+                    # and let the caller retry rather than submitting blind into a
+                    # possibly-high corr that would waste the slot.
+                    if src == CorrSource.BRAIN_PENDING:
+                        return {
+                            "submitted": False,
+                            "reason": (
+                                "self_corr 仍在 BRAIN 侧计算中(corr pending)— "
+                                "稍后重试"
+                            ),
+                            "self_corr_source": src,
+                            "retryable": True,
+                        }
+                    # src=UNKNOWN → corr is None → inconclusive, do NOT block.
+                    if src != CorrSource.UNKNOWN and corr is not None and corr >= 0.7:
+                        return {
+                            "submitted": False,
+                            "reason": (
+                                f"self_corr {corr:.3f} >= 0.7 ({src}) — BRAIN would "
+                                f"reject; submitting would waste a slot"
+                            ),
+                            "self_corr": corr,
+                            "self_corr_source": src,
+                        }
+                    # self_corr 通过 — 写 cache 让 PENDING 重试时跳过 BRAIN 调用
+                    if _redis is not None:
+                        try:
+                            await _redis.setex(_self_corr_cache_key, 300, "1")
+                        except Exception as _cache_e:
+                            logger.debug(f"[submit_alpha] self_corr cache write failed: {_cache_e}")
+
+                # P3-Brain plan §6.2:Consultant 模式第 3 门 PROD correlation gate
+                # (User 模式跳过 — endpoint 选择类能力走全局 flag,plan §14)。
+                # AUTH_DENIED → 自动 revert flag(安全网,plan §6.3)。
+                from backend.config import settings as _cfg
+                if _cfg.ENABLE_BRAIN_CONSULTANT_MODE:
+                    prod = await brain_adapter.check_correlation_with_poll(
+                        alpha.alpha_id, "PROD",
+                        max_polls=3, poll_interval=5.0,
+                    )
+                    if prod["status"] == "AUTH_DENIED":
+                        await self._auto_revert_consultant_mode(
+                            "BRAIN PROD-corr 返回 403 — 账号未实际授权 Consultant"
+                        )
+                        return {
+                            "submitted": False,
+                            "reason": "Consultant 模式已自动回退到 USER(BRAIN 拒绝 PROD-corr)",
+                            "retryable": False,
+                        }
+                    if prod["status"] == "PENDING":
+                        return {
+                            "submitted": False,
+                            "reason": "PROD-corr 计算中(BRAIN 异步)— 稍后重试",
+                            "retryable": True,
+                        }
+                    _prod_max = prod.get("data", {}).get("max")
+                    if _prod_max is None:
+                        return {
+                            "submitted": False,
+                            "reason": "PROD-corr 无 max 字段(BRAIN 响应异常)",
+                            "retryable": True,
+                        }
+                    if _prod_max >= 0.7:
+                        return {
+                            "submitted": False,
+                            "reason": f"prod_corr_max={_prod_max:.3f} >= 0.7 — BRAIN would reject",
+                            "prod_corr_max": _prod_max,
+                        }
 
                 result = await brain_adapter.submit_alpha(alpha.alpha_id)
                 if not result.get("success"):
@@ -578,6 +641,30 @@ class AlphaService(BaseService):
                         )
                     except Exception:
                         pass
+
+    async def _auto_revert_consultant_mode(self, reason: str) -> None:
+        """Safety-net: BRAIN PROD-corr 返回 403 → 自动 clear ENABLE_BRAIN_CONSULTANT_MODE flag。
+
+        用独立 AsyncSessionLocal session 调 clear_override(避免与当前 submit_alpha
+        db transaction 嵌套 — FeatureFlagService.clear_override 有 @transactional 装饰
+        会触发 InvalidRequestError "A transaction is already begun"。R4-M2 修复)。
+
+        独立 commit 也保证:submit 失败 rollback 不会撤销这次 flag clear。
+        失败不向上抛(safety-net 自身不能拖垮 submit 主路径)。
+        """
+        try:
+            from backend.database import AsyncSessionLocal
+            from backend.services.feature_flag_service import FeatureFlagService
+            async with AsyncSessionLocal() as iso_db:
+                flag_svc = FeatureFlagService(iso_db)
+                await flag_svc.clear_override(
+                    "ENABLE_BRAIN_CONSULTANT_MODE",
+                    actor="system_auto_revert",
+                    note=reason,
+                )
+            logger.error(f"[brain_role] Consultant 模式自动回退: {reason}")
+        except Exception as ex:
+            logger.error(f"[brain_role] auto-revert 自身失败 (ignored, submit 继续): {ex}")
 
     async def get_marginal_contribution(
         self,

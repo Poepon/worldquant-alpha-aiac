@@ -934,3 +934,72 @@ async def llm_op_rerun(
     """Fire the daily monitor_llm_op_hallucinations Celery task."""
     result = await _run_trigger(svc, _LLM_OP_TASK, actor or "ops_console")
     return TriggerOut(**result.__dict__)
+
+
+# ---------------------------------------------------------------------------
+# P3-Brain — BRAIN Consultant mode role switch (2026-05-16)
+# ---------------------------------------------------------------------------
+# Manual switch: user receives BRAIN upgrade email, flips flag in ConfigCenter
+# (OpsBrainRoleCard in FeatureFlagsConsole). No auto-detection.
+# See plan §10-§11 + brain_role_switch_service.py.
+
+from backend.services.brain_role_switch_service import BrainRoleSwitchService
+
+
+def get_brain_role_switch_service(
+    db: AsyncSession = Depends(get_db),
+    flag_service: FeatureFlagService = Depends(get_feature_flag_service),
+) -> BrainRoleSwitchService:
+    return BrainRoleSwitchService(db, flag_service)
+
+
+class BrainRoleStateOut(BaseModel):
+    mode: str                                     # "USER" | "CONSULTANT"
+    effective_default_test_period: str
+    effective_sharpe_submit_min: float
+    effective_region_universes: Dict[str, str]
+    running_tasks_count: int
+    last_switched_at: Optional[str] = None        # ISO 8601 UTC w/ Z suffix
+    last_switched_by: Optional[str] = None
+
+
+class BrainRoleSwitchOut(BaseModel):
+    mode: str
+    note: Optional[str] = None
+    actor: Optional[str] = None
+    sync_enqueued: Optional[bool] = None
+
+
+@router.get("/brain/role-state", response_model=BrainRoleStateOut)
+async def brain_role_state(
+    _token: str = Depends(_require_ops_token),
+    svc: BrainRoleSwitchService = Depends(get_brain_role_switch_service),
+) -> BrainRoleStateOut:
+    """Current BRAIN mode + effective_* + last-switched timestamp."""
+    state = await svc.get_state()
+    return BrainRoleStateOut(**state)
+
+
+@router.post("/brain/activate-consultant", response_model=BrainRoleSwitchOut)
+async def brain_activate_consultant(
+    _token: str = Depends(_require_ops_token),
+    svc: BrainRoleSwitchService = Depends(get_brain_role_switch_service),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> BrainRoleSwitchOut:
+    """Flip ENABLE_BRAIN_CONSULTANT_MODE → True, clean multi-sim latch,
+    enqueue global dataset sync. Should be called only after BRAIN sent the
+    Consultant upgrade email (system does not auto-detect)."""
+    result = await svc.activate_consultant_mode(actor=actor or "ops_console")
+    return BrainRoleSwitchOut(**result)
+
+
+@router.post("/brain/deactivate-consultant", response_model=BrainRoleSwitchOut)
+async def brain_deactivate_consultant(
+    _token: str = Depends(_require_ops_token),
+    svc: BrainRoleSwitchService = Depends(get_brain_role_switch_service),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> BrainRoleSwitchOut:
+    """Flip ENABLE_BRAIN_CONSULTANT_MODE → False. Does NOT touch multi-sim
+    latch (manual latch set would create invisible 24h perf cliff)."""
+    result = await svc.deactivate_consultant_mode(actor=actor or "ops_console")
+    return BrainRoleSwitchOut(**result)

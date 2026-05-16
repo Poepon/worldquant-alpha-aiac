@@ -147,6 +147,8 @@ All HTTP traffic to `platform.worldquantbrain.com` goes through `backend/adapter
 
 `backend/config.py` (Pydantic Settings) is the single source of truth. It reads `.env` and exposes thresholds (`SHARPE_MIN`, `TURNOVER_MAX`, `FITNESS_MIN`, `MAX_CORRELATION`, `SCORE_PASS_THRESHOLD`), bandit / field / diversity weights, multi-fidelity flags, and rate limits (`MAX_SIMULATIONS_PER_DAY`, `MAX_TOKENS_PER_DAY`). Add new tunables here, not as scattered constants.
 
+`ENABLE_BRAIN_CONSULTANT_MODE` (P3-Brain, 2026-05-16) is a manual toggle flipped from the ops console (`POST /ops/brain/activate-consultant`) after the user receives a BRAIN Consultant upgrade email. Switching unlocks `effective_sharpe_submit_min` (raised to `max(SHARPE_MIN, 1.58)`), `effective_default_test_period` (`P0Y`), and `effective_region_universes` (5 regions: USA/CHN/HKG/JPN/EUR). Task启动时冻结快照到 `MiningTask.config["brain_role_snapshot"]`,后续 round 内读快照而非全局 settings — see `backend/services/brain_role_switch_service.py` + plan §14.
+
 ### Frontend layout
 
 - Routing in `frontend/src/App.jsx` (Dashboard / Tasks / TaskDetail / AlphaLab / AlphaDetail / DataManagement / ConfigCenter).
@@ -160,3 +162,4 @@ All HTTP traffic to `platform.worldquantbrain.com` goes through `backend/adapter
 - Top-level files `keys.txt`, `api_structure.json`, `brain_alpha_structure.json` are reference dumps from BRAIN — treat as read-only inputs, not authoritative state.
 - Windows is the primary dev platform; Celery is launched with `--pool=solo` because the prefork pool is broken on Windows.
 - Default LLM points at `https://api.deepseek.com/v1` with model `deepseek-chat`. Note that `backend/agents/agent_hub.py` currently hard-codes the DeepSeek base URL — prefer `backend/agents/services/llm_service.py` for new code so settings/env wins.
+- BRAIN role switching走 P3-Brain group 的 `FeatureFlagOverride`(键名 `ENABLE_BRAIN_CONSULTANT_MODE`),**不引入 `WQBCredential.role` 字段**。切换有安全网:`alpha_service.submit_alpha` 时 PROD-corr 403 自动回退 flag 并写 audit。**能力分类(方向 C)**:数据一致性能力(Sharpe 阈值 / testPeriod)走 task 启动快照,running task 不受切换影响;endpoint 选择能力(multi-sim / PROD-corr)走全局 `settings.ENABLE_BRAIN_CONSULTANT_MODE`,切回 USER 立即降级以避免 USER 状态调用 Consultant API。

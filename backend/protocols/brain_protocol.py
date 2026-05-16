@@ -537,7 +537,30 @@ class BrainProtocol(Protocol):
             check_type: Type of correlation check (PROD, SELF, etc.)
 
         Returns:
-            Correlation check results
+            {"status_code": int, "data": Dict}
+            status_code=0 on exception/network failure.
+        """
+        ...
+
+    async def check_correlation_with_poll(
+        self,
+        alpha_id: str,
+        check_type: str = "PROD",
+        *,
+        max_polls: int = 3,
+        poll_interval: float = 5.0,
+    ) -> Dict[str, Any]:
+        """
+        Poll-aware wrapper around check_correlation that classifies status.
+
+        BRAIN async-computes correlation; first call may return empty payload
+        while still computing. This method retries up to max_polls and maps
+        the outcome to a status keyword.
+
+        Returns:
+            {"status": "OK", "data": {...}}        — 200 + max present
+            {"status": "PENDING"}                  — exhausted retries while empty
+            {"status": "AUTH_DENIED"}              — 403 from BRAIN
         """
         ...
 
