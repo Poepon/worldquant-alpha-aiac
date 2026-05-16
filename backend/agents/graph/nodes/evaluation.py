@@ -1675,63 +1675,47 @@ async def node_evaluate(
                     },
                 )
 
-                # Re-eval with the same tier-aware gate. Reuse the per-tier thresholds
-                # (sharpe_min / fitness_min / turnover_min/max) computed at top of
-                # this function. T1 doesn't gate on concentrated / self_corr so the
-                # flip-retry path mirrors that.
-                sub_universe_check = next(
-                    (c for c in flip_metrics.get("checks", [])
-                     if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
-                    None,
-                )
-                sub_universe_ok = (
-                    sub_universe_check is None
-                    or sub_universe_check.get("result") != "FAIL"
-                )
-
-                pass_sharpe = new_sharpe >= sharpe_min
-                pass_fitness = new_fitness >= fitness_min
-                pass_turnover = turnover_min <= new_turnover <= turnover_max
-                # V-12 (2026-05-03 spike-discovered gap): the main hard_gate path
-                # already includes is_overfit_safe, but the sign-flip retry path
-                # bypassed it. Spike 2.0 alpha YP2QnnVW (multiply(-1, ts_zscore(
-                # analyst_revision_rank_derivative, 5))) hit train=8.37 / test=0
-                # via flip-retry and was wrongly tagged PASS. Apply the same OS-
-                # consistency gate here so flip-retry can't smuggle IS-overfit
-                # PASSes through.
-                is_overfit_safe = _check_is_os_consistency(flip_metrics, tier=tier_cfg["tier"])
-
-                if pass_sharpe and pass_fitness and pass_turnover and sub_universe_ok and is_overfit_safe:
-                    # V-16 (2026-05-03): apply same suspicion-mode checks on the
-                    # flipped expression — flip-retry inherits the same overfit
-                    # surface as the main hard_gate path.
-                    v16_flags = _run_suspicion_checks(flip_metrics, flipped_expr or "")
-                    hard_flags = [f for f in v16_flags if f.get("severity") == "hard"]
-                    if v16_flags and isinstance(new_alpha.metrics, dict):
-                        new_alpha.metrics["_v16_suspicion_flags"] = v16_flags
-                    if hard_flags:
-                        new_alpha.quality_status = "PASS_PROVISIONAL"
-                        flip_retry_prov += 1
-                        logger.warning(
-                            f"[{node_name}] V-16 downgrades flip-retry PASS → PROV | "
-                            f"sharpe={new_sharpe:.2f} flags={[f['check'] for f in hard_flags]}"
-                        )
-                    else:
-                        new_alpha.quality_status = "PASS"
-                        flip_retry_pass += 1
-                elif (
-                    new_sharpe >= prov_sharpe_min
-                    and new_fitness >= prov_fitness_min
-                    and turnover_min <= new_turnover <= prov_turnover_max
-                    and sub_universe_ok
-                ):
-                    new_alpha.quality_status = "PASS_PROVISIONAL"
-                    flip_retry_prov += 1
-                else:
+                # Bug B fix (2026-05-16): route flip-retry alphas through
+                # _evaluate_single_alpha so they get the same multi-tier
+                # routing, line-646 metrics spread, V-16 suspicion check,
+                # P2-C regime stamp (_regime_at_eval), P0 dual_run,
+                # P1-A graded_score, P1-D RobustnessGate as main-loop alphas.
+                # Pre-fix: this block re-implemented (and drifted from) the
+                # gate logic, and skipped every P0/P1/P2 stamp — flip-retry
+                # PROV alphas landed in alphas.metrics with only BRAIN raw
+                # fields, breaking _regime_at_eval audit + downstream score
+                # consumers.
+                try:
+                    _flip_single_result = await _evaluate_single_alpha(new_alpha, _ctx)
+                    if _flip_single_result.corr_check_performed:
+                        corr_checks_performed += 1
+                    elif _flip_single_result.corr_check_skipped_reason:
+                        corr_checks_skipped += 1
+                except Exception as _flip_eval_ex:
+                    # Mirror main-loop fear-score fallback (line 1469-1496):
+                    # one bad flip-retry alpha does NOT crash the batch.
+                    eval_errors += 1
                     new_alpha.quality_status = "FAIL"
+                    prior_metrics = new_alpha.metrics or {}
+                    existing_flags = prior_metrics.get("_metrics_fallback_flags")
+                    if not isinstance(existing_flags, list):
+                        existing_flags = []
+                    new_alpha.metrics = {
+                        **prior_metrics,
+                        "_eval_error": f"{type(_flip_eval_ex).__name__}: {_flip_eval_ex}"[:500],
+                        "_metrics_fallback_flags": existing_flags + ["__flip_eval_exception__"],
+                    }
+                    logger.exception(
+                        f"[{node_name}] flip-retry per-alpha eval crashed for "
+                        f"{new_alpha.alpha_id or (new_alpha.expression or '')[:60]}; marking FAIL"
+                    )
 
                 updated_alphas.append(new_alpha)
                 flip_retry_count += 1
+                if new_alpha.quality_status == "PASS":
+                    flip_retry_pass += 1
+                elif new_alpha.quality_status == "PASS_PROVISIONAL":
+                    flip_retry_prov += 1
                 logger.info(
                     f"[{node_name}] flip-retry result: orig_sharpe={orig.metrics.get('sharpe'):.2f} "
                     f"→ flipped_sharpe={new_sharpe:.2f} status={new_alpha.quality_status}"
