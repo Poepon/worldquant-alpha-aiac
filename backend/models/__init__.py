@@ -77,6 +77,8 @@ from backend.models.config import (
     BrainAuthToken,
     WQBCredential,
     LLMProvider,
+    FeatureFlagOverride,
+    FeatureFlagAudit,
 )
 
 __all__ = [
@@ -128,4 +130,6 @@ __all__ = [
     "BrainAuthToken",
     "WQBCredential",
     "LLMProvider",
+    "FeatureFlagOverride",
+    "FeatureFlagAudit",
 ]

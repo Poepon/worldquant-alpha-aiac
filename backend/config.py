@@ -7,7 +7,7 @@ import os
 import json
 import logging
 from pydantic_settings import BaseSettings
-from typing import Optional, Dict
+from typing import Any, Optional, Dict
 
 _config_logger = logging.getLogger(__name__)
 
@@ -54,6 +54,24 @@ def _load_thinking_overrides() -> Dict[str, str]:
 # automatic env JSON parsing (which would crash Settings() construction on
 # malformed JSON); the helper above handles env + fault tolerance directly.
 _THINKING_EFFORT_OVERRIDES_CACHE: Dict[str, str] = _load_thinking_overrides()
+
+
+# ---------------------------------------------------------------------------
+# Runtime feature-flag override cache (P3 — ops dashboard, 2026-05-16)
+# ---------------------------------------------------------------------------
+# Read by ``Settings.__getattribute__`` for any attribute starting with
+# ``ENABLE_``. Written by FeatureFlagService.set/clear (write-through) and
+# by the lifespan / worker_process_init refresher loops every 60s.
+#
+# This dict lives in ``backend.config`` (not in feature_flag_service) so the
+# Settings hook below doesn't need a lazy import on every attribute read —
+# Pydantic accesses many attributes per request and the cumulative import
+# overhead would matter. FeatureFlagService imports this module-level dict
+# directly: ``from backend.config import _flag_override_cache``.
+#
+# The dict starts empty. A flag without an entry here means "no override —
+# fall back to the env default that Pydantic loaded at startup".
+_flag_override_cache: Dict[str, Any] = {}
 
 
 class Settings(BaseSettings):
@@ -767,6 +785,31 @@ class Settings(BaseSettings):
         case_sensitive = True
         env_file = ".env"
         extra = "ignore"
+
+    # ----------------------------------------------------------------------
+    # Runtime feature-flag override hook (P3 — ops dashboard, 2026-05-16)
+    # ----------------------------------------------------------------------
+    # Intercepts attribute reads ONLY for names beginning with "ENABLE_". For
+    # those, if a runtime override exists in ``_flag_override_cache`` (set
+    # by FeatureFlagService.set + the cross-process refresher), return the
+    # override; otherwise fall through to the env/default value Pydantic
+    # already loaded. Every other attribute access — including all of
+    # Pydantic's own internal reads of ``__class__`` / ``__fields__`` /
+    # ``model_config`` etc — bypasses the hook entirely.
+    #
+    # Why ``object.__getattribute__`` and not ``super()``: Pydantic's
+    # BaseSettings has a custom ``__getattribute__`` that we don't want to
+    # call recursively from inside ours. The ``object.__getattribute__``
+    # call goes straight to CPython's resolution and avoids any chance of
+    # re-entry into this hook.
+    #
+    # Performance: the prefix check is a single startswith call (~50 ns).
+    # We do NOT do an isinstance check on `name` — Python guarantees attribute
+    # names are str, and validating it costs more than just running startswith.
+    def __getattribute__(self, name: str) -> Any:  # noqa: D401
+        if name.startswith("ENABLE_") and name in _flag_override_cache:
+            return _flag_override_cache[name]
+        return object.__getattribute__(self, name)
 
 
 settings = Settings()

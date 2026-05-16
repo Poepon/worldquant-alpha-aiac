@@ -9,6 +9,24 @@ const client = axios.create({
   },
 })
 
+// P3 (2026-05-16): inject the ops console token into every request when
+// it's present in localStorage. Backend reads X-Ops-Token and matches
+// against OPS_API_TOKEN env var; empty env disables the check in dev.
+// We attach the header unconditionally — backend ignores it on non-/ops
+// routes, and dev mode treats any value as fine.
+client.interceptors.request.use((config) => {
+  try {
+    const token = window.localStorage.getItem('ops_token')
+    if (token) {
+      config.headers = config.headers || {}
+      config.headers['X-Ops-Token'] = token
+    }
+  } catch (_) {
+    // localStorage unavailable (private mode etc.) — silently skip
+  }
+  return config
+})
+
 // API functions
 const api = {
   // Datasets & Fields
@@ -347,6 +365,50 @@ const api = {
     const { data } = await client.get(`/correlation/alpha/${alphaId}/crisis`, {
       params: { region },
     })
+    return data
+  },
+
+  // ---------------------------------------------------------------------
+  // Ops Console (P3 — 2026-05-16)
+  // Feature flags + manual task triggers backing /ops/* dashboards.
+  // ---------------------------------------------------------------------
+
+  // Feature flags
+  listFeatureFlags: async () => {
+    const { data } = await client.get('/ops/flags')
+    return data
+  },
+
+  setFeatureFlag: async (name, value, note = null) => {
+    const { data } = await client.patch(`/ops/flags/${name}`, { value, note })
+    return data
+  },
+
+  clearFeatureFlag: async (name) => {
+    const { data } = await client.delete(`/ops/flags/${name}/override`)
+    return data
+  },
+
+  listFeatureFlagAudit: async (limit = 50) => {
+    const { data } = await client.get('/ops/flags/audit', { params: { limit } })
+    return data
+  },
+
+  refreshAllFlags: async () => {
+    const { data } = await client.post('/ops/flags/refresh-all')
+    return data
+  },
+
+  // Ops task triggers
+  triggerOpsTask: async (name, kwargs = null) => {
+    const { data } = await client.post('/ops/tasks/trigger', { name, kwargs })
+    return data
+  },
+
+  listRecentOpsRuns: async (taskName = null, limit = 20) => {
+    const params = { limit }
+    if (taskName) params.task_name = taskName
+    const { data } = await client.get('/ops/tasks/recent-runs', { params })
     return data
   },
 }

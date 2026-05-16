@@ -5,6 +5,7 @@ Handles mining tasks, feedback loops, and scheduled jobs
 
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_process_init, worker_process_shutdown
 import asyncio
 
 from backend.config import settings
@@ -16,6 +17,30 @@ celery_app = Celery(
     backend=settings.REDIS_URL,
     include=["backend.tasks"]
 )
+
+
+# P3 (2026-05-16): each worker process needs its own feature-flag override
+# refresher because ``backend.config._flag_override_cache`` is per-process
+# (a plain Python dict, not shared memory). Without this, an ops console
+# flip via /ops/feature-flags would only take effect on the FastAPI side;
+# Celery workers would keep using the env defaults until restart.
+@worker_process_init.connect
+def _start_feature_flag_refresher(**_kwargs):  # pragma: no cover - signal hook
+    try:
+        from backend.feature_flag_runtime import start_sync_refresher
+        start_sync_refresher()
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"[celery_app] feature-flag refresher start failed: {e}")
+
+
+@worker_process_shutdown.connect
+def _stop_feature_flag_refresher(**_kwargs):  # pragma: no cover - signal hook
+    try:
+        from backend.feature_flag_runtime import stop_sync_refresher
+        stop_sync_refresher()
+    except Exception:
+        pass
 
 # Celery configuration
 celery_app.conf.update(

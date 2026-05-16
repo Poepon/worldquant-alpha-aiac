@@ -1,0 +1,350 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  Button,
+  Card,
+  Drawer,
+  Empty,
+  Popconfirm,
+  Space,
+  Spin,
+  Switch,
+  Table,
+  Tag,
+  Timeline,
+  Tooltip,
+  Typography,
+  message,
+} from 'antd'
+import {
+  HistoryOutlined,
+  InfoCircleOutlined,
+  ReloadOutlined,
+  ThunderboltOutlined,
+} from '@ant-design/icons'
+
+import api from '../../services/api'
+
+const { Title, Text } = Typography
+
+// Colors for the "source" badge — mirrors what the docs/ops_dashboard_guide
+// will recommend so operators learn one color scheme across all /ops/* pages.
+const SOURCE_TAG_COLORS = {
+  env: 'default',
+  default: 'default',
+  'runtime-override': 'gold',
+}
+
+// Order the groups appear top→bottom in the page. Anything not in this
+// list falls back to alphabetic order.
+const GROUP_ORDER = ['P0', 'P1', 'P2-A', 'P2-B', 'P2-C', 'P2-D']
+
+/**
+ * Feature Flag Console (P3 — 2026-05-16)
+ *
+ * One Table per logical group (P0 / P1 / P2-*) so flags stay scannable as
+ * the whitelist grows. Each row is a Switch that PATCHes immediately + a
+ * Reset button that DELETEs the override. The Refresh-all button forces
+ * the FastAPI process to re-read overrides from DB without waiting for
+ * the 60s background refresher.
+ *
+ * Audit Drawer (right side) renders the most recent 50 flip/clear events
+ * as an Ant Design Timeline. Opened from the "查看 audit" button.
+ *
+ * Errors from the backend (whitelist drift, type mismatch, 401/403)
+ * surface as Ant message toasts and the Switch reverts to the prior
+ * value — no optimistic update.
+ */
+export default function FeatureFlagsConsole() {
+  const [flags, setFlags] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [busyFlag, setBusyFlag] = useState(null)
+  const [refreshingAll, setRefreshingAll] = useState(false)
+  const [auditOpen, setAuditOpen] = useState(false)
+  const [audit, setAudit] = useState([])
+  const [auditLoading, setAuditLoading] = useState(false)
+
+  const fetchFlags = useCallback(async () => {
+    setLoading(true)
+    try {
+      const data = await api.listFeatureFlags()
+      setFlags(data)
+    } catch (e) {
+      message.error(`加载 flag 失败:${e?.response?.data?.detail || e.message}`)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    fetchFlags()
+  }, [fetchFlags])
+
+  // Group the flat array into { groupName: [...flags] }, ordered by GROUP_ORDER
+  const groupedFlags = useMemo(() => {
+    const map = new Map()
+    for (const f of flags) {
+      const g = f.group || 'misc'
+      if (!map.has(g)) map.set(g, [])
+      map.get(g).push(f)
+    }
+    const ordered = []
+    for (const g of GROUP_ORDER) {
+      if (map.has(g)) {
+        ordered.push([g, map.get(g)])
+        map.delete(g)
+      }
+    }
+    // Append any unknown groups alphabetically
+    for (const g of [...map.keys()].sort()) {
+      ordered.push([g, map.get(g)])
+    }
+    return ordered
+  }, [flags])
+
+  const handleToggle = async (flag, nextValue) => {
+    setBusyFlag(flag.name)
+    try {
+      const updated = await api.setFeatureFlag(flag.name, nextValue)
+      setFlags((prev) => prev.map((f) => (f.name === flag.name ? updated : f)))
+      message.success(
+        `${flag.name} → ${String(nextValue)}(60s 内 worker 进程也会感知;点 "全量刷新" 立即生效)`,
+      )
+    } catch (e) {
+      message.error(
+        `flip 失败:${e?.response?.data?.detail || e.message}`,
+      )
+      // Refetch to re-sync UI with backend's authoritative state
+      fetchFlags()
+    } finally {
+      setBusyFlag(null)
+    }
+  }
+
+  const handleReset = async (flag) => {
+    setBusyFlag(flag.name)
+    try {
+      const updated = await api.clearFeatureFlag(flag.name)
+      setFlags((prev) => prev.map((f) => (f.name === flag.name ? updated : f)))
+      message.success(`${flag.name} override 已清除,回落 env 默认`)
+    } catch (e) {
+      message.error(`reset 失败:${e?.response?.data?.detail || e.message}`)
+      fetchFlags()
+    } finally {
+      setBusyFlag(null)
+    }
+  }
+
+  const handleRefreshAll = async () => {
+    setRefreshingAll(true)
+    try {
+      const { refreshed, flags: names } = await api.refreshAllFlags()
+      message.success(
+        `已强制刷新本进程缓存(共 ${refreshed} 条 override:${names.join(', ') || '无'})`,
+      )
+      await fetchFlags()
+    } catch (e) {
+      message.error(`refresh-all 失败:${e?.response?.data?.detail || e.message}`)
+    } finally {
+      setRefreshingAll(false)
+    }
+  }
+
+  const openAudit = async () => {
+    setAuditOpen(true)
+    setAuditLoading(true)
+    try {
+      const rows = await api.listFeatureFlagAudit(50)
+      setAudit(rows)
+    } catch (e) {
+      message.error(`加载 audit 失败:${e?.response?.data?.detail || e.message}`)
+      setAudit([])
+    } finally {
+      setAuditLoading(false)
+    }
+  }
+
+  const columns = [
+    {
+      title: 'Flag',
+      dataIndex: 'name',
+      width: 320,
+      render: (name, row) => (
+        <Space>
+          <Text strong style={{ fontFamily: 'monospace' }}>
+            {name}
+          </Text>
+          <Tooltip title={row.description}>
+            <InfoCircleOutlined style={{ color: '#9c88ff' }} />
+          </Tooltip>
+        </Space>
+      ),
+    },
+    {
+      title: '类型',
+      dataIndex: 'flag_type',
+      width: 80,
+      render: (t) => <Tag>{t}</Tag>,
+    },
+    {
+      title: '当前值',
+      width: 140,
+      render: (_, row) =>
+        row.flag_type === 'bool' ? (
+          <Switch
+            checked={!!row.effective_value}
+            loading={busyFlag === row.name}
+            onChange={(checked) => handleToggle(row, checked)}
+          />
+        ) : (
+          // Non-bool types: read-only for now; PATCH still works through API
+          // but Phase 1 only ships flip UX since every whitelisted flag is bool.
+          <Text code>{String(row.effective_value)}</Text>
+        ),
+    },
+    {
+      title: '来源',
+      dataIndex: 'source',
+      width: 140,
+      render: (src) => (
+        <Tag color={SOURCE_TAG_COLORS[src] || 'default'}>{src}</Tag>
+      ),
+    },
+    {
+      title: 'env 默认',
+      dataIndex: 'env_default',
+      width: 90,
+      render: (v) => <Text code>{String(v)}</Text>,
+    },
+    {
+      title: '更新时间',
+      dataIndex: 'updated_at',
+      width: 170,
+      render: (v) => (v ? new Date(v).toLocaleString('zh-CN') : '—'),
+    },
+    {
+      title: '操作人',
+      dataIndex: 'updated_by',
+      width: 120,
+      render: (v) => v || '—',
+    },
+    {
+      title: '操作',
+      width: 90,
+      render: (_, row) =>
+        row.source === 'runtime-override' ? (
+          <Popconfirm
+            title="清除此 override,回落 env 默认?"
+            onConfirm={() => handleReset(row)}
+          >
+            <Button size="small" type="link">
+              重置
+            </Button>
+          </Popconfirm>
+        ) : (
+          <Text type="secondary">—</Text>
+        ),
+    },
+  ]
+
+  return (
+    <div>
+      <Space
+        style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}
+        align="center"
+      >
+        <Title level={3} style={{ margin: 0 }}>
+          Feature Flag 控制台
+        </Title>
+        <Space>
+          <Tooltip title="强制本进程立即从 DB 重读所有 override(无需等 60s 刷新)">
+            <Button
+              icon={<ThunderboltOutlined />}
+              onClick={handleRefreshAll}
+              loading={refreshingAll}
+            >
+              全量刷新
+            </Button>
+          </Tooltip>
+          <Button icon={<HistoryOutlined />} onClick={openAudit}>
+            查看 audit
+          </Button>
+          <Button icon={<ReloadOutlined />} onClick={fetchFlags} loading={loading}>
+            重新加载
+          </Button>
+        </Space>
+      </Space>
+
+      <Text type="secondary">
+        翻转开关后写入 DB + 当前进程立即生效;其他 worker 进程在 60s 内同步,或点
+        "全量刷新" 强制本进程刷新。重置 = 清除 override 回落到 env 默认。
+      </Text>
+
+      {loading && flags.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 40 }}>
+          <Spin />
+        </div>
+      ) : groupedFlags.length === 0 ? (
+        <Empty description="无可控 flag(检查 SUPPORTED_FLAGS 白名单)" />
+      ) : (
+        groupedFlags.map(([group, rows]) => (
+          <Card
+            key={group}
+            title={`分组 · ${group}`}
+            size="small"
+            style={{ marginTop: 16 }}
+            className="glass-card"
+          >
+            <Table
+              rowKey="name"
+              size="small"
+              columns={columns}
+              dataSource={rows}
+              pagination={false}
+            />
+          </Card>
+        ))
+      )}
+
+      <Drawer
+        title="Feature Flag 审计日志(最近 50 条)"
+        open={auditOpen}
+        onClose={() => setAuditOpen(false)}
+        width={520}
+      >
+        {auditLoading ? (
+          <Spin />
+        ) : audit.length === 0 ? (
+          <Empty description="尚无 audit 记录" />
+        ) : (
+          <Timeline
+            items={audit.map((a) => ({
+              color: a.action === 'clear' ? 'gray' : 'blue',
+              children: (
+                <div>
+                  <Text strong style={{ fontFamily: 'monospace' }}>
+                    {a.flag_name}
+                  </Text>
+                  <Tag style={{ marginLeft: 8 }}>{a.action}</Tag>
+                  <div style={{ marginTop: 4, fontSize: 12, color: '#888' }}>
+                    {new Date(a.created_at).toLocaleString('zh-CN')} · {a.actor}
+                  </div>
+                  <div style={{ marginTop: 4 }}>
+                    <Text type="secondary">old:</Text>{' '}
+                    <Text code>{a.old_value ?? 'null'}</Text>{' '}
+                    <Text type="secondary">→ new:</Text>{' '}
+                    <Text code>{a.new_value}</Text>
+                  </div>
+                  {a.note && (
+                    <div style={{ marginTop: 4, fontStyle: 'italic', color: '#aaa' }}>
+                      {a.note}
+                    </div>
+                  )}
+                </div>
+              ),
+            }))}
+          />
+        )}
+      </Drawer>
+    </div>
+  )
+}
