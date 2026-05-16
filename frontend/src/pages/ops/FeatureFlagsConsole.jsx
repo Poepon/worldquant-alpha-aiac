@@ -190,6 +190,12 @@ function OpsBrainRoleCard() {
               <li>立即触发后台 5 region 同步(USA/CHN/HKG/JPN/EUR,预计 10-30 分钟)</li>
               <li>新发起 task 使用 testPeriod=P0Y、Sharpe 提交门槛抬到 1.58</li>
               <li>当前 {state?.running_tasks_count ?? 0} 个 running task <b>不受影响</b>(读启动时冻结的配置)</li>
+              <li>
+                <Text type="warning">
+                  <b>注意 legacy alpha</b>:task_id=NULL(v5 之前创建)的旧 alpha 在下次 sync 时会被用 Sharpe=1.58 重判 → 可能批量
+                  PASS → PASS_PROVISIONAL 降级。建议切换前先回填 task_id,或接受此一次性降级。
+                </Text>
+              </li>
               <li><b>安全网</b>:若 BRAIN 在下次 submit_alpha 时返回 PROD-corr 403(账号实际未授权),系统会<b>自动切回 USER</b> 并写 audit 日志</li>
             </ul>
           </>
@@ -370,9 +376,21 @@ export default function FeatureFlagsConsole() {
     },
     {
       title: '当前值',
-      width: 140,
-      render: (_, row) =>
-        row.flag_type === 'bool' ? (
+      width: 200,
+      render: (_, row) => {
+        // P3-Brain (2026-05-16): ENABLE_BRAIN_CONSULTANT_MODE 必须走顶部
+        // OpsBrainRoleCard 的 Modal — 普通 Switch 直接 PATCH 会绕过 multi-sim
+        // latch 清理 + sync_datasets enqueue,Consultant 模式有名无实。
+        if (row.name === 'ENABLE_BRAIN_CONSULTANT_MODE') {
+          return (
+            <Tooltip title="此 flag 必须在上方 'BRAIN 模式' 卡片切换 — 直接 PATCH 会绕过 multi-sim latch 清理与全球数据同步">
+              <Tag color={row.effective_value ? 'gold' : 'default'}>
+                {String(row.effective_value)} · 见上方卡片
+              </Tag>
+            </Tooltip>
+          )
+        }
+        return row.flag_type === 'bool' ? (
           <Switch
             checked={!!row.effective_value}
             loading={busyFlag === row.name}
@@ -382,7 +400,8 @@ export default function FeatureFlagsConsole() {
           // Non-bool types: read-only for now; PATCH still works through API
           // but Phase 1 only ships flip UX since every whitelisted flag is bool.
           <Text code>{String(row.effective_value)}</Text>
-        ),
+        )
+      },
     },
     {
       title: '来源',
@@ -413,8 +432,11 @@ export default function FeatureFlagsConsole() {
     {
       title: '操作',
       width: 90,
-      render: (_, row) =>
-        row.source === 'runtime-override' ? (
+      render: (_, row) => {
+        if (row.name === 'ENABLE_BRAIN_CONSULTANT_MODE') {
+          return <Text type="secondary">↑ 见卡片</Text>
+        }
+        return row.source === 'runtime-override' ? (
           <Popconfirm
             title="清除此 override,回落 env 默认?"
             onConfirm={() => handleReset(row)}
@@ -425,7 +447,8 @@ export default function FeatureFlagsConsole() {
           </Popconfirm>
         ) : (
           <Text type="secondary">—</Text>
-        ),
+        )
+      },
     },
   ]
 

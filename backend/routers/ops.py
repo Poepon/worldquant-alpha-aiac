@@ -913,13 +913,15 @@ async def llm_op_deactivated_kb(
     _token: str = Depends(_require_ops_token),
     svc: OpsService = Depends(get_ops_service),
 ) -> List[Dict[str, Any]]:
-    """Affected-entries subset — only entries whose row currently lists
-    bad ops AND would have been (or was) deactivated.
+    """Dedicated endpoint for the "affected KB entries" tab on the LLM-op
+    page — alias of ``affected_entries`` from /latest.
 
-    Returns the same row schema as ``affected_entries`` in /latest. We
-    don't separately hit the DB — the monitor's md already tells us
-    which rows were flagged; the task is the source of truth for the
-    "deactivated" decision (knowledge_entries.is_active toggling).
+    Same row schema as ``affected_entries`` in /latest; the monitor task
+    (not this endpoint) is the source of truth for the actual
+    is_active toggling on ``knowledge_entries``. The "deactivated" name
+    is historical — the list contains all entries flagged in the latest
+    monitor run, including ones whose row is still active because the
+    task only logged them without auto-disable.
     """
     result = await svc.get_llm_op_latest(date_)
     return result["summary"].get("affected_entries", [])

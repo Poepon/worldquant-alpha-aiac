@@ -17,6 +17,25 @@ from backend.routers import dashboard, tasks, alphas, knowledge, config, dataset
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events."""
+    # P3 safety net (2026-05-16): /ops/* flips ENABLE_BRAIN_CONSULTANT_MODE,
+    # triggers Celery beat tasks, soft-disables pitfalls. Empty OPS_API_TOKEN
+    # silently disables auth (dev convenience) — refuse to start in non-dev
+    # so a missing env var can't accidentally expose ops endpoints publicly.
+    import os
+    _ops_token = os.getenv("OPS_API_TOKEN", "").strip()
+    _env = os.getenv("ENV", "dev").lower()
+    if not _ops_token:
+        if _env not in ("dev", "development", "test", "testing"):
+            raise SystemExit(
+                f"OPS_API_TOKEN is empty in ENV={_env}. "
+                "Set OPS_API_TOKEN to a non-empty secret to enable /ops/* auth, "
+                "or set ENV=dev to acknowledge dev-mode unauth."
+            )
+        from loguru import logger
+        logger.warning(
+            f"[Startup] OPS_API_TOKEN empty — /ops/* UNAUTHENTICATED (ENV={_env})"
+        )
+
     # Startup: Initialize database
     await init_db()
 

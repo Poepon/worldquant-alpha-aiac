@@ -187,12 +187,17 @@ def _decode_value(raw: str, flag_type: str) -> Any:
 
 
 def _encode_value(value: Any, flag_type: str) -> str:
-    """JSON-encode a value, validating it matches the declared type."""
+    """JSON-encode a value, validating it matches the declared type.
+
+    Note bool is a subclass of int in Python — guard int/float against
+    accidentally accepting True/False (would silently encode as JSON `true`
+    and decode back as 1, drifting behaviour without an error).
+    """
     if flag_type == "bool" and not isinstance(value, bool):
         raise ValueError(f"expected bool, got {type(value).__name__}")
-    if flag_type == "int" and not isinstance(value, int):
+    if flag_type == "int" and (isinstance(value, bool) or not isinstance(value, int)):
         raise ValueError(f"expected int, got {type(value).__name__}")
-    if flag_type == "float" and not isinstance(value, (int, float)):
+    if flag_type == "float" and (isinstance(value, bool) or not isinstance(value, (int, float))):
         raise ValueError(f"expected number, got {type(value).__name__}")
     if flag_type == "str" and not isinstance(value, str):
         raise ValueError(f"expected str, got {type(value).__name__}")

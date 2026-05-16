@@ -83,7 +83,10 @@ def start_async_refresher() -> asyncio.Task:
     global _async_task
     if _async_task is not None and not _async_task.done():
         return _async_task
-    loop = asyncio.get_event_loop()
+    # Called from FastAPI lifespan (async context) → there IS a running loop.
+    # Use get_running_loop instead of the 3.12-deprecated get_event_loop
+    # (which 3.14 removes entirely for the "no running loop" branch).
+    loop = asyncio.get_running_loop()
     _async_task = loop.create_task(
         _async_refresh_loop(),
         name="feature_flag_async_refresher",

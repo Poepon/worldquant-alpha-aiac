@@ -326,6 +326,58 @@ async def test_correct_token_200(client, monkeypatch):
     assert r.status_code == 200
 
 
+@pytest.mark.asyncio
+async def test_wrong_token_401(client, monkeypatch):
+    """Token mismatch → 401, not 200 (regression: review found this untested)."""
+    monkeypatch.setenv("OPS_API_TOKEN", "super-secret")
+    r = await client.get(
+        "/api/v1/ops/flags",
+        headers={"X-Ops-Token": "wrong-secret"},
+    )
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_empty_token_header_401(client, monkeypatch):
+    """X-Ops-Token: '' (empty string sent) must NOT auth-bypass — only an
+    unset OPS_API_TOKEN env var disables auth."""
+    monkeypatch.setenv("OPS_API_TOKEN", "super-secret")
+    r = await client.get(
+        "/api/v1/ops/flags",
+        headers={"X-Ops-Token": ""},
+    )
+    assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_per_task_lock_does_not_block_other_tasks(client):
+    """Per-task SETNX is keyed by task name — distinct tasks don't collide."""
+    fake_redis = _MiniRedis()
+
+    def _send(name, kwargs=None, **rest):
+        m = MagicMock()
+        m.id = "ok"
+        return m
+
+    with patch("backend.celery_app.celery_app") as mock_app, \
+         patch("backend.services.ops_service.OpsService._redis",
+               return_value=fake_redis):
+        mock_app.send_task.side_effect = _send
+
+        # Two distinct whitelisted tasks back-to-back — both must succeed
+        r1 = await client.post(
+            "/api/v1/ops/tasks/trigger",
+            json={"name": "backend.tasks.run_pillar_balance_check"},
+        )
+        r2 = await client.post(
+            "/api/v1/ops/tasks/trigger",
+            json={"name": "backend.tasks.run_alpha_health_check"},
+        )
+
+    assert r1.status_code == 200
+    assert r2.status_code == 200
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -255,9 +255,9 @@ class OpsService:
                     # Some Celery versions store name under different keys
                     if blob.get("name") != task_name:
                         continue
+                key_str = key.decode() if isinstance(key, bytes) else str(key)
                 results.append(TaskRunRecord(
-                    task_id=blob.get("task_id") or key.decode().split("-")[-1]
-                    if isinstance(key, bytes) else str(key).split("-")[-1],
+                    task_id=blob.get("task_id") or key_str.split("-")[-1],
                     name=blob.get("task") or blob.get("name"),
                     status=blob.get("status"),
                     date_done=blob.get("date_done"),
@@ -315,17 +315,22 @@ class OpsService:
             pass
 
     def _check_and_bump_global_throttle(self) -> bool:
-        """Return True if under the global limit + bumped; False if over."""
+        """Return True if under the global limit + bumped; False if over.
+
+        Uses ``SET key 0 EX 60 NX`` then ``INCR`` so the TTL is attached
+        the moment the key exists. The old INCR-then-EXPIRE pattern raced
+        on process death — a crash between the two ops left a TTL-less
+        counter that permanently throttled all triggers for everyone.
+        """
         try:
             cli = self._redis()
         except Exception:
             return True  # fail-open
 
         try:
+            # NX makes this a no-op on second+ calls within the window.
+            cli.set(_GLOBAL_KEY, 0, ex=GLOBAL_THROTTLE_WINDOW_SEC, nx=True)
             count = cli.incr(_GLOBAL_KEY)
-            if count == 1:
-                # First in this minute — set the window expiry
-                cli.expire(_GLOBAL_KEY, GLOBAL_THROTTLE_WINDOW_SEC)
             return count <= GLOBAL_THROTTLE_LIMIT
         except Exception:
             return True  # fail-open
@@ -593,19 +598,38 @@ class OpsService:
         per-region health snapshot + top triggers + top pitfalls.
 
         Designed so a single GET fills the entire /ops/overview page;
-        the React side does not chain calls.
+        the React side does not chain calls. The 7 reader calls fan out
+        concurrently via anyio task group — each is an independent
+        threadpool disk read, no cross-dependency.
         """
+        import anyio
         from backend.services.ops_report_reader import OpsReportReader
 
         reader = OpsReportReader()
+        slots: Dict[str, Any] = {}
 
-        alpha_p, alpha_src = await reader.get_or_compute("alpha_health_check")
-        hyp_p, hyp_src = await reader.get_or_compute("hypothesis_health_check")
-        pillar_p, pillar_src = await reader.get_or_compute("pillar_balance")
-        regime_p, regime_src = await reader.get_or_compute("regime_state")
-        neg_p, neg_src = await reader.get_or_compute("negative_knowledge")
-        macro_p, macro_src = await reader.get_or_compute("macro_narratives")
-        llm_p, llm_src = await reader.get_or_compute("llm_op_monitor")
+        async def _load(kind: str) -> None:
+            slots[kind] = await reader.get_or_compute(kind)
+
+        async with anyio.create_task_group() as tg:
+            for k in (
+                "alpha_health_check",
+                "hypothesis_health_check",
+                "pillar_balance",
+                "regime_state",
+                "negative_knowledge",
+                "macro_narratives",
+                "llm_op_monitor",
+            ):
+                tg.start_soon(_load, k)
+
+        alpha_p, alpha_src = slots["alpha_health_check"]
+        hyp_p, hyp_src = slots["hypothesis_health_check"]
+        pillar_p, pillar_src = slots["pillar_balance"]
+        regime_p, regime_src = slots["regime_state"]
+        neg_p, neg_src = slots["negative_knowledge"]
+        macro_p, macro_src = slots["macro_narratives"]
+        llm_p, llm_src = slots["llm_op_monitor"]
 
         alpha_summary = self._summarize_alpha_health(alpha_p, alpha_src)
         hyp_summary = self._summarize_hypothesis_health(hyp_p, hyp_src)

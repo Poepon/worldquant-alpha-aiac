@@ -858,9 +858,19 @@ class Settings(BaseSettings):
     # We do NOT do an isinstance check on `name` — Python guarantees attribute
     # names are str, and validating it costs more than just running startswith.
     def __getattribute__(self, name: str) -> Any:  # noqa: D401
-        if name.startswith("ENABLE_") and name in _flag_override_cache:
-            return _flag_override_cache[name]
+        if name.startswith("ENABLE_"):
+            # Single .get under GIL — avoid the `in`-then-`[]` race against
+            # `_flag_override_cache.clear()` from load_overrides_into_cache.
+            # The sentinel comparison also lets us honour an override value
+            # of None (cleared override path stores nothing in cache).
+            val = _flag_override_cache.get(name, _UNSET_FLAG)
+            if val is not _UNSET_FLAG:
+                return val
         return object.__getattribute__(self, name)
 
+
+# Sentinel for __getattribute__ override-cache lookup. Module-level so the
+# hot path doesn't allocate per call.
+_UNSET_FLAG = object()
 
 settings = Settings()
