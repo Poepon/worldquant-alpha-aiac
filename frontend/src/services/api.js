@@ -411,6 +411,62 @@ const api = {
     const { data } = await client.get('/ops/tasks/recent-runs', { params })
     return data
   },
+
+  // Ops Phase 2 — Alpha Health
+  getOpsAlphaHealthLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/alpha-health/latest', { params })
+    return data
+  },
+
+  getOpsAlphaHealthHistory: async (days = 30) => {
+    const { data } = await client.get('/ops/alpha-health/history', { params: { days } })
+    return data
+  },
+
+  getOpsAlphaHealthRecords: async ({ band = null, region = null, limit = 200, date = null } = {}) => {
+    const params = { limit }
+    if (band) params.band = band
+    if (region) params.region = region
+    if (date) params.date = date
+    const { data } = await client.get('/ops/alpha-health/alphas', { params })
+    return data
+  },
+
+  rerunOpsAlphaHealth: async () => {
+    const { data } = await client.post('/ops/alpha-health/rerun')
+    return data
+  },
+
+  // Ops Phase 2 — Hypothesis Health
+  getOpsHypothesisHealthLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/hypothesis-health/latest', { params })
+    return data
+  },
+
+  getOpsHypothesisHealthHistory: async (days = 30) => {
+    const { data } = await client.get('/ops/hypothesis-health/history', { params: { days } })
+    return data
+  },
+
+  getOpsHypothesisTransitions: async (hypothesisId = null, limit = 100) => {
+    const params = { limit }
+    if (hypothesisId) params.hypothesis_id = hypothesisId
+    const { data } = await client.get('/ops/hypothesis-health/transitions', { params })
+    return data
+  },
+
+  rerunOpsHypothesisHealth: async () => {
+    const { data } = await client.post('/ops/hypothesis-health/rerun')
+    return data
+  },
+
+  // Ops Phase 2 — Overview
+  getOpsOverview: async () => {
+    const { data } = await client.get('/ops/overview')
+    return data
+  },
 }
 
 export default api

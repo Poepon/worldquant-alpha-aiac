@@ -2,6 +2,9 @@ import { Route, Routes, Navigate } from 'react-router-dom'
 import { Alert } from 'antd'
 
 import FeatureFlagsConsole from './FeatureFlagsConsole'
+import AlphaHealthMonitor from './AlphaHealthMonitor'
+import HypothesisHealthMonitor from './HypothesisHealthMonitor'
+import OpsOverview from './OpsOverview'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -36,17 +39,19 @@ export default function OpsLayout() {
         />
       )}
       <Routes>
-        <Route index element={<Navigate to="feature-flags" replace />} />
+        <Route index element={<Navigate to="overview" replace />} />
+        {/* Phase 1 — Feature Flag Console */}
         <Route path="feature-flags" element={<FeatureFlagsConsole />} />
-        {/* Phase 2/3 placeholders — redirect to flags until those pages land */}
-        <Route path="overview" element={<Navigate to="../feature-flags" replace />} />
-        <Route path="alpha-health" element={<Navigate to="../feature-flags" replace />} />
-        <Route path="hypothesis-health" element={<Navigate to="../feature-flags" replace />} />
-        <Route path="pillar-balance" element={<Navigate to="../feature-flags" replace />} />
-        <Route path="negative-knowledge" element={<Navigate to="../feature-flags" replace />} />
-        <Route path="macro-narratives" element={<Navigate to="../feature-flags" replace />} />
-        <Route path="regime" element={<Navigate to="../feature-flags" replace />} />
-        <Route path="llm-op-monitor" element={<Navigate to="../feature-flags" replace />} />
+        {/* Phase 2 — P1 visualizations */}
+        <Route path="overview" element={<OpsOverview />} />
+        <Route path="alpha-health" element={<AlphaHealthMonitor />} />
+        <Route path="hypothesis-health" element={<HypothesisHealthMonitor />} />
+        {/* Phase 3 — P2 pages still pending (redirect until shipped) */}
+        <Route path="pillar-balance" element={<Navigate to="../overview" replace />} />
+        <Route path="negative-knowledge" element={<Navigate to="../overview" replace />} />
+        <Route path="macro-narratives" element={<Navigate to="../overview" replace />} />
+        <Route path="regime" element={<Navigate to="../overview" replace />} />
+        <Route path="llm-op-monitor" element={<Navigate to="../overview" replace />} />
       </Routes>
     </div>
   )

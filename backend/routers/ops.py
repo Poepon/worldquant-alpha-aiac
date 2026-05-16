@@ -23,7 +23,7 @@ disable auth — production MUST set it.
 from __future__ import annotations
 
 import os
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -152,6 +152,76 @@ class RecentRunOut(BaseModel):
 class RefreshAllOut(BaseModel):
     refreshed: int
     flags: List[str]
+
+
+# ---------- Phase 2 (Alpha / Hypothesis Health + Overview) ----------------
+
+class AlphaHealthSummaryOut(BaseModel):
+    """Wire mirror of services.ops_service.AlphaHealthSummary."""
+    report_date: Optional[str] = None
+    band_counts: Dict[str, int] = Field(default_factory=dict)
+    band_pcts: Dict[str, float] = Field(default_factory=dict)
+    by_region: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    total_alphas: int = 0
+    failed: int = 0
+    record_count: int = 0
+    source: str
+    stale_days: Optional[int] = None
+
+
+class AlphaHealthLatestOut(BaseModel):
+    summary: AlphaHealthSummaryOut
+    source: str
+    # We forward the raw payload so the React Drawer can show the full
+    # JSON without a second round-trip — small reports (<5MB) keep this cheap.
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class AlphaHealthRecordsOut(BaseModel):
+    records: List[Dict[str, Any]] = Field(default_factory=list)
+    total_unfiltered: int = 0
+    source: str
+
+
+class HypothesisHealthSummaryOut(BaseModel):
+    report_date: Optional[str] = None
+    total_active: int = 0
+    total_triggered: int = 0
+    avg_thesis_score: Optional[float] = None
+    trigger_histogram: Dict[str, int] = Field(default_factory=dict)
+    score_buckets: Dict[str, int] = Field(default_factory=dict)
+    source: str
+    stale_days: Optional[int] = None
+
+
+class HypothesisHealthLatestOut(BaseModel):
+    summary: HypothesisHealthSummaryOut
+    source: str
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class HypothesisTransitionOut(BaseModel):
+    id: int
+    hypothesis_id: int
+    old_is_triggered: Optional[bool]
+    new_is_triggered: bool
+    sharpe_at_transition: Optional[float]
+    reason: Optional[str]
+    source: Optional[str]
+    transitioned_at: Optional[str]
+
+
+class BeatStatusOut(BaseModel):
+    source: str
+    date: Optional[str] = None
+
+
+class OverviewOut(BaseModel):
+    beat_status: Dict[str, BeatStatusOut]
+    alpha_health_summary: AlphaHealthSummaryOut
+    hypothesis_health_summary: HypothesisHealthSummaryOut
+    region_regime: Dict[str, Optional[str]] = Field(default_factory=dict)
+    top_pitfalls: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 # ===========================================================================
@@ -303,3 +373,180 @@ async def recent_task_runs(
     """
     rows = await svc.list_recent_celery_runs(task_name=task_name, limit=limit)
     return [RecentRunOut(**r.__dict__) for r in rows]
+
+
+# ===========================================================================
+# Phase 2 — Alpha Health endpoints
+# ===========================================================================
+
+# Trigger task names for the convenience "rerun" buttons. Kept here (rather
+# than inline strings on each endpoint) so the whitelist is the single
+# source of truth alongside _ALLOWED_TRIGGER_NAMES in OpsService.
+_ALPHA_HEALTH_TASK = "backend.tasks.run_alpha_health_check"
+_HYPOTHESIS_HEALTH_TASK = "backend.tasks.run_hypothesis_health_check"
+
+
+@router.get("/alpha-health/latest", response_model=AlphaHealthLatestOut)
+async def alpha_health_latest(
+    date_: Optional[date] = Query(None, alias="date"),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> AlphaHealthLatestOut:
+    """Latest alpha_health_check summary + raw payload."""
+    result = await svc.get_alpha_health(date_)
+    return AlphaHealthLatestOut(
+        summary=AlphaHealthSummaryOut(**result["summary"].__dict__),
+        source=result["source"],
+        payload=result["payload"],
+    )
+
+
+@router.get("/alpha-health/history")
+async def alpha_health_history(
+    days: int = Query(30, ge=1, le=180),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> List[Dict[str, Any]]:
+    """Chronological per-day summary, oldest→newest, missing days skipped.
+
+    Each entry shape: ``{"_date": "2026-05-16", "band_counts": {...},
+    "band_pcts": {...}, "total_alphas": N}``. Returned as a raw dict list
+    rather than a typed BaseModel because the ``_date`` key starts with
+    an underscore (matches OpsReportReader's stamp convention) which
+    Pydantic v2 rejects as a field name.
+    """
+    return await svc.get_alpha_health_history(days=days)
+
+
+@router.get("/alpha-health/alphas", response_model=AlphaHealthRecordsOut)
+async def alpha_health_records(
+    band: Optional[str] = Query(None, description="Comma-separated bands, e.g. 'RED,YELLOW'"),
+    region: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=2000),
+    date_: Optional[date] = Query(None, alias="date"),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> AlphaHealthRecordsOut:
+    """Filtered drill-down list — defaults to today's records, no filter."""
+    bands_list = [b.strip().upper() for b in band.split(",")] if band else None
+    result = await svc.get_alpha_health_records(
+        target=date_, bands=bands_list, region=region, limit=limit,
+    )
+    return AlphaHealthRecordsOut(**result)
+
+
+@router.post("/alpha-health/rerun", response_model=TriggerOut)
+async def alpha_health_rerun(
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> TriggerOut:
+    """Fire the daily alpha_health_check Celery task on demand.
+
+    Same throttle rules as /tasks/trigger — 60s per task, 10/min global.
+    Operator polls GET /alpha-health/latest a few seconds later for the
+    refreshed payload.
+    """
+    try:
+        result = await svc.trigger_task(_ALPHA_HEALTH_TASK, actor=actor or "ops_console")
+    except UnknownTaskError as ex:
+        raise HTTPException(400, str(ex)) from ex
+    except PerTaskThrottledError as ex:
+        raise HTTPException(409, str(ex)) from ex
+    except GlobalThrottledError as ex:
+        raise HTTPException(429, str(ex)) from ex
+    return TriggerOut(**result.__dict__)
+
+
+# ===========================================================================
+# Phase 2 — Hypothesis Health endpoints
+# ===========================================================================
+
+@router.get("/hypothesis-health/latest", response_model=HypothesisHealthLatestOut)
+async def hypothesis_health_latest(
+    date_: Optional[date] = Query(None, alias="date"),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> HypothesisHealthLatestOut:
+    """Latest hypothesis_health_check summary + raw payload."""
+    result = await svc.get_hypothesis_health(date_)
+    return HypothesisHealthLatestOut(
+        summary=HypothesisHealthSummaryOut(**result["summary"]),
+        source=result["source"],
+        payload=result["payload"],
+    )
+
+
+@router.get("/hypothesis-health/history")
+async def hypothesis_health_history(
+    days: int = Query(30, ge=1, le=180),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> List[Dict[str, Any]]:
+    """30d trend of triggered count + avg score.
+
+    Raw list (see alpha_health_history for why) — ``_date`` key clashes
+    with Pydantic v2's leading-underscore field-name guard.
+    """
+    return await svc.get_hypothesis_health_history(days=days)
+
+
+@router.get(
+    "/hypothesis-health/transitions", response_model=List[HypothesisTransitionOut],
+)
+async def hypothesis_transitions(
+    hypothesis_id: Optional[int] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> List[HypothesisTransitionOut]:
+    """Audit log of is_triggered edge transitions, newest first."""
+    return await svc.get_hypothesis_transitions(
+        hypothesis_id=hypothesis_id, limit=limit,
+    )
+
+
+@router.post("/hypothesis-health/rerun", response_model=TriggerOut)
+async def hypothesis_health_rerun(
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> TriggerOut:
+    """Fire the daily hypothesis_health_check Celery task on demand."""
+    try:
+        result = await svc.trigger_task(
+            _HYPOTHESIS_HEALTH_TASK, actor=actor or "ops_console",
+        )
+    except UnknownTaskError as ex:
+        raise HTTPException(400, str(ex)) from ex
+    except PerTaskThrottledError as ex:
+        raise HTTPException(409, str(ex)) from ex
+    except GlobalThrottledError as ex:
+        raise HTTPException(429, str(ex)) from ex
+    return TriggerOut(**result.__dict__)
+
+
+# ===========================================================================
+# Phase 2 — Overview (one GET fills the whole /ops/overview page)
+# ===========================================================================
+
+@router.get("/overview", response_model=OverviewOut)
+async def overview(
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> OverviewOut:
+    """Aggregates all seven daily-beat sources into one payload."""
+    raw = await svc.get_overview()
+    return OverviewOut(
+        beat_status={
+            k: BeatStatusOut(**v) for k, v in raw["beat_status"].items()
+        },
+        alpha_health_summary=AlphaHealthSummaryOut(
+            **raw["alpha_health_summary"].__dict__
+        ),
+        hypothesis_health_summary=HypothesisHealthSummaryOut(
+            **raw["hypothesis_health_summary"]
+        ),
+        region_regime=raw["region_regime"],
+        top_pitfalls=raw["top_pitfalls"],
+    )
