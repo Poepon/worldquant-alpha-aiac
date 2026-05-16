@@ -566,6 +566,22 @@ const api = {
     const { data } = await client.post('/ops/regime/rerun', null, { params })
     return data
   },
+
+  // Ops Phase 4 — LLM op hallucination monitor
+  getOpsLLMOpLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/llm-op/latest', { params })
+    return data
+  },
+  getOpsLLMOpDeactivatedKB: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/llm-op/deactivated-kb', { params })
+    return data
+  },
+  rerunOpsLLMOp: async () => {
+    const { data } = await client.post('/ops/llm-op/rerun')
+    return data
+  },
 }
 
 export default api

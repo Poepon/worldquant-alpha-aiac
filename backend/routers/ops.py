@@ -288,6 +288,24 @@ class RegimeSnapshotOut(BaseModel):
     source: str
 
 
+class LLMOpSummary(BaseModel):
+    scanned: int = 0
+    valid_ops_in_registry: int = 0
+    clean: int = 0
+    pattern_halluc: int = 0
+    template_halluc: int = 0
+    deactivated: int = 0
+    hallucinated_ops: List[Dict[str, Any]] = Field(default_factory=list)
+    affected_entries: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class LLMOpLatestOut(BaseModel):
+    summary: LLMOpSummary
+    source: str
+    stale_days: Optional[int] = None
+    report_date: Optional[str] = None
+
+
 # ===========================================================================
 # Feature flag endpoints
 # ===========================================================================
@@ -857,4 +875,62 @@ async def regime_rerun(
     """Fire the daily regime-infer task. ``region`` is a hint only —
     the task iterates over all configured regions regardless."""
     result = await _run_trigger(svc, _REGIME_TASK, actor or "ops_console")
+    return TriggerOut(**result.__dict__)
+
+
+# ===========================================================================
+# Phase 4 — LLM op hallucination monitor
+# ===========================================================================
+
+_LLM_OP_TASK = "backend.tasks.monitor_llm_op_hallucinations"
+
+
+@router.get("/llm-op/latest", response_model=LLMOpLatestOut)
+async def llm_op_latest(
+    date_: Optional[date] = Query(None, alias="date"),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> LLMOpLatestOut:
+    """Parse the daily LLM-op-monitor Markdown into KPI + lists.
+
+    docs/llm_op_monitor/<date>.md is the historic format (designed for
+    `cat`-ing in a terminal); we parse it server-side rather than
+    refactoring the upstream task. Up to ARCHIVE_FALLBACK_DAYS days of
+    fallback walk-back when today's file is missing.
+    """
+    result = await svc.get_llm_op_latest(date_)
+    return LLMOpLatestOut(
+        summary=LLMOpSummary(**result["summary"]),
+        source=result["source"],
+        stale_days=result.get("stale_days"),
+        report_date=result.get("report_date"),
+    )
+
+
+@router.get("/llm-op/deactivated-kb")
+async def llm_op_deactivated_kb(
+    date_: Optional[date] = Query(None, alias="date"),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> List[Dict[str, Any]]:
+    """Affected-entries subset — only entries whose row currently lists
+    bad ops AND would have been (or was) deactivated.
+
+    Returns the same row schema as ``affected_entries`` in /latest. We
+    don't separately hit the DB — the monitor's md already tells us
+    which rows were flagged; the task is the source of truth for the
+    "deactivated" decision (knowledge_entries.is_active toggling).
+    """
+    result = await svc.get_llm_op_latest(date_)
+    return result["summary"].get("affected_entries", [])
+
+
+@router.post("/llm-op/rerun", response_model=TriggerOut)
+async def llm_op_rerun(
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> TriggerOut:
+    """Fire the daily monitor_llm_op_hallucinations Celery task."""
+    result = await _run_trigger(svc, _LLM_OP_TASK, actor or "ops_console")
     return TriggerOut(**result.__dict__)

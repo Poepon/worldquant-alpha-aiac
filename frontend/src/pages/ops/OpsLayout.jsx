@@ -9,6 +9,7 @@ import PillarBalance from './PillarBalance'
 import NegativeKnowledge from './NegativeKnowledge'
 import MacroNarratives from './MacroNarratives'
 import Regime from './Regime'
+import LLMOpMonitor from './LLMOpMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -55,8 +56,8 @@ export default function OpsLayout() {
         <Route path="negative-knowledge" element={<NegativeKnowledge />} />
         <Route path="macro-narratives" element={<MacroNarratives />} />
         <Route path="regime" element={<Regime />} />
-        {/* Phase 4 (LLM op monitor) still pending */}
-        <Route path="llm-op-monitor" element={<Navigate to="../overview" replace />} />
+        {/* Phase 4 — LLM op hallucination monitor */}
+        <Route path="llm-op-monitor" element={<LLMOpMonitor />} />
       </Routes>
     </div>
   )

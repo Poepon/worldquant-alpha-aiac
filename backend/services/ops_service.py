@@ -27,7 +27,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -824,6 +824,147 @@ class OpsService:
         return {
             "snapshot": regions.get(region) or {},
             "source": source,
+        }
+
+    # ==================================================================
+    # Phase 4 — LLM op hallucination monitor composer
+    # ==================================================================
+    #
+    # The daily ``monitor_llm_op_hallucinations`` task writes a Markdown
+    # report instead of JSON (it was originally designed to be eyeballed
+    # on disk). For the dashboard we keep that contract and parse the md
+    # in Python — switching the task to emit JSON would touch a pipeline
+    # downstream operators are already used to.
+    #
+    # Parser is regex + line-walker style; only the KPI counters and the
+    # two structured sections (hallucinated op histogram + affected
+    # entries table) are extracted. Free-form prose between sections is
+    # ignored.
+
+    @staticmethod
+    def _parse_llm_op_md(text_content: str) -> Dict[str, Any]:
+        """Parse the daily LLM-op monitor Markdown into a dashboard dict.
+
+        Resilient to missing sections: an empty / partial md still
+        returns a well-formed shape with zero counters + empty lists.
+        """
+        import re
+
+        def _grab_int(label: str) -> int:
+            m = re.search(rf"\*\*{re.escape(label)}\*\*:\s*(\d+)", text_content)
+            return int(m.group(1)) if m else 0
+
+        scanned = _grab_int("Active KB entries scanned")
+        valid_ops = _grab_int("Valid BRAIN ops in registry")
+        clean = _grab_int("Clean entries")
+        pattern_halluc = _grab_int("Pattern-level hallucinations")
+        template_halluc = _grab_int("Template-only hallucinations")
+        deactivated = _grab_int("Deactivated")
+
+        # Hallucinated op histogram — bullet list `- `op_name` — N`
+        halluc_ops: List[Dict[str, Any]] = []
+        for m in re.finditer(r"^- `([^`]+)` — (\d+)", text_content, flags=re.M):
+            halluc_ops.append({"op": m.group(1), "count": int(m.group(2))})
+
+        # Affected entries table — first column is `| 1234 |`. We pull
+        # KB#, source, bad_ops, pattern fields. The table header lines
+        # (kb# / ---) get filtered out by requiring a numeric first cell.
+        affected: List[Dict[str, Any]] = []
+        for m in re.finditer(
+            r"^\|\s*(\d+)\s*\|\s*([^|]+?)\s*\|\s*([^|]+?)\s*\|\s*`([^`]+)`",
+            text_content,
+            flags=re.M,
+        ):
+            affected.append({
+                "kb_id": int(m.group(1)),
+                "source": m.group(2).strip(),
+                "bad_ops": [
+                    x.strip() for x in m.group(3).split(",") if x.strip()
+                ],
+                "pattern": m.group(4),
+            })
+
+        return {
+            "scanned": scanned,
+            "valid_ops_in_registry": valid_ops,
+            "clean": clean,
+            "pattern_halluc": pattern_halluc,
+            "template_halluc": template_halluc,
+            "deactivated": deactivated,
+            "hallucinated_ops": halluc_ops,
+            "affected_entries": affected,
+        }
+
+    async def get_llm_op_latest(
+        self, target: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """Read the latest LLM-op-monitor Markdown + parse it for the UI.
+
+        Walks back up to ``ARCHIVE_FALLBACK_DAYS`` if today's file is
+        missing, mirroring OpsReportReader's policy for JSON kinds.
+        Returns ``{summary, payload, source}`` matching the shape every
+        other Phase 2/3 endpoint exposes.
+        """
+        import anyio
+        from backend.services.ops_report_reader import (
+            ARCHIVE_FALLBACK_DAYS,
+            SOURCE_DOCS_ARCHIVED,
+            SOURCE_DOCS_TODAY,
+            SOURCE_MISSING,
+            _DOCS_ROOT,
+        )
+
+        kind_dir = _DOCS_ROOT / "llm_op_monitor"
+        target = target or date.today()
+        today = date.today()
+
+        def _read_md(d: date) -> Optional[str]:
+            path = kind_dir / f"{d.isoformat()}.md"
+            try:
+                return path.read_text(encoding="utf-8") if path.exists() else None
+            except OSError:
+                return None
+
+        # Primary date
+        body = await anyio.to_thread.run_sync(_read_md, target)
+        source = SOURCE_DOCS_TODAY if target == today else SOURCE_DOCS_ARCHIVED
+        stale_days = 0
+
+        # Fallback walk
+        if body is None:
+            for back in range(1, ARCHIVE_FALLBACK_DAYS + 1):
+                body = await anyio.to_thread.run_sync(
+                    _read_md, target - timedelta(days=back),
+                )
+                if body is not None:
+                    source = SOURCE_DOCS_ARCHIVED
+                    stale_days = back
+                    break
+
+        if body is None:
+            return {
+                "summary": {
+                    "scanned": 0, "clean": 0, "pattern_halluc": 0,
+                    "template_halluc": 0, "deactivated": 0,
+                    "valid_ops_in_registry": 0,
+                    "hallucinated_ops": [],
+                    "affected_entries": [],
+                },
+                "source": SOURCE_MISSING,
+                "stale_days": None,
+                "report_date": None,
+            }
+
+        summary = self._parse_llm_op_md(body)
+        # The first markdown heading carries the report date — pull it
+        # so the React side can stamp the card without re-reading anything.
+        import re
+        date_match = re.search(r"#\s*LLM op hallucination monitor — (\S+)", body)
+        return {
+            "summary": summary,
+            "source": source,
+            "stale_days": stale_days or None,
+            "report_date": date_match.group(1) if date_match else None,
         }
 
     async def get_regime_history(
