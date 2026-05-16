@@ -5,6 +5,10 @@ import FeatureFlagsConsole from './FeatureFlagsConsole'
 import AlphaHealthMonitor from './AlphaHealthMonitor'
 import HypothesisHealthMonitor from './HypothesisHealthMonitor'
 import OpsOverview from './OpsOverview'
+import PillarBalance from './PillarBalance'
+import NegativeKnowledge from './NegativeKnowledge'
+import MacroNarratives from './MacroNarratives'
+import Regime from './Regime'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -46,11 +50,12 @@ export default function OpsLayout() {
         <Route path="overview" element={<OpsOverview />} />
         <Route path="alpha-health" element={<AlphaHealthMonitor />} />
         <Route path="hypothesis-health" element={<HypothesisHealthMonitor />} />
-        {/* Phase 3 — P2 pages still pending (redirect until shipped) */}
-        <Route path="pillar-balance" element={<Navigate to="../overview" replace />} />
-        <Route path="negative-knowledge" element={<Navigate to="../overview" replace />} />
-        <Route path="macro-narratives" element={<Navigate to="../overview" replace />} />
-        <Route path="regime" element={<Navigate to="../overview" replace />} />
+        {/* Phase 3 — P2-A/B/C/D dashboards */}
+        <Route path="pillar-balance" element={<PillarBalance />} />
+        <Route path="negative-knowledge" element={<NegativeKnowledge />} />
+        <Route path="macro-narratives" element={<MacroNarratives />} />
+        <Route path="regime" element={<Regime />} />
+        {/* Phase 4 (LLM op monitor) still pending */}
         <Route path="llm-op-monitor" element={<Navigate to="../overview" replace />} />
       </Routes>
     </div>

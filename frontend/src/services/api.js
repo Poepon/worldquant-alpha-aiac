@@ -467,6 +467,105 @@ const api = {
     const { data } = await client.get('/ops/overview')
     return data
   },
+
+  // Ops Phase 3 — P2-B Pillar Balance
+  getOpsPillarLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/pillar/latest', { params })
+    return data
+  },
+  getOpsPillarHistory: async (days = 14) => {
+    const { data } = await client.get('/ops/pillar/history', { params: { days } })
+    return data
+  },
+  getOpsPillarDeficit: async (region, skewThreshold = 0) => {
+    const { data } = await client.get('/ops/pillar/deficit-recommendation', {
+      params: { region, skew_threshold: skewThreshold },
+    })
+    return data
+  },
+  rerunOpsPillar: async () => {
+    const { data } = await client.post('/ops/pillar/rerun')
+    return data
+  },
+
+  // Ops Phase 3 — P2-D Negative Knowledge
+  getOpsNegativeTop: async ({ region = null, category = null, limit = 20 } = {}) => {
+    const params = { limit }
+    if (region) params.region = region
+    if (category) params.category = category
+    const { data } = await client.get('/ops/negative-knowledge/top', { params })
+    return data
+  },
+  getOpsNegativeCategoryBreakdown: async (region = null) => {
+    const params = region ? { region } : {}
+    const { data } = await client.get('/ops/negative-knowledge/category-breakdown', { params })
+    return data
+  },
+  getOpsNegativeTimeline: async (days = 30, region = null) => {
+    const params = { days }
+    if (region) params.region = region
+    const { data } = await client.get('/ops/negative-knowledge/timeline', { params })
+    return data
+  },
+  togglePitfall: async (entryId, isActive) => {
+    const { data } = await client.patch(
+      `/ops/negative-knowledge/entries/${entryId}`,
+      { is_active: isActive },
+    )
+    return data
+  },
+  rerunOpsNegative: async () => {
+    const { data } = await client.post('/ops/negative-knowledge/rerun')
+    return data
+  },
+
+  // Ops Phase 3 — P2-A Macro Narrative
+  getOpsMacroLatest: async (date = null) => {
+    const params = date ? { date } : {}
+    const { data } = await client.get('/ops/macro/latest', { params })
+    return data
+  },
+  getOpsMacroCoverage: async () => {
+    const { data } = await client.get('/ops/macro/coverage')
+    return data
+  },
+  getOpsMacroByScope: async (scope, { datasetCategory = null, limit = 200 } = {}) => {
+    const params = { scope, limit }
+    if (datasetCategory) params.dataset_category = datasetCategory
+    const { data } = await client.get('/ops/macro/by-scope', { params })
+    return data
+  },
+  getOpsMacroTokenBudget: async (utcDate = null) => {
+    const params = utcDate ? { utc_date: utcDate } : {}
+    const { data } = await client.get('/ops/macro/token-budget', { params })
+    return data
+  },
+  rerunOpsMacro: async () => {
+    const { data } = await client.post('/ops/macro/rerun')
+    return data
+  },
+
+  // Ops Phase 3 — P2-C Regime
+  getOpsRegimeCurrent: async (region = 'USA') => {
+    const { data } = await client.get('/ops/regime/current', { params: { region } })
+    return data
+  },
+  getOpsRegimeSnapshot: async (region = 'USA') => {
+    const { data } = await client.get('/ops/regime/snapshot', { params: { region } })
+    return data
+  },
+  getOpsRegimeHistory: async (region = 'USA', days = 14) => {
+    const { data } = await client.get('/ops/regime/history', {
+      params: { region, days },
+    })
+    return data
+  },
+  rerunOpsRegime: async (region = null) => {
+    const params = region ? { region } : {}
+    const { data } = await client.post('/ops/regime/rerun', null, { params })
+    return data
+  },
 }
 
 export default api

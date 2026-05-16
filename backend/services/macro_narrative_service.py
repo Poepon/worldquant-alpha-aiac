@@ -379,6 +379,160 @@ class MacroNarrativeService(BaseService):
         return rows_all[:5]
 
     # ------------------------------------------------------------------
+    # Ops dashboard read methods (P3, 2026-05-16)
+    # ------------------------------------------------------------------
+
+    async def coverage_stats(self) -> Dict[str, Any]:
+        """Return narrative counts grouped by scope + coverage ratio.
+
+        ``coverage`` = field-scope narratives / total active datafields,
+        so ops can see how much of the catalog has economic context.
+        Output shape::
+
+            {
+              "by_scope": {"field": N, "dataset": N, "category": N},
+              "total": N,
+              "fields_total": M,
+              "fields_with_narrative": K,
+              "fields_coverage_pct": 100*K/M,
+            }
+        """
+        scope_sql = """
+            SELECT
+              COALESCE(meta_data->>'scope', 'unknown') AS scope,
+              COUNT(*) AS n
+            FROM knowledge_entries
+            WHERE entry_type = 'MACRO_NARRATIVE'
+              AND is_active = TRUE
+            GROUP BY scope
+        """
+        try:
+            scope_rows = (await self.db.execute(text(scope_sql))).all()
+        except Exception as ex:
+            logger.warning(f"[macro_narrative] coverage_stats — scope query failed: {ex}")
+            scope_rows = []
+        by_scope = {r[0] or "unknown": int(r[1] or 0) for r in scope_rows}
+        total = sum(by_scope.values())
+
+        # field coverage — datafields with at least one field-scope narrative
+        coverage_sql = """
+            SELECT
+              COUNT(DISTINCT df.field_id) AS fields_total,
+              COUNT(DISTINCT
+                CASE
+                  WHEN ke.id IS NOT NULL THEN df.field_id
+                END
+              ) AS fields_with_narrative
+            FROM datafields df
+            LEFT JOIN knowledge_entries ke
+              ON ke.entry_type = 'MACRO_NARRATIVE'
+              AND ke.is_active = TRUE
+              AND COALESCE(ke.meta_data->>'scope', 'unknown') = 'field'
+              AND COALESCE(ke.meta_data->>'field_id', '') = df.field_id
+            WHERE df.is_active = TRUE
+        """
+        try:
+            cov_row = (await self.db.execute(text(coverage_sql))).first()
+        except Exception as ex:
+            logger.warning(
+                f"[macro_narrative] coverage_stats — coverage query failed: {ex}"
+            )
+            cov_row = None
+
+        fields_total = int(cov_row[0] or 0) if cov_row else 0
+        fields_with = int(cov_row[1] or 0) if cov_row else 0
+        coverage_pct = (
+            round(100.0 * fields_with / fields_total, 1) if fields_total else 0.0
+        )
+        return {
+            "by_scope": by_scope,
+            "total": total,
+            "fields_total": fields_total,
+            "fields_with_narrative": fields_with,
+            "fields_coverage_pct": coverage_pct,
+        }
+
+    async def list_narratives_by_scope(
+        self,
+        scope: str,
+        *,
+        dataset_category: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """List active narrative entries filtered by scope (field/dataset/category).
+
+        Returns dicts ready for the /ops/macro-narratives Tab Table.
+        """
+        if scope not in ("field", "dataset", "category"):
+            return []
+        sql = """
+            SELECT
+              id, pattern, description, meta_data, created_at, updated_at
+            FROM knowledge_entries
+            WHERE entry_type = 'MACRO_NARRATIVE'
+              AND is_active = TRUE
+              AND COALESCE(meta_data->>'scope', '') = :scope
+        """
+        params: Dict[str, Any] = {"scope": scope}
+        if dataset_category:
+            sql += " AND COALESCE(meta_data->>'dataset_category', '') = :cat"
+            params["cat"] = dataset_category
+        sql += (
+            " ORDER BY COALESCE((meta_data->>'confidence')::float, 0) DESC,"
+            " updated_at DESC LIMIT :lim"
+        )
+        params["lim"] = int(max(1, min(limit, 1000)))
+        try:
+            rows = (await self.db.execute(text(sql), params)).all()
+        except Exception as ex:
+            logger.warning(
+                f"[macro_narrative] list_narratives_by_scope failed: {ex}"
+            )
+            return []
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            md = r[3] if r[3] else {}
+            md = md if isinstance(md, dict) else {}
+            out.append({
+                "id": r[0],
+                "pattern": r[1] or "",
+                "description": r[2] or "",
+                "scope": md.get("scope") or "",
+                "field_id": md.get("field_id") or "",
+                "dataset_id": md.get("dataset_id") or "",
+                "dataset_category": md.get("dataset_category") or "",
+                "region": md.get("region") or "",
+                "mechanism": md.get("mechanism") or "",
+                "confidence": float(md.get("confidence", 0.0) or 0.0),
+                "source": md.get("source") or "",
+                "created_at": r[4].isoformat() if r[4] else None,
+                "updated_at": r[5].isoformat() if r[5] else None,
+            })
+        return out
+
+    @staticmethod
+    def get_token_usage(utc_date: Optional[str] = None) -> Dict[str, Any]:
+        """Read Redis macro-extract daily token counter.
+
+        Used by /ops/macro/token-budget to show how much of today's LLM
+        budget the macro-narrative extractor has consumed. Fail-open
+        with zeros on Redis outage (consistent with other ops endpoints).
+        """
+        from datetime import datetime as _dt, timezone as _tz
+        if utc_date is None:
+            utc_date = _dt.now(_tz.utc).date().isoformat()
+        out = {"utc_date": utc_date, "tokens_used": 0, "redis_ok": False}
+        try:
+            from backend.tasks.redis_pool import get_redis_client  # lazy
+            cli = get_redis_client()
+            raw = cli.get(f"aiac:macro_extract_tokens:{utc_date}")
+            out["tokens_used"] = int(raw) if raw else 0
+            out["redis_ok"] = True
+        except Exception as ex:
+            logger.debug(f"[macro_narrative] token usage — redis blip: {ex}")
+        return out
+
+    # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
     @staticmethod

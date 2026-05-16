@@ -47,140 +47,26 @@ def run_pillar_balance_check():
 
 
 async def _run_async() -> Dict[str, Any]:
-    """Compute per-region pillar shares over the trailing 7d and persist
-    a JSON report. Returns a small summary dict for Celery result storage."""
-    from sqlalchemy import select, func
+    """Thin wrapper around PillarService.compute_balance_report.
+
+    The aggregation logic was moved to backend/services/pillar_service.py
+    in P3 (ops dashboard) so /ops/pillar-balance can recompute the same
+    report on demand without spawning a Celery task. This task is now
+    only responsible for the side effects:
+      - constructing the AsyncSession
+      - persisting the JSON to docs/pillar_balance/<sh-date>.json
+      - shaping the small dict that ends up in the Celery result backend
+
+    Byte-for-byte report equivalence with the pre-refactor task output is
+    enforced by backend/tests/unit/test_pillar_service_byte_for_byte.py.
+    """
     from backend.database import AsyncSessionLocal
-    from backend.models import Alpha, Hypothesis
-    from backend.pillar_classifier import PILLAR_VALUES, infer_pillar
-    from backend.config import settings
+    from backend.services.pillar_service import PillarService
 
     payload: Dict[str, Any] = {}
     try:
-        now_utc = datetime.now(timezone.utc)
-        sh_now = now_utc.astimezone(SH_TZ)
-        # ``alphas.created_at`` is TIMESTAMP WITHOUT TIME ZONE — pass a naive
-        # UTC datetime so asyncpg doesn't reject the WHERE clause with
-        # "can't subtract offset-naive and offset-aware datetimes".
-        cutoff = (now_utc - timedelta(days=7)).replace(tzinfo=None)
-        target = getattr(settings, "PILLAR_TARGET_DISTRIBUTION", {}) or {}
-
         async with AsyncSessionLocal() as db:
-            # M3: OUTER JOIN from Alpha so legacy rows with NULL hypothesis_id
-            # are not silently dropped. The grouping is on Hypothesis.pillar;
-            # NULL pillars (legacy + Hypothesis without pillar yet) are then
-            # attributed via infer_pillar on the row's expression.
-            #
-            # Two-step approach:
-            #   1. SUM by (region, pillar) for rows that already have a
-            #      pillar (fast PG aggregate).
-            #   2. Stream rows with NULL pillar through infer_pillar in
-            #      Python and bin them into the same region buckets.
-            grouped_stmt = (
-                select(
-                    Alpha.region,
-                    Hypothesis.pillar,
-                    func.count(Alpha.id),
-                )
-                .select_from(Alpha)
-                .outerjoin(
-                    Hypothesis, Alpha.hypothesis_id == Hypothesis.id,
-                )
-                .where(Alpha.created_at >= cutoff)
-                .group_by(Alpha.region, Hypothesis.pillar)
-            )
-            grouped_rows = (await db.execute(grouped_stmt)).all()
-
-            null_pillar_stmt = (
-                select(Alpha.region, Alpha.expression)
-                .select_from(Alpha)
-                .outerjoin(
-                    Hypothesis, Alpha.hypothesis_id == Hypothesis.id,
-                )
-                .where(
-                    Alpha.created_at >= cutoff,
-                    Hypothesis.pillar.is_(None),
-                )
-            )
-            null_rows = (await db.execute(null_pillar_stmt)).all()
-
-        # ---- aggregate ----
-        # by_region[region][pillar] = count of alphas already stamped
-        by_region: Dict[str, Dict[str, int]] = {}
-        # inferred[region][pillar] = count of legacy NULL alphas attributed
-        # via infer_pillar (kept separate so the report can show coverage).
-        inferred: Dict[str, Dict[str, int]] = {}
-
-        for region, pillar, count in grouped_rows:
-            region = region or "UNKNOWN"
-            bucket = by_region.setdefault(region, {})
-            key = pillar if pillar else "unknown"
-            bucket[key] = bucket.get(key, 0) + int(count or 0)
-
-        for region, expression in null_rows:
-            region = region or "UNKNOWN"
-            inferred_pillar = infer_pillar(expression=expression or "")
-            ibucket = inferred.setdefault(region, {})
-            ibucket[inferred_pillar] = ibucket.get(inferred_pillar, 0) + 1
-
-        # ---- build per-region report ----
-        regions: Dict[str, Dict[str, Any]] = {}
-        all_regions = set(by_region.keys()) | set(inferred.keys())
-        for region in sorted(all_regions):
-            stamped = by_region.get(region, {})
-            legacy_inferred = inferred.get(region, {})
-            # Stamped counts (denominator excludes ``unknown`` so legacy
-            # backlog doesn't dilute fresh share computation).
-            stamped_total = sum(
-                c for p, c in stamped.items() if p in target
-            )
-            shares = {
-                p: (stamped.get(p, 0) / stamped_total) if stamped_total else 0.0
-                for p in target
-            }
-            deficits = {
-                p: max(0.0, target.get(p, 0.0) - shares.get(p, 0.0))
-                for p in target
-            }
-            skew = (
-                max(shares.values()) - min(shares.values())
-                if shares else 0.0
-            )
-            top_def = (
-                max(deficits.items(), key=lambda kv: kv[1])
-                if deficits else (None, 0.0)
-            )
-            regions[region] = {
-                "stamped_counts": stamped,
-                "stamped_total": stamped_total,
-                "unknown_count": stamped.get("unknown", 0),
-                "legacy_inferred_counts": legacy_inferred,
-                "legacy_inferred_total": sum(legacy_inferred.values()),
-                "shares": {k: round(v, 3) for k, v in shares.items()},
-                "target": target,
-                "deficits": {k: round(v, 3) for k, v in deficits.items()},
-                "skew": round(skew, 3),
-                "next_pillar": (
-                    top_def[0] if (top_def[1] or 0) > 0 else None
-                ),
-            }
-
-        payload = {
-            "report_date": sh_now.strftime("%Y-%m-%d"),
-            "generated_at_utc": now_utc.isoformat(),
-            "lookback_days": 7,
-            "pillar_values": sorted(PILLAR_VALUES),
-            "regions": regions,
-            "totals": {
-                "regions_checked": len(regions),
-                "stamped_alphas": sum(
-                    r["stamped_total"] for r in regions.values()
-                ),
-                "legacy_inferred_alphas": sum(
-                    r["legacy_inferred_total"] for r in regions.values()
-                ),
-            },
-        }
+            payload = await PillarService(db).compute_balance_report()
     except Exception as e:
         logger.error(f"[pillar_balance] run failed: {e}")
         return {"error": str(e), "traceback": traceback.format_exc()}

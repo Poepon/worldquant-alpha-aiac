@@ -635,3 +635,221 @@ class OpsService:
             "region_regime": region_regime,
             "top_pitfalls": top_pitfalls,
         }
+
+    # ==================================================================
+    # Phase 3 — P2-B Pillar Balance composers
+    # ==================================================================
+
+    async def get_pillar_latest(
+        self, target: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """Pillar report for ``target`` date.
+
+        Today + PillarService available → fresh compute. Otherwise read
+        from docs archive. This is the only Phase 3 page that has a
+        cheap fresh_service path (no LLM / no external API).
+        """
+        from backend.services.ops_report_reader import OpsReportReader
+        from backend.services.pillar_service import PillarService
+
+        reader = OpsReportReader()
+
+        async def _fresh() -> Dict[str, Any]:
+            return await PillarService(self.db).compute_balance_report()
+
+        payload, source = await reader.get_or_compute(
+            "pillar_balance", target, fresh_service=_fresh,
+        )
+        return {"payload": payload, "source": source}
+
+    async def get_pillar_history(self, days: int = 14) -> List[Dict[str, Any]]:
+        """Per-day pillar report entries oldest→newest (skip missing days)."""
+        from backend.services.ops_report_reader import OpsReportReader
+
+        reader = OpsReportReader()
+        raw_days = await reader.list_recent("pillar_balance", days=days)
+        raw_days.sort(key=lambda d: d.get("_date") or "")
+        return raw_days
+
+    async def get_pillar_deficit_recommendation(
+        self, region: str, *, skew_threshold: float = 0.0,
+    ) -> Dict[str, Any]:
+        """Which pillar is most under-represented in ``region`` right now."""
+        from backend.services.pillar_service import PillarService
+
+        svc = PillarService(self.db)
+        nxt = await svc.get_next_pillar_for_region(
+            region, skew_threshold=skew_threshold,
+        )
+        return {"region": region, "next_pillar": nxt}
+
+    # ==================================================================
+    # Phase 3 — P2-D Negative Knowledge composers
+    # ==================================================================
+
+    async def get_negative_knowledge_top(
+        self,
+        *,
+        region: Optional[str] = None,
+        limit: int = 20,
+        category: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Top active pitfalls for the Bar chart + main Table.
+
+        Reads DB live via NegativeKnowledgeService (KB is always-current,
+        no docs fallback needed). On empty result still returns 200 +
+        empty list.
+        """
+        from backend.services.negative_knowledge_service import (
+            NegativeKnowledgeService,
+        )
+        svc = NegativeKnowledgeService(self.db)
+        rows = await svc.fetch_top_pitfalls_admin(
+            region=region, limit=limit, category_filter=category,
+        )
+        return {"records": rows, "source": "service"}
+
+    async def get_negative_knowledge_category_breakdown(
+        self, *, region: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        from backend.services.negative_knowledge_service import (
+            NegativeKnowledgeService,
+        )
+        svc = NegativeKnowledgeService(self.db)
+        by_cat = await svc.aggregate_by_category(region=region)
+        return {"by_category": by_cat, "source": "service"}
+
+    async def get_negative_knowledge_timeline(
+        self, *, days: int = 30, region: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        from backend.services.negative_knowledge_service import (
+            NegativeKnowledgeService,
+        )
+        svc = NegativeKnowledgeService(self.db)
+        return await svc.get_pitfall_timeline(days=days, region=region)
+
+    async def set_pitfall_active(self, entry_id: int, is_active: bool) -> bool:
+        from backend.services.negative_knowledge_service import (
+            NegativeKnowledgeService,
+        )
+        svc = NegativeKnowledgeService(self.db)
+        return await svc.set_pitfall_active(entry_id, is_active)
+
+    # ==================================================================
+    # Phase 3 — P2-A Macro Narrative composers
+    # ==================================================================
+
+    async def get_macro_latest(
+        self, target: Optional[date] = None,
+    ) -> Dict[str, Any]:
+        """Last macro-narrative-extract run summary."""
+        from backend.services.ops_report_reader import OpsReportReader
+
+        reader = OpsReportReader()
+        payload, source = await reader.get_or_compute("macro_narratives", target)
+        return {"payload": payload, "source": source}
+
+    async def get_macro_coverage(self) -> Dict[str, Any]:
+        from backend.services.macro_narrative_service import MacroNarrativeService
+
+        svc = MacroNarrativeService(self.db)
+        coverage = await svc.coverage_stats()
+        return {"coverage": coverage, "source": "service"}
+
+    async def get_macro_by_scope(
+        self,
+        *,
+        scope: str,
+        dataset_category: Optional[str] = None,
+        limit: int = 200,
+    ) -> Dict[str, Any]:
+        from backend.services.macro_narrative_service import MacroNarrativeService
+
+        svc = MacroNarrativeService(self.db)
+        rows = await svc.list_narratives_by_scope(
+            scope, dataset_category=dataset_category, limit=limit,
+        )
+        return {"records": rows, "source": "service"}
+
+    @staticmethod
+    def get_macro_token_budget(utc_date: Optional[str] = None) -> Dict[str, Any]:
+        from backend.services.macro_narrative_service import MacroNarrativeService
+
+        return MacroNarrativeService.get_token_usage(utc_date)
+
+    # ==================================================================
+    # Phase 3 — P2-C Regime composers
+    # ==================================================================
+
+    async def get_regime_current(
+        self, region: str = "USA",
+    ) -> Dict[str, Any]:
+        """Live Redis read — what regime is THIS region in right now.
+
+        Best-effort: returns ``{"regime": None}`` on Redis outage or
+        cold-start (no value cached). The frontend renders a "等待 beat"
+        chip in that case.
+        """
+        from backend.services.regime_inference_service import RegimeInferenceService
+
+        svc = RegimeInferenceService(self.db)
+        regime = await svc.get_cached_regime(region=region)
+        return {"region": region, "regime": regime, "source": "service"}
+
+    async def get_regime_snapshot(
+        self, region: str = "USA",
+    ) -> Dict[str, Any]:
+        """Full inference snapshot from Redis (pass_rate / confidence /
+        history). Falls back to today's docs/regime_state archive when
+        Redis is empty (e.g. service just restarted)."""
+        from backend.services.ops_report_reader import OpsReportReader
+
+        try:
+            from backend.tasks.redis_pool import get_redis_client
+            cli = get_redis_client()
+            raw = cli.get(f"aiac:regime_snapshot:{region}")
+            if raw:
+                import json as _json
+                payload = _json.loads(
+                    raw.decode() if isinstance(raw, bytes) else raw
+                )
+                return {"snapshot": payload, "source": "service"}
+        except Exception:
+            pass
+
+        # fallback: read today's archive + extract this region
+        reader = OpsReportReader()
+        archive, source = await reader.get_or_compute("regime_state")
+        regions = archive.get("regions") or {}
+        return {
+            "snapshot": regions.get(region) or {},
+            "source": source,
+        }
+
+    async def get_regime_history(
+        self, region: str = "USA", *, days: int = 14,
+    ) -> List[Dict[str, Any]]:
+        """Per-day regime + pass_rate for ``region`` over ``days``.
+
+        Each entry: ``{"date", "regime", "pass_rate", "confidence",
+        "cold_start"}``. Missing days skipped, sorted oldest→newest.
+        """
+        from backend.services.ops_report_reader import OpsReportReader
+
+        reader = OpsReportReader()
+        raw_days = await reader.list_recent("regime_state", days=days)
+        out: List[Dict[str, Any]] = []
+        for entry in raw_days:
+            block = (entry.get("regions") or {}).get(region) or {}
+            if not block:
+                continue
+            out.append({
+                "date": entry.get("_date"),
+                "regime": block.get("regime"),
+                "pass_rate": block.get("pass_rate"),
+                "pass_rate_7d_mean": block.get("pass_rate_7d_mean"),
+                "confidence": block.get("confidence"),
+                "cold_start": block.get("cold_start"),
+            })
+        out.sort(key=lambda d: d["date"] or "")
+        return out

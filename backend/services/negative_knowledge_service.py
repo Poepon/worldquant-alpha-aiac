@@ -409,6 +409,176 @@ class NegativeKnowledgeService(BaseService):
         return out
 
     # ------------------------------------------------------------------
+    # Ops dashboard read methods (P3, 2026-05-16)
+    #
+    # These complement fetch_top_pitfalls (mining-time, region-bound) with
+    # ops-view aggregations that don't require a region. They run the
+    # same JSONB query but with relaxed WHERE clauses.
+    # ------------------------------------------------------------------
+
+    async def fetch_top_pitfalls_admin(
+        self,
+        *,
+        region: Optional[str] = None,
+        limit: int = 20,
+        min_fail_count: int = 1,
+        category_filter: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Admin-side variant of fetch_top_pitfalls — region optional.
+
+        When region is None we return active pitfalls across all regions
+        (the /ops/negative-knowledge page wants the global picture).
+        Otherwise behaviour mirrors fetch_top_pitfalls (sim_error rows
+        with empty region are always included).
+        """
+        sql = """
+            SELECT
+              id, pattern, description, meta_data, is_active,
+              created_at, updated_at
+            FROM knowledge_entries
+            WHERE entry_type = 'FAILURE_PITFALL'
+              AND is_active = TRUE
+              AND COALESCE(meta_data->>'skeleton', 'UNKNOWN') != 'UNKNOWN'
+              AND COALESCE((meta_data->>'fail_count')::int, 0) >= :min_fc
+        """
+        params: Dict[str, Any] = {"min_fc": int(min_fail_count)}
+        if region:
+            sql += (
+                " AND (meta_data->>'region' = :region"
+                "      OR (meta_data->>'region' = '' AND"
+                "          meta_data->>'category' = 'sim_error'))"
+            )
+            params["region"] = region
+        if category_filter:
+            sql += " AND meta_data->>'category' = :cat"
+            params["cat"] = str(category_filter)
+        sql += (
+            " ORDER BY COALESCE((meta_data->>'fail_count')::int, 0) DESC,"
+            " (meta_data->>'last_seen_at') DESC NULLS LAST"
+            " LIMIT :lim"
+        )
+        params["lim"] = int(limit)
+
+        try:
+            rows = (await self.db.execute(text(sql), params)).all()
+        except Exception as ex:
+            logger.warning(
+                f"[negative_knowledge] fetch_top_pitfalls_admin failed: {ex}"
+            )
+            return []
+
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            md = r[3] if r[3] else {}
+            md = md if isinstance(md, dict) else {}
+            out.append({
+                "id": r[0],
+                "pattern": md.get("skeleton") or "",
+                "description": (r[2] or "")[:500],
+                "rule_id": md.get("rule_id") or "",
+                "category": md.get("category") or "",
+                "region": md.get("region") or "",
+                "fail_count": int(md.get("fail_count", 0) or 0),
+                "signature_key": md.get("signature_key") or "",
+                "first_seen_at": md.get("first_seen_at"),
+                "last_seen_at": md.get("last_seen_at"),
+                "is_active": bool(r[4]),
+            })
+        return out
+
+    async def aggregate_by_category(
+        self, *, region: Optional[str] = None,
+    ) -> Dict[str, int]:
+        """Count active pitfalls grouped by 6-class category.
+
+        Returns ``{category: count}`` with 0 entries omitted. Used by
+        /ops/negative-knowledge/category-breakdown to render a PieChart.
+        """
+        sql = """
+            SELECT
+              COALESCE(meta_data->>'category', 'unknown') AS cat,
+              COUNT(*) AS n
+            FROM knowledge_entries
+            WHERE entry_type = 'FAILURE_PITFALL'
+              AND is_active = TRUE
+        """
+        params: Dict[str, Any] = {}
+        if region:
+            sql += " AND meta_data->>'region' = :region"
+            params["region"] = region
+        sql += " GROUP BY cat"
+        try:
+            rows = (await self.db.execute(text(sql), params)).all()
+        except Exception as ex:
+            logger.warning(
+                f"[negative_knowledge] aggregate_by_category failed: {ex}"
+            )
+            return {}
+        return {r[0] or "unknown": int(r[1] or 0) for r in rows}
+
+    async def get_pitfall_timeline(
+        self, *, days: int = 30, region: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Per-day count of new pitfalls (created_at) over ``days``.
+
+        Each entry: ``{"date": "2026-05-16", "new_count": N}``. Missing
+        days are NOT zero-filled — frontend chart handles gaps.
+        """
+        sql = """
+            SELECT
+              DATE(created_at) AS d,
+              COUNT(*) AS n
+            FROM knowledge_entries
+            WHERE entry_type = 'FAILURE_PITFALL'
+              AND created_at >= NOW() - (:days || ' days')::interval
+        """
+        params: Dict[str, Any] = {"days": int(max(1, min(days, 365)))}
+        if region:
+            sql += " AND meta_data->>'region' = :region"
+            params["region"] = region
+        sql += " GROUP BY d ORDER BY d"
+        try:
+            rows = (await self.db.execute(text(sql), params)).all()
+        except Exception as ex:
+            logger.warning(
+                f"[negative_knowledge] get_pitfall_timeline failed: {ex}"
+            )
+            return []
+        return [
+            {"date": r[0].isoformat() if r[0] else None, "new_count": int(r[1])}
+            for r in rows if r[0]
+        ]
+
+    async def set_pitfall_active(self, entry_id: int, is_active: bool) -> bool:
+        """Soft-enable / disable a single pitfall row. Returns True if
+        anything was updated (one row, by ID), False otherwise.
+
+        Backs the /ops/negative-knowledge "禁用 Switch" interaction.
+        Keeps the audit trail in sync — knowledge_entries.updated_at
+        bumps automatically via the ORM.
+        """
+        try:
+            from sqlalchemy import update
+            from backend.models import KnowledgeEntry
+            stmt = (
+                update(KnowledgeEntry)
+                .where(
+                    KnowledgeEntry.id == int(entry_id),
+                    KnowledgeEntry.entry_type == "FAILURE_PITFALL",
+                )
+                .values(is_active=bool(is_active))
+            )
+            result = await self.db.execute(stmt)
+            await self.db.commit()
+            return result.rowcount > 0
+        except Exception as ex:
+            await self.db.rollback()
+            logger.warning(
+                f"[negative_knowledge] set_pitfall_active({entry_id}) failed: {ex}"
+            )
+            return False
+
+    # ------------------------------------------------------------------
     # internals
     # ------------------------------------------------------------------
     def _is_postgres(self) -> bool:

@@ -224,6 +224,70 @@ class OverviewOut(BaseModel):
     top_pitfalls: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+# ---------- Phase 3 (Pillar / Negative / Macro / Regime) ------------------
+
+class PillarLatestOut(BaseModel):
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    source: str
+
+
+class PillarDeficitOut(BaseModel):
+    region: str
+    next_pillar: Optional[str] = None
+
+
+class NegativeTopOut(BaseModel):
+    records: List[Dict[str, Any]] = Field(default_factory=list)
+    source: str
+
+
+class NegativeCategoryOut(BaseModel):
+    by_category: Dict[str, int] = Field(default_factory=dict)
+    source: str
+
+
+class PitfallToggleIn(BaseModel):
+    is_active: bool
+
+
+class PitfallToggleOut(BaseModel):
+    id: int
+    is_active: bool
+    updated: bool
+
+
+class MacroLatestOut(BaseModel):
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    source: str
+
+
+class MacroCoverageOut(BaseModel):
+    coverage: Dict[str, Any]
+    source: str
+
+
+class MacroByScopeOut(BaseModel):
+    records: List[Dict[str, Any]] = Field(default_factory=list)
+    source: str
+
+
+class MacroTokenBudgetOut(BaseModel):
+    utc_date: str
+    tokens_used: int
+    redis_ok: bool
+
+
+class RegimeCurrentOut(BaseModel):
+    region: str
+    regime: Optional[str] = None
+    source: str
+
+
+class RegimeSnapshotOut(BaseModel):
+    snapshot: Dict[str, Any] = Field(default_factory=dict)
+    source: str
+
+
 # ===========================================================================
 # Feature flag endpoints
 # ===========================================================================
@@ -550,3 +614,247 @@ async def overview(
         region_regime=raw["region_regime"],
         top_pitfalls=raw["top_pitfalls"],
     )
+
+
+# ===========================================================================
+# Phase 3 — P2-B Pillar Balance endpoints
+# ===========================================================================
+
+_PILLAR_TASK = "backend.tasks.run_pillar_balance_check"
+_NEGATIVE_TASK = "backend.tasks.run_negative_knowledge_extract"
+_MACRO_TASK = "backend.tasks.run_macro_narrative_extract"
+_REGIME_TASK = "backend.tasks.run_regime_infer"
+
+
+async def _run_trigger(svc: OpsService, task_name: str, actor: str):
+    """Translate OpsService trigger errors to HTTP statuses.
+
+    Phase 3 added 4 more rerun endpoints; this helper dedupes the same
+    try/except shape used by /alpha-health/rerun and /hypothesis-health
+    /rerun above. Kept module-local (not in OpsService) because it's
+    purely an HTTP-translation concern.
+    """
+    try:
+        return await svc.trigger_task(task_name, actor=actor)
+    except UnknownTaskError as ex:
+        raise HTTPException(400, str(ex)) from ex
+    except PerTaskThrottledError as ex:
+        raise HTTPException(409, str(ex)) from ex
+    except GlobalThrottledError as ex:
+        raise HTTPException(429, str(ex)) from ex
+
+
+@router.get("/pillar/latest", response_model=PillarLatestOut)
+async def pillar_latest(
+    date_: Optional[date] = Query(None, alias="date"),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> PillarLatestOut:
+    """Pillar balance report for ``date`` (defaults to today, fresh service)."""
+    result = await svc.get_pillar_latest(date_)
+    return PillarLatestOut(**result)
+
+
+@router.get("/pillar/history")
+async def pillar_history(
+    days: int = Query(14, ge=1, le=180),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> List[Dict[str, Any]]:
+    """Per-day pillar reports oldest→newest. Each entry carries ``_date``."""
+    return await svc.get_pillar_history(days=days)
+
+
+@router.get("/pillar/deficit-recommendation", response_model=PillarDeficitOut)
+async def pillar_deficit(
+    region: str = Query(..., min_length=1),
+    skew_threshold: float = Query(0.0, ge=0.0, le=1.0),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> PillarDeficitOut:
+    """Which pillar is most under-represented in ``region`` right now."""
+    out = await svc.get_pillar_deficit_recommendation(
+        region, skew_threshold=skew_threshold,
+    )
+    return PillarDeficitOut(**out)
+
+
+@router.post("/pillar/rerun", response_model=TriggerOut)
+async def pillar_rerun(
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> TriggerOut:
+    result = await _run_trigger(svc, _PILLAR_TASK, actor or "ops_console")
+    return TriggerOut(**result.__dict__)
+
+
+# ===========================================================================
+# Phase 3 — P2-D Negative Knowledge endpoints
+# ===========================================================================
+
+@router.get("/negative-knowledge/top", response_model=NegativeTopOut)
+async def negative_top(
+    region: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    limit: int = Query(20, ge=1, le=200),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> NegativeTopOut:
+    """Top active pitfalls (DB live)."""
+    result = await svc.get_negative_knowledge_top(
+        region=region, limit=limit, category=category,
+    )
+    return NegativeTopOut(**result)
+
+
+@router.get("/negative-knowledge/category-breakdown", response_model=NegativeCategoryOut)
+async def negative_category_breakdown(
+    region: Optional[str] = Query(None),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> NegativeCategoryOut:
+    result = await svc.get_negative_knowledge_category_breakdown(region=region)
+    return NegativeCategoryOut(**result)
+
+
+@router.get("/negative-knowledge/timeline")
+async def negative_timeline(
+    days: int = Query(30, ge=1, le=180),
+    region: Optional[str] = Query(None),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> List[Dict[str, Any]]:
+    return await svc.get_negative_knowledge_timeline(days=days, region=region)
+
+
+@router.patch("/negative-knowledge/entries/{entry_id}", response_model=PitfallToggleOut)
+async def negative_toggle(
+    entry_id: int,
+    body: PitfallToggleIn,
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> PitfallToggleOut:
+    """Soft-enable / disable a single pitfall row (操作员的"禁用" Switch)."""
+    updated = await svc.set_pitfall_active(entry_id, body.is_active)
+    if not updated:
+        raise HTTPException(404, f"pitfall id={entry_id} not found or not a FAILURE_PITFALL")
+    return PitfallToggleOut(id=entry_id, is_active=body.is_active, updated=True)
+
+
+@router.post("/negative-knowledge/rerun", response_model=TriggerOut)
+async def negative_rerun(
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> TriggerOut:
+    result = await _run_trigger(svc, _NEGATIVE_TASK, actor or "ops_console")
+    return TriggerOut(**result.__dict__)
+
+
+# ===========================================================================
+# Phase 3 — P2-A Macro Narrative endpoints
+# ===========================================================================
+
+@router.get("/macro/latest", response_model=MacroLatestOut)
+async def macro_latest(
+    date_: Optional[date] = Query(None, alias="date"),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> MacroLatestOut:
+    result = await svc.get_macro_latest(date_)
+    return MacroLatestOut(**result)
+
+
+@router.get("/macro/coverage", response_model=MacroCoverageOut)
+async def macro_coverage(
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> MacroCoverageOut:
+    """Field coverage + per-scope narrative counts."""
+    result = await svc.get_macro_coverage()
+    return MacroCoverageOut(**result)
+
+
+@router.get("/macro/by-scope", response_model=MacroByScopeOut)
+async def macro_by_scope(
+    scope: str = Query(..., pattern="^(field|dataset|category)$"),
+    dataset_category: Optional[str] = Query(None),
+    limit: int = Query(200, ge=1, le=1000),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> MacroByScopeOut:
+    result = await svc.get_macro_by_scope(
+        scope=scope, dataset_category=dataset_category, limit=limit,
+    )
+    return MacroByScopeOut(**result)
+
+
+@router.get("/macro/token-budget", response_model=MacroTokenBudgetOut)
+async def macro_token_budget(
+    utc_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$"),
+    _token: str = Depends(_require_ops_token),
+) -> MacroTokenBudgetOut:
+    """Daily LLM token counter from Redis."""
+    out = OpsService.get_macro_token_budget(utc_date)
+    return MacroTokenBudgetOut(**out)
+
+
+@router.post("/macro/rerun", response_model=TriggerOut)
+async def macro_rerun(
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> TriggerOut:
+    result = await _run_trigger(svc, _MACRO_TASK, actor or "ops_console")
+    return TriggerOut(**result.__dict__)
+
+
+# ===========================================================================
+# Phase 3 — P2-C Regime endpoints
+# ===========================================================================
+
+@router.get("/regime/current", response_model=RegimeCurrentOut)
+async def regime_current(
+    region: str = Query("USA", min_length=1),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> RegimeCurrentOut:
+    """Live Redis read of current regime for ``region``."""
+    result = await svc.get_regime_current(region=region)
+    return RegimeCurrentOut(**result)
+
+
+@router.get("/regime/snapshot", response_model=RegimeSnapshotOut)
+async def regime_snapshot(
+    region: str = Query("USA", min_length=1),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> RegimeSnapshotOut:
+    """Full inference snapshot from Redis (fall back to today's archive)."""
+    result = await svc.get_regime_snapshot(region=region)
+    return RegimeSnapshotOut(**result)
+
+
+@router.get("/regime/history")
+async def regime_history(
+    region: str = Query("USA", min_length=1),
+    days: int = Query(14, ge=1, le=90),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+) -> List[Dict[str, Any]]:
+    """Per-day regime + pass_rate over ``days``, oldest first."""
+    return await svc.get_regime_history(region=region, days=days)
+
+
+@router.post("/regime/rerun", response_model=TriggerOut)
+async def regime_rerun(
+    region: Optional[str] = Query(None),
+    _token: str = Depends(_require_ops_token),
+    svc: OpsService = Depends(get_ops_service),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> TriggerOut:
+    """Fire the daily regime-infer task. ``region`` is a hint only —
+    the task iterates over all configured regions regardless."""
+    result = await _run_trigger(svc, _REGIME_TASK, actor or "ops_console")
+    return TriggerOut(**result.__dict__)
