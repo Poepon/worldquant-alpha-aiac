@@ -8,7 +8,9 @@
 > - [`qlib_alpha_research_2026-05-16.md`](qlib_alpha_research_2026-05-16.md)(seed 内容调研,§ 3 已 partial 覆盖 Alpha-GPT)
 > - [`retrospective_p012_2026-05-16.md`](retrospective_p012_2026-05-16.md)(P0-P2 完成回顾)
 
-> **审查状态**:1 轮 Plan + 3 Explore + 1 轮红队对抗审查,catch **4 个 MUST FIX**(R4 整个基于错误前提 / Co-STEER 第二口径幻觉 / Hubble v1-v2 区分 / Alpha-GPT v1-v2 修订区分)+ 5 SHOULD FIX,全部修正。
+> **审查状态**:
+> - **v1**:1 轮 Plan + 3 Explore + 1 轮红队对抗审查,catch **4 MUST FIX**(R4 错误前提 / Co-STEER 第二口径幻觉 / Hubble v1-v2 / Alpha-GPT v1-v2)+ 5 SHOULD FIX,全部修正。
+> - **v2 (2026-05-17)**:第二轮独立 code-grep + web fact-check,catch **1 BLOCKING**(S5 前提错:`AttributionType` value 字符串实际**未**渗透 production,`metrics_tracker.py:440` 用的是 `'FAILURE_PITFALL'`)+ **4 MAJOR**(core/ 模块数 13→9 / Shamir-Tsur 1999 复杂度上界本次未独立 verify / RD-Agent-Quant 三数字 + AlphaAgent 五数字未从 abstract 验证 — 标记 caveat),全部并入下面正文。
 
 ---
 
@@ -191,6 +193,8 @@ Analysis (更新 SOTA + bandit reward 更新)
 | 使用因子数 | **22-26** vs Alpha158 的 **158**(~86% 减少) |
 | 单次实验成本 | **< $10** |
 
+⚠️ **数字来源 caveat**(review v2):arxiv abstract 仅确认 "up to 2X higher ARR with 70% fewer factors";14.21% / 22-26 因子 / <$10 三个具体数字来自论文 body Table(v2 html),review v2 独立 fetch 未从 abstract 提取确认。引用前以 PDF Table 或 NeurIPS 2025 poster 为准,补 § 号 / 表号。
+
 **消融**(joint > factor-only > model-only):
 | 模式 | ARR |
 |---|---|
@@ -207,7 +211,7 @@ Analysis (更新 SOTA + bandit reward 更新)
 ### 3.1 v1.0(arxiv:2308.00016)
 
 **版本史与 caveat** ⚠️:
-- **v1 原版 (2023-07-31)**:未明确 LLM(可能 GPT-3.5/4),无 Llama3 / BGE-M3(后两者 2024 才发布)
+- **v1 原版 (2023-08-01)**:未明确 LLM(可能 GPT-3.5/4),无 Llama3 / BGE-M3(后两者 2024 才发布)
 - **v2 修订 (2025-09-20,EMNLP 2025 Demos 版)**:**明确写 Llama3 70B + BGE-M3 + 4 层 Hierarchical RAG**
 
 本节内容**主要源自 v2 修订版**。
@@ -298,8 +302,10 @@ ER(f, h) = β₁ · S(f) + β₂ · C(h, d, f) + β₃ · log(1+|F_f|) … Eq. 8
 
 **关键细节**:
 - **Eq. 5 不是** tree edit distance / kernel,而是 **pairwise subtree isomorphism 节点计数**
-- alpha AST 是 **rooted-ordered**(operator args 有序)→ **polynomial 可解**(Shamir-Tsur 1999, O(n^2.5/log n)),**不是 NP-hard MCIS**
+- alpha AST 是 **rooted-ordered**(operator args 有序)→ **polynomial 可解**(Shamir-Tsur 1999, `O(n^2.5/log n)`)⚠️,**不是 NP-hard MCIS**
 - `c₁/c₂` 都由 LLM judge:`c₁(h, d)` 校验 hypothesis ↔ description;`c₂(d, f)` 校验 description ↔ expression
+
+⚠️ **Shamir-Tsur 1999 复杂度引用 caveat**(review v2):论文标题 plausibly 为 "Faster Subtree Isomorphism"(IPL / J.Algorithms 1999 年代),`O(n^2.5/log n)` 上界 review v2 独立 fetch 未能从 DBLP / ScienceDirect 确认(socket 错误)。实施 R3 前需交叉验证:(a) 论文存在性 + DOI;(b) 复杂度是否真针对 rooted-ordered tree subtree isomorphism;(c) hidden constant 是否实际可接受。若上界失实,R3 工程量(§ 6 R3,3-5 人日)需重估 — 最坏降级到 O(n²) brute-force 节点对计数也能跑(AIAC alpha AST 通常 n < 20)。
 
 ### 4.2 AlphaAgent 实验
 
@@ -312,6 +318,8 @@ ER(f, h) = β₁ · S(f) + β₂ · C(h, d, f) + β₃ · log(1+|F_f|) … Eq. 8
 | MDD | -9.36% |
 | **hit-ratio** | **+81%**(0.29 vs 0.16) |
 | **token 效率** | **+23%** |
+
+⚠️ **数字来源 caveat**(review v2):IC=0.0212 / IR=1.488 / MDD=-9.36% / hit-ratio +81% / token +23% 五个 cell review v2 独立 fetch 未能从 arxiv:2502.16789 v2 PDF 抽取确认(文本层提取失败)。引用以 KDD 2025 ACM 版 Table 为准(DOI 10.1145/3711896.3736838),补 Table 号。
 
 **Baseline**(不与 Alpha-GPT 直接对比):LSTM/Transformer/LightGBM/TRA/StockMixer/AlphaForge/RD-Agent/DeepSeek-R1/OpenAI-o1。
 
@@ -358,30 +366,31 @@ ER(f, h) = β₁ · S(f) + β₂ · C(h, d, f) + β₃ · log(1+|F_f|) … Eq. 8
 
 ### 5.1 完整模块结构
 
-`backend/agents/core/` = **3223 行 Python 代码,13 模块**:
+`backend/agents/core/` = **3223 行 Python 代码,9 个 .py 模块 + 1 个 ARCHITECTURE.md**(review v2 修正:原文 "13 模块" 是把 § 1.2 RD-Agent `core/` 13 模块串行了进来;行数为 2026-05-17 wc -l 实测):
 
 | 文件 | 行数 | 关键 export |
 |---|---|---|
 | `__init__.py` | 149 | 统一导出 48 个符号 |
-| `experiment.py` | 240 | `Hypothesis` / `AlphaExperiment` / `EvoStep` |
-| `feedback.py` | 215 | `HypothesisFeedback` + `AttributionType` enum |
-| `trace.py` | 362 | `ExperimentTrace` DAG + `TraceNode` |
-| `knowledge.py` | 299 | `KnowledgeRule` / `QueriedKnowledge` / `EvolvingKnowledge` |
-| `scenario.py` | 200+ | `Scenario` / `AlphaMiningScenario` |
-| `pipeline.py` | 700+ | 4 段 Pipeline(`LLMHypothesisGen` → `LLMHypothesis2Experiment` → `BRAINExperimentRunner` → `LLMExperiment2Feedback`)+ `AlphaMiningPipeline` |
-| `evolving_rag.py` | 300+ | `AlphaRAGStrategy` / `EnhancedQueriedKnowledge` |
-| `integration.py` | 450+ | 工厂函数 + 既有系统适配器 |
+| `experiment.py` | 239 | `Hypothesis` / `AlphaExperiment` / `EvoStep` |
+| `feedback.py` | 214 | `HypothesisFeedback` + `AttributionType` enum |
+| `trace.py` | 359 | `ExperimentTrace` DAG + `TraceNode` |
+| `knowledge.py` | 327 | `KnowledgeRule` / `QueriedKnowledge` / `EvolvingKnowledge` |
+| `scenario.py` | 308 | `Scenario` / `AlphaMiningScenario` |
+| `pipeline.py` | 702 | 4 段 Pipeline(`LLMHypothesisGen` → `LLMHypothesis2Experiment` → `BRAINExperimentRunner` → `LLMExperiment2Feedback`)+ `AlphaMiningPipeline` |
+| `evolving_rag.py` | 442 | `AlphaRAGStrategy` / `EnhancedQueriedKnowledge` |
+| `integration.py` | 483 | 工厂函数 + 既有系统适配器 |
 | `ARCHITECTURE.md` | — | 18 章节完整中英双语设计文档 |
 
 ### 5.2 数据结构 6 类对照表(已有 vs RD-Agent v0.8.0 差距)
 
 (详见 § 1.3)
 
-**AttributionType 字符串渗透 production**(S5 修正):
-- `AttributionType` enum 类**只**在 core/ 内 + tests + integration.py import
-- **但其 enum value 字符串**(`'HYPOTHESIS_FAILURE'` / `'IMPLEMENTATION_FAILURE'`)作为 `KnowledgeEntry.entry_type` 约定**已被 production 使用**(`backend/metrics_tracker.py:440`)
-- `agents/graph/early_stop.py:105` 是**字符串注释引用**("matching backend.agents.core.feedback.AttributionType .value strings"),不是真 import
-- **不能 rm -rf core/feedback.py** — value 字符串语义已渗透
+**AttributionType 现状**(S5,review v2 重写 — 原 S5 基于事实错前提):
+- `AttributionType` enum 定义在 `core/feedback.py:17-22`,真实 value 为 `"hypothesis"` / `"implementation"` / `"both"` / `"unknown"`(**全小写,无 `_FAILURE` 后缀**)
+- enum **class 本身**被 `integration.py:368` import + `:393` 实例化,服务 `enhance_existing_node_evaluate()` 钩子(R1a Phase 1 推荐路径的入口)— 这是它 production-relevant 的**唯一**通道
+- enum **value 字符串**与 `KnowledgeEntry.entry_type` 体系(`SUCCESS_PATTERN` / `FAILURE_PITFALL` / `FIELD_INSIGHT`)是**两套独立常量**;`grep -rn "HYPOTHESIS_FAILURE\|IMPLEMENTATION_FAILURE" backend/` = **0 matches**。原 S5 声称"value 字符串渗透 `metrics_tracker.py:440`"是 review v1 的事实错(:440 实际是 `metrics.failure_pitfalls = type_counts.get('FAILURE_PITFALL', 0)`,与 `AttributionType.value` 无关)
+- `agents/graph/early_stop.py:105` 注释里"matching ... AttributionType .value strings" 指 early_stop heuristic 实际返回的字符串 — `:115-128` 全 return **小写** `"hypothesis"` / `"implementation"` / `"both"` / `"unknown"`,与 enum value 完全一致;`integration.py:393` `AttributionType(attribution_str)` 直接构造成功,**无大小写转换**。`:104` docstring 写大写 "Returns one of: HYPOTHESIS / ..." 是**注释与实现不符**,运行时无影响。此 attribution 字符串体系**不参与** `KnowledgeEntry.entry_type`(review v2 第一稿误判为"大小写互转",此处终修)
+- **不能 rm -rf core/feedback.py** — 因为 R1a 的入口 `enhance_existing_node_evaluate` 直接 import `HypothesisFeedback` + `AttributionType` **class**(不是 value 字符串)
 
 ### 5.3 零生产路径调用证据
 
@@ -399,11 +408,13 @@ $ grep -rn "from backend.agents.core" backend/agents/graph/ backend/agents/minin
 
 ### 5.4 `run_enhanced_mining()` DORMANT 标注
 
-`backend/agents/core/integration.py:279`(原文):
+`backend/agents/core/integration.py:279-288`(原文摘录,review v2 修正:v1 paraphrase 漏 :279-280 "main-loop inversion entry point — hypothesis-as-driver instead of dataset-as-driver" 这层语义;`hypothesis_centric_variant=3` **不是杜撰**,真实存在于 `:286` + `config.py` / `mining_tasks.py` / `mining_agent.py` / `task_service.py` 等 9 个 backend 文件;v1 paraphrase 把它从原 :285-288 "When Phase 3 is greenlit" 段挪进 Status 块**同时改了语义** — 原文是 "production entry via mining_tasks.py routing on `...=3`"(routing-on,Phase 3 ship 后默认走此入口),v1 写成 "Activation gated by ... flag"(flag-gating,需主动 flip 才进入),两者隐含的触发机制不同):
 ```
-"Status (2026-05-06): DORMANT — not wired into Celery / mining_tasks.
- Plan v5 Final §三轮精简 pushed Phase 3 to Q3 (2026-07-09).
- Activation gated by task.config.hypothesis_centric_variant=3 flag."
+"Status (2026-05-06): DORMANT — designated as the Plan v5+ §C-Phase 3
+ main-loop inversion entry point (hypothesis-as-driver instead of
+ dataset-as-driver), but not wired into Celery / mining_tasks. Plan
+ v5 Final §三轮精简 pushed Phase 3 to Q3 (2026-07-09); see
+ docs/phase3_evaluation_2026-05-06.md for the launch gates."
 ```
 
 **这是计划性 dormant,不是 dead code**(S1 修正)。
@@ -467,17 +478,19 @@ RD-Agent 借鉴有三条路:
 ### R 路线图 caveat 与 ROI 论证(S3 修正)
 
 **R2 的 AIAC 适配**:
-- RD-Agent 8 维 reward (IC/ICIR/Rank-IC/Rank-ICIR/ARR/IR/-MDD/SR) 在 AIAC **无对应数据**(`Alpha` 只有 sharpe/fitness/turnover/correlation/composite_score 5 维)
-- AIAC 用 **5 维替代**:`(is_sharpe, is_fitness, -is_turnover, -self_correlation, composite_score)`
+- RD-Agent 8 维 reward (IC/ICIR/Rank-IC/Rank-ICIR/ARR/IR/-MDD/SR) 大多在 AIAC **无对应字段**。`Alpha` 模型实际持久化 6 个 sim metrics column(`is_sharpe / is_turnover / is_fitness / is_returns / is_drawdown / is_margin`)+ 2 counts(`is_long_count / is_short_count`)+ **5 JSONB**(`settings / checks / is_metrics / os_metrics / metrics`)+ 1 ARRAY(`tags`);**`self_corr` 不是 Alpha column**(实际名 `self_corr`,**不是** `self_correlation` — grep `self_correlation` = 0 matches、grep `self_corr` = 15 files;由 `services/correlation_service.py:CorrelationService.get_with_fallback` 实时调 BRAIN `/correlations/SELF` API 取回,**不持久化**);**`composite_score` 也不是 column**(`alpha_scoring.py:225/346` 是 `EvalResult` dataclass field,实时计算,**不持久化**)
+- AIAC R2 **自选 5 维 reward 组件**:`(is_sharpe, is_fitness, -is_turnover, -self_corr, composite_score)` — **横跨三类来源**(3 个 Alpha column + 1 个 BRAIN API 实时 call + 1 个 `alpha_scoring` 计算字段),R2 实现需要额外 fetch + 计算路径
+- review v3 修正:v1 公式写 `self_correlation` 是**字段名 typo**(代码全用 `self_corr`);"Alpha 只有 5 维" → "Alpha ≥ 8 字段 包括 self_correlation/composite_score" → "在 correlation 相关表 / sim result JSONB 里" 三轮 caveat 全错(self_corr/composite_score 不是 column 也不在 JSONB,是实时 API + 计算字段);**字段名 typo 三轮全漏**(plausibly-looking field name 偏见),v3 终修
 - arms 是 **AIAC 自定义**(生成策略级),不是 RD-Agent 原版 task-direction arms
 - **arm 语义独立性未验证**(AIAC 现是单 LLM 路径,需先拆分才能 multi-arm)— 这是 R2 隐含成本
 - 既有 `selection_strategy.py:135` 已用 **UCB1**(`math.sqrt(2 * math.log(...))`),Thompson Sampling 升级 ROI 在 AIAC 场景(sparse pass_rate)未必显著好
 
 **R3 的算法选择**:
-- alpha AST 是 **rooted-ordered**(operator args 有序)→ **polynomial 可解**(Shamir-Tsur 1999, O(n^2.5/log n)),**不是 NP-hard MCIS**
+- alpha AST 是 **rooted-ordered**(operator args 有序)→ **polynomial 可解**(Shamir-Tsur 1999, `O(n^2.5/log n)`)⚠️,**不是 NP-hard MCIS**(详见 § 4.1 caveat)
 - AIAC `knowledge_extraction.extract_operator_tree:100-117` 已有 rooted-ordered tree
 - AIAC 当前用 `expression_to_skeleton` 字符串 skeleton + `diversity_tracker.fingerprint` md5(skeleton + 5 组件)— 两者不同
 - AlphaAgent 论文**未给伪代码**(信息不可得 § 8),需自行实现 Shamir-Tsur 算法
+- ⚠️ 若 § 4.1 caveat 显示 Shamir-Tsur 复杂度上界失实,R3 工程量(3-5 人日)需重估;最坏降级到 O(n²) brute-force 节点对计数(AIAC alpha AST n < 20,实测可接受)
 
 ---
 
@@ -504,6 +517,9 @@ RD-Agent 借鉴有三条路:
 - **"Evolution of Alpha" survey 2505.14727 taxonomy 具体表**(33pp PDF 不可解)
 - **AlphaAgent vs Alpha-GPT 直接对比**(baseline 不含)
 - **AlphaAgent AST 算法实现伪代码 / 复杂度证明**(论文未给,需自行设计 Shamir-Tsur)
+- **Shamir-Tsur 1999 `O(n^2.5/log n)` 上界**(review v2 独立 fetch 未能从 DBLP / ScienceDirect 确认 — socket 错误;引用前需交叉验证 DOI + 复杂度是否真针对 rooted-ordered tree subtree isomorphism)
+- **RD-Agent-Quant 14.21% / 22-26 因子 / <$10 单次成本**(review v2 独立 fetch 未从 abstract 提取确认 — 来自 paper body Table,引用以 PDF / NeurIPS 2025 poster 为准)
+- **AlphaAgent CSI500 五指标**(IC/IR/MDD/hit-ratio/token,review v2 PDF 文本层提取失败 — 引用以 KDD 2025 ACM 版 Table 为准)
 - **Hubble formal ablation**(作者 v2 自承缺)
 
 ### 8.2 附录 URL 索引
