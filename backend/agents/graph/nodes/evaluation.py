@@ -405,8 +405,17 @@ async def _evaluate_single_alpha(
         _corr_performed = True
         try:
             prod_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="PROD")
+            # P3-Brain (2026-05-16): check_correlation returns
+            # {"status_code": int, "data": {...}}. Tolerate the legacy bare
+            # {"max": ...} shape too — keeps in-tree fakes working.
             if isinstance(prod_corr_result, dict):
-                prod_corr = float(prod_corr_result.get("max", 0.0) or 0.0)
+                _prod_data = (
+                    prod_corr_result["data"]
+                    if "status_code" in prod_corr_result
+                    and isinstance(prod_corr_result.get("data"), dict)
+                    else prod_corr_result
+                )
+                prod_corr = float(_prod_data.get("max", 0.0) or 0.0)
         except Exception as e:
             logger.warning(f"[{node_name}] PROD correlation check failed for {alpha.alpha_id}: {e}")
 
@@ -449,8 +458,15 @@ async def _evaluate_single_alpha(
         else:
             try:
                 self_corr_result = await brain.check_correlation(alpha.alpha_id, check_type="SELF")
+                # P3-Brain (2026-05-16): see PROD branch above re: shape.
                 if isinstance(self_corr_result, dict):
-                    self_corr = float(self_corr_result.get("max", 0.0) or 0.0)
+                    _self_data = (
+                        self_corr_result["data"]
+                        if "status_code" in self_corr_result
+                        and isinstance(self_corr_result.get("data"), dict)
+                        else self_corr_result
+                    )
+                    self_corr = float(_self_data.get("max", 0.0) or 0.0)
                     self_corr_source = CorrSource.BRAIN
             except Exception as e:
                 logger.warning(f"[{node_name}] SELF correlation check failed for {alpha.alpha_id}: {e}")

@@ -443,9 +443,14 @@ class CorrelationService:
 
         try:
             res = await self.brain.check_correlation(alpha_id, check_type="SELF")
+            # P3-Brain (2026-05-16): check_correlation now returns
+            # {"status_code": int, "data": {...}}. Legacy fakes/mocks may still
+            # return the bare payload {"max": ...} — accept both shapes so
+            # in-tree fake brains and the real adapter share this code path.
             if isinstance(res, dict):
-                if res.get("max") is not None:
-                    return float(res["max"]), CorrSource.BRAIN
+                data = res["data"] if "status_code" in res and isinstance(res.get("data"), dict) else res
+                if data.get("max") is not None:
+                    return float(data["max"]), CorrSource.BRAIN
                 # V-27.126: well-formed dict but max=None — BRAIN accepted the
                 # request and the correlation job is still computing. Report
                 # BRAIN_PENDING (not UNKNOWN) so a caller that can wait may

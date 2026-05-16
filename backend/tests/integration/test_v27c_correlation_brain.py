@@ -194,3 +194,66 @@ class TestGetWithFallbackBrainPending:
         corr, src = await svc.get_with_fallback("test-alpha", region="ZZ1")
         assert corr == pytest.approx(0.42)
         assert src == CorrSource.BRAIN
+
+
+# ---------------------------------------------------------------------------
+# P3-Brain — check_correlation shape change tolerance
+# ---------------------------------------------------------------------------
+# 2026-05-16: BrainAdapter.check_correlation switched return shape from
+# {"max": ...} to {"status_code": int, "data": {"max": ...}}. Pin the
+# CorrelationService + raw-brain caller path against the new shape so a
+# future re-break is caught here, not in production.
+
+class TestCheckCorrelationShapeP3Brain:
+    @pytest.mark.asyncio
+    async def test_get_with_fallback_accepts_new_shape_max_present(self):
+        class _NewShapeBrain:
+            async def check_correlation(self, alpha_id, check_type):
+                return {"status_code": 200, "data": {"max": 0.42}}
+
+        svc = CorrelationService(_NewShapeBrain())
+        corr, src = await svc.get_with_fallback("test-alpha", region="ZZ1")
+        assert corr == pytest.approx(0.42)
+        assert src == CorrSource.BRAIN
+
+    @pytest.mark.asyncio
+    async def test_get_with_fallback_accepts_new_shape_max_none(self):
+        class _NewShapeBrain:
+            async def check_correlation(self, alpha_id, check_type):
+                return {"status_code": 200, "data": {"max": None}}
+
+        svc = CorrelationService(_NewShapeBrain())
+        corr, src = await svc.get_with_fallback("test-alpha", region="ZZ1")
+        assert corr is None
+        assert src == CorrSource.BRAIN_PENDING
+
+    @pytest.mark.asyncio
+    async def test_evaluation_prod_corr_reads_new_shape(self):
+        # node_simulate / node_evaluate path: `prod_corr_result.get(...)`
+        # extraction must also handle the new shape. Reproduces the same
+        # branching used in agents/graph/nodes/evaluation.py:407-415.
+        result = {"status_code": 200, "data": {"max": 0.37}}
+        data = (
+            result["data"]
+            if "status_code" in result and isinstance(result.get("data"), dict)
+            else result
+        )
+        prod_corr = float(data.get("max", 0.0) or 0.0)
+        assert prod_corr == pytest.approx(0.37)
+
+    @pytest.mark.asyncio
+    async def test_real_adapter_check_correlation_returns_new_shape(self):
+        # Pin the adapter contract — if anyone reverts to the bare-dict shape,
+        # this test fires before correlation_service silently breaks.
+        from backend.adapters.brain_adapter import BrainAdapter
+
+        adapter = BrainAdapter()
+
+        async def _fake_request(method, url, **kwargs):
+            return _FakeResp(200, body={"max": 0.5})
+
+        adapter._request = _fake_request
+        out = await adapter.check_correlation("a-1", "PROD")
+        assert set(out.keys()) == {"status_code", "data"}
+        assert out["status_code"] == 200
+        assert out["data"] == {"max": 0.5}
