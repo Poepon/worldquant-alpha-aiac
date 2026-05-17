@@ -51,7 +51,7 @@ USAGE:
     1. Clone openassetpricing into ../openassetpricing/CrossSection (or
        pass --predictors-dir).
     2. Set ANTHROPIC_API_KEY in env.
-    3. Set LLM_PROVIDER=anthropic and LLM_MODEL=claude-opus-4-7-20251022
+    3. Set LLM_PROVIDER=anthropic and LLM_MODEL=claude-opus-4-7
        in .env (or rely on script's --model override).
 
   Dry run (no LLM calls, validate file discovery + prompt construction):
@@ -99,7 +99,7 @@ OUTPUT_JSON = Path("backend/data/openassetpricing_translations.json")
 SIGNALDOC_FALLBACK_JSON = Path("backend/data/openassetpricing_signaldoc.json")
 FAILURES_LOG = Path("scripts/q2_translation_failures.log")
 
-DEFAULT_MODEL = "claude-opus-4-7-20251022"
+DEFAULT_MODEL = "claude-opus-4-7"
 DEFAULT_PROVIDER = "anthropic"
 DEFAULT_THINKING = "high"  # SF-V1.3-B: 8K budget, ~$220 for 300 signals
 
