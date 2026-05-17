@@ -167,6 +167,20 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase3-flatF1",
         description="启用 FLAT_CONTINUOUS mining_mode (与 legacy CONTINUOUS_CASCADE 并行)。Hypothesis-driven flat session — dataset × hypothesis 迭代,无 T1→T2→T3 级联。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。默认 OFF,flat-F2 后续 PR 翻默认。",
     ),
+    # --- Phase 2 R5: Hypothesis-Alignment Dual-Bridge LLM Judge ---
+    "ENABLE_LLM_JUDGE": FlagSpec(
+        name="ENABLE_LLM_JUDGE",
+        flag_type="bool",
+        group="Phase2-R5",
+        description=(
+            "Phase 2 R5 (AlphaAgent Eq. 7): 在 evaluation node R1a hook 后 "
+            "运行双向 LLM judge — c₁(hypothesis ↔ description) + "
+            "c₂(description ↔ expression) 写入 r1a_attribution_log 的 r5_* 列。"
+            "R5 verdict 非 None 时 OVERWRITE R1a heuristic attribution (R5 wins)。"
+            "成本:haiku-4-5 med effort ~$0.01/call,GO gate $0.05/call 满足。"
+            "默认 OFF,flag 翻 ON 启动 attribution distribution shift 观察。"
+        ),
+    ),
     # --- Phase 1.5-C: TaskSchema v2 cut-over ---
     "ENABLE_TASK_SCHEMA_V2": FlagSpec(
         name="ENABLE_TASK_SCHEMA_V2",

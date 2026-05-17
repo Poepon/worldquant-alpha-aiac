@@ -2606,6 +2606,41 @@ async def node_evaluate(
             # Pydantic field reassignment (AlphaCandidate is Pydantic BaseModel —
             # no flag_modified needed; persistence.py INSERT path doesn't need dirty marker)
             _a.metrics = _new_metrics
+
+            # === Phase 2 R5 LLM judge (plan v1.0 §1.2, 2026-05-18) ===
+            # Runs AFTER R1a heuristic so R5 can OVERWRITE R1a verdict
+            # per [V1.0-A2-3] conflict resolution lock. R5 None (both
+            # PASS / low conf) preserves R1a verdict.
+            # Per-alpha try/except guard — same as R1a, must not block round.
+            if getattr(settings, "ENABLE_LLM_JUDGE", False):
+                try:
+                    from backend.agents.graph.r5_judge import run_r5_judge  # noqa: E402
+                    from backend.agents.services.llm_service import get_llm_service  # noqa: E402
+                    _r5_payload = await run_r5_judge(
+                        hypothesis_statement=_hyp.get("statement", ""),
+                        description=getattr(_a, "logic_explanation", "") or "",
+                        expression=getattr(_a, "expression", "") or "",
+                        llm_service=get_llm_service(),
+                        r1a_attribution=_r1a_log.get("attribution"),
+                        operators_used=None,
+                    )
+                    # Merge 10 r5_* columns (pop the internal r5_attribution first)
+                    _r5_override = _r5_payload.pop("r5_attribution", None)
+                    _r1a_log.update(_r5_payload)
+                    # [V1.0-A2-3] R5 wins: overwrite R1a attribution when R5 has verdict
+                    if _r5_override is not None:
+                        _r1a_log["attribution"] = _r5_override
+                        # mirror to metrics for downstream R2/Q7 / R8 readers
+                        _new_metrics["_r1a_attribution"] = _r5_override
+                        _a.metrics = _new_metrics
+                except Exception as _r5_e:  # noqa: BLE001
+                    logger.warning(
+                        "[R5] judge failed for alpha {}: {}",
+                        getattr(_a, "alpha_id", "?"), _r5_e
+                    )
+                    _r1a_log["r5_hook_error"] = str(_r5_e)[:200]
+            # === end R5 judge ===
+
             _r1a_log_rows.append(_r1a_log)
 
         # Batch INSERT to r1a_attribution_log — independent of alpha persistence

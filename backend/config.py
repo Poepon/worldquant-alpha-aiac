@@ -248,6 +248,20 @@ class Settings(BaseSettings):
     FLAT_CONTINUOUS_DAILY_GOAL: int = 20         # alphas/iteration cap
     FLAT_CONTINUOUS_MAX_ITERATIONS: int = 100    # safety bound per session
 
+    # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
+    # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
+    # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression
+    # 失败时 attribution 标 AttributionType.hypothesis/implementation/both
+    # 与 R1a heuristic 互补:R5 verdict 非 None 时 OVERWRITE R1a 字段(R5 wins
+    # per plan v1.0 [V1.0-A2-3])。R5 None(both PASS / low confidence)时
+    # 保 R1a。原 R1a verdict 存 r5_agrees_r1a 供分析。
+    # 成本:haiku-4-5 med effort ~$0.01/call,GO gate $0.05/call 满足。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: ~/.claude/plans/phase2-r5-llm-judge-2026-05-18.md v1.0
+    ENABLE_LLM_JUDGE: bool = False
+    R5_JUDGE_MODEL: str = "claude-haiku-4-5-20251001"   # cheaper than opus, med effort
+    R5_JUDGE_LOW_CONF: float = 0.55                      # below this R5 abstains → R1a wins
+
     # ----- Phase 1.5-C: TaskSchema v2 cut-over (2026-05-18) -----
     # 切 read paths 从 legacy cols (mining_mode / cascade_phase / agent_mode)
     # 到 new authoritative cols (schedule / starting_tier / runtime_state).

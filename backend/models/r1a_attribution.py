@@ -51,6 +51,9 @@ class R1aAttributionLog(SQLAlchemyBase):
         Index("ix_r1a_task_id", "task_id"),
         Index("ix_r1a_created_at", "created_at"),
         Index("ix_r1a_attribution", "attribution"),
+        # === Phase 2 R5 indexes (2026-05-18) ===
+        Index("ix_r1a_r5_c1_aligned", "r5_c1_aligned"),
+        Index("ix_r1a_r5_composite", "r5_composite_score"),
     )
 
     id = Column(BigInteger, primary_key=True)
@@ -71,3 +74,17 @@ class R1aAttributionLog(SQLAlchemyBase):
     hook_error = Column(Text, nullable=True)              # str(exception)[:200] when hook raised
     quality_status_at_eval = Column(String(20), nullable=True)  # PASS/PROV/OPTIMIZE/FAIL/PENDING
     created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+
+    # === Phase 2 R5 columns (plan v1.0 §1.5, 2026-05-18) ===
+    # All NULL when ENABLE_LLM_JUDGE=False — backwards-compat with 273 existing rows.
+    # AlphaAgent Eq. 7: C(h,d,f) = α·c₁(h,d) + (1-α)·c₂(d,f), α=0.5
+    r5_c1_aligned = Column(String(8), nullable=True)         # 'true'/'false' — c₁(h,d) verdict
+    r5_c1_confidence = Column(Float, nullable=True)          # 0.0-1.0
+    r5_c1_reason = Column(Text, nullable=True)               # LLM 1-sentence, ≤500 chars
+    r5_c2_aligned = Column(String(8), nullable=True)         # 'true'/'false' — c₂(d,f) verdict
+    r5_c2_confidence = Column(Float, nullable=True)          # 0.0-1.0
+    r5_c2_reason = Column(Text, nullable=True)
+    r5_composite_score = Column(Float, nullable=True)        # 0.0-1.0,Eq. 7 公式
+    r5_agrees_r1a = Column(String(8), nullable=True)         # 'true'/'false' — R5 verdict 是否同 R1a heuristic
+    r5_hook_error = Column(Text, nullable=True)              # str(exc)[:200] on LLM call failure
+    r5_cost_usd = Column(Float, nullable=True)               # 估算 c₁+c₂ token cost USD
