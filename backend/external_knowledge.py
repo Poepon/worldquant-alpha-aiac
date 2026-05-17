@@ -119,13 +119,20 @@ ALPHA_KEYWORDS = [
 ]
 
 # Operator patterns for validation
+# Extended 2026-05-17 (Q1 v1.5): added power/signed_power/ts_covariance/ts_delay/
+# ts_product/ts_scale/ts_arg_max/ts_arg_min/ts_regression — required for
+# is_likely_alpha_expression sniff to accept Kakushadze 101 patterns like
+# Alpha#41 (`power(high * low, 0.5) - vwap`) and several others.
 VALID_OPERATORS = {
     "ts_rank", "ts_zscore", "ts_mean", "ts_sum", "ts_delta", "ts_std_dev",
-    "ts_decay_linear", "ts_corr", "ts_max", "ts_min", "ts_argmax", "ts_argmin",
+    "ts_decay_linear", "ts_corr", "ts_covariance", "ts_max", "ts_min",
+    "ts_argmax", "ts_argmin", "ts_arg_max", "ts_arg_min", "ts_delay",
+    "ts_product", "ts_scale", "ts_regression",
     "rank", "zscore", "group_rank", "group_zscore", "group_neutralize",
     "vec_sum", "vec_avg", "vec_max", "vec_min",
-    "log", "sqrt", "abs", "sign", "add", "subtract", "multiply", "divide",
-    "if_else", "trade_when", "pasteurize",
+    "log", "sqrt", "abs", "sign", "power", "signed_power",
+    "add", "subtract", "multiply", "divide", "max", "min",
+    "if_else", "trade_when", "pasteurize", "equal",
 }
 
 
