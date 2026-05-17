@@ -1,0 +1,157 @@
+[
+  {
+    "source": "openassetpricing",
+    "pattern": "(-1) * (((act - ts_delay(act, 12)) - (che - ts_delay(che, 12)) - ((lct - ts_delay(lct, 12)) - (dlc - ts_delay(dlc, 12)) - (fnd6_txp - ts_delay(fnd6_txp, 12))) - dp) / ((at + ts_delay(at, 12)) / 2))",
+    "description": "Annual change approximated via ts_delay(...,12) on monthly Compustat fields; txp is fillna(0)-treated in source, omitted here; negate to match Sign=-1; abs(prc)>5 filter not applied.",
+    "category": "accounting_quality",
+    "confidence": 0.78,
+    "verified": false,
+    "source_title": "openassetpricing/Predictors/Accruals.py",
+    "source_url": "https://github.com/OpenSourceAP/CrossSection/blob/master/Signals/pyCode/Predictors/Accruals.py",
+    "is_anchor_metadata": false,
+    "openassetpricing_signal": "Predictors/Accruals.py",
+    "llm_translation_version": "claude-opus-4-7-high-v1",
+    "translation_confidence": 0.78,
+    "translation_notes": "Annual change approximated via ts_delay(...,12) on monthly Compustat fields; txp is fillna(0)-treated in source, omitted here; negate to match Sign=-1; abs(prc)>5 filter not applied.",
+    "theoretical_anchor": "Sloan 1996 accruals anomaly",
+    "paper_citation": "Sloan, R.G. (1996). Do Stock Prices Fully Reflect Information in Accruals and Cash Flows about Future Earnings? The Accounting Review, 71(3), 289-315.",
+    "candidate_brain_expression": "(-1) * (((act - ts_delay(act, 12)) - (che - ts_delay(che, 12)) - ((lct - ts_delay(lct, 12)) - (dlc - ts_delay(dlc, 12)) - (fnd6_txp - ts_delay(fnd6_txp, 12))) - dp) / ((at + ts_delay(at, 12)) / 2))",
+    "fields_used": [
+      "fnd6_act",
+      "fnd6_che",
+      "fnd6_lct",
+      "fnd6_dlc",
+      "fnd6_txp",
+      "fnd6_at",
+      "fnd6_dp"
+    ],
+    "operators_used": [
+      "ts_delay",
+      "subtract",
+      "divide",
+      "multiply"
+    ],
+    "_validation_passed": true,
+    "_validation_reason": "all_gates_passed"
+  },
+  {
+    "source": "openassetpricing",
+    "pattern": "if_else(fnd6_ceq < 0, nan, rank(log(fnd6_ceq / cap)) - rank(((ts_delta(fnd6_act, 252) - ts_delta(fnd6_che, 252)) - (ts_delta(fnd6_lct, 252) - ts_delta(fnd6_dlc, 252) - ts_delta(fnd6_txp, 252))) / ((fnd6_at + ts_delay(fnd6_at, 252)) / 2)))",
+    "description": "Original is a discrete binary using extreme quintile intersections (high BM + low accruals vs low BM + high accruals); translated to a continuous rank(BM) - rank(accruals) which preserves the long-sho",
+    "category": "accounting_quality",
+    "confidence": 0.55,
+    "verified": false,
+    "source_title": "openassetpricing/Predictors/AccrualsBM.py",
+    "source_url": "https://github.com/OpenSourceAP/CrossSection/blob/master/Signals/pyCode/Predictors/AccrualsBM.py",
+    "is_anchor_metadata": false,
+    "openassetpricing_signal": "Predictors/AccrualsBM.py",
+    "llm_translation_version": "claude-opus-4-7-high-v1",
+    "translation_confidence": 0.55,
+    "translation_notes": "Original is a discrete binary using extreme quintile intersections (high BM + low accruals vs low BM + high accruals); translated to a continuous rank(BM) - rank(accruals) which preserves the long-sho",
+    "theoretical_anchor": "Bartov and Kim 2004 - Book-to-market and accruals",
+    "paper_citation": "Bartov, E. and Kim, M. (2004). Risk, Mispricing, and Value Investing. Review of Quantitative Finance and Accounting.",
+    "candidate_brain_expression": "if_else(fnd6_ceq < 0, nan, rank(log(fnd6_ceq / cap)) - rank(((ts_delta(fnd6_act, 252) - ts_delta(fnd6_che, 252)) - (ts_delta(fnd6_lct, 252) - ts_delta(fnd6_dlc, 252) - ts_delta(fnd6_txp, 252))) / ((fnd6_at + ts_delay(fnd6_at, 252)) / 2)))",
+    "fields_used": [
+      "fnd6_ceq",
+      "cap",
+      "fnd6_act",
+      "fnd6_che",
+      "fnd6_lct",
+      "fnd6_dlc",
+      "fnd6_txp",
+      "fnd6_at"
+    ],
+    "operators_used": [
+      "log",
+      "rank",
+      "ts_delta",
+      "ts_delay",
+      "if_else",
+      "subtract",
+      "divide",
+      "add"
+    ],
+    "_validation_passed": true,
+    "_validation_reason": "all_gates_passed"
+  },
+  {
+    "source": "openassetpricing",
+    "pattern": "if_else(fnd6_xad > 0, fnd6_xad / cap, NULL)",
+    "description": "Advertising expense (xad) scaled by market cap; filtered to positive xad only.",
+    "category": "other",
+    "confidence": 0.85,
+    "verified": false,
+    "source_title": "openassetpricing/Predictors/AdExp.py",
+    "source_url": "https://github.com/OpenSourceAP/CrossSection/blob/master/Signals/pyCode/Predictors/AdExp.py",
+    "is_anchor_metadata": false,
+    "openassetpricing_signal": "Predictors/AdExp.py",
+    "llm_translation_version": "claude-opus-4-7-high-v1",
+    "translation_confidence": 0.85,
+    "translation_notes": "Advertising expense (xad) scaled by market cap; filtered to positive xad only.",
+    "theoretical_anchor": "Chan, Lakonishok and Sougiannis 2001 advertising expense",
+    "paper_citation": "Chan, L.K.C., Lakonishok, J., Sougiannis, T. (2001). The Stock Market Valuation of Research and Development Expenditures. Journal of Finance.",
+    "candidate_brain_expression": "if_else(fnd6_xad > 0, fnd6_xad / cap, NULL)",
+    "fields_used": [
+      "fnd6_xad",
+      "cap"
+    ],
+    "operators_used": [
+      "if_else",
+      "divide"
+    ],
+    "_validation_passed": true,
+    "_validation_reason": "all_gates_passed"
+  },
+  {
+    "source": "openassetpricing",
+    "pattern": "Signal requires IPO date and hand-collected founding year from Ritter's dataset, plus a 3-36 month post-IPO event filter and minimum monthly IPO count threshold.",
+    "description": "Signal requires IPO date and hand-collected founding year from Ritter's dataset, plus a 3-36 month post-IPO event filter and minimum monthly IPO count threshold.",
+    "category": "other",
+    "confidence": 0.9,
+    "verified": false,
+    "source_title": "openassetpricing/Predictors/AgeIPO.py",
+    "source_url": "https://github.com/OpenSourceAP/CrossSection/blob/master/Signals/pyCode/Predictors/AgeIPO.py",
+    "is_anchor_metadata": true,
+    "openassetpricing_signal": "Predictors/AgeIPO.py",
+    "llm_translation_version": "claude-opus-4-7-high-v1",
+    "translation_confidence": 0.9,
+    "translation_notes": "Signal requires IPO date and hand-collected founding year from Ritter's dataset, plus a 3-36 month post-IPO event filter and minimum monthly IPO count threshold.",
+    "theoretical_anchor": "Ritter 1991 IPO long-run underperformance",
+    "paper_citation": "Ritter, Jay R. (1991). The Long-Run Performance of Initial Public Offerings. Journal of Finance, 46(1), 3-27.",
+    "candidate_brain_expression": null,
+    "fields_used": [
+      "IPOdate",
+      "FoundingYear"
+    ],
+    "operators_used": [],
+    "_validation_passed": true,
+    "_validation_reason": "null_expression_anchor_only"
+  },
+  {
+    "source": "openassetpricing",
+    "pattern": "divide(fnd6_assets, cap)",
+    "description": "Maps Compustat 'at' to fnd6_assets and market value of equity to cap; signal sign positive.",
+    "category": "value",
+    "confidence": 0.95,
+    "verified": false,
+    "source_title": "openassetpricing/Predictors/AM.py",
+    "source_url": "https://github.com/OpenSourceAP/CrossSection/blob/master/Signals/pyCode/Predictors/AM.py",
+    "is_anchor_metadata": false,
+    "openassetpricing_signal": "Predictors/AM.py",
+    "llm_translation_version": "claude-opus-4-7-high-v1",
+    "translation_confidence": 0.95,
+    "translation_notes": "Maps Compustat 'at' to fnd6_assets and market value of equity to cap; signal sign positive.",
+    "theoretical_anchor": "Fama and French 1992 assets-to-market",
+    "paper_citation": "Fama, E. F., & French, K. R. (1992). The Cross-Section of Expected Stock Returns. Journal of Finance.",
+    "candidate_brain_expression": "divide(fnd6_assets, cap)",
+    "fields_used": [
+      "fnd6_assets",
+      "cap"
+    ],
+    "operators_used": [
+      "divide"
+    ],
+    "_validation_passed": true,
+    "_validation_reason": "all_gates_passed"
+  }
+]

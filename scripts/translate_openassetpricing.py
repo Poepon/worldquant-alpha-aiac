@@ -205,18 +205,21 @@ def validate_translation(result: Dict, known_operators: set) -> Tuple[bool, str]
         if unknown:
             return False, f"unknown operators: {unknown[:5]}"
 
-    # Gate 3: real expression — semantic validator. Skip gracefully when the
-    # OperatorRegistry isn't loaded (e.g. running translate script before
-    # backend has started + synced operators) — that's a separate ops issue,
-    # not a translation issue.
+    # Gate 3: real expression — semantic validator. strict_field_check=False
+    # so FIELD_NOT_FOUND is a soft warning (not hard fail). Reasoning: dev
+    # environments often have empty DataField catalog (BRAIN dataset sync
+    # hasn't run); the LLM may emit legitimate BRAIN field names that aren't
+    # in our local index. Only OPERATOR-level / syntax-level hard severities
+    # should kill the translation — those are catalog-independent.
     try:
         from backend.alpha_semantic_validator import AlphaSemanticValidator
-        validator = AlphaSemanticValidator()
+        validator = AlphaSemanticValidator(strict_field_check=False)
         check = validator.validate(expr)
         if not getattr(check, "valid", True):
             findings = getattr(check, "findings", []) or []
-            errs = ", ".join(getattr(f, "message", str(f))[:80] for f in findings[:3])
-            return False, f"semantic validator failed: {errs}"
+            hard_findings = [f for f in findings if getattr(f, "severity", "") == "hard"]
+            errs = ", ".join(getattr(f, "message", str(f))[:80] for f in hard_findings[:3])
+            return False, f"semantic validator hard-failed: {errs}"
     except Exception as e:
         # Validator unavailable — don't block translation; gate 4 caught the
         # operator-catalog issue if it was relevant
@@ -372,7 +375,11 @@ def to_translation_row(
     """Construct the persistable JSON row (ExternalKnowledge-shaped)."""
     brain_expr = result.get("brain_expression")
     is_anchor = (not pass_validation) or (brain_expr is None or brain_expr == "")
-    # Pattern field: BRAIN expression when valid; English description otherwise
+    # Pattern field: BRAIN expression when valid; English description otherwise.
+    # IMPORTANT: even when routing to ANCHOR, preserve the candidate LLM
+    # expression in `candidate_brain_expression` so a future re-validate
+    # (after DataField/Operator catalog sync) can promote it without re-paying
+    # the LLM cost.
     pattern = brain_expr if not is_anchor else (
         result.get("notes")
         or result.get("reason")
@@ -400,6 +407,11 @@ def to_translation_row(
         )[:200],
         "theoretical_anchor": result.get("theoretical_anchor", ""),
         "paper_citation": result.get("paper_citation", ""),
+        # Preserve LLM-generated artifacts even when validation fails — lets
+        # a future post-catalog-sync re-validate re-promote without rerun.
+        "candidate_brain_expression": brain_expr,
+        "fields_used": result.get("fields_used") or [],
+        "operators_used": result.get("operators_used") or [],
         "_validation_passed": pass_validation,
         "_validation_reason": validation_reason,
     }
