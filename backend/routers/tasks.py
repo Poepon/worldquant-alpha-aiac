@@ -66,7 +66,16 @@ class TaskResponse(BaseModel):
     max_iterations: int = 10
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
+    # Phase 1.5-C [V1.2-C5] (2026-05-18): new authoritative scheduling fields,
+    # dual-written by Phase 1.5-B. Optional for backward compat with old
+    # clients ignoring them. Frontend can ?? fallback to agent_mode/mining_mode
+    # display. Pydantic from_attributes will auto-populate from MiningTask ORM.
+    schedule: Optional[str] = None
+    starting_tier: Optional[int] = None
+    mining_mode: Optional[str] = None
+    cascade_phase: Optional[str] = None
+    cascade_round_idx: Optional[int] = None
+
     class Config:
         from_attributes = True
 
@@ -140,6 +149,12 @@ async def list_tasks(
             max_iterations=t.max_iterations,
             created_at=t.created_at,
             updated_at=t.updated_at,
+            # Phase 1.5-C new fields
+            schedule=getattr(t, "schedule", None),
+            starting_tier=getattr(t, "starting_tier", None),
+            mining_mode=getattr(t, "mining_mode", None),
+            cascade_phase=getattr(t, "cascade_phase", None),
+            cascade_round_idx=getattr(t, "cascade_round_idx", None),
         )
         for t in tasks
     ]
@@ -186,6 +201,12 @@ async def create_task(
         max_iterations=task.max_iterations,
         created_at=task.created_at,
         updated_at=task.updated_at,
+        # Phase 1.5-C new fields
+        schedule=getattr(task, "schedule", None),
+        starting_tier=getattr(task, "starting_tier", None),
+        mining_mode=getattr(task, "mining_mode", None),
+        cascade_phase=getattr(task, "cascade_phase", None),
+        cascade_round_idx=getattr(task, "cascade_round_idx", None),
     )
 
 
