@@ -2535,18 +2535,44 @@ async def node_evaluate(
         "SUCCESS"
     )
 
-    # === R1a hook (Phase 0, 2026-05-17): capture AttributionType into alpha.metrics ===
-    # Activates DORMANT shim backend/agents/core/integration.py:342-407 to enrich
-    # alpha.metrics with HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN attribution.
-    # Data flows to Phase 1 R2/Q7 bandit arm-set design. Default OFF; flip via
-    # FeatureFlagOverride ENABLE_R1A_HOOK=true. See plan v1.3 §1.4.
+    # === R1a hook (Phase 0 v1.6, 2026-05-17): capture AttributionType ===
+    # v1.5 designed to write into alpha.metrics (Pydantic), relying on
+    # persistence to push it to DB. But empirically only PROV/PASS alphas
+    # INSERT (1/round); FAIL+OPTIMIZE (49/round) get GC'd with their
+    # AlphaCandidate. v1.6 fix: ALSO INSERT a dedicated row into
+    # r1a_attribution_log per evaluated alpha, captured independent of
+    # alpha persistence. 50× better R1a accumulation throughput.
+    # Default OFF; flip via FeatureFlagOverride ENABLE_R1A_HOOK=true.
     if getattr(settings, "ENABLE_R1A_HOOK", False):
         # Lazy import: avoid cold-start cost when flag OFF (core/ is 3223 LOC DORMANT)
         from backend.agents.core.integration import enhance_existing_node_evaluate  # noqa: E402
+        from backend.database import AsyncSessionLocal  # noqa: E402
+        from backend.models.r1a_attribution import R1aAttributionLog  # noqa: E402
+        import hashlib  # noqa: E402
+
         _r1a_failures = 0
+        _r1a_log_rows = []  # collect first, INSERT in one batch after loop
+        _task_id_for_r1a = getattr(state, "task_id", None)
+
         for _a in updated_alphas:  # _a is AlphaCandidate (Pydantic BaseModel)
             # V-26.79 detach: rebind to fresh dict before mutating
             _new_metrics = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+            _r1a_log = {
+                "task_id": _task_id_for_r1a,
+                "alpha_id_brain": getattr(_a, "alpha_id", None),
+                "expression": getattr(_a, "expression", "") or "",
+                "expression_hash": hashlib.sha256(
+                    (getattr(_a, "expression", "") or "").encode("utf-8")
+                ).hexdigest()[:64],
+                "quality_status_at_eval": getattr(_a, "quality_status", None),
+                "hook_version": "v1",
+                "attribution": None,
+                "attribution_confidence": None,
+                "attribution_evidence": None,
+                "should_retry_implementation": None,
+                "should_modify_hypothesis": None,
+                "hook_error": None,
+            }
             try:
                 _sim = {
                     "sharpe": _new_metrics.get("sharpe"),
@@ -2561,6 +2587,12 @@ async def node_evaluate(
                 _new_metrics["_r1a_should_retry"] = bool(_fb.should_retry_implementation)
                 _new_metrics["_r1a_should_modify"] = bool(_fb.should_modify_hypothesis)
                 _new_metrics["_r1a_hook_version"] = "v1"
+                # log row mirrors metrics
+                _r1a_log["attribution"] = _fb.attribution.value
+                _r1a_log["attribution_confidence"] = _fb.attribution_confidence
+                _r1a_log["attribution_evidence"] = list(_fb.attribution_evidence) if _fb.attribution_evidence else None
+                _r1a_log["should_retry_implementation"] = "true" if _fb.should_retry_implementation else "false"
+                _r1a_log["should_modify_hypothesis"] = "true" if _fb.should_modify_hypothesis else "false"
             except Exception as _r1a_e:  # noqa: BLE001 — must isolate per-alpha failures
                 _r1a_failures += 1
                 logger.warning(
@@ -2570,9 +2602,24 @@ async def node_evaluate(
                 _new_metrics["_r1a_attribution"] = None
                 _new_metrics["_r1a_hook_error"] = str(_r1a_e)[:200]
                 _new_metrics["_r1a_hook_version"] = "v1"  # mark even on fail so GO denominator includes
+                _r1a_log["hook_error"] = str(_r1a_e)[:200]
             # Pydantic field reassignment (AlphaCandidate is Pydantic BaseModel —
             # no flag_modified needed; persistence.py INSERT path doesn't need dirty marker)
             _a.metrics = _new_metrics
+            _r1a_log_rows.append(_r1a_log)
+
+        # Batch INSERT to r1a_attribution_log — independent of alpha persistence
+        if _r1a_log_rows:
+            try:
+                async with AsyncSessionLocal() as _r1a_db:
+                    for _row in _r1a_log_rows:
+                        _r1a_db.add(R1aAttributionLog(**_row))
+                    await _r1a_db.commit()
+            except Exception as _r1a_db_e:  # noqa: BLE001
+                logger.warning(
+                    "[R1a] log INSERT failed (non-fatal): {}", _r1a_db_e
+                )
+
         if _r1a_failures:
             logger.warning(
                 "[R1a] {}/{} hook failed this round", _r1a_failures, len(updated_alphas)

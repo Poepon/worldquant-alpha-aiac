@@ -60,27 +60,29 @@ STALL_WINDOW_HOURS = 1
 async def collect_attribution(days: Optional[int] = None) -> Dict[str, int]:
     """Return {attr_str_or_None: count} + an 'errs' tally as a separate row.
 
+    v1.6 (2026-05-17): query independent `r1a_attribution_log` table
+    instead of alpha.metrics. The log captures every evaluated alpha
+    (50/round) — `alphas` table only had PROV/PASS subset (~1/round).
+
     `attr` keys: 'hypothesis', 'implementation', 'both', 'unknown', None
-    `errs` key (special): rows where _r1a_hook_error is set
+    `errs` key (special): rows where hook_error is set
     """
     if days is not None:
         sql = text("""
-            SELECT metrics->>'_r1a_attribution' AS attr,
+            SELECT attribution AS attr,
                    COUNT(*) AS n,
-                   COUNT(*) FILTER (WHERE metrics ? '_r1a_hook_error') AS errs
-            FROM alphas
+                   COUNT(*) FILTER (WHERE hook_error IS NOT NULL) AS errs
+            FROM r1a_attribution_log
             WHERE created_at > now() - (:days || ' day')::interval
-              AND metrics ? '_r1a_hook_version'
             GROUP BY 1 ORDER BY n DESC
         """)
         params = {"days": str(days)}
     else:
         sql = text("""
-            SELECT metrics->>'_r1a_attribution' AS attr,
+            SELECT attribution AS attr,
                    COUNT(*) AS n,
-                   COUNT(*) FILTER (WHERE metrics ? '_r1a_hook_error') AS errs
-            FROM alphas
-            WHERE metrics ? '_r1a_hook_version'
+                   COUNT(*) FILTER (WHERE hook_error IS NOT NULL) AS errs
+            FROM r1a_attribution_log
             GROUP BY 1 ORDER BY n DESC
         """)
         params = {}
@@ -97,11 +99,10 @@ async def collect_attribution(days: Optional[int] = None) -> Dict[str, int]:
 
 
 async def check_stall() -> int:
-    """Return count of hook_version rows in last STALL_WINDOW_HOURS."""
+    """Return count of hook log rows in last STALL_WINDOW_HOURS."""
     sql = text("""
-        SELECT COUNT(*) FROM alphas
+        SELECT COUNT(*) FROM r1a_attribution_log
         WHERE created_at > now() - (:hrs || ' hour')::interval
-          AND metrics ? '_r1a_hook_version'
     """)
     async with AsyncSessionLocal() as s:
         r = await s.execute(sql, {"hrs": str(STALL_WINDOW_HOURS)})

@@ -81,6 +81,9 @@ from backend.models.config import (
     FeatureFlagAudit,
 )
 
+# R1a attribution log (Phase 0 v1.6 fix — independent of alpha persistence)
+from backend.models.r1a_attribution import R1aAttributionLog
+
 __all__ = [
     # Enums
     "MiningStatus",

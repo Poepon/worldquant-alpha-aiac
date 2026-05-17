@@ -250,3 +250,72 @@ async def test_r1a_hook_attribution_distribution():
         f"hypo_a: sharpe=0.3 + no issues must give hypothesis, got {hypo_attr}"
     assert unkn_attr == "unknown", \
         f"unkn_a: sharpe=1.5 + no issues must give unknown, got {unkn_attr}"
+
+
+# --------------------------------------------------------------------------- #
+# v1.6 fix: r1a_attribution_log table captures ALL evaluated alphas
+# independent of alpha persistence (FAIL/OPTIMIZE alphas now logged too)
+# --------------------------------------------------------------------------- #
+@pytest.mark.asyncio
+async def test_r1a_log_table_captures_all_evaluated_alphas():
+    """v1.6 fix: r1a_attribution_log must record every alpha evaluated,
+    even those that won't INSERT into the alphas table (FAIL/OPTIMIZE)."""
+    from sqlalchemy import text
+    from backend.database import AsyncSessionLocal
+
+    alphas = [
+        _mk_alpha(sharpe=1.5, alpha_id="log_pass_a"),
+        _mk_alpha(sharpe=0.3, alpha_id="log_fail_a"),
+        _mk_alpha(sharpe=1.5, alpha_id="log_impl_a",
+                  validation_error="syntax error"),
+    ]
+    state = _mk_state(alphas)
+
+    # Snapshot pre-run log count for THESE alpha_ids
+    async with AsyncSessionLocal() as s:
+        r = await s.execute(text(
+            "SELECT COUNT(*) FROM r1a_attribution_log WHERE alpha_id_brain IN "
+            "('log_pass_a', 'log_fail_a', 'log_impl_a')"
+        ))
+        pre_count = r.scalar() or 0
+
+    original = settings.ENABLE_R1A_HOOK
+    settings.ENABLE_R1A_HOOK = True
+    try:
+        await node_evaluate(state, brain=None, config={})
+    finally:
+        settings.ENABLE_R1A_HOOK = original
+
+    # Verify all 3 alphas landed in r1a_attribution_log regardless of routing
+    async with AsyncSessionLocal() as s:
+        r = await s.execute(text("""
+            SELECT alpha_id_brain, attribution, hook_version
+            FROM r1a_attribution_log
+            WHERE alpha_id_brain IN ('log_pass_a', 'log_fail_a', 'log_impl_a')
+            ORDER BY alpha_id_brain
+        """))
+        rows = r.all()
+
+    post_count = len(rows)
+    assert post_count - pre_count == 3, (
+        f"expected 3 new log rows (one per evaluated alpha), got {post_count - pre_count} "
+        f"(pre={pre_count}, post={post_count})"
+    )
+
+    by_alpha = {row[0]: row for row in rows}
+    assert by_alpha["log_pass_a"][1] == "unknown", \
+        f"log_pass_a attribution: {by_alpha['log_pass_a'][1]}"
+    assert by_alpha["log_fail_a"][1] == "hypothesis", \
+        f"log_fail_a attribution: {by_alpha['log_fail_a'][1]}"
+    assert by_alpha["log_impl_a"][1] == "implementation", \
+        f"log_impl_a attribution: {by_alpha['log_impl_a'][1]}"
+    for alpha_id, row in by_alpha.items():
+        assert row[2] == "v1", f"{alpha_id}: hook_version expected 'v1', got {row[2]!r}"
+
+    # Cleanup: don't pollute the table with test rows
+    async with AsyncSessionLocal() as s:
+        await s.execute(text(
+            "DELETE FROM r1a_attribution_log WHERE alpha_id_brain IN "
+            "('log_pass_a', 'log_fail_a', 'log_impl_a')"
+        ))
+        await s.commit()
