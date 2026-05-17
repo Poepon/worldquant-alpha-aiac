@@ -2616,9 +2616,18 @@ async def node_evaluate(
                 try:
                     from backend.agents.graph.r5_judge import run_r5_judge  # noqa: E402
                     from backend.agents.services.llm_service import get_llm_service  # noqa: E402
+                    # AlphaCandidate (Pydantic, agents/graph/state.py:19) has
+                    # field `explanation`; SQLAlchemy Alpha.logic_explanation
+                    # is the DB-persisted name (mapped in persistence.py:270).
+                    # In-loop _a is AlphaCandidate so read `explanation` —
+                    # task 1463 verify showed 100% skip due to reading the
+                    # wrong (DB) name. Same for `hypothesis` (already a
+                    # field on AlphaCandidate, plain attr).
+                    _desc_text = getattr(_a, "explanation", "") or ""
+                    _hyp_text = getattr(_a, "hypothesis", "") or _hyp.get("statement", "") or ""
                     _r5_payload = await run_r5_judge(
-                        hypothesis_statement=_hyp.get("statement", ""),
-                        description=getattr(_a, "logic_explanation", "") or "",
+                        hypothesis_statement=_hyp_text,
+                        description=_desc_text,
                         expression=getattr(_a, "expression", "") or "",
                         llm_service=get_llm_service(),
                         r1a_attribution=_r1a_log.get("attribution"),
