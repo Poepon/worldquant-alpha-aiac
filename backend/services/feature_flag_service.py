@@ -153,6 +153,13 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase1-R2Q7",
         description="启用 ContextualDirectionBandit (4-arm Beta-Bernoulli + (region, dataset_category, recent_failure_pattern) 三维 context) 选 strategy 生成方式。任一 segment ≥ 10 select 触发 GO 闸门。",
     ),
+    # --- Phase 1 R3/Q8 AST subtree-isomorphism diversity dim ---
+    "ENABLE_AST_DIVERSITY_DIM": FlagSpec(
+        name="ENABLE_AST_DIVERSITY_DIM",
+        flag_type="bool",
+        group="Phase1-R3Q8",
+        description="启用 DiversityScore 第 6 维 ast_diversity (1 − Jaccard subtree overlap)。Light wiring 仅记录到 ast_distance_log,不 gate 生成。Phase 2+ R10 family-cap 复用此信号。",
+    ),
 }
 
 

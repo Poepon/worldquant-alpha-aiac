@@ -87,6 +87,10 @@ from backend.models.r1a_attribution import R1aAttributionLog
 # DirectionBandit off-policy log (Phase 1 R2/Q7 — independent of task.config)
 from backend.models.direction_bandit_log import DirectionBanditLog
 
+# AST distance log (Phase 1 R3/Q8 — independent of alpha persistence per
+# R1a v1.6 lesson [[feedback_r1a_dedicated_log_table]])
+from backend.models.ast_distance_log import AstDistanceLog
+
 __all__ = [
     # Enums
     "MiningStatus",

@@ -84,6 +84,13 @@ class DiversityScore:
     # ``overall_score`` when ENABLE_PILLAR_AWARE_SELECTION is True AND a
     # non-None pillar is supplied. Otherwise stays 0.0 and is ignored.
     pillar_diversity: float = 0.0
+    # R3/Q8 (Phase 1, 2026-05-17): 6th dim — 1 − Jaccard subtree overlap vs
+    # recent K attempts. Defaults to 0.0 (legacy-compat: existing callers see
+    # the field but it stays unused unless ENABLE_AST_DIVERSITY_DIM and a
+    # caller explicitly populates it). Phase 1.5 / 2+ wiring may include
+    # this dim in overall_score weighted sum; Phase 1 just records to
+    # ast_distance_log dedicated table.
+    ast_diversity: float = 0.0
 
     # Combined score
     overall_score: float = 0.0
@@ -102,6 +109,7 @@ class DiversityScore:
             "operator_diversity": round(self.operator_diversity, 3),
             "settings_diversity": round(self.settings_diversity, 3),
             "pillar_diversity": round(self.pillar_diversity, 3),
+            "ast_diversity": round(self.ast_diversity, 3),  # R3/Q8 Phase 1
             "overall_score": round(self.overall_score, 3),
             "similar_attempts": self.similar_attempts,
             "suggestions": self.suggestions,

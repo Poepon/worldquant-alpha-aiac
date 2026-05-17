@@ -225,6 +225,17 @@ class Settings(BaseSettings):
     ]
     DIRECTION_BANDIT_COLD_THRESHOLD: int = 5
 
+    # ----- R3/Q8 AST subtree-isomorphism diversity dim (Phase 1, 2026-05-17) -----
+    # Adds a 6th dim `ast_diversity` to DiversityScore based on Jaccard subtree
+    # overlap (brute-force O(n²), fine for AIAC AST n<20 at max_depth=3).
+    # Light wiring per plan §2.4: every node_code_gen alpha gets distance
+    # computed + logged to ast_distance_log table, BUT diversity score is NOT
+    # used as a hard gate (Phase 1.5 / 2+ work).
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_AST_DIVERSITY_DIM: bool = False
+    AST_DIVERSITY_MAX_DEPTH: int = 3       # OperatorNode skeleton truncation
+    AST_DIVERSITY_HISTORY_K: int = 20      # compare new alpha to top-K recent attempts
+
     # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
     # T1: 裸 ts_op 信号；2026-05-07 P0 收紧到 BRAIN 提交 gate
     # 旧值 0.8/0.5 是 探索 bar — batch 276-283 产生 8 条 PASS 全部 can_submit=False

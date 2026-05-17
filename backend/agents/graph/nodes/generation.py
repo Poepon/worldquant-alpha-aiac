@@ -1332,7 +1332,20 @@ async def node_code_gen(
     })
     
     logger.info(f"[{node_name}] Complete | alphas={len(pending_alphas)}")
-    
+
+    # R3/Q8 (Phase 1, 2026-05-17): light wiring — write per-alpha ast_distance
+    # to ast_distance_log dedicated table when flag ON. Soft-fail, never
+    # blocks generation. Per R1a v1.6 lesson, must NOT route via
+    # AlphaCandidate.metrics (95% drop rate).
+    try:
+        from backend.ast_distance_logger import log_round_ast_distances
+        task_id = getattr(state, "task_id", None)
+        round_idx = getattr(state, "current_iteration", None) or getattr(state, "round_idx", None)
+        new_exprs = [a.expression for a in pending_alphas if getattr(a, "expression", None)]
+        await log_round_ast_distances(task_id, round_idx, new_exprs)
+    except Exception as e:
+        logger.debug(f"[{node_name}] R3/Q8 ast_distance log skip (non-fatal): {e}")
+
     trace_update = await record_trace(
         state, trace_service, node_name,
         {

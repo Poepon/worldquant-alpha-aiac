@@ -117,6 +117,68 @@ def extract_operator_tree(expression: str, max_depth: int = 4) -> Optional[Opera
     return root
 
 
+def enumerate_subtrees(node: Optional["OperatorNode"], max_depth: int = 3) -> set:
+    """Phase 1 R3/Q8 (2026-05-17): depth-first enumerate every subtree skeleton.
+
+    Returns a set of string-hashed subtree skeletons (via ``OperatorNode.to_skeleton``).
+    Empty set for None node or depth-overflow. Used by ``ast_distance`` to
+    compute Jaccard-style subtree overlap between two expression trees.
+
+    Brute-force O(n) per call (recursion over n nodes). Plan §2.2 verified
+    AIAC alpha AST n ≤ 8 truncated at max_depth=3 — perf irrelevant.
+    """
+    if node is None or getattr(node, "depth", 0) > max_depth:
+        return set()
+    out = {node.to_skeleton(max_depth=max_depth)}
+    for child in getattr(node, "children", []):
+        out |= enumerate_subtrees(child, max_depth)
+    return out
+
+
+def ast_distance(t1: Optional["OperatorNode"], t2: Optional["OperatorNode"],
+                 max_depth: int = 3) -> float:
+    """Phase 1 R3/Q8: 1 − Jaccard subtree overlap between two trees.
+
+    Returns:
+      0.0 — identical subtree population (most similar)
+      1.0 — disjoint subtree populations (most different)
+
+    Brute-force O(n²) — fine for AIAC AST n < 20 at max_depth ≤ 3 per
+    plan §2.2 verification. Shamir-Tsur 1999 deferred to Phase 2+ (the
+    plan-cited O(n²·⁵/log n) bound was unverifiable; brute-force matches
+    actual perf needs).
+
+    Special cases:
+      - Both trees None / empty subtree sets → 0.0 (identical-by-vacuity)
+      - One empty + one populated → 1.0 (max distance)
+    """
+    s1 = enumerate_subtrees(t1, max_depth)
+    s2 = enumerate_subtrees(t2, max_depth)
+    if not s1 and not s2:
+        return 0.0
+    if not s1 or not s2:
+        return 1.0
+    union = s1 | s2
+    return 1.0 - (len(s1 & s2) / len(union))
+
+
+def ast_distance_from_expressions(expr1: str, expr2: str, max_depth: int = 3) -> float:
+    """Convenience: parse both expressions + compute ast_distance.
+
+    Caller-friendly wrapper for diversity_tracker hot path; isolates the
+    parse-failure handling so the bandit hot path never raises.
+    """
+    try:
+        t1 = extract_operator_tree(expr1, max_depth) if expr1 else None
+        t2 = extract_operator_tree(expr2, max_depth) if expr2 else None
+        return ast_distance(t1, t2, max_depth)
+    except Exception:
+        # Parse failures shouldn't crash the diversity-gate hot path —
+        # return max distance (1.0) so the unparseable input is treated as
+        # maximally novel rather than rejecting / pinning to 0.
+        return 1.0
+
+
 def expression_to_skeleton(expression: str, max_depth: int = 3) -> str:
     """
     Convert expression to skeleton string.
