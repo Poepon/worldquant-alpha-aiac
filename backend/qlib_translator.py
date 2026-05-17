@@ -104,6 +104,48 @@ QLIB_TO_BRAIN_OPERATORS: Dict[str, str] = {
 
     # ---- Control flow ----
     "If":        "if_else",            # If(cond, a, b)
+
+    # =========================================================================
+    # Phase 1 Q6 (2026-05-17): Alpha191 / JoinQuant pseudo-code operators
+    # =========================================================================
+    # JoinQuant alpha191.py uses ALLCAPS keyword convention (`MEAN`, `STD`,
+    # `DELAY`, ...) instead of CamelCase. Add UPPERCASE alias keys so the
+    # uppercase-first-letter regex (_OPERATOR_CALL_RE = `[A-Z]\w*`) catches
+    # them too. CamelCase Qlib entries above stay authoritative; these are
+    # synonyms.
+    "MEAN":      "ts_mean",
+    "SUM":       "ts_sum",
+    "STD":       "ts_std_dev",
+    "VAR":       "ts_std_dev",         # std² alias (same as Qlib Var)
+    "MAX":       "ts_max",             # Alpha191 MAX is window max (single arg list with window)
+    "MIN":       "ts_min",
+    "TSMAX":     "ts_max",
+    "TSMIN":     "ts_min",
+    "TSRANK":    "ts_rank",            # time-series rank, same as Qlib Rank
+    "YSRANK":    "ts_rank",            # Alpha191 variant of TSRANK
+    "RANK":      "rank",               # Alpha191/Alpha101 RANK is cross-sectional rank
+    "DELTA":     "ts_delta",
+    "DELAY":     "ts_delay",
+    "CORR":      "ts_corr",
+    "COVIANCE":  "ts_covariance",      # Alpha191 sometimes mis-spelled
+    "COV":       "ts_covariance",
+    "SMA":       "ts_mean",            # simple moving average ≈ ts_mean
+    "WMA":       "ts_decay_linear",
+    "DECAYLINEAR": "ts_decay_linear",
+    "LOG":       "log",
+    "ABS":       "abs",
+    "SIGN":      "sign",
+    "SQRT":      "sqrt",
+    "POWER":     "power",
+    "SIGNEDPOWER": "signed_power",
+    "HIGHDAY":   "ts_argmax",          # Alpha191 HIGHDAY(x, w) ≈ ts_argmax(x, w)
+    "LOWDAY":    "ts_argmin",
+    "IF":        "if_else",            # ternary keyword form
+    "FILTER":    "if_else",            # FILTER(x, cond) ≈ if_else(cond, x, NULL); use with care
+    "PROD":      "ts_product",
+    "TSPROD":    "ts_product",
+    "REGBETA":   "ts_regression",      # Alpha191 regression beta
+    "REGRESI":   "ts_regression_residual",
 }
 
 

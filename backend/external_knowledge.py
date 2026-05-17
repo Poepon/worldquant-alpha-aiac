@@ -756,6 +756,87 @@ def _load_external_patterns_json(filename: str) -> List[ExternalKnowledge]:
     return out
 
 
+async def import_alpha191_knowledge(db: AsyncSession) -> int:
+    """Import Alpha191 CHN-region patterns (Phase 1 Q6, 2026-05-17).
+
+    Reads ``backend/data/alpha191_jq.json`` (produced by
+    ``scripts/extract_alpha191.py`` on the JoinQuant alpha191.py source) and
+    inserts as SUCCESS_PATTERN rows with ``region='CHN'`` + ``horizon='short'``
+    metadata forward-compat hooks (for future Phase 2+ region-aware RAG).
+
+    Every row gets ``meta_data["import_batch"] = PHASE1_Q6_IMPORT_BATCH``
+    for precise rollback (UPDATE knowledge_entries SET is_active=false WHERE
+    meta_data->>'import_batch' = :batch).
+    """
+    path = Path(__file__).parent / "data" / "alpha191_jq.json"
+    if not path.exists():
+        logger.warning("[Q6] alpha191_jq.json missing; run scripts/extract_alpha191.py first")
+        return 0
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (json.JSONDecodeError, OSError) as ex:
+        logger.warning(f"[Q6] failed to load alpha191_jq.json: {ex}")
+        return 0
+
+    # Build ExternalKnowledge objects + capture Q6-specific meta_data fields
+    # (region / horizon / alpha191_id) for the import path to pass through.
+    patterns: List[ExternalKnowledge] = []
+    q6_extras: List[Dict[str, Any]] = []
+    for item in raw:
+        try:
+            patterns.append(ExternalKnowledge(
+                source=item.get("source", "alpha191_jq"),
+                pattern=item["pattern"],
+                description=item.get("description", ""),
+                category=item.get("category", "pv"),
+                confidence=item.get("confidence", 0.75),
+                verified=item.get("verified", True),
+                source_title=item.get("source_title", ""),
+                source_url=item.get("source_url", ""),
+                raw_feature=item.get("raw_feature"),
+                qlib_origin=item.get("qlib_origin"),
+            ))
+            q6_extras.append({
+                "alpha191_id": item.get("alpha191_id"),
+                "region": item.get("region", "CHN"),
+                "horizon": item.get("horizon", "short"),
+            })
+        except KeyError as ex:
+            logger.warning(f"[Q6] alpha191_jq.json item missing key {ex}; skipping")
+            continue
+
+    syncer = ExternalKnowledgeSyncer(db)
+    imported = await syncer.import_curated_patterns(
+        patterns, batch_id=PHASE1_Q6_IMPORT_BATCH
+    )
+
+    # Backfill the Q6-specific meta_data fields (region/horizon/alpha191_id)
+    # for the rows we just inserted. We match by import_batch + pattern_hash —
+    # safe because Q6 batch is fresh.
+    from sqlalchemy import update, select as _select
+    from sqlalchemy.dialects.postgresql import JSONB as _JSONB
+    for ext, extras in zip(patterns, q6_extras):
+        phash = compute_pattern_hash(ext.pattern, None, None)
+        row = (await db.execute(
+            _select(KnowledgeEntry).where(KnowledgeEntry.pattern_hash == phash)
+        )).scalar_one_or_none()
+        if not row or not isinstance(row.meta_data, dict):
+            continue
+        # In-place merge + flag JSONB dirty so SQLAlchemy persists
+        from sqlalchemy.orm.attributes import flag_modified
+        for k, v in extras.items():
+            if v is not None:
+                row.meta_data[k] = v
+        flag_modified(row, "meta_data")
+    if imported > 0:
+        await db.commit()
+
+    logger.info(f"[Q6] imported {imported} alpha191 patterns "
+                f"(region=CHN, batch={PHASE1_Q6_IMPORT_BATCH})")
+    return imported
+
+
 async def import_openassetpricing_knowledge(db: AsyncSession) -> int:
     """Import openassetpricing translations (Phase 1 Q2, 2026-05-17).
 
