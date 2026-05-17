@@ -57,6 +57,12 @@ class MiningSessionResponse(BaseModel):
     last_alpha_persisted_at: Optional[datetime] = None
     started_at: Optional[datetime] = None
     paused_at: Optional[datetime] = None
+    # Phase 1.5-C [V1.2-C5] (2026-05-18): new authoritative scheduling
+    # fields. Optional for backward compat — old clients ignoring these
+    # still work.
+    schedule: Optional[str] = None
+    starting_tier: Optional[int] = None
+    current_tier: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -76,6 +82,10 @@ def _info_to_response(info: MiningSessionInfo) -> MiningSessionResponse:
         last_alpha_persisted_at=info.last_alpha_persisted_at,
         started_at=info.started_at,
         paused_at=info.paused_at,
+        # Phase 1.5-C new fields
+        schedule=info.schedule,
+        starting_tier=info.starting_tier,
+        current_tier=info.current_tier,
     )
 
 

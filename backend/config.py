@@ -248,6 +248,15 @@ class Settings(BaseSettings):
     FLAT_CONTINUOUS_DAILY_GOAL: int = 20         # alphas/iteration cap
     FLAT_CONTINUOUS_MAX_ITERATIONS: int = 100    # safety bound per session
 
+    # ----- Phase 1.5-C: TaskSchema v2 cut-over (2026-05-18) -----
+    # 切 read paths 从 legacy cols (mining_mode / cascade_phase / agent_mode)
+    # 到 new authoritative cols (schedule / starting_tier / runtime_state).
+    # 默认 OFF 保留 legacy 行为 — dual-write 已在 Phase 1.5-B 启 → flag 翻 ON
+    # 应 byte-equivalent 在 Revision B 之后创建的 task 上。
+    # Gray rollout: staging → single task → region 全量(plan §3.5)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_TASK_SCHEMA_V2: bool = False
+
     # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
     # T1: 裸 ts_op 信号；2026-05-07 P0 收紧到 BRAIN 提交 gate
     # 旧值 0.8/0.5 是 探索 bar — batch 276-283 产生 8 条 PASS 全部 can_submit=False

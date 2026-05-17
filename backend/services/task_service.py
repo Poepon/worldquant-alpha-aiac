@@ -110,13 +110,20 @@ class MiningSessionInfo:
     region: str
     universe: str
     status: str           # RUNNING / PAUSED
-    mining_mode: str      # always CONTINUOUS_CASCADE
+    mining_mode: str      # CONTINUOUS_CASCADE / FLAT_CONTINUOUS / DISCRETE
     cascade_phase: Optional[str]   # T1 / T2 / T3 / IDLE
     cascade_round_idx: int
     progress_current: int
     last_alpha_persisted_at: Optional[datetime]
     started_at: Optional[datetime]   # task.created_at
     paused_at: Optional[datetime]    # task.updated_at when status moved to PAUSED
+    # Phase 1.5-C [V1.2-C5 NEW] (2026-05-18): new authoritative scheduling
+    # fields. Populated from MiningTask.schedule / .starting_tier (Phase 1.5-A
+    # cols, dual-written by Phase 1.5-B) + latest run's runtime_state.
+    # Optional for backward compat — old callers ignoring these still work.
+    schedule: Optional[str] = None         # ONESHOT / CASCADE
+    starting_tier: Optional[int] = None    # 1 / 2 / 3
+    current_tier: Optional[int] = None     # from latest run.runtime_state["current_tier"]
 
 
 @dataclass
@@ -977,6 +984,12 @@ class TaskService(BaseService):
         return celery_task.id
 
     def _to_session_info(self, task: MiningTask) -> MiningSessionInfo:
+        # Phase 1.5-C [V1.2-C5] (2026-05-18): populate new authoritative
+        # fields from MiningTask cols (dual-written by Phase 1.5-B). For
+        # current_tier we derive from cascade_phase since it's dual-written
+        # with runtime_state.current_tier — avoids async run lookup here.
+        _phase_to_tier = {"T1": 1, "T2": 2, "T3": 3}
+        current_tier = _phase_to_tier.get(task.cascade_phase) if task.cascade_phase else None
         return MiningSessionInfo(
             task_id=task.id,
             task_name=task.task_name,
@@ -990,4 +1003,8 @@ class TaskService(BaseService):
             last_alpha_persisted_at=task.last_alpha_persisted_at,
             started_at=task.created_at,
             paused_at=task.updated_at if task.status == "PAUSED" else None,
+            # Phase 1.5-C new fields (Optional, backward-compat)
+            schedule=getattr(task, "schedule", None),
+            starting_tier=getattr(task, "starting_tier", None),
+            current_tier=current_tier,
         )

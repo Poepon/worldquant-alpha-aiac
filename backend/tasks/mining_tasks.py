@@ -20,6 +20,53 @@ from backend.models import MiningTask, DatasetMetadata, Operator, DataField, Exp
 from backend.tasks import run_async
 
 
+# ---------------------------------------------------------------------------
+# Phase 1.5-C: TaskSchema v2 dual-source readers
+# ---------------------------------------------------------------------------
+# Per plan v1.3 §3.3 + memory [[project_phase15_block1_shipped_2026_05_17]]:
+# Block 1 (Revision A/B) wrote new columns dual-write with legacy. Block 2
+# (here) flips read paths to prefer new cols when ENABLE_TASK_SCHEMA_V2=True.
+# Default OFF preserves legacy behavior; flag flip is byte-equivalent for
+# tasks created after Revision B backfill (2026-05-17).
+
+
+def _is_cascade_schedule(task) -> bool:
+    """Dual-source cascade detection — flag ON reads schedule, OFF reads mining_mode.
+
+    Both populated during Phase 1.5-B dual-write window (Revision B backfilled
+    227 mining_tasks + 227 latest runs), so flag-flip should be byte-equivalent
+    for tasks created after backfill.
+    """
+    if getattr(settings, "ENABLE_TASK_SCHEMA_V2", False):
+        sched = getattr(task, "schedule", None) or ""
+        return sched.upper() == "CASCADE"
+    return task.mining_mode == "CONTINUOUS_CASCADE"
+
+
+def _resolve_cascade_phase(task, run) -> str:
+    """Phase 1.5-C dual-source cascade resume — prefer run.runtime_state.current_tier.
+
+    Flag ON: read ``current_tier`` from the active run's ``runtime_state``
+    (populated by Phase 1.5-B heartbeat). Fallback to ``task.cascade_phase``
+    when runtime_state is empty (historical runs pre-1.5-B, or freshly-revived
+    runs whose inherited state is missing — though §3.4.1 watchdog revive
+    inheritance should populate this).
+
+    Flag OFF: read ``task.cascade_phase`` (legacy path), unchanged.
+
+    Returns the phase string ("T1" / "T2" / "T3").
+    """
+    if getattr(settings, "ENABLE_TASK_SCHEMA_V2", False):
+        rs = getattr(run, "runtime_state", None) if run is not None else None
+        current_tier = None
+        if isinstance(rs, dict):
+            current_tier = rs.get("current_tier")
+        if current_tier in (1, 2, 3):
+            return {1: "T1", 2: "T2", 3: "T3"}[current_tier]
+        # fall through to legacy
+    return task.cascade_phase or "T1"
+
+
 @celery_app.task(bind=True, name="backend.tasks.run_mining_task")
 def run_mining_task(self, task_id: int, run_id: int | None = None):
     """
@@ -244,7 +291,7 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             # persistent service loop instead of the discrete dataset loop.
             # Discrete tasks (mining_mode='DISCRETE', the default) keep
             # original behavior 100%.
-            if task.mining_mode == "CONTINUOUS_CASCADE":
+            if _is_cascade_schedule(task):
                 try:
                     return await _run_continuous_cascade(
                         db, task, run, self.request.id,
@@ -1435,7 +1482,11 @@ async def _run_continuous_cascade(db, task, run, celery_task_id, *, lock_key, lo
             # know about) all three phase branches below silently no-op and
             # the `while True` becomes a busy loop. Normalize to T1 with a
             # WARNING so the situation is observable.
-            current_phase = task.cascade_phase or "T1"
+            # Phase 1.5-C (2026-05-18): dual-source — flag ON reads
+            # ``run.runtime_state["current_tier"]`` first, falls back to
+            # ``task.cascade_phase`` when runtime_state is empty (legacy /
+            # freshly-revived runs without §3.4.1 inheritance).
+            current_phase = _resolve_cascade_phase(task, run)
             if current_phase not in {"T1", "T2", "T3"}:
                 logger.warning(
                     f"[cascade] task={task.id} V-26.28 unrecognized cascade_phase="

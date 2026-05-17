@@ -41,6 +41,17 @@ from backend.models.task import TraceStep
 from backend.tasks import run_async
 
 
+# Phase 1.5-C (2026-05-18): dual-source cascade detection — flag ON reads
+# task.schedule; OFF reads task.mining_mode (legacy). See
+# backend/tasks/mining_tasks.py:_is_cascade_schedule for the shared helper.
+# Duplicated here to avoid cross-import; both readers identical semantics.
+def _is_cascade_schedule(task) -> bool:
+    if getattr(settings, "ENABLE_TASK_SCHEMA_V2", False):
+        sched = getattr(task, "schedule", None) or ""
+        return sched.upper() == "CASCADE"
+    return task.mining_mode == "CONTINUOUS_CASCADE"
+
+
 # ---------------------------------------------------------------------------
 # 1. Watchdog — revive dead sessions
 # ---------------------------------------------------------------------------
@@ -61,6 +72,11 @@ async def _watchdog_revive_async() -> dict:
     revived = []
     async with AsyncSessionLocal() as db:
         # --- (a) V-19 CONTINUOUS_CASCADE sessions ---
+        # Phase 1.5-C (2026-05-18): SQL prefilter still uses mining_mode for
+        # index efficiency (operates on the dual-written column either way);
+        # Python-side guard via _is_cascade_schedule(task) makes the flag-flip
+        # semantic correct when schedule and mining_mode diverge (won't happen
+        # under dual-write but defensive for hand-edited DB rows).
         stmt = (
             select(MiningTask)
             .where(MiningTask.mining_mode == "CONTINUOUS_CASCADE")
@@ -68,6 +84,9 @@ async def _watchdog_revive_async() -> dict:
         )
         cascade_rows = (await db.execute(stmt)).scalars().all()
         for task in cascade_rows:
+            if not _is_cascade_schedule(task):
+                # flag ON + schedule mismatch → defer to discrete loop below
+                continue
             # Skip fresh sessions (grace period) — they may not have persisted
             # their first alpha yet.
             if task.created_at and task.created_at > grace_cutoff:
@@ -97,6 +116,9 @@ async def _watchdog_revive_async() -> dict:
         # --- (b) V-22.9 DISCRETE T1/T2/T3 tasks (non-cascade) ---
         # Discrete tasks don't update last_alpha_persisted_at; use latest
         # trace_step as the liveness signal instead.
+        # Phase 1.5-C (2026-05-18): SQL still filters by mining_mode (index
+        # efficient + dual-written); Python guard via _is_cascade_schedule
+        # ensures flag-flip semantic correctness.
         stmt = (
             select(MiningTask)
             .where(MiningTask.status == "RUNNING")
@@ -107,6 +129,9 @@ async def _watchdog_revive_async() -> dict:
         )
         discrete_rows = (await db.execute(stmt)).scalars().all()
         for task in discrete_rows:
+            if _is_cascade_schedule(task):
+                # flag ON + schedule says cascade → cascade loop above handles
+                continue
             if task.created_at and task.created_at > grace_cutoff:
                 continue
             # Find latest trace_step for this task
@@ -243,6 +268,30 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
         inherited_strategy = (
             dict(prior_run.strategy_snapshot) if (prior_run and isinstance(prior_run.strategy_snapshot, dict)) else {}
         )
+
+        # Phase 1.5-C [V1.2-B3 NEW] (2026-05-18): inherit scheduling state
+        # from prior run's runtime_state. Without this, every watchdog revive
+        # creates a run with runtime_state={}, and the cascade worker resume
+        # v2 path (mining_tasks.py:_resolve_cascade_phase) restarts at T1 —
+        # losing T2/T3 progress accumulated since the last successful round.
+        # progress / iteration / last_persisted_at intentionally NOT inherited
+        # — heartbeat will repopulate them on first successful round of new
+        # run; inheriting stale values risks watchdog mis-judging liveness.
+        prior_runtime_state: dict = {}
+        if prior_run is not None and isinstance(prior_run.runtime_state, dict):
+            prior_runtime_state = prior_run.runtime_state
+        _phase_to_tier = {"T1": 1, "T2": 2, "T3": 3}
+        inherited_runtime_state = {
+            "current_tier": prior_runtime_state.get(
+                "current_tier",
+                _phase_to_tier.get(task.cascade_phase or "T1", 1),
+            ),
+            "round_idx": prior_runtime_state.get(
+                "round_idx",
+                task.cascade_round_idx or 0,
+            ),
+        }
+
         run = ExperimentRun(
             task_id=task.id,
             status="RUNNING",
@@ -250,6 +299,7 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
             celery_task_id=None,
             config_snapshot=inherited_config,
             strategy_snapshot=inherited_strategy,
+            runtime_state=inherited_runtime_state,
         )
         db.add(run)
         await db.commit()

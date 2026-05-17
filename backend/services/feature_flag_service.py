@@ -167,6 +167,21 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase3-flatF1",
         description="启用 FLAT_CONTINUOUS mining_mode (与 legacy CONTINUOUS_CASCADE 并行)。Hypothesis-driven flat session — dataset × hypothesis 迭代,无 T1→T2→T3 级联。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。默认 OFF,flat-F2 后续 PR 翻默认。",
     ),
+    # --- Phase 1.5-C: TaskSchema v2 cut-over ---
+    "ENABLE_TASK_SCHEMA_V2": FlagSpec(
+        name="ENABLE_TASK_SCHEMA_V2",
+        flag_type="bool",
+        group="Phase15-C",
+        description=(
+            "Phase 1.5-C: 切 cascade worker resume / watchdog liveness / "
+            "router responses / ops dashboard 的 read paths 从 legacy cols "
+            "(mining_mode / cascade_phase / agent_mode) 到 new authoritative "
+            "cols (schedule / starting_tier / runtime_state.current_tier)。"
+            "OFF = legacy path,代码保留 fallback;dual-write 已在 1.5-B 启,"
+            "flag 翻 ON 在 Revision B 之后创建的 task 上 byte-equivalent。"
+            "Gray rollout: staging → single task → region 全量。"
+        ),
+    ),
 }
 
 
