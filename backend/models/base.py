@@ -82,6 +82,12 @@ class KnowledgeEntryType(str, enum.Enum):
     FIELD_BLACKLIST = "FIELD_BLACKLIST"
     OPERATOR_STAT = "OPERATOR_STAT"
     MACRO_NARRATIVE = "MACRO_NARRATIVE"   # P2-A (2026-05-16)
+    # Phase 1 Q2 (2026-05-17): plain-English anchor for signals that
+    # cannot be cleanly translated to BRAIN DSL (e.g. openassetpricing
+    # panel-regression signals). RAG SQL MUST exclude this entry_type
+    # via WHERE entry_type IN ('SUCCESS_PATTERN','FAILURE_PITFALL') OR
+    # check meta_data->>'is_anchor_metadata' != 'true'. See plan v1.3 §4.7.
+    ANCHOR_METADATA = "ANCHOR_METADATA"
 
 
 class JobStatus(str, enum.Enum):

@@ -38,6 +38,8 @@ from backend.config import settings
 
 PHASE0_Q1_IMPORT_BATCH = "phase0_q1_kakushadze_2026_05"
 PHASE0_Q3_IMPORT_BATCH = "phase0_q3_alpha158_2026_05"
+PHASE1_Q2_IMPORT_BATCH = "phase1_q2_openassetpricing_2026_05"
+PHASE1_Q6_IMPORT_BATCH = "phase1_q6_alpha191_chn_2026_05"
 LEGACY_SEED_IMPORT_BATCH = "legacy_seed"
 
 
@@ -103,6 +105,20 @@ class ExternalKnowledge:
     # Original Qlib expression text (only set for Q3 alpha158 rows; preserved
     # so future role-recategorization or wrapper-injection can trace back).
     qlib_origin: Optional[str] = None
+
+    # Phase 1 Q2 (2026-05-17) — openassetpricing dual-path forward-compat:
+    # is_anchor_metadata=True → row is plain-English anchor (NOT a BRAIN-DSL
+    # expression), written as entry_type='ANCHOR_METADATA'. RAG SQL MUST
+    # exclude this row via meta_data filter (MF-V1.2-6). The remaining
+    # openassetpricing-specific fields preserve provenance for future
+    # retranslation (1 SQL UPDATE per [[feedback_forward_compat_metadata_hook]]).
+    is_anchor_metadata: Optional[bool] = None
+    openassetpricing_signal: Optional[str] = None  # e.g. "Predictors/Accruals.py"
+    llm_translation_version: Optional[str] = None  # e.g. "claude-opus-4-7-high-v1"
+    translation_confidence: Optional[float] = None  # LLM-emit confidence ∈ [0,1]
+    translation_notes: Optional[str] = None         # short LLM-emit caveat
+    theoretical_anchor: Optional[str] = None        # academic citation, e.g. "Sloan 1996"
+    paper_citation: Optional[str] = None            # full reference
 
 
 # =============================================================================
@@ -567,9 +583,32 @@ class ExternalKnowledgeSyncer:
                 meta_data['raw_feature'] = ext.raw_feature
             if ext.qlib_origin is not None:
                 meta_data['qlib_origin'] = ext.qlib_origin
+            # Phase 1 Q2 (2026-05-17) — dual-path openassetpricing fields
+            if ext.is_anchor_metadata is not None:
+                meta_data['is_anchor_metadata'] = ext.is_anchor_metadata
+            if ext.openassetpricing_signal is not None:
+                meta_data['openassetpricing_signal'] = ext.openassetpricing_signal
+            if ext.llm_translation_version is not None:
+                meta_data['llm_translation_version'] = ext.llm_translation_version
+            if ext.translation_confidence is not None:
+                meta_data['translation_confidence'] = ext.translation_confidence
+            if ext.translation_notes is not None:
+                meta_data['translation_notes'] = ext.translation_notes
+            if ext.theoretical_anchor is not None:
+                meta_data['theoretical_anchor'] = ext.theoretical_anchor
+            if ext.paper_citation is not None:
+                meta_data['paper_citation'] = ext.paper_citation
+
+            # Q2 dual-path: ANCHOR_METADATA entries are plain-English signal
+            # documentation, NOT BRAIN-DSL — RAG SQL must filter them out.
+            # All other entries default to SUCCESS_PATTERN (legacy behavior).
+            row_entry_type = (
+                'ANCHOR_METADATA' if ext.is_anchor_metadata is True
+                else 'SUCCESS_PATTERN'
+            )
 
             entry = KnowledgeEntry(
-                entry_type='SUCCESS_PATTERN' if ext.verified else 'SUCCESS_PATTERN',
+                entry_type=row_entry_type,
                 pattern=ext.pattern,
                 pattern_hash=phash,  # MF-8 fix: was silently NULL prior to v1.3
                 description=ext.description,
@@ -702,11 +741,48 @@ def _load_external_patterns_json(filename: str) -> List[ExternalKnowledge]:
                 # Q3 Alpha158 optional fields (None for other sources)
                 raw_feature=item.get("raw_feature"),
                 qlib_origin=item.get("qlib_origin"),
+                # Q2 openassetpricing dual-path fields (None for other sources)
+                is_anchor_metadata=item.get("is_anchor_metadata"),
+                openassetpricing_signal=item.get("openassetpricing_signal"),
+                llm_translation_version=item.get("llm_translation_version"),
+                translation_confidence=item.get("translation_confidence"),
+                translation_notes=item.get("translation_notes"),
+                theoretical_anchor=item.get("theoretical_anchor"),
+                paper_citation=item.get("paper_citation"),
             ))
         except KeyError as ex:
             logger.warning(f"[ExternalKnowledge] {filename} item missing key {ex}; skipping")
             continue
     return out
+
+
+async def import_openassetpricing_knowledge(db: AsyncSession) -> int:
+    """Import openassetpricing translations (Phase 1 Q2, 2026-05-17).
+
+    Reads ``backend/data/openassetpricing_translations.json`` (produced by
+    ``scripts/translate_openassetpricing.py`` on the openassetpricing
+    Predictors directory). Dual-path:
+
+    - Entries with ``is_anchor_metadata=False`` (or unset) and a non-empty
+      BRAIN-DSL ``pattern`` → SUCCESS_PATTERN row.
+    - Entries with ``is_anchor_metadata=True`` → ANCHOR_METADATA row;
+      ``pattern`` field carries the plain-English signal description.
+
+    Every row gets ``meta_data["import_batch"] = PHASE1_Q2_IMPORT_BATCH``
+    for precise rollback (UPDATE knowledge_entries SET is_active=false WHERE
+    meta_data->>'import_batch' = :batch).
+    """
+    patterns = _load_external_patterns_json("openassetpricing_translations.json")
+    if not patterns:
+        logger.warning(
+            "[Q2] openassetpricing_translations.json missing or empty; "
+            "run scripts/translate_openassetpricing.py first"
+        )
+        return 0
+    syncer = ExternalKnowledgeSyncer(db)
+    return await syncer.import_curated_patterns(
+        patterns, batch_id=PHASE1_Q2_IMPORT_BATCH
+    )
 
 
 # Phase 0 eager merge — SF-7 v1.2: module-level, not lazy, so
