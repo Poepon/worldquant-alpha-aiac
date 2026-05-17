@@ -83,15 +83,26 @@ class ExternalKnowledge:
     pattern: str
     description: str
     category: str  # Dataset category relevance
-    
+
     # Quality indicators
     confidence: float = 0.5
     verified: bool = False
-    
+
     # Metadata
     source_url: str = ""
     source_title: str = ""
     extraction_date: datetime = field(default_factory=datetime.now)
+
+    # Phase 0 Q3 v1.5 — Alpha158 raw-feature flag (None for non-Q3 sources).
+    # When True, R8 Hierarchical RAG should DOWN-weight this row when
+    # surfacing patterns to the LLM because raw OHLCV ratios (e.g. KMID =
+    # (close-open)/open) are ML features, not BRAIN-submittable alphas
+    # — feeding them as success exemplars risks LLM generating wrappers-less
+    # expressions that always fail BRAIN sim. Phase 0 ingests the flag only.
+    raw_feature: Optional[bool] = None
+    # Original Qlib expression text (only set for Q3 alpha158 rows; preserved
+    # so future role-recategorization or wrapper-injection can trace back).
+    qlib_origin: Optional[str] = None
 
 
 # =============================================================================
@@ -119,20 +130,31 @@ ALPHA_KEYWORDS = [
 ]
 
 # Operator patterns for validation
-# Extended 2026-05-17 (Q1 v1.5): added power/signed_power/ts_covariance/ts_delay/
-# ts_product/ts_scale/ts_arg_max/ts_arg_min/ts_regression — required for
-# is_likely_alpha_expression sniff to accept Kakushadze 101 patterns like
-# Alpha#41 (`power(high * low, 0.5) - vwap`) and several others.
+# Extended 2026-05-17 (Q1 v1.5 + Q3 v1.5): added power/signed_power/
+# ts_covariance/ts_delay/ts_product/ts_scale/ts_arg_max/ts_arg_min/
+# ts_regression (Q1); ts_quantile/ts_median/ts_skewness/ts_kurtosis/
+# ts_rsquare/ts_decay_exp/ts_regression_residual + boolean/logical
+# operators less/greater/less_equal/greater_equal/not_equal/and_op/or_op/
+# not_op (Q3). Required for is_likely_alpha_expression sniff to accept
+# Kakushadze 101 + Alpha158 patterns.
 VALID_OPERATORS = {
+    # Time-series rolling
     "ts_rank", "ts_zscore", "ts_mean", "ts_sum", "ts_delta", "ts_std_dev",
-    "ts_decay_linear", "ts_corr", "ts_covariance", "ts_max", "ts_min",
-    "ts_argmax", "ts_argmin", "ts_arg_max", "ts_arg_min", "ts_delay",
-    "ts_product", "ts_scale", "ts_regression",
+    "ts_decay_linear", "ts_decay_exp", "ts_corr", "ts_covariance",
+    "ts_max", "ts_min", "ts_argmax", "ts_argmin", "ts_arg_max", "ts_arg_min",
+    "ts_delay", "ts_product", "ts_scale", "ts_quantile", "ts_median",
+    "ts_skewness", "ts_kurtosis", "ts_regression", "ts_regression_residual",
+    "ts_rsquare",
+    # Cross-sectional
     "rank", "zscore", "group_rank", "group_zscore", "group_neutralize",
     "vec_sum", "vec_avg", "vec_max", "vec_min",
+    # Element-wise math
     "log", "sqrt", "abs", "sign", "power", "signed_power",
     "add", "subtract", "multiply", "divide", "max", "min",
-    "if_else", "trade_when", "pasteurize", "equal",
+    # Boolean / control flow
+    "if_else", "trade_when", "pasteurize",
+    "equal", "not_equal", "less", "greater", "less_equal", "greater_equal",
+    "and_op", "or_op", "not_op",
 }
 
 
@@ -539,6 +561,12 @@ class ExternalKnowledgeSyncer:
                 # v1.3 SF-12: precise rollback marker, optional for
                 # backward compat with legacy callers that don't tag batches
                 meta_data['import_batch'] = batch_id
+            # Q3 Alpha158 optional fields — only written when set on ext.
+            # raw_feature is a bool, so check explicitly against None.
+            if ext.raw_feature is not None:
+                meta_data['raw_feature'] = ext.raw_feature
+            if ext.qlib_origin is not None:
+                meta_data['qlib_origin'] = ext.qlib_origin
 
             entry = KnowledgeEntry(
                 entry_type='SUCCESS_PATTERN' if ext.verified else 'SUCCESS_PATTERN',
@@ -671,6 +699,9 @@ def _load_external_patterns_json(filename: str) -> List[ExternalKnowledge]:
                 verified=item.get("verified", True),
                 source_title=item.get("source_title", ""),
                 source_url=item.get("source_url", ""),
+                # Q3 Alpha158 optional fields (None for other sources)
+                raw_feature=item.get("raw_feature"),
+                qlib_origin=item.get("qlib_origin"),
             ))
         except KeyError as ex:
             logger.warning(f"[ExternalKnowledge] {filename} item missing key {ex}; skipping")
@@ -692,6 +723,24 @@ async def import_academic_knowledge(db: AsyncSession) -> int:
     """Import pre-defined academic patterns."""
     syncer = ExternalKnowledgeSyncer(db)
     return await syncer.import_curated_patterns(ACADEMIC_PATTERNS)
+
+
+async def import_alpha158_knowledge(db: AsyncSession) -> int:
+    """Import Qlib Alpha158 patterns (Phase 0 Q3, v1.5 single-version).
+
+    Reads backend/data/alpha158_qlib.json (produced by qlib_translator on
+    alpha158_qlib_raw.json), tags every row with PHASE0_Q3_IMPORT_BATCH +
+    requires_role='both' + raw_feature flag (passed through from JSON) +
+    qlib_origin (preserved for future audit / wrapper injection).
+    """
+    patterns = _load_external_patterns_json("alpha158_qlib.json")
+    if not patterns:
+        logger.warning("[Alpha158] alpha158_qlib.json missing or empty; nothing to import")
+        return 0
+    syncer = ExternalKnowledgeSyncer(db)
+    return await syncer.import_curated_patterns(
+        patterns, batch_id=PHASE0_Q3_IMPORT_BATCH
+    )
 
 
 # =============================================================================

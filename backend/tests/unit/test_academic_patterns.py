@@ -75,26 +75,33 @@ def test_no_duplicate_pattern_hashes():
 
 # --------------------------------------------------------------------------- #
 # 4. Basic syntax sniff — every pattern should look like alpha-DSL code
+#    EXCEPT Q3 raw-feature rows which are pure-arithmetic OHLCV ratios
+#    (KMID = (close-open)/open etc.) — those don't have function calls
+#    on purpose, see ExternalKnowledge.raw_feature docstring.
 # --------------------------------------------------------------------------- #
-def test_all_patterns_look_like_alpha_expressions():
+def test_all_non_raw_patterns_look_like_alpha_expressions():
     failed = []
     for item in ACADEMIC_PATTERNS:
+        if item.raw_feature:
+            continue  # raw OHLCV ratios skipped — see Q3 plan §3.11
         if not is_likely_alpha_expression(item.pattern):
             failed.append(item.pattern[:80])
-    assert not failed, f"{len(failed)} patterns failed sniff: {failed[:5]}"
+    assert not failed, f"{len(failed)} non-raw patterns failed sniff: {failed[:5]}"
 
 
 # --------------------------------------------------------------------------- #
-# 5. parse_pattern_operators — every real alpha pattern has ≥ 1 operator
+# 5. parse_pattern_operators — every non-raw alpha pattern has ≥ 1 operator
+#    (raw_feature=True rows like KMID = (close-open)/open have 0 operator
+#    calls by definition.)
 # --------------------------------------------------------------------------- #
 def test_parse_pattern_operators_extracts_at_least_one_op():
-    """Every alpha in ACADEMIC_PATTERNS must use at least one operator call."""
+    """Every NON-raw alpha in ACADEMIC_PATTERNS must use at least one operator."""
     no_ops = [
         item.pattern[:60] for item in ACADEMIC_PATTERNS
-        if not parse_pattern_operators(item.pattern)
+        if not item.raw_feature and not parse_pattern_operators(item.pattern)
     ]
     assert not no_ops, (
-        f"{len(no_ops)} patterns have zero operators extracted: {no_ops[:5]}"
+        f"{len(no_ops)} non-raw patterns have zero operators extracted: {no_ops[:5]}"
     )
 
 
@@ -131,4 +138,15 @@ def test_alpha158_json_loads_when_present():
     alpha158 = _load_external_patterns_json("alpha158_qlib.json")
     if not alpha158:
         pytest.skip("alpha158_qlib.json not yet committed (Q3 pending)")
-    assert len(alpha158) >= 100, f"Q3 should yield ≥ 100 rows, got {len(alpha158)}"
+    assert len(alpha158) == 158, f"Q3 should yield exactly 158 rows, got {len(alpha158)}"
+    # Every Q3 row carries raw_feature bool + qlib_origin (Q3 plan §3.11 +
+    # ExternalKnowledge docstring)
+    for item in alpha158:
+        assert item.raw_feature is not None, f"Q3 row {item.pattern[:40]} missing raw_feature"
+        assert item.qlib_origin, f"Q3 row {item.pattern[:40]} missing qlib_origin"
+    # CA-1 inspect: should be ~62% raw, ~38% wrapped per §3.11 verification
+    raw_count = sum(1 for it in alpha158 if it.raw_feature)
+    assert 80 <= raw_count <= 110, (
+        f"raw_feature count {raw_count}/158 outside expected band 80-110 — "
+        f"verify _BASE Alpha158 features match Qlib defaults"
+    )

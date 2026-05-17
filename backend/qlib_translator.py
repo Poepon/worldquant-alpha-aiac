@@ -67,25 +67,30 @@ QLIB_TO_BRAIN_OPERATORS: Dict[str, str] = {
     "EMA":       "ts_decay_exp",       # Exp MA (may not exist; check)
     "Slope":     "ts_regression",      # Slope ≈ regression slope
     "Resi":      "ts_regression_residual",  # may need custom translate
+    "Rsquare":   "ts_rsquare",         # R^2 of x-vs-time linear fit
     "Delta":     "ts_delta",           # Delta(x, w) = x - Ref(x, w)
     "ZScore":    "ts_zscore",          # ZScore(x, w) standardize over window
 
     # ---- Element-wise binary (NO window arg) ----
+    # IMPORTANT (Qlib quirk): Qlib's `Less` and `Greater` are element-wise
+    # min and max (np.minimum / np.maximum), NOT boolean comparisons. Boolean
+    # comparisons in Qlib use `Gt`/`Lt`/`Ge`/`Le`/`Eq`/`Ne` (or Python infix
+    # `>`/`<` which the parser turns into those).
     "Add":       "add",
     "Sub":       "subtract",
     "Mul":       "multiply",
     "Div":       "divide",
-    "Less":      "less",               # Qlib Less(x, y) is x<y boolean compare
-    "Greater":   "greater",            # Qlib Greater(x, y) is x>y boolean compare
-    "Minimum":   "min",                # If a Qlib variant uses Minimum/Maximum
-    "Maximum":   "max",                # for element-wise min/max
-    "And":       "and_op",             # may need custom; logical AND
+    "Less":      "min",                # element-wise min(x, y) — NOT boolean
+    "Greater":   "max",                # element-wise max(x, y) — NOT boolean
+    "Minimum":   "min",                # alias for Less in some Qlib versions
+    "Maximum":   "max",                # alias for Greater in some Qlib versions
+    "And":       "and_op",
     "Or":        "or_op",
     "Not":       "not_op",
     "Eq":        "equal",
     "Ne":        "not_equal",
-    "Gt":        "greater",
-    "Lt":        "less",
+    "Gt":        "greater",            # boolean x > y
+    "Lt":        "less",               # boolean x < y
     "Ge":        "greater_equal",
     "Le":        "less_equal",
 

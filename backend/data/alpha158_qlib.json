@@ -1,0 +1,1424 @@
+[
+  {
+    "name": "KMID",
+    "pattern": "(close-open)/open",
+    "description": "Qlib Alpha158 KMID: ($close-$open)/$open",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — KMID",
+    "qlib_origin": "($close-$open)/$open",
+    "raw_feature": true
+  },
+  {
+    "name": "KLEN",
+    "pattern": "(high-low)/open",
+    "description": "Qlib Alpha158 KLEN: ($high-$low)/$open",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — KLEN",
+    "qlib_origin": "($high-$low)/$open",
+    "raw_feature": true
+  },
+  {
+    "name": "KMID2",
+    "pattern": "(close-open)/(high-low+1e-12)",
+    "description": "Qlib Alpha158 KMID2: ($close-$open)/($high-$low+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — KMID2",
+    "qlib_origin": "($close-$open)/($high-$low+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "KUP",
+    "pattern": "(high-max(open, close))/open",
+    "description": "Qlib Alpha158 KUP: ($high-Greater($open, $close))/$open",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — KUP",
+    "qlib_origin": "($high-Greater($open, $close))/$open",
+    "raw_feature": true
+  },
+  {
+    "name": "KUP2",
+    "pattern": "(high-max(open, close))/(high-low+1e-12)",
+    "description": "Qlib Alpha158 KUP2: ($high-Greater($open, $close))/($high-$low+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — KUP2",
+    "qlib_origin": "($high-Greater($open, $close))/($high-$low+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "KLOW",
+    "pattern": "(min(open, close)-low)/open",
+    "description": "Qlib Alpha158 KLOW: (Less($open, $close)-$low)/$open",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — KLOW",
+    "qlib_origin": "(Less($open, $close)-$low)/$open",
+    "raw_feature": true
+  },
+  {
+    "name": "KLOW2",
+    "pattern": "(min(open, close)-low)/(high-low+1e-12)",
+    "description": "Qlib Alpha158 KLOW2: (Less($open, $close)-$low)/($high-$low+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — KLOW2",
+    "qlib_origin": "(Less($open, $close)-$low)/($high-$low+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "KSFT",
+    "pattern": "(2*close-high-low)/open",
+    "description": "Qlib Alpha158 KSFT: (2*$close-$high-$low)/$open",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — KSFT",
+    "qlib_origin": "(2*$close-$high-$low)/$open",
+    "raw_feature": true
+  },
+  {
+    "name": "KSFT2",
+    "pattern": "(2*close-high-low)/(high-low+1e-12)",
+    "description": "Qlib Alpha158 KSFT2: (2*$close-$high-$low)/($high-$low+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — KSFT2",
+    "qlib_origin": "(2*$close-$high-$low)/($high-$low+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "OPEN0",
+    "pattern": "open/close",
+    "description": "Qlib Alpha158 OPEN0: $open/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — OPEN0",
+    "qlib_origin": "$open/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "HIGH0",
+    "pattern": "high/close",
+    "description": "Qlib Alpha158 HIGH0: $high/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — HIGH0",
+    "qlib_origin": "$high/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "LOW0",
+    "pattern": "low/close",
+    "description": "Qlib Alpha158 LOW0: $low/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — LOW0",
+    "qlib_origin": "$low/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "VWAP0",
+    "pattern": "vwap/close",
+    "description": "Qlib Alpha158 VWAP0: $vwap/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VWAP0",
+    "qlib_origin": "$vwap/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "ROC5",
+    "pattern": "ts_delay(close, 5)/close",
+    "description": "Qlib Alpha158 ROC5: Ref($close, 5)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — ROC5",
+    "qlib_origin": "Ref($close, 5)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "ROC10",
+    "pattern": "ts_delay(close, 10)/close",
+    "description": "Qlib Alpha158 ROC10: Ref($close, 10)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — ROC10",
+    "qlib_origin": "Ref($close, 10)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "ROC20",
+    "pattern": "ts_delay(close, 20)/close",
+    "description": "Qlib Alpha158 ROC20: Ref($close, 20)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — ROC20",
+    "qlib_origin": "Ref($close, 20)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "ROC30",
+    "pattern": "ts_delay(close, 30)/close",
+    "description": "Qlib Alpha158 ROC30: Ref($close, 30)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — ROC30",
+    "qlib_origin": "Ref($close, 30)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "ROC60",
+    "pattern": "ts_delay(close, 60)/close",
+    "description": "Qlib Alpha158 ROC60: Ref($close, 60)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — ROC60",
+    "qlib_origin": "Ref($close, 60)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MA5",
+    "pattern": "ts_mean(close, 5)/close",
+    "description": "Qlib Alpha158 MA5: Mean($close, 5)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MA5",
+    "qlib_origin": "Mean($close, 5)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "MA10",
+    "pattern": "ts_mean(close, 10)/close",
+    "description": "Qlib Alpha158 MA10: Mean($close, 10)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MA10",
+    "qlib_origin": "Mean($close, 10)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "MA20",
+    "pattern": "ts_mean(close, 20)/close",
+    "description": "Qlib Alpha158 MA20: Mean($close, 20)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MA20",
+    "qlib_origin": "Mean($close, 20)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "MA30",
+    "pattern": "ts_mean(close, 30)/close",
+    "description": "Qlib Alpha158 MA30: Mean($close, 30)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MA30",
+    "qlib_origin": "Mean($close, 30)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "MA60",
+    "pattern": "ts_mean(close, 60)/close",
+    "description": "Qlib Alpha158 MA60: Mean($close, 60)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MA60",
+    "qlib_origin": "Mean($close, 60)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "STD5",
+    "pattern": "ts_std_dev(close, 5)/close",
+    "description": "Qlib Alpha158 STD5: Std($close, 5)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — STD5",
+    "qlib_origin": "Std($close, 5)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "STD10",
+    "pattern": "ts_std_dev(close, 10)/close",
+    "description": "Qlib Alpha158 STD10: Std($close, 10)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — STD10",
+    "qlib_origin": "Std($close, 10)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "STD20",
+    "pattern": "ts_std_dev(close, 20)/close",
+    "description": "Qlib Alpha158 STD20: Std($close, 20)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — STD20",
+    "qlib_origin": "Std($close, 20)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "STD30",
+    "pattern": "ts_std_dev(close, 30)/close",
+    "description": "Qlib Alpha158 STD30: Std($close, 30)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — STD30",
+    "qlib_origin": "Std($close, 30)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "STD60",
+    "pattern": "ts_std_dev(close, 60)/close",
+    "description": "Qlib Alpha158 STD60: Std($close, 60)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — STD60",
+    "qlib_origin": "Std($close, 60)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "BETA5",
+    "pattern": "ts_regression(close, 5)/close",
+    "description": "Qlib Alpha158 BETA5: Slope($close, 5)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — BETA5",
+    "qlib_origin": "Slope($close, 5)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "BETA10",
+    "pattern": "ts_regression(close, 10)/close",
+    "description": "Qlib Alpha158 BETA10: Slope($close, 10)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — BETA10",
+    "qlib_origin": "Slope($close, 10)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "BETA20",
+    "pattern": "ts_regression(close, 20)/close",
+    "description": "Qlib Alpha158 BETA20: Slope($close, 20)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — BETA20",
+    "qlib_origin": "Slope($close, 20)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "BETA30",
+    "pattern": "ts_regression(close, 30)/close",
+    "description": "Qlib Alpha158 BETA30: Slope($close, 30)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — BETA30",
+    "qlib_origin": "Slope($close, 30)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "BETA60",
+    "pattern": "ts_regression(close, 60)/close",
+    "description": "Qlib Alpha158 BETA60: Slope($close, 60)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — BETA60",
+    "qlib_origin": "Slope($close, 60)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "RSQR5",
+    "pattern": "ts_rsquare(close, 5)",
+    "description": "Qlib Alpha158 RSQR5: Rsquare($close, 5)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSQR5",
+    "qlib_origin": "Rsquare($close, 5)",
+    "raw_feature": true
+  },
+  {
+    "name": "RSQR10",
+    "pattern": "ts_rsquare(close, 10)",
+    "description": "Qlib Alpha158 RSQR10: Rsquare($close, 10)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSQR10",
+    "qlib_origin": "Rsquare($close, 10)",
+    "raw_feature": true
+  },
+  {
+    "name": "RSQR20",
+    "pattern": "ts_rsquare(close, 20)",
+    "description": "Qlib Alpha158 RSQR20: Rsquare($close, 20)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSQR20",
+    "qlib_origin": "Rsquare($close, 20)",
+    "raw_feature": true
+  },
+  {
+    "name": "RSQR30",
+    "pattern": "ts_rsquare(close, 30)",
+    "description": "Qlib Alpha158 RSQR30: Rsquare($close, 30)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSQR30",
+    "qlib_origin": "Rsquare($close, 30)",
+    "raw_feature": true
+  },
+  {
+    "name": "RSQR60",
+    "pattern": "ts_rsquare(close, 60)",
+    "description": "Qlib Alpha158 RSQR60: Rsquare($close, 60)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSQR60",
+    "qlib_origin": "Rsquare($close, 60)",
+    "raw_feature": true
+  },
+  {
+    "name": "RESI5",
+    "pattern": "ts_regression_residual(close, 5)/close",
+    "description": "Qlib Alpha158 RESI5: Resi($close, 5)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RESI5",
+    "qlib_origin": "Resi($close, 5)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "RESI10",
+    "pattern": "ts_regression_residual(close, 10)/close",
+    "description": "Qlib Alpha158 RESI10: Resi($close, 10)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RESI10",
+    "qlib_origin": "Resi($close, 10)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "RESI20",
+    "pattern": "ts_regression_residual(close, 20)/close",
+    "description": "Qlib Alpha158 RESI20: Resi($close, 20)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RESI20",
+    "qlib_origin": "Resi($close, 20)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "RESI30",
+    "pattern": "ts_regression_residual(close, 30)/close",
+    "description": "Qlib Alpha158 RESI30: Resi($close, 30)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RESI30",
+    "qlib_origin": "Resi($close, 30)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "RESI60",
+    "pattern": "ts_regression_residual(close, 60)/close",
+    "description": "Qlib Alpha158 RESI60: Resi($close, 60)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RESI60",
+    "qlib_origin": "Resi($close, 60)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "MAX5",
+    "pattern": "ts_max(high, 5)/close",
+    "description": "Qlib Alpha158 MAX5: Max($high, 5)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MAX5",
+    "qlib_origin": "Max($high, 5)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MAX10",
+    "pattern": "ts_max(high, 10)/close",
+    "description": "Qlib Alpha158 MAX10: Max($high, 10)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MAX10",
+    "qlib_origin": "Max($high, 10)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MAX20",
+    "pattern": "ts_max(high, 20)/close",
+    "description": "Qlib Alpha158 MAX20: Max($high, 20)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MAX20",
+    "qlib_origin": "Max($high, 20)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MAX30",
+    "pattern": "ts_max(high, 30)/close",
+    "description": "Qlib Alpha158 MAX30: Max($high, 30)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MAX30",
+    "qlib_origin": "Max($high, 30)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MAX60",
+    "pattern": "ts_max(high, 60)/close",
+    "description": "Qlib Alpha158 MAX60: Max($high, 60)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MAX60",
+    "qlib_origin": "Max($high, 60)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MIN5",
+    "pattern": "ts_min(low, 5)/close",
+    "description": "Qlib Alpha158 MIN5: Min($low, 5)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MIN5",
+    "qlib_origin": "Min($low, 5)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MIN10",
+    "pattern": "ts_min(low, 10)/close",
+    "description": "Qlib Alpha158 MIN10: Min($low, 10)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MIN10",
+    "qlib_origin": "Min($low, 10)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MIN20",
+    "pattern": "ts_min(low, 20)/close",
+    "description": "Qlib Alpha158 MIN20: Min($low, 20)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MIN20",
+    "qlib_origin": "Min($low, 20)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MIN30",
+    "pattern": "ts_min(low, 30)/close",
+    "description": "Qlib Alpha158 MIN30: Min($low, 30)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MIN30",
+    "qlib_origin": "Min($low, 30)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "MIN60",
+    "pattern": "ts_min(low, 60)/close",
+    "description": "Qlib Alpha158 MIN60: Min($low, 60)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — MIN60",
+    "qlib_origin": "Min($low, 60)/$close",
+    "raw_feature": true
+  },
+  {
+    "name": "QTLU5",
+    "pattern": "ts_quantile(close, 5, 0.8)/close",
+    "description": "Qlib Alpha158 QTLU5: Quantile($close, 5, 0.8)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLU5",
+    "qlib_origin": "Quantile($close, 5, 0.8)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "QTLU10",
+    "pattern": "ts_quantile(close, 10, 0.8)/close",
+    "description": "Qlib Alpha158 QTLU10: Quantile($close, 10, 0.8)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLU10",
+    "qlib_origin": "Quantile($close, 10, 0.8)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "QTLU20",
+    "pattern": "ts_quantile(close, 20, 0.8)/close",
+    "description": "Qlib Alpha158 QTLU20: Quantile($close, 20, 0.8)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLU20",
+    "qlib_origin": "Quantile($close, 20, 0.8)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "QTLU30",
+    "pattern": "ts_quantile(close, 30, 0.8)/close",
+    "description": "Qlib Alpha158 QTLU30: Quantile($close, 30, 0.8)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLU30",
+    "qlib_origin": "Quantile($close, 30, 0.8)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "QTLU60",
+    "pattern": "ts_quantile(close, 60, 0.8)/close",
+    "description": "Qlib Alpha158 QTLU60: Quantile($close, 60, 0.8)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLU60",
+    "qlib_origin": "Quantile($close, 60, 0.8)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "QTLD5",
+    "pattern": "ts_quantile(close, 5, 0.2)/close",
+    "description": "Qlib Alpha158 QTLD5: Quantile($close, 5, 0.2)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLD5",
+    "qlib_origin": "Quantile($close, 5, 0.2)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "QTLD10",
+    "pattern": "ts_quantile(close, 10, 0.2)/close",
+    "description": "Qlib Alpha158 QTLD10: Quantile($close, 10, 0.2)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLD10",
+    "qlib_origin": "Quantile($close, 10, 0.2)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "QTLD20",
+    "pattern": "ts_quantile(close, 20, 0.2)/close",
+    "description": "Qlib Alpha158 QTLD20: Quantile($close, 20, 0.2)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLD20",
+    "qlib_origin": "Quantile($close, 20, 0.2)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "QTLD30",
+    "pattern": "ts_quantile(close, 30, 0.2)/close",
+    "description": "Qlib Alpha158 QTLD30: Quantile($close, 30, 0.2)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLD30",
+    "qlib_origin": "Quantile($close, 30, 0.2)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "QTLD60",
+    "pattern": "ts_quantile(close, 60, 0.2)/close",
+    "description": "Qlib Alpha158 QTLD60: Quantile($close, 60, 0.2)/$close",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — QTLD60",
+    "qlib_origin": "Quantile($close, 60, 0.2)/$close",
+    "raw_feature": false
+  },
+  {
+    "name": "RANK5",
+    "pattern": "ts_rank(close, 5)",
+    "description": "Qlib Alpha158 RANK5: Rank($close, 5)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RANK5",
+    "qlib_origin": "Rank($close, 5)",
+    "raw_feature": false
+  },
+  {
+    "name": "RANK10",
+    "pattern": "ts_rank(close, 10)",
+    "description": "Qlib Alpha158 RANK10: Rank($close, 10)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RANK10",
+    "qlib_origin": "Rank($close, 10)",
+    "raw_feature": false
+  },
+  {
+    "name": "RANK20",
+    "pattern": "ts_rank(close, 20)",
+    "description": "Qlib Alpha158 RANK20: Rank($close, 20)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RANK20",
+    "qlib_origin": "Rank($close, 20)",
+    "raw_feature": false
+  },
+  {
+    "name": "RANK30",
+    "pattern": "ts_rank(close, 30)",
+    "description": "Qlib Alpha158 RANK30: Rank($close, 30)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RANK30",
+    "qlib_origin": "Rank($close, 30)",
+    "raw_feature": false
+  },
+  {
+    "name": "RANK60",
+    "pattern": "ts_rank(close, 60)",
+    "description": "Qlib Alpha158 RANK60: Rank($close, 60)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RANK60",
+    "qlib_origin": "Rank($close, 60)",
+    "raw_feature": false
+  },
+  {
+    "name": "RSV5",
+    "pattern": "(close-ts_min(low, 5))/(ts_max(high, 5)-ts_min(low, 5)+1e-12)",
+    "description": "Qlib Alpha158 RSV5: ($close-Min($low, 5))/(Max($high, 5)-Min($low, 5)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSV5",
+    "qlib_origin": "($close-Min($low, 5))/(Max($high, 5)-Min($low, 5)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "RSV10",
+    "pattern": "(close-ts_min(low, 10))/(ts_max(high, 10)-ts_min(low, 10)+1e-12)",
+    "description": "Qlib Alpha158 RSV10: ($close-Min($low, 10))/(Max($high, 10)-Min($low, 10)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSV10",
+    "qlib_origin": "($close-Min($low, 10))/(Max($high, 10)-Min($low, 10)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "RSV20",
+    "pattern": "(close-ts_min(low, 20))/(ts_max(high, 20)-ts_min(low, 20)+1e-12)",
+    "description": "Qlib Alpha158 RSV20: ($close-Min($low, 20))/(Max($high, 20)-Min($low, 20)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSV20",
+    "qlib_origin": "($close-Min($low, 20))/(Max($high, 20)-Min($low, 20)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "RSV30",
+    "pattern": "(close-ts_min(low, 30))/(ts_max(high, 30)-ts_min(low, 30)+1e-12)",
+    "description": "Qlib Alpha158 RSV30: ($close-Min($low, 30))/(Max($high, 30)-Min($low, 30)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSV30",
+    "qlib_origin": "($close-Min($low, 30))/(Max($high, 30)-Min($low, 30)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "RSV60",
+    "pattern": "(close-ts_min(low, 60))/(ts_max(high, 60)-ts_min(low, 60)+1e-12)",
+    "description": "Qlib Alpha158 RSV60: ($close-Min($low, 60))/(Max($high, 60)-Min($low, 60)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — RSV60",
+    "qlib_origin": "($close-Min($low, 60))/(Max($high, 60)-Min($low, 60)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "IMAX5",
+    "pattern": "ts_argmax(high, 5)/5",
+    "description": "Qlib Alpha158 IMAX5: IdxMax($high, 5)/5",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMAX5",
+    "qlib_origin": "IdxMax($high, 5)/5",
+    "raw_feature": true
+  },
+  {
+    "name": "IMAX10",
+    "pattern": "ts_argmax(high, 10)/10",
+    "description": "Qlib Alpha158 IMAX10: IdxMax($high, 10)/10",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMAX10",
+    "qlib_origin": "IdxMax($high, 10)/10",
+    "raw_feature": true
+  },
+  {
+    "name": "IMAX20",
+    "pattern": "ts_argmax(high, 20)/20",
+    "description": "Qlib Alpha158 IMAX20: IdxMax($high, 20)/20",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMAX20",
+    "qlib_origin": "IdxMax($high, 20)/20",
+    "raw_feature": true
+  },
+  {
+    "name": "IMAX30",
+    "pattern": "ts_argmax(high, 30)/30",
+    "description": "Qlib Alpha158 IMAX30: IdxMax($high, 30)/30",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMAX30",
+    "qlib_origin": "IdxMax($high, 30)/30",
+    "raw_feature": true
+  },
+  {
+    "name": "IMAX60",
+    "pattern": "ts_argmax(high, 60)/60",
+    "description": "Qlib Alpha158 IMAX60: IdxMax($high, 60)/60",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMAX60",
+    "qlib_origin": "IdxMax($high, 60)/60",
+    "raw_feature": true
+  },
+  {
+    "name": "IMIN5",
+    "pattern": "ts_argmin(low, 5)/5",
+    "description": "Qlib Alpha158 IMIN5: IdxMin($low, 5)/5",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMIN5",
+    "qlib_origin": "IdxMin($low, 5)/5",
+    "raw_feature": true
+  },
+  {
+    "name": "IMIN10",
+    "pattern": "ts_argmin(low, 10)/10",
+    "description": "Qlib Alpha158 IMIN10: IdxMin($low, 10)/10",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMIN10",
+    "qlib_origin": "IdxMin($low, 10)/10",
+    "raw_feature": true
+  },
+  {
+    "name": "IMIN20",
+    "pattern": "ts_argmin(low, 20)/20",
+    "description": "Qlib Alpha158 IMIN20: IdxMin($low, 20)/20",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMIN20",
+    "qlib_origin": "IdxMin($low, 20)/20",
+    "raw_feature": true
+  },
+  {
+    "name": "IMIN30",
+    "pattern": "ts_argmin(low, 30)/30",
+    "description": "Qlib Alpha158 IMIN30: IdxMin($low, 30)/30",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMIN30",
+    "qlib_origin": "IdxMin($low, 30)/30",
+    "raw_feature": true
+  },
+  {
+    "name": "IMIN60",
+    "pattern": "ts_argmin(low, 60)/60",
+    "description": "Qlib Alpha158 IMIN60: IdxMin($low, 60)/60",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMIN60",
+    "qlib_origin": "IdxMin($low, 60)/60",
+    "raw_feature": true
+  },
+  {
+    "name": "IMXD5",
+    "pattern": "(ts_argmax(high, 5)-ts_argmin(low, 5))/5",
+    "description": "Qlib Alpha158 IMXD5: (IdxMax($high, 5)-IdxMin($low, 5))/5",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMXD5",
+    "qlib_origin": "(IdxMax($high, 5)-IdxMin($low, 5))/5",
+    "raw_feature": true
+  },
+  {
+    "name": "IMXD10",
+    "pattern": "(ts_argmax(high, 10)-ts_argmin(low, 10))/10",
+    "description": "Qlib Alpha158 IMXD10: (IdxMax($high, 10)-IdxMin($low, 10))/10",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMXD10",
+    "qlib_origin": "(IdxMax($high, 10)-IdxMin($low, 10))/10",
+    "raw_feature": true
+  },
+  {
+    "name": "IMXD20",
+    "pattern": "(ts_argmax(high, 20)-ts_argmin(low, 20))/20",
+    "description": "Qlib Alpha158 IMXD20: (IdxMax($high, 20)-IdxMin($low, 20))/20",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMXD20",
+    "qlib_origin": "(IdxMax($high, 20)-IdxMin($low, 20))/20",
+    "raw_feature": true
+  },
+  {
+    "name": "IMXD30",
+    "pattern": "(ts_argmax(high, 30)-ts_argmin(low, 30))/30",
+    "description": "Qlib Alpha158 IMXD30: (IdxMax($high, 30)-IdxMin($low, 30))/30",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMXD30",
+    "qlib_origin": "(IdxMax($high, 30)-IdxMin($low, 30))/30",
+    "raw_feature": true
+  },
+  {
+    "name": "IMXD60",
+    "pattern": "(ts_argmax(high, 60)-ts_argmin(low, 60))/60",
+    "description": "Qlib Alpha158 IMXD60: (IdxMax($high, 60)-IdxMin($low, 60))/60",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — IMXD60",
+    "qlib_origin": "(IdxMax($high, 60)-IdxMin($low, 60))/60",
+    "raw_feature": true
+  },
+  {
+    "name": "CORR5",
+    "pattern": "ts_corr(close, log(volume+1), 5)",
+    "description": "Qlib Alpha158 CORR5: Corr($close, Log($volume+1), 5)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORR5",
+    "qlib_origin": "Corr($close, Log($volume+1), 5)",
+    "raw_feature": true
+  },
+  {
+    "name": "CORR10",
+    "pattern": "ts_corr(close, log(volume+1), 10)",
+    "description": "Qlib Alpha158 CORR10: Corr($close, Log($volume+1), 10)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORR10",
+    "qlib_origin": "Corr($close, Log($volume+1), 10)",
+    "raw_feature": true
+  },
+  {
+    "name": "CORR20",
+    "pattern": "ts_corr(close, log(volume+1), 20)",
+    "description": "Qlib Alpha158 CORR20: Corr($close, Log($volume+1), 20)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORR20",
+    "qlib_origin": "Corr($close, Log($volume+1), 20)",
+    "raw_feature": true
+  },
+  {
+    "name": "CORR30",
+    "pattern": "ts_corr(close, log(volume+1), 30)",
+    "description": "Qlib Alpha158 CORR30: Corr($close, Log($volume+1), 30)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORR30",
+    "qlib_origin": "Corr($close, Log($volume+1), 30)",
+    "raw_feature": true
+  },
+  {
+    "name": "CORR60",
+    "pattern": "ts_corr(close, log(volume+1), 60)",
+    "description": "Qlib Alpha158 CORR60: Corr($close, Log($volume+1), 60)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORR60",
+    "qlib_origin": "Corr($close, Log($volume+1), 60)",
+    "raw_feature": true
+  },
+  {
+    "name": "CORD5",
+    "pattern": "ts_corr(close/ts_delay(close, 1), log(volume/ts_delay(volume, 1)+1), 5)",
+    "description": "Qlib Alpha158 CORD5: Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 5)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORD5",
+    "qlib_origin": "Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 5)",
+    "raw_feature": true
+  },
+  {
+    "name": "CORD10",
+    "pattern": "ts_corr(close/ts_delay(close, 1), log(volume/ts_delay(volume, 1)+1), 10)",
+    "description": "Qlib Alpha158 CORD10: Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 10)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORD10",
+    "qlib_origin": "Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 10)",
+    "raw_feature": true
+  },
+  {
+    "name": "CORD20",
+    "pattern": "ts_corr(close/ts_delay(close, 1), log(volume/ts_delay(volume, 1)+1), 20)",
+    "description": "Qlib Alpha158 CORD20: Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 20)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORD20",
+    "qlib_origin": "Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 20)",
+    "raw_feature": true
+  },
+  {
+    "name": "CORD30",
+    "pattern": "ts_corr(close/ts_delay(close, 1), log(volume/ts_delay(volume, 1)+1), 30)",
+    "description": "Qlib Alpha158 CORD30: Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 30)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORD30",
+    "qlib_origin": "Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 30)",
+    "raw_feature": true
+  },
+  {
+    "name": "CORD60",
+    "pattern": "ts_corr(close/ts_delay(close, 1), log(volume/ts_delay(volume, 1)+1), 60)",
+    "description": "Qlib Alpha158 CORD60: Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 60)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CORD60",
+    "qlib_origin": "Corr($close/Ref($close, 1), Log($volume/Ref($volume, 1)+1), 60)",
+    "raw_feature": true
+  },
+  {
+    "name": "CNTP5",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 5)",
+    "description": "Qlib Alpha158 CNTP5: Mean($close>Ref($close, 1), 5)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTP5",
+    "qlib_origin": "Mean($close>Ref($close, 1), 5)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTP10",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 10)",
+    "description": "Qlib Alpha158 CNTP10: Mean($close>Ref($close, 1), 10)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTP10",
+    "qlib_origin": "Mean($close>Ref($close, 1), 10)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTP20",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 20)",
+    "description": "Qlib Alpha158 CNTP20: Mean($close>Ref($close, 1), 20)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTP20",
+    "qlib_origin": "Mean($close>Ref($close, 1), 20)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTP30",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 30)",
+    "description": "Qlib Alpha158 CNTP30: Mean($close>Ref($close, 1), 30)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTP30",
+    "qlib_origin": "Mean($close>Ref($close, 1), 30)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTP60",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 60)",
+    "description": "Qlib Alpha158 CNTP60: Mean($close>Ref($close, 1), 60)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTP60",
+    "qlib_origin": "Mean($close>Ref($close, 1), 60)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTN5",
+    "pattern": "ts_mean(close<ts_delay(close, 1), 5)",
+    "description": "Qlib Alpha158 CNTN5: Mean($close<Ref($close, 1), 5)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTN5",
+    "qlib_origin": "Mean($close<Ref($close, 1), 5)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTN10",
+    "pattern": "ts_mean(close<ts_delay(close, 1), 10)",
+    "description": "Qlib Alpha158 CNTN10: Mean($close<Ref($close, 1), 10)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTN10",
+    "qlib_origin": "Mean($close<Ref($close, 1), 10)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTN20",
+    "pattern": "ts_mean(close<ts_delay(close, 1), 20)",
+    "description": "Qlib Alpha158 CNTN20: Mean($close<Ref($close, 1), 20)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTN20",
+    "qlib_origin": "Mean($close<Ref($close, 1), 20)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTN30",
+    "pattern": "ts_mean(close<ts_delay(close, 1), 30)",
+    "description": "Qlib Alpha158 CNTN30: Mean($close<Ref($close, 1), 30)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTN30",
+    "qlib_origin": "Mean($close<Ref($close, 1), 30)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTN60",
+    "pattern": "ts_mean(close<ts_delay(close, 1), 60)",
+    "description": "Qlib Alpha158 CNTN60: Mean($close<Ref($close, 1), 60)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTN60",
+    "qlib_origin": "Mean($close<Ref($close, 1), 60)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTD5",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 5)-ts_mean(close<ts_delay(close, 1), 5)",
+    "description": "Qlib Alpha158 CNTD5: Mean($close>Ref($close, 1), 5)-Mean($close<Ref($close, 1), 5)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTD5",
+    "qlib_origin": "Mean($close>Ref($close, 1), 5)-Mean($close<Ref($close, 1), 5)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTD10",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 10)-ts_mean(close<ts_delay(close, 1), 10)",
+    "description": "Qlib Alpha158 CNTD10: Mean($close>Ref($close, 1), 10)-Mean($close<Ref($close, 1), 10)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTD10",
+    "qlib_origin": "Mean($close>Ref($close, 1), 10)-Mean($close<Ref($close, 1), 10)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTD20",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 20)-ts_mean(close<ts_delay(close, 1), 20)",
+    "description": "Qlib Alpha158 CNTD20: Mean($close>Ref($close, 1), 20)-Mean($close<Ref($close, 1), 20)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTD20",
+    "qlib_origin": "Mean($close>Ref($close, 1), 20)-Mean($close<Ref($close, 1), 20)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTD30",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 30)-ts_mean(close<ts_delay(close, 1), 30)",
+    "description": "Qlib Alpha158 CNTD30: Mean($close>Ref($close, 1), 30)-Mean($close<Ref($close, 1), 30)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTD30",
+    "qlib_origin": "Mean($close>Ref($close, 1), 30)-Mean($close<Ref($close, 1), 30)",
+    "raw_feature": false
+  },
+  {
+    "name": "CNTD60",
+    "pattern": "ts_mean(close>ts_delay(close, 1), 60)-ts_mean(close<ts_delay(close, 1), 60)",
+    "description": "Qlib Alpha158 CNTD60: Mean($close>Ref($close, 1), 60)-Mean($close<Ref($close, 1), 60)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — CNTD60",
+    "qlib_origin": "Mean($close>Ref($close, 1), 60)-Mean($close<Ref($close, 1), 60)",
+    "raw_feature": false
+  },
+  {
+    "name": "SUMP5",
+    "pattern": "ts_sum(max(close-ts_delay(close, 1), 0), 5)/(ts_sum(abs(close-ts_delay(close, 1)), 5)+1e-12)",
+    "description": "Qlib Alpha158 SUMP5: Sum(Greater($close-Ref($close, 1), 0), 5)/(Sum(Abs($close-Ref($close, 1)), 5)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMP5",
+    "qlib_origin": "Sum(Greater($close-Ref($close, 1), 0), 5)/(Sum(Abs($close-Ref($close, 1)), 5)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMP10",
+    "pattern": "ts_sum(max(close-ts_delay(close, 1), 0), 10)/(ts_sum(abs(close-ts_delay(close, 1)), 10)+1e-12)",
+    "description": "Qlib Alpha158 SUMP10: Sum(Greater($close-Ref($close, 1), 0), 10)/(Sum(Abs($close-Ref($close, 1)), 10)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMP10",
+    "qlib_origin": "Sum(Greater($close-Ref($close, 1), 0), 10)/(Sum(Abs($close-Ref($close, 1)), 10)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMP20",
+    "pattern": "ts_sum(max(close-ts_delay(close, 1), 0), 20)/(ts_sum(abs(close-ts_delay(close, 1)), 20)+1e-12)",
+    "description": "Qlib Alpha158 SUMP20: Sum(Greater($close-Ref($close, 1), 0), 20)/(Sum(Abs($close-Ref($close, 1)), 20)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMP20",
+    "qlib_origin": "Sum(Greater($close-Ref($close, 1), 0), 20)/(Sum(Abs($close-Ref($close, 1)), 20)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMP30",
+    "pattern": "ts_sum(max(close-ts_delay(close, 1), 0), 30)/(ts_sum(abs(close-ts_delay(close, 1)), 30)+1e-12)",
+    "description": "Qlib Alpha158 SUMP30: Sum(Greater($close-Ref($close, 1), 0), 30)/(Sum(Abs($close-Ref($close, 1)), 30)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMP30",
+    "qlib_origin": "Sum(Greater($close-Ref($close, 1), 0), 30)/(Sum(Abs($close-Ref($close, 1)), 30)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMP60",
+    "pattern": "ts_sum(max(close-ts_delay(close, 1), 0), 60)/(ts_sum(abs(close-ts_delay(close, 1)), 60)+1e-12)",
+    "description": "Qlib Alpha158 SUMP60: Sum(Greater($close-Ref($close, 1), 0), 60)/(Sum(Abs($close-Ref($close, 1)), 60)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMP60",
+    "qlib_origin": "Sum(Greater($close-Ref($close, 1), 0), 60)/(Sum(Abs($close-Ref($close, 1)), 60)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMN5",
+    "pattern": "ts_sum(max(ts_delay(close, 1)-close, 0), 5)/(ts_sum(abs(close-ts_delay(close, 1)), 5)+1e-12)",
+    "description": "Qlib Alpha158 SUMN5: Sum(Greater(Ref($close, 1)-$close, 0), 5)/(Sum(Abs($close-Ref($close, 1)), 5)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMN5",
+    "qlib_origin": "Sum(Greater(Ref($close, 1)-$close, 0), 5)/(Sum(Abs($close-Ref($close, 1)), 5)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMN10",
+    "pattern": "ts_sum(max(ts_delay(close, 1)-close, 0), 10)/(ts_sum(abs(close-ts_delay(close, 1)), 10)+1e-12)",
+    "description": "Qlib Alpha158 SUMN10: Sum(Greater(Ref($close, 1)-$close, 0), 10)/(Sum(Abs($close-Ref($close, 1)), 10)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMN10",
+    "qlib_origin": "Sum(Greater(Ref($close, 1)-$close, 0), 10)/(Sum(Abs($close-Ref($close, 1)), 10)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMN20",
+    "pattern": "ts_sum(max(ts_delay(close, 1)-close, 0), 20)/(ts_sum(abs(close-ts_delay(close, 1)), 20)+1e-12)",
+    "description": "Qlib Alpha158 SUMN20: Sum(Greater(Ref($close, 1)-$close, 0), 20)/(Sum(Abs($close-Ref($close, 1)), 20)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMN20",
+    "qlib_origin": "Sum(Greater(Ref($close, 1)-$close, 0), 20)/(Sum(Abs($close-Ref($close, 1)), 20)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMN30",
+    "pattern": "ts_sum(max(ts_delay(close, 1)-close, 0), 30)/(ts_sum(abs(close-ts_delay(close, 1)), 30)+1e-12)",
+    "description": "Qlib Alpha158 SUMN30: Sum(Greater(Ref($close, 1)-$close, 0), 30)/(Sum(Abs($close-Ref($close, 1)), 30)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMN30",
+    "qlib_origin": "Sum(Greater(Ref($close, 1)-$close, 0), 30)/(Sum(Abs($close-Ref($close, 1)), 30)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMN60",
+    "pattern": "ts_sum(max(ts_delay(close, 1)-close, 0), 60)/(ts_sum(abs(close-ts_delay(close, 1)), 60)+1e-12)",
+    "description": "Qlib Alpha158 SUMN60: Sum(Greater(Ref($close, 1)-$close, 0), 60)/(Sum(Abs($close-Ref($close, 1)), 60)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMN60",
+    "qlib_origin": "Sum(Greater(Ref($close, 1)-$close, 0), 60)/(Sum(Abs($close-Ref($close, 1)), 60)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMD5",
+    "pattern": "(ts_sum(max(close-ts_delay(close, 1), 0), 5)-ts_sum(max(ts_delay(close, 1)-close, 0), 5))/(ts_sum(abs(close-ts_delay(close, 1)), 5)+1e-12)",
+    "description": "Qlib Alpha158 SUMD5: (Sum(Greater($close-Ref($close, 1), 0), 5)-Sum(Greater(Ref($close, 1)-$close, 0), 5))/(Sum(Abs($close-Ref($close, 1)), 5)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMD5",
+    "qlib_origin": "(Sum(Greater($close-Ref($close, 1), 0), 5)-Sum(Greater(Ref($close, 1)-$close, 0), 5))/(Sum(Abs($close-Ref($close, 1)), 5)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMD10",
+    "pattern": "(ts_sum(max(close-ts_delay(close, 1), 0), 10)-ts_sum(max(ts_delay(close, 1)-close, 0), 10))/(ts_sum(abs(close-ts_delay(close, 1)), 10)+1e-12)",
+    "description": "Qlib Alpha158 SUMD10: (Sum(Greater($close-Ref($close, 1), 0), 10)-Sum(Greater(Ref($close, 1)-$close, 0), 10))/(Sum(Abs($close-Ref($close, 1)), 10)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMD10",
+    "qlib_origin": "(Sum(Greater($close-Ref($close, 1), 0), 10)-Sum(Greater(Ref($close, 1)-$close, 0), 10))/(Sum(Abs($close-Ref($close, 1)), 10)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMD20",
+    "pattern": "(ts_sum(max(close-ts_delay(close, 1), 0), 20)-ts_sum(max(ts_delay(close, 1)-close, 0), 20))/(ts_sum(abs(close-ts_delay(close, 1)), 20)+1e-12)",
+    "description": "Qlib Alpha158 SUMD20: (Sum(Greater($close-Ref($close, 1), 0), 20)-Sum(Greater(Ref($close, 1)-$close, 0), 20))/(Sum(Abs($close-Ref($close, 1)), 20)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMD20",
+    "qlib_origin": "(Sum(Greater($close-Ref($close, 1), 0), 20)-Sum(Greater(Ref($close, 1)-$close, 0), 20))/(Sum(Abs($close-Ref($close, 1)), 20)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMD30",
+    "pattern": "(ts_sum(max(close-ts_delay(close, 1), 0), 30)-ts_sum(max(ts_delay(close, 1)-close, 0), 30))/(ts_sum(abs(close-ts_delay(close, 1)), 30)+1e-12)",
+    "description": "Qlib Alpha158 SUMD30: (Sum(Greater($close-Ref($close, 1), 0), 30)-Sum(Greater(Ref($close, 1)-$close, 0), 30))/(Sum(Abs($close-Ref($close, 1)), 30)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMD30",
+    "qlib_origin": "(Sum(Greater($close-Ref($close, 1), 0), 30)-Sum(Greater(Ref($close, 1)-$close, 0), 30))/(Sum(Abs($close-Ref($close, 1)), 30)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "SUMD60",
+    "pattern": "(ts_sum(max(close-ts_delay(close, 1), 0), 60)-ts_sum(max(ts_delay(close, 1)-close, 0), 60))/(ts_sum(abs(close-ts_delay(close, 1)), 60)+1e-12)",
+    "description": "Qlib Alpha158 SUMD60: (Sum(Greater($close-Ref($close, 1), 0), 60)-Sum(Greater(Ref($close, 1)-$close, 0), 60))/(Sum(Abs($close-Ref($close, 1)), 60)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — SUMD60",
+    "qlib_origin": "(Sum(Greater($close-Ref($close, 1), 0), 60)-Sum(Greater(Ref($close, 1)-$close, 0), 60))/(Sum(Abs($close-Ref($close, 1)), 60)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VMA5",
+    "pattern": "ts_mean(volume, 5)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VMA5: Mean($volume, 5)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VMA5",
+    "qlib_origin": "Mean($volume, 5)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VMA10",
+    "pattern": "ts_mean(volume, 10)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VMA10: Mean($volume, 10)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VMA10",
+    "qlib_origin": "Mean($volume, 10)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VMA20",
+    "pattern": "ts_mean(volume, 20)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VMA20: Mean($volume, 20)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VMA20",
+    "qlib_origin": "Mean($volume, 20)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VMA30",
+    "pattern": "ts_mean(volume, 30)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VMA30: Mean($volume, 30)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VMA30",
+    "qlib_origin": "Mean($volume, 30)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VMA60",
+    "pattern": "ts_mean(volume, 60)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VMA60: Mean($volume, 60)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VMA60",
+    "qlib_origin": "Mean($volume, 60)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VSTD5",
+    "pattern": "ts_std_dev(volume, 5)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VSTD5: Std($volume, 5)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSTD5",
+    "qlib_origin": "Std($volume, 5)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VSTD10",
+    "pattern": "ts_std_dev(volume, 10)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VSTD10: Std($volume, 10)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSTD10",
+    "qlib_origin": "Std($volume, 10)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VSTD20",
+    "pattern": "ts_std_dev(volume, 20)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VSTD20: Std($volume, 20)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSTD20",
+    "qlib_origin": "Std($volume, 20)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VSTD30",
+    "pattern": "ts_std_dev(volume, 30)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VSTD30: Std($volume, 30)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSTD30",
+    "qlib_origin": "Std($volume, 30)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VSTD60",
+    "pattern": "ts_std_dev(volume, 60)/(volume+1e-12)",
+    "description": "Qlib Alpha158 VSTD60: Std($volume, 60)/($volume+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSTD60",
+    "qlib_origin": "Std($volume, 60)/($volume+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "WVMA5",
+    "pattern": "ts_std_dev(abs(close/ts_delay(close, 1)-1)*volume, 5)/(ts_mean(abs(close/ts_delay(close, 1)-1)*volume, 5)+1e-12)",
+    "description": "Qlib Alpha158 WVMA5: Std(Abs($close/Ref($close, 1)-1)*$volume, 5)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 5)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — WVMA5",
+    "qlib_origin": "Std(Abs($close/Ref($close, 1)-1)*$volume, 5)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 5)+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "WVMA10",
+    "pattern": "ts_std_dev(abs(close/ts_delay(close, 1)-1)*volume, 10)/(ts_mean(abs(close/ts_delay(close, 1)-1)*volume, 10)+1e-12)",
+    "description": "Qlib Alpha158 WVMA10: Std(Abs($close/Ref($close, 1)-1)*$volume, 10)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 10)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — WVMA10",
+    "qlib_origin": "Std(Abs($close/Ref($close, 1)-1)*$volume, 10)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 10)+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "WVMA20",
+    "pattern": "ts_std_dev(abs(close/ts_delay(close, 1)-1)*volume, 20)/(ts_mean(abs(close/ts_delay(close, 1)-1)*volume, 20)+1e-12)",
+    "description": "Qlib Alpha158 WVMA20: Std(Abs($close/Ref($close, 1)-1)*$volume, 20)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 20)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — WVMA20",
+    "qlib_origin": "Std(Abs($close/Ref($close, 1)-1)*$volume, 20)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 20)+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "WVMA30",
+    "pattern": "ts_std_dev(abs(close/ts_delay(close, 1)-1)*volume, 30)/(ts_mean(abs(close/ts_delay(close, 1)-1)*volume, 30)+1e-12)",
+    "description": "Qlib Alpha158 WVMA30: Std(Abs($close/Ref($close, 1)-1)*$volume, 30)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 30)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — WVMA30",
+    "qlib_origin": "Std(Abs($close/Ref($close, 1)-1)*$volume, 30)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 30)+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "WVMA60",
+    "pattern": "ts_std_dev(abs(close/ts_delay(close, 1)-1)*volume, 60)/(ts_mean(abs(close/ts_delay(close, 1)-1)*volume, 60)+1e-12)",
+    "description": "Qlib Alpha158 WVMA60: Std(Abs($close/Ref($close, 1)-1)*$volume, 60)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 60)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — WVMA60",
+    "qlib_origin": "Std(Abs($close/Ref($close, 1)-1)*$volume, 60)/(Mean(Abs($close/Ref($close, 1)-1)*$volume, 60)+1e-12)",
+    "raw_feature": false
+  },
+  {
+    "name": "VSUMP5",
+    "pattern": "ts_sum(max(volume-ts_delay(volume, 1), 0), 5)/(ts_sum(abs(volume-ts_delay(volume, 1)), 5)+1e-12)",
+    "description": "Qlib Alpha158 VSUMP5: Sum(Greater($volume-Ref($volume, 1), 0), 5)/(Sum(Abs($volume-Ref($volume, 1)), 5)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMP5",
+    "qlib_origin": "Sum(Greater($volume-Ref($volume, 1), 0), 5)/(Sum(Abs($volume-Ref($volume, 1)), 5)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMP10",
+    "pattern": "ts_sum(max(volume-ts_delay(volume, 1), 0), 10)/(ts_sum(abs(volume-ts_delay(volume, 1)), 10)+1e-12)",
+    "description": "Qlib Alpha158 VSUMP10: Sum(Greater($volume-Ref($volume, 1), 0), 10)/(Sum(Abs($volume-Ref($volume, 1)), 10)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMP10",
+    "qlib_origin": "Sum(Greater($volume-Ref($volume, 1), 0), 10)/(Sum(Abs($volume-Ref($volume, 1)), 10)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMP20",
+    "pattern": "ts_sum(max(volume-ts_delay(volume, 1), 0), 20)/(ts_sum(abs(volume-ts_delay(volume, 1)), 20)+1e-12)",
+    "description": "Qlib Alpha158 VSUMP20: Sum(Greater($volume-Ref($volume, 1), 0), 20)/(Sum(Abs($volume-Ref($volume, 1)), 20)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMP20",
+    "qlib_origin": "Sum(Greater($volume-Ref($volume, 1), 0), 20)/(Sum(Abs($volume-Ref($volume, 1)), 20)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMP30",
+    "pattern": "ts_sum(max(volume-ts_delay(volume, 1), 0), 30)/(ts_sum(abs(volume-ts_delay(volume, 1)), 30)+1e-12)",
+    "description": "Qlib Alpha158 VSUMP30: Sum(Greater($volume-Ref($volume, 1), 0), 30)/(Sum(Abs($volume-Ref($volume, 1)), 30)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMP30",
+    "qlib_origin": "Sum(Greater($volume-Ref($volume, 1), 0), 30)/(Sum(Abs($volume-Ref($volume, 1)), 30)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMP60",
+    "pattern": "ts_sum(max(volume-ts_delay(volume, 1), 0), 60)/(ts_sum(abs(volume-ts_delay(volume, 1)), 60)+1e-12)",
+    "description": "Qlib Alpha158 VSUMP60: Sum(Greater($volume-Ref($volume, 1), 0), 60)/(Sum(Abs($volume-Ref($volume, 1)), 60)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMP60",
+    "qlib_origin": "Sum(Greater($volume-Ref($volume, 1), 0), 60)/(Sum(Abs($volume-Ref($volume, 1)), 60)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMN5",
+    "pattern": "ts_sum(max(ts_delay(volume, 1)-volume, 0), 5)/(ts_sum(abs(volume-ts_delay(volume, 1)), 5)+1e-12)",
+    "description": "Qlib Alpha158 VSUMN5: Sum(Greater(Ref($volume, 1)-$volume, 0), 5)/(Sum(Abs($volume-Ref($volume, 1)), 5)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMN5",
+    "qlib_origin": "Sum(Greater(Ref($volume, 1)-$volume, 0), 5)/(Sum(Abs($volume-Ref($volume, 1)), 5)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMN10",
+    "pattern": "ts_sum(max(ts_delay(volume, 1)-volume, 0), 10)/(ts_sum(abs(volume-ts_delay(volume, 1)), 10)+1e-12)",
+    "description": "Qlib Alpha158 VSUMN10: Sum(Greater(Ref($volume, 1)-$volume, 0), 10)/(Sum(Abs($volume-Ref($volume, 1)), 10)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMN10",
+    "qlib_origin": "Sum(Greater(Ref($volume, 1)-$volume, 0), 10)/(Sum(Abs($volume-Ref($volume, 1)), 10)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMN20",
+    "pattern": "ts_sum(max(ts_delay(volume, 1)-volume, 0), 20)/(ts_sum(abs(volume-ts_delay(volume, 1)), 20)+1e-12)",
+    "description": "Qlib Alpha158 VSUMN20: Sum(Greater(Ref($volume, 1)-$volume, 0), 20)/(Sum(Abs($volume-Ref($volume, 1)), 20)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMN20",
+    "qlib_origin": "Sum(Greater(Ref($volume, 1)-$volume, 0), 20)/(Sum(Abs($volume-Ref($volume, 1)), 20)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMN30",
+    "pattern": "ts_sum(max(ts_delay(volume, 1)-volume, 0), 30)/(ts_sum(abs(volume-ts_delay(volume, 1)), 30)+1e-12)",
+    "description": "Qlib Alpha158 VSUMN30: Sum(Greater(Ref($volume, 1)-$volume, 0), 30)/(Sum(Abs($volume-Ref($volume, 1)), 30)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMN30",
+    "qlib_origin": "Sum(Greater(Ref($volume, 1)-$volume, 0), 30)/(Sum(Abs($volume-Ref($volume, 1)), 30)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMN60",
+    "pattern": "ts_sum(max(ts_delay(volume, 1)-volume, 0), 60)/(ts_sum(abs(volume-ts_delay(volume, 1)), 60)+1e-12)",
+    "description": "Qlib Alpha158 VSUMN60: Sum(Greater(Ref($volume, 1)-$volume, 0), 60)/(Sum(Abs($volume-Ref($volume, 1)), 60)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMN60",
+    "qlib_origin": "Sum(Greater(Ref($volume, 1)-$volume, 0), 60)/(Sum(Abs($volume-Ref($volume, 1)), 60)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMD5",
+    "pattern": "(ts_sum(max(volume-ts_delay(volume, 1), 0), 5)-ts_sum(max(ts_delay(volume, 1)-volume, 0), 5))/(ts_sum(abs(volume-ts_delay(volume, 1)), 5)+1e-12)",
+    "description": "Qlib Alpha158 VSUMD5: (Sum(Greater($volume-Ref($volume, 1), 0), 5)-Sum(Greater(Ref($volume, 1)-$volume, 0), 5))/(Sum(Abs($volume-Ref($volume, 1)), 5)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMD5",
+    "qlib_origin": "(Sum(Greater($volume-Ref($volume, 1), 0), 5)-Sum(Greater(Ref($volume, 1)-$volume, 0), 5))/(Sum(Abs($volume-Ref($volume, 1)), 5)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMD10",
+    "pattern": "(ts_sum(max(volume-ts_delay(volume, 1), 0), 10)-ts_sum(max(ts_delay(volume, 1)-volume, 0), 10))/(ts_sum(abs(volume-ts_delay(volume, 1)), 10)+1e-12)",
+    "description": "Qlib Alpha158 VSUMD10: (Sum(Greater($volume-Ref($volume, 1), 0), 10)-Sum(Greater(Ref($volume, 1)-$volume, 0), 10))/(Sum(Abs($volume-Ref($volume, 1)), 10)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMD10",
+    "qlib_origin": "(Sum(Greater($volume-Ref($volume, 1), 0), 10)-Sum(Greater(Ref($volume, 1)-$volume, 0), 10))/(Sum(Abs($volume-Ref($volume, 1)), 10)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMD20",
+    "pattern": "(ts_sum(max(volume-ts_delay(volume, 1), 0), 20)-ts_sum(max(ts_delay(volume, 1)-volume, 0), 20))/(ts_sum(abs(volume-ts_delay(volume, 1)), 20)+1e-12)",
+    "description": "Qlib Alpha158 VSUMD20: (Sum(Greater($volume-Ref($volume, 1), 0), 20)-Sum(Greater(Ref($volume, 1)-$volume, 0), 20))/(Sum(Abs($volume-Ref($volume, 1)), 20)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMD20",
+    "qlib_origin": "(Sum(Greater($volume-Ref($volume, 1), 0), 20)-Sum(Greater(Ref($volume, 1)-$volume, 0), 20))/(Sum(Abs($volume-Ref($volume, 1)), 20)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMD30",
+    "pattern": "(ts_sum(max(volume-ts_delay(volume, 1), 0), 30)-ts_sum(max(ts_delay(volume, 1)-volume, 0), 30))/(ts_sum(abs(volume-ts_delay(volume, 1)), 30)+1e-12)",
+    "description": "Qlib Alpha158 VSUMD30: (Sum(Greater($volume-Ref($volume, 1), 0), 30)-Sum(Greater(Ref($volume, 1)-$volume, 0), 30))/(Sum(Abs($volume-Ref($volume, 1)), 30)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMD30",
+    "qlib_origin": "(Sum(Greater($volume-Ref($volume, 1), 0), 30)-Sum(Greater(Ref($volume, 1)-$volume, 0), 30))/(Sum(Abs($volume-Ref($volume, 1)), 30)+1e-12)",
+    "raw_feature": true
+  },
+  {
+    "name": "VSUMD60",
+    "pattern": "(ts_sum(max(volume-ts_delay(volume, 1), 0), 60)-ts_sum(max(ts_delay(volume, 1)-volume, 0), 60))/(ts_sum(abs(volume-ts_delay(volume, 1)), 60)+1e-12)",
+    "description": "Qlib Alpha158 VSUMD60: (Sum(Greater($volume-Ref($volume, 1), 0), 60)-Sum(Greater(Ref($volume, 1)-$volume, 0), 60))/(Sum(Abs($volume-Ref($volume, 1)), 60)+1e-12)",
+    "category": "pv",
+    "source_title": "Qlib Alpha158 (Microsoft, 2020) — VSUMD60",
+    "qlib_origin": "(Sum(Greater($volume-Ref($volume, 1), 0), 60)-Sum(Greater(Ref($volume, 1)-$volume, 0), 60))/(Sum(Abs($volume-Ref($volume, 1)), 60)+1e-12)",
+    "raw_feature": true
+  }
+]

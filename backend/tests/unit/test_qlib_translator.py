@@ -47,12 +47,16 @@ def test_rolling_operator_round_trip(qlib_op, brain_op):
 
 
 @pytest.mark.parametrize("qlib_op,brain_op", [
-    ("Add",   "add"),
-    ("Sub",   "subtract"),
-    ("Mul",   "multiply"),
-    ("Div",   "divide"),
-    ("Less",  "less"),
-    ("Greater", "greater"),
+    ("Add",     "add"),
+    ("Sub",     "subtract"),
+    ("Mul",     "multiply"),
+    ("Div",     "divide"),
+    # Qlib Less/Greater ARE element-wise min/max, NOT boolean compare
+    ("Less",    "min"),
+    ("Greater", "max"),
+    # Qlib Gt/Lt are the actual boolean comparators
+    ("Gt",      "greater"),
+    ("Lt",      "less"),
 ])
 def test_binary_operator_round_trip(qlib_op, brain_op):
     """Element-wise binary ops with two datafield args."""
@@ -113,9 +117,17 @@ def test_nested_with_arithmetic():
 
 
 def test_if_else_translation():
-    """If(cond, a, b) → if_else with recursive args."""
-    result = translate("If(Less($close, $open), 1, -1)")
+    """If(cond, a, b) → if_else with recursive args.
+    Note: Qlib Lt is the boolean less-than (not Less, which is min)."""
+    result = translate("If(Lt($close, $open), 1, -1)")
     assert result == "if_else(less(close, open), 1, -1)"
+
+
+def test_kbar_kup_translation():
+    """KUP from Alpha158: ($high-Greater($open, $close))/$open.
+    Critical: Greater here is element-wise max, not boolean."""
+    result = translate("($high-Greater($open, $close))/$open")
+    assert result == "(high-max(open, close))/open"
 
 
 def test_leaf_expression_passes_through():
@@ -134,7 +146,7 @@ def test_translated_outputs_have_extractable_operators():
         ("Mean($close, 20)",           {"ts_mean"}),
         ("Corr($close, $volume, 30)",  {"ts_corr"}),
         ("Std(Mean($close, 5), 10)",   {"ts_std_dev", "ts_mean"}),
-        ("If(Less($close, $open), 1, -1)", {"if_else", "less"}),
+        ("If(Lt($close, $open), 1, -1)", {"if_else", "less"}),
     ]
     for qlib_expr, expected_ops in cases:
         brain_expr = translate(qlib_expr)
