@@ -132,6 +132,13 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="P3-Brain",
         description="BRAIN Consultant 模式 — 解锁 multi-sim/PROD-corr/全球 region/Sharpe≥1.58。仅在收到 BRAIN 升级邮件后翻。",
     ),
+    # --- Phase 0 R1a ---
+    "ENABLE_R1A_HOOK": FlagSpec(
+        name="ENABLE_R1A_HOOK",
+        flag_type="bool",
+        group="Phase0-R1a",
+        description="启用 enhance_existing_node_evaluate shim,把 AttributionType 写入 alpha.metrics 供 Phase 1 R2/Q7 bandit arm-set 反证。≥200 触发观察期门槛。",
+    ),
 }
 
 
