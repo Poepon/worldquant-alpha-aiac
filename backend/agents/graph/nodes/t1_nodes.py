@@ -210,6 +210,20 @@ async def node_t1_expand(
         f"[{node_name}] T1 expand | candidates={len(pending)} (target={state.num_alphas_target * 1.5:.0f})"
     )
 
+    # R3/Q8 (Phase 1, 2026-05-17 hotfix): T1 tier-1 tasks bypass node_code_gen
+    # (pure-code rule-based expansion, no LLM) so the ast_distance hook wired
+    # there never fires. Wire it here too so T1 tasks (90% of production
+    # workload per pre-discovery snapshot) contribute to ast_distance_log
+    # accumulation. Soft-fail, never blocks expansion.
+    try:
+        from backend.ast_distance_logger import log_round_ast_distances
+        task_id = getattr(state, "task_id", None)
+        round_idx = getattr(state, "current_iteration", None) or getattr(state, "current_round", None)
+        new_exprs = [a.expression for a in pending if getattr(a, "expression", None)]
+        await log_round_ast_distances(task_id, round_idx, new_exprs)
+    except Exception as e:
+        logger.debug(f"[{node_name}] R3/Q8 ast_distance log skip (non-fatal): {e}")
+
     if trace_service:
         await record_trace(
             state, trace_service, node_name,
