@@ -12,6 +12,7 @@ This module enriches the knowledge base with external best practices.
 
 import re
 import json
+from pathlib import Path
 from typing import List, Dict, Optional, Any, Tuple
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -20,7 +21,24 @@ from sqlalchemy import select, func
 from loguru import logger
 
 from backend.models import KnowledgeEntry
+from backend.models.knowledge import compute_pattern_hash
 from backend.config import settings
+
+
+# =============================================================================
+# import_batch constants (Phase 0, v1.3 SF-12)
+# =============================================================================
+# Single source of truth for `meta_data["import_batch"]` markers. All Phase 0
+# import paths + backfill scripts + rollback SQL reference these constants
+# (NOT the magic string itself) so a typo in one place won't desync rollback.
+#
+# Future Phase 1+ batches add new constants here following the same pattern:
+#   PHASE<N>_<TASK>_IMPORT_BATCH = "phase<N>_<task>_<topic>_<YYYY_MM>"
+# =============================================================================
+
+PHASE0_Q1_IMPORT_BATCH = "phase0_q1_kakushadze_2026_05"
+PHASE0_Q3_IMPORT_BATCH = "phase0_q3_alpha158_2026_05"
+LEGACY_SEED_IMPORT_BATCH = "legacy_seed"
 
 
 # =============================================================================
@@ -109,6 +127,28 @@ VALID_OPERATORS = {
     "log", "sqrt", "abs", "sign", "add", "subtract", "multiply", "divide",
     "if_else", "trade_when", "pasteurize",
 }
+
+
+# Phase 0 v1.5 SF-FC: operator extraction for permanent audit hook.
+# Matches BRAIN function-call shape `name(` — pure CPU regex, used by
+# import paths + backfill scripts to populate `meta_data["pattern_operators"]`.
+# Future role-recategorization needs ZERO pattern text rewrite: one SQL UPDATE
+# based on this list flips requires_role for any rows whose operators overlap
+# a hardcoded CONSULTANT_ONLY_OPERATORS set (maintained when BRAIN forum or
+# sync-diff baseline exposes the actual user-vs-consultant boundary).
+_OPERATOR_CALL_RE = re.compile(r'\b([a-zA-Z_]\w*)\s*\(')
+
+
+def parse_pattern_operators(pattern_text: str) -> List[str]:
+    """Extract distinct operator names from a BRAIN alpha expression.
+
+    Greps `name(` function-call shapes from the pattern text and returns
+    sorted unique operator names. Datafield identifiers (close, volume,
+    returns, …) are NOT matched because they don't have a trailing `(`.
+    """
+    if not pattern_text:
+        return []
+    return sorted(set(_OPERATOR_CALL_RE.findall(pattern_text)))
 
 
 def extract_alpha_expressions(text: str) -> List[str]:
@@ -418,59 +458,99 @@ class ExternalKnowledgeSyncer:
         return added
     
     async def _pattern_exists(self, pattern: str) -> bool:
-        """Check if pattern already exists in knowledge base."""
+        """Check if pattern already exists in knowledge base (legacy API)."""
         query = select(KnowledgeEntry).where(
             KnowledgeEntry.pattern == pattern,
             KnowledgeEntry.is_active == True
         )
         result = await self.db.execute(query)
         return result.scalar_one_or_none() is not None
-    
+
+    async def _pattern_hash_exists(self, pattern_hash: str) -> bool:
+        """Check if pattern_hash already exists in knowledge base.
+
+        v1.3 Q1 MF-8: dedupe via UNIQUE index ix_kb_pattern_hash. Required
+        because the legacy `_pattern_exists(pattern)` does string-equality
+        lookup which would re-import semantically identical rows whose
+        existing pattern_hash column happens to be NULL (older import paths
+        never set it — see backfill_kb_requires_role.py for the one-shot fix).
+        """
+        query = select(KnowledgeEntry).where(
+            KnowledgeEntry.pattern_hash == pattern_hash,
+        )
+        result = await self.db.execute(query)
+        return result.scalar_one_or_none() is not None
+
     async def import_curated_patterns(
         self,
-        patterns: List[ExternalKnowledge]
+        patterns: List[ExternalKnowledge],
+        *,
+        batch_id: Optional[str] = None,
+        requires_role: str = "both",
     ) -> int:
-        """
-        Import curated patterns from external sources.
-        
+        """Import curated patterns from external sources.
+
         Args:
-            patterns: List of ExternalKnowledge entries
-        
+            patterns: List of ExternalKnowledge entries.
+            batch_id: Phase 0 v1.3 SF-12 import batch marker. When provided,
+                written to ``meta_data["import_batch"]`` for precise rollback
+                via ``WHERE meta_data->>'import_batch' = :batch_id``. Use the
+                ``PHASE0_*_IMPORT_BATCH`` constants at the top of this module.
+            requires_role: Phase 0 v1.5 forward-compat marker. Defaults to
+                ``"both"`` — write all rows as universally available. Future
+                ``CONSULTANT_ONLY_OPERATORS``-aware audit can flip rows based
+                on ``meta_data["pattern_operators"]`` without rewriting any
+                alpha expression text.
+
         Returns:
-            Number of patterns imported
+            Number of patterns imported (existing pattern_hash rows are
+            skipped via _pattern_hash_exists; the previously latent
+            missing-hash bug is also fixed here — every new row carries
+            pattern_hash, populated by compute_pattern_hash(text, None, None)).
         """
         imported = 0
-        
+
         for ext in patterns:
-            exists = await self._pattern_exists(ext.pattern)
-            if exists:
+            phash = compute_pattern_hash(ext.pattern, None, None)
+            if await self._pattern_hash_exists(phash):
                 continue
-            
+
+            meta_data: Dict[str, Any] = {
+                'source': ext.source,
+                'source_url': ext.source_url,
+                'source_title': ext.source_title,
+                'dataset_category': ext.category,
+                'confidence': ext.confidence,
+                'verified': ext.verified,
+                'score': ext.confidence,
+                'extracted_at': ext.extraction_date.isoformat(),
+                # v1.5 SF-FC forward-compat fields
+                'requires_role': requires_role,
+                'pattern_operators': parse_pattern_operators(ext.pattern),
+            }
+            if batch_id is not None:
+                # v1.3 SF-12: precise rollback marker, optional for
+                # backward compat with legacy callers that don't tag batches
+                meta_data['import_batch'] = batch_id
+
             entry = KnowledgeEntry(
                 entry_type='SUCCESS_PATTERN' if ext.verified else 'SUCCESS_PATTERN',
                 pattern=ext.pattern,
+                pattern_hash=phash,  # MF-8 fix: was silently NULL prior to v1.3
                 description=ext.description,
-                meta_data={
-                    'source': ext.source,
-                    'source_url': ext.source_url,
-                    'source_title': ext.source_title,
-                    'dataset_category': ext.category,
-                    'confidence': ext.confidence,
-                    'verified': ext.verified,
-                    'score': ext.confidence,
-                    'extracted_at': ext.extraction_date.isoformat(),
-                },
+                meta_data=meta_data,
                 usage_count=0,
                 is_active=True,
                 created_by='CURATED_IMPORT'
             )
             self.db.add(entry)
             imported += 1
-        
+
         if imported > 0:
             await self.db.commit()
-        
-        logger.info(f"[ExternalKnowledge] Imported {imported} curated patterns")
+
+        logger.info(f"[ExternalKnowledge] Imported {imported} curated patterns"
+                    + (f" (batch={batch_id})" if batch_id else ""))
         return imported
     
     async def get_sync_stats(self) -> Dict[str, Any]:
@@ -499,8 +579,11 @@ class ExternalKnowledgeSyncer:
 # Pre-defined External Knowledge
 # =============================================================================
 
-# Curated patterns from academic papers (101 Alphas, Alpha-GPT)
-ACADEMIC_PATTERNS = [
+# Base curated patterns hand-written in this module (5 rows, Phase 0 pre-Q1).
+# Full ACADEMIC_PATTERNS list below extends this with eager-merged JSON files
+# (Q1 alpha101_kakushadze.json + Q3 alpha158_qlib.json) when those files
+# land — see _load_external_patterns_json + ACADEMIC_PATTERNS assignment.
+_BASE_ACADEMIC_PATTERNS: List[ExternalKnowledge] = [
     ExternalKnowledge(
         source="paper",
         pattern="rank(ts_argmax(signed_power(if_else(returns > 0, ts_std_dev(returns, 20), close), 2), 5))",
@@ -547,6 +630,55 @@ ACADEMIC_PATTERNS = [
         source_title="Quantitative Factor Research",
     ),
 ]
+
+
+def _load_external_patterns_json(filename: str) -> List[ExternalKnowledge]:
+    """Load curated patterns from a JSON file under backend/data/.
+
+    Returns [] if the file is absent so module import doesn't fail before
+    Q1/Q3 JSON files are committed. v1.5 SF-7 fix: module-level eager merge
+    (called once at import time, not lazy property) — `from backend
+    .external_knowledge import ACADEMIC_PATTERNS` always observes the full
+    merged list.
+    """
+    path = Path(__file__).parent / "data" / filename
+    if not path.exists():
+        logger.debug(f"[ExternalKnowledge] {filename} not yet committed; merging []")
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            raw = json.load(fh)
+    except (json.JSONDecodeError, OSError) as ex:
+        logger.warning(f"[ExternalKnowledge] failed to load {filename}: {ex}; merging []")
+        return []
+
+    out: List[ExternalKnowledge] = []
+    for item in raw:
+        try:
+            out.append(ExternalKnowledge(
+                source=item.get("source", "paper"),
+                pattern=item["pattern"],
+                description=item.get("description", ""),
+                category=item.get("category", "pv"),
+                confidence=item.get("confidence", 0.85),
+                verified=item.get("verified", True),
+                source_title=item.get("source_title", ""),
+                source_url=item.get("source_url", ""),
+            ))
+        except KeyError as ex:
+            logger.warning(f"[ExternalKnowledge] {filename} item missing key {ex}; skipping")
+            continue
+    return out
+
+
+# Phase 0 eager merge — SF-7 v1.2: module-level, not lazy, so
+# `len(ACADEMIC_PATTERNS)` GO gate verify (plan §7) sees the full list
+# immediately after `from backend.external_knowledge import ACADEMIC_PATTERNS`.
+ACADEMIC_PATTERNS: List[ExternalKnowledge] = (
+    _BASE_ACADEMIC_PATTERNS
+    + _load_external_patterns_json("alpha101_kakushadze.json")
+    + _load_external_patterns_json("alpha158_qlib.json")
+)
 
 
 async def import_academic_knowledge(db: AsyncSession) -> int:
