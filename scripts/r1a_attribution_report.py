@@ -124,18 +124,21 @@ async def production_crash_delta() -> Optional[float]:
     if flip_at is None:
         return None
 
+    # CAST :flip to timestamptz because feature_flag_overrides.updated_at is
+    # stored naive while mining_tasks.created_at carries a tz — asyncpg
+    # rejects the heterogeneous comparison without explicit cast.
     baseline_sql = text("""
         SELECT (COUNT(*) FILTER (WHERE status='FAILED'))::float
                / NULLIF(COUNT(*), 0) AS pct
         FROM mining_tasks
-        WHERE created_at > :flip - interval '30 day'
-          AND created_at < :flip
+        WHERE created_at > (cast(:flip as timestamptz)) - interval '30 day'
+          AND created_at < cast(:flip as timestamptz)
     """)
     observed_sql = text("""
         SELECT (COUNT(*) FILTER (WHERE status='FAILED'))::float
                / NULLIF(COUNT(*), 0) AS pct
         FROM mining_tasks
-        WHERE created_at >= :flip
+        WHERE created_at >= cast(:flip as timestamptz)
     """)
     async with AsyncSessionLocal() as s:
         baseline = (await s.execute(baseline_sql, {"flip": flip_at})).scalar() or 0.0
