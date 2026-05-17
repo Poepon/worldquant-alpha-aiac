@@ -543,9 +543,20 @@ class TaskService(BaseService):
         task = await self.task_repo.get_by_id(task_id)
         if not task:
             raise ValueError(f"Task {task_id} not found")
-        
+
         action = action.upper()
-        
+
+        # flat-F1 v1.5 Q2 Variant A: FLAT_CONTINUOUS mode does not survive
+        # legacy intervene_task PAUSE/RESUME — that path flips status only and
+        # does NOT dispatch a worker, leaving FLAT tasks stuck RUNNING-with-no-
+        # worker. Route ops through the dedicated admin endpoints instead.
+        if task.mining_mode == "FLAT_CONTINUOUS" and action in ("PAUSE", "RESUME"):
+            raise ValueError(
+                f"FLAT_CONTINUOUS tasks use POST /ops/flat-sessions/{task_id}/resume "
+                f"(or flag-off via ENABLE_FLAT_CONTINUOUS=false) instead of "
+                f"/tasks/{task_id}/intervene which does not dispatch a worker."
+            )
+
         if action == "PAUSE":
             if task.status != "RUNNING":
                 raise ValueError("Can only pause running tasks")
@@ -832,12 +843,113 @@ class TaskService(BaseService):
         )
         return info
 
-    async def _dispatch_session_worker(self, task_id: int) -> str:
+    # =========================================================================
+    # flat-F1 Advanced Kickoff (Phase 3, plan v1.5 SHIP-READY, 2026-05-18)
+    # =========================================================================
+    # FLAT_CONTINUOUS mining mode parallel to legacy CONTINUOUS_CASCADE per
+    # master plan §6 D3 "保留 legacy(渐进切换)". Hypothesis-driven flat session
+    # iterating (dataset × hypothesis) tuples without T1→T2→T3 cascade. Gated
+    # by ``settings.ENABLE_FLAT_CONTINUOUS`` (default OFF).
+
+    async def start_flat_session(
+        self,
+        region: str = "USA",
+        universe: str = "TOP3000",
+        datasets: Optional[List[str]] = None,
+    ) -> "MiningSessionInfo":
+        """Create a new FLAT_CONTINUOUS task and dispatch its worker.
+
+        Unlike CONTINUOUS_CASCADE.start_session this is NOT singleton-per-region:
+        multiple FLAT tasks may co-exist (different dataset / hypothesis sets).
+        Caller (admin endpoint) is expected to gate on
+        ``settings.ENABLE_FLAT_CONTINUOUS``.
+        """
+        if region not in self.SUPPORTED_REGIONS:
+            raise ValueError(
+                f"region={region!r} not supported; choose one of {self.SUPPORTED_REGIONS}"
+            )
+
+        task = MiningTask(
+            task_name=f"flat-session-{region}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
+            region=region,
+            universe=universe,
+            dataset_strategy="MANUAL" if datasets else "AUTO",
+            target_datasets=list(datasets or []),
+            agent_mode="AUTONOMOUS",
+            daily_goal=0,                # 0 = unlimited within FLAT_CONTINUOUS_MAX_ITERATIONS
+            max_iterations=999999,
+            config={"flat_cursor": 0},   # v1.5 Q1 V2 initial cursor
+            mining_mode="FLAT_CONTINUOUS",
+            cascade_phase=None,
+            cascade_round_idx=0,
+            status="RUNNING",
+            schedule="ONESHOT",          # flat is single-pass, no CASCADE schedule
+            starting_tier=1,
+        )
+        created = await self.task_repo.create(task)
+        await self.commit()
+        await self._dispatch_session_worker(created.id, inherit_runtime_state=False)
+        logger.info(
+            f"[start_flat_session] region={region} task_id={created.id} "
+            f"datasets={len(datasets or [])} dispatched"
+        )
+        return self._to_session_info(await self.task_repo.get_by_id(created.id))
+
+    async def resume_flat_session(self, task_id: int) -> "MiningSessionInfo":
+        """Resume a paused FLAT_CONTINUOUS session, preserving runtime_state.
+
+        v1.5 Q1 Variant V2: calls ``_dispatch_session_worker`` with
+        ``inherit_runtime_state=True`` so ``flat_cursor`` (and any other
+        per-session keys) carries over to the new ExperimentRun.
+        """
+        task = await self.task_repo.get_by_id(task_id)
+        if not task:
+            raise ValueError(f"task_id={task_id} not found")
+        if task.mining_mode != "FLAT_CONTINUOUS":
+            raise ValueError(
+                f"task_id={task_id} is not FLAT_CONTINUOUS "
+                f"(mining_mode={task.mining_mode}); use /mining-session/resume for cascade"
+            )
+        if task.status == "RUNNING":
+            return self._to_session_info(task)
+        if task.status != "PAUSED":
+            raise ValueError(
+                f"task_id={task_id} cannot resume from status={task.status}"
+            )
+        await self.task_repo.update_status(task_id, "RUNNING")
+        await self.commit()
+        await self._dispatch_session_worker(task_id, inherit_runtime_state=True)
+        logger.info(
+            f"[resume_flat_session] task_id={task_id} region={task.region} "
+            f"PAUSED→RUNNING (runtime_state inherited)"
+        )
+        return self._to_session_info(await self.task_repo.get_by_id(task_id))
+
+    async def _dispatch_session_worker(
+        self,
+        task_id: int,
+        *,
+        inherit_runtime_state: bool = False,
+    ) -> str:
         """Create a new ExperimentRun + dispatch celery worker for the session.
 
         Each pause/resume cycle gets its own ExperimentRun for traceability.
+
+        flat-F1 v1.5 Q1 Variant V2: when ``inherit_runtime_state=True`` the new
+        run is seeded with the previous (latest) run's ``runtime_state`` so
+        FLAT_CONTINUOUS sessions preserve ``flat_cursor`` (and any future
+        per-session keys) across pause-resume. Cascade callers keep the default
+        ``False`` — each cascade ExperimentRun starts with empty runtime_state,
+        unchanged from pre-v1.5 behavior.
         """
         task = await self.task_repo.get_by_id(task_id)
+
+        prev_state: Dict[str, Any] = {}
+        if inherit_runtime_state:
+            prev_run = await self.run_repo.get_latest_by_task(task_id)
+            if prev_run is not None and isinstance(prev_run.runtime_state, dict):
+                prev_state = dict(prev_run.runtime_state)
+
         run = ExperimentRun(
             task_id=task_id,
             status="RUNNING",
@@ -853,6 +965,7 @@ class TaskService(BaseService):
                 },
             },
             strategy_snapshot={},
+            runtime_state=prev_state,
         )
         created_run = await self.run_repo.create(run)
         await self.commit()

@@ -160,6 +160,13 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase1-R3Q8",
         description="启用 DiversityScore 第 6 维 ast_diversity (1 − Jaccard subtree overlap)。Light wiring 仅记录到 ast_distance_log,不 gate 生成。Phase 2+ R10 family-cap 复用此信号。",
     ),
+    # --- flat-F1 Advanced: FLAT_CONTINUOUS mining mode ---
+    "ENABLE_FLAT_CONTINUOUS": FlagSpec(
+        name="ENABLE_FLAT_CONTINUOUS",
+        flag_type="bool",
+        group="Phase3-flatF1",
+        description="启用 FLAT_CONTINUOUS mining_mode (与 legacy CONTINUOUS_CASCADE 并行)。Hypothesis-driven flat session — dataset × hypothesis 迭代,无 T1→T2→T3 级联。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。默认 OFF,flat-F2 后续 PR 翻默认。",
+    ),
 }
 
 

@@ -236,6 +236,18 @@ class Settings(BaseSettings):
     AST_DIVERSITY_MAX_DEPTH: int = 3       # OperatorNode skeleton truncation
     AST_DIVERSITY_HISTORY_K: int = 20      # compare new alpha to top-K recent attempts
 
+    # ----- flat-F1 Advanced: FLAT_CONTINUOUS mining mode (Phase 3, 2026-05-18) -----
+    # 第二个 mining_mode = FLAT_CONTINUOUS,与 legacy CONTINUOUS_CASCADE 并行。
+    # Hypothesis-driven flat session:dataset × hypothesis 元组迭代,无 T1→T2→T3
+    # 级联。master plan §6 D3 "保留 legacy(渐进切换)" — F1 默认 OFF,默认 mining_mode
+    # 不变(仍 CONTINUOUS_CASCADE / DISCRETE);flat-F2 后续 PR 翻默认值。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py(per
+    # [[feedback_enable_flag_double_file]] Phase 0 v1.4 教训)。
+    # plan: ~/.claude/plans/flat-F1-kickoff-2026-05-18.md v1.5 SHIP-READY。
+    ENABLE_FLAT_CONTINUOUS: bool = False
+    FLAT_CONTINUOUS_DAILY_GOAL: int = 20         # alphas/iteration cap
+    FLAT_CONTINUOUS_MAX_ITERATIONS: int = 100    # safety bound per session
+
     # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
     # T1: 裸 ts_op 信号；2026-05-07 P0 收紧到 BRAIN 提交 gate
     # 旧值 0.8/0.5 是 探索 bar — batch 276-283 产生 8 条 PASS 全部 can_submit=False

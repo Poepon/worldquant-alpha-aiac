@@ -1005,3 +1005,100 @@ async def brain_deactivate_consultant(
     latch (manual latch set would create invisible 24h perf cliff)."""
     result = await svc.deactivate_consultant_mode(actor=actor or "ops_console")
     return BrainRoleSwitchOut(**result)
+
+
+# ---------------------------------------------------------------------------
+# flat-F1 Advanced Kickoff (Phase 3, plan v1.5 SHIP-READY, 2026-05-18)
+# ---------------------------------------------------------------------------
+# FLAT_CONTINUOUS mining_mode parallel to legacy CONTINUOUS_CASCADE per master
+# plan §6 D3 "保留 legacy(渐进切换)". Two admin endpoints — both gated on
+# settings.ENABLE_FLAT_CONTINUOUS (default OFF, flat-F2 PR flips default).
+
+from backend.services.task_service import TaskService  # noqa: E402  (intentional late import)
+
+
+def get_task_service_ops(db: AsyncSession = Depends(get_db)) -> TaskService:
+    """Inject TaskService for ops endpoints — mirrors routers/tasks.py:get_task_service."""
+    return TaskService(db)
+
+
+class StartFlatSessionIn(BaseModel):
+    region: str = Field(default="USA", description="BRAIN region (USA/CHN/EUR/ASI/GLB)")
+    universe: str = Field(default="TOP3000", description="Region universe")
+    datasets: List[str] = Field(
+        default_factory=list,
+        description="Explicit dataset list; empty = AUTO-pick same as cascade",
+    )
+
+
+class FlatSessionOut(BaseModel):
+    task_id: int
+    region: str
+    universe: str
+    status: str
+    mining_mode: str
+    runtime_state_inherited: bool = False
+
+
+@router.post("/start-flat-session", response_model=FlatSessionOut)
+async def start_flat_session(
+    payload: StartFlatSessionIn,
+    _token: str = Depends(_require_ops_token),
+    svc: TaskService = Depends(get_task_service_ops),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> FlatSessionOut:
+    """Create a new FLAT_CONTINUOUS mining task and dispatch its worker.
+
+    flat-F1 v1.5 §3.4. Gated by ``settings.ENABLE_FLAT_CONTINUOUS`` — returns
+    400 when flag is OFF so the caller knows to flip the flag first.
+    """
+    from backend.config import settings  # local import — settings hot-reads flag overrides
+    if not getattr(settings, "ENABLE_FLAT_CONTINUOUS", False):
+        raise HTTPException(
+            status_code=400,
+            detail="ENABLE_FLAT_CONTINUOUS flag is OFF — flip via PATCH /ops/flags/ENABLE_FLAT_CONTINUOUS first",
+        )
+    try:
+        info = await svc.start_flat_session(
+            region=payload.region,
+            universe=payload.universe,
+            datasets=payload.datasets or None,
+        )
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex)) from ex
+    return FlatSessionOut(
+        task_id=info.task_id,
+        region=info.region,
+        universe=info.universe,
+        status=info.status,
+        mining_mode=info.mining_mode,
+        runtime_state_inherited=False,
+    )
+
+
+@router.post("/flat-sessions/{task_id}/resume", response_model=FlatSessionOut)
+async def resume_flat_session(
+    task_id: int,
+    _token: str = Depends(_require_ops_token),
+    svc: TaskService = Depends(get_task_service_ops),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> FlatSessionOut:
+    """Resume a paused FLAT_CONTINUOUS session (preserves flat_cursor).
+
+    flat-F1 v1.5 §3.5 + Q1 V2: internally calls
+    ``TaskService._dispatch_session_worker(task_id, inherit_runtime_state=True)``
+    so ``runtime_state["flat_cursor"]`` (and any other per-session keys)
+    survives the pause-resume cycle into the new ExperimentRun.
+    """
+    try:
+        info = await svc.resume_flat_session(task_id)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex)) from ex
+    return FlatSessionOut(
+        task_id=info.task_id,
+        region=info.region,
+        universe=info.universe,
+        status=info.status,
+        mining_mode=info.mining_mode,
+        runtime_state_inherited=True,
+    )

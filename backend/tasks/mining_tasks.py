@@ -272,6 +272,57 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                 finally:
                     _release_lock()
 
+            # flat-F1 v1.5 (Phase 3, 2026-05-18): FLAT_CONTINUOUS dispatch.
+            # Parallel to CONTINUOUS_CASCADE per master plan §6 D3 "保留 legacy
+            # (渐进切换)". Hypothesis-driven flat session (dataset × hypothesis)
+            # iterating with no T1→T2→T3 cascade. Gated by ENABLE_FLAT_CONTINUOUS
+            # — if a FLAT task is dispatched while the flag is OFF, refuse to
+            # run (defensive: should be unreachable when /ops/start-flat-session
+            # gates correctly).
+            if task.mining_mode == "FLAT_CONTINUOUS":
+                if not getattr(settings, "ENABLE_FLAT_CONTINUOUS", False):
+                    logger.warning(
+                        f"[flat] task_id={task_id} dispatched as FLAT_CONTINUOUS "
+                        f"but ENABLE_FLAT_CONTINUOUS=False; marking FAILED"
+                    )
+                    await db.execute(
+                        update(MiningTask)
+                        .where(MiningTask.id == task_id)
+                        .values(status="FAILED")
+                    )
+                    if run is not None:
+                        run.status = "FAILED"
+                        run.finished_at = datetime.utcnow()
+                        run.error_message = "ENABLE_FLAT_CONTINUOUS flag is OFF"
+                    await db.commit()
+                    return {"error": "ENABLE_FLAT_CONTINUOUS=False"}
+                try:
+                    return await _run_flat_iteration(
+                        db, task, run, self.request.id,
+                        lock_key=cascade_lock_key,
+                        lock_token=cascade_lock_token,
+                    )
+                except Exception as e:
+                    logger.error(f"[flat] Task {task_id} failed: {e}")
+                    await db.rollback()
+                    try:
+                        await db.execute(
+                            update(MiningTask)
+                            .where(MiningTask.id == task_id)
+                            .values(status="FAILED")
+                        )
+                        if run is not None:
+                            run.status = "FAILED"
+                            run.finished_at = datetime.utcnow()
+                            run.error_message = str(e)[:500]
+                        await db.commit()
+                    except Exception as db_err:
+                        logger.error(f"[flat] failed to mark task FAILED: {db_err}")
+                        await db.rollback()
+                    raise
+                finally:
+                    _release_lock()
+
             try:
                 async with BrainAdapter() as brain:
                     mining_agent = MiningAgent(db, brain)
@@ -1195,6 +1246,114 @@ async def _run_cascade_phase(
         await _cancel_remaining()
 
     return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
+
+
+async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_token):
+    """flat-F1 v1.5 main loop — FLAT_CONTINUOUS mining_mode (Phase 3, 2026-05-18).
+
+    Hypothesis-driven flat session: iterate over (dataset × hypothesis) tuples
+    at ``starting_tier`` only, no T1→T2→T3 cascade. Persists ``flat_cursor`` in
+    ``run.runtime_state`` so pause-resume picks up where it left off (the
+    cursor is inherited into the new ExperimentRun when
+    ``TaskService._dispatch_session_worker`` is called with
+    ``inherit_runtime_state=True`` — see Q1 V2 in plan v1.5 §3.6).
+
+    Bounds: ``settings.FLAT_CONTINUOUS_MAX_ITERATIONS`` iterations or
+    ``settings.FLAT_CONTINUOUS_DAILY_GOAL`` alphas, whichever fires first.
+    Exits cleanly on task.status in (PAUSED, STOPPED, EARLY_STOPPED) at any
+    iteration boundary, preserving cursor in runtime_state.
+    """
+    logger.info(
+        f"[flat] task={task.id} region={task.region} starting "
+        f"flat session (target_datasets={len(task.target_datasets or [])})"
+    )
+
+    max_iters = int(getattr(settings, "FLAT_CONTINUOUS_MAX_ITERATIONS", 100) or 100)
+    daily_goal = int(getattr(settings, "FLAT_CONTINUOUS_DAILY_GOAL", 20) or 20)
+
+    # Resolve dataset list — explicit target_datasets or AUTO-pick same as cascade
+    datasets = list(task.target_datasets or [])
+    if not datasets:
+        datasets = await _get_datasets_to_mine(db, task)
+    if not datasets:
+        logger.warning(f"[flat] task={task.id} no datasets to mine; exiting")
+        if run is not None:
+            run.status = "COMPLETED"
+            run.finished_at = datetime.utcnow()
+            await db.commit()
+        return {"warning": "no_datasets", "total_alphas": 0}
+
+    # Q1 V2: cursor comes from runtime_state, inherited across pause-resume
+    flat_cursor = 0
+    if isinstance(run.runtime_state, dict):
+        flat_cursor = int(run.runtime_state.get("flat_cursor", 0) or 0)
+    if flat_cursor >= len(datasets):
+        logger.info(
+            f"[flat] task={task.id} cursor={flat_cursor} ≥ len(datasets)={len(datasets)}, "
+            f"session COMPLETED"
+        )
+        flat_cursor = 0  # wrap-around for next session
+
+    total_alphas = 0
+    iterations = 0
+
+    async with BrainAdapter() as brain:
+        mining_agent = MiningAgent(db, brain)
+        operators = await _get_operators(db)
+
+        while iterations < max_iters and total_alphas < daily_goal:
+            await db.refresh(task)
+            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+                logger.info(
+                    f"[flat] task={task.id} status={task.status} at cursor={flat_cursor}, "
+                    f"exiting (cursor preserved in runtime_state)"
+                )
+                break
+
+            dataset_id = datasets[flat_cursor % len(datasets)]
+            tier = int(task.starting_tier or 1)
+            result = await _run_one_round_inline(
+                db, task, run, brain, mining_agent, operators,
+                dataset_id=dataset_id, tier=tier,
+            )
+            round_alphas = len(result.get("all_alphas") or [])
+            total_alphas += round_alphas
+            iterations += 1
+            flat_cursor += 1
+
+            # Persist cursor + counters into run.runtime_state — flag_modified
+            # required because SQLAlchemy doesn't detect JSONB in-place edits
+            # (Phase 1.5-B pattern).
+            if isinstance(run.runtime_state, dict):
+                run.runtime_state["flat_cursor"] = flat_cursor
+                run.runtime_state["flat_total_alphas"] = total_alphas
+                run.runtime_state["flat_iterations"] = iterations
+                flag_modified(run, "runtime_state")
+                await db.commit()
+
+            logger.info(
+                f"[flat] task={task.id} iter={iterations} dataset={dataset_id} "
+                f"round_alphas={round_alphas} total={total_alphas}/{daily_goal}"
+            )
+
+            if flat_cursor >= len(datasets):
+                logger.info(
+                    f"[flat] task={task.id} traversed all {len(datasets)} datasets; "
+                    f"session COMPLETED"
+                )
+                break
+
+    if run is not None:
+        run.status = "COMPLETED"
+        run.finished_at = datetime.utcnow()
+        await db.commit()
+
+    return {
+        "mode": "FLAT_CONTINUOUS",
+        "total_alphas": total_alphas,
+        "iterations": iterations,
+        "final_cursor": flat_cursor,
+    }
 
 
 async def _run_continuous_cascade(db, task, run, celery_task_id, *, lock_key, lock_token):
