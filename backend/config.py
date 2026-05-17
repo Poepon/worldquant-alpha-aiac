@@ -262,6 +262,15 @@ class Settings(BaseSettings):
     R5_JUDGE_MODEL: str = "claude-haiku-4-5-20251001"   # cheaper than opus, med effort
     R5_JUDGE_LOW_CONF: float = 0.55                      # below this R5 abstains → R1a wins
 
+    # ----- Phase 2 R10 Family-cap (Hubble v2 Table 1, 2026-05-18) -----
+    # 同 pillar 同 family(operator-sequence signature)只保留 top-K=2 by score。
+    # 防止一个 op pipeline 在评估批次刷榜挤掉异质 alpha。
+    # 落地:evaluation.py R1a/R5 hook 之后调 family_classifier.apply_family_cap,
+    # 超出 K 的标 quality_status="FAIL" + metrics["_r10_family_cap_dropped"]=True。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_FAMILY_CAP: bool = False
+    FAMILY_CAP_TOP_K: int = 2          # Hubble v2 default;OFF + flip K=5 用于探索期
+
     # ----- Phase 1.5-C: TaskSchema v2 cut-over (2026-05-18) -----
     # 切 read paths 从 legacy cols (mining_mode / cascade_phase / agent_mode)
     # 到 new authoritative cols (schedule / starting_tier / runtime_state).

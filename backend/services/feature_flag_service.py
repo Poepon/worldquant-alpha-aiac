@@ -167,6 +167,20 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase3-flatF1",
         description="启用 FLAT_CONTINUOUS mining_mode (与 legacy CONTINUOUS_CASCADE 并行)。Hypothesis-driven flat session — dataset × hypothesis 迭代,无 T1→T2→T3 级联。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。默认 OFF,flat-F2 后续 PR 翻默认。",
     ),
+    # --- Phase 2 R10: Family-cap (Hubble v2) ---
+    "ENABLE_FAMILY_CAP": FlagSpec(
+        name="ENABLE_FAMILY_CAP",
+        flag_type="bool",
+        group="Phase2-R10",
+        description=(
+            "Phase 2 R10 (Hubble v2 Table 1): 同 pillar 同 family "
+            "(operator-sequence signature) 只保留 top-K=2 by score。"
+            "防止一个 op pipeline 在 evaluation batch 刷榜挤掉异质 alpha。"
+            "evaluation node R5 hook 之后调 family_classifier.apply_family_cap,"
+            "超出 K 的标 quality_status='FAIL' + metrics['_r10_family_cap_dropped']=True。"
+            "误杀时 flag flip OFF (0 工程量) 或 FAMILY_CAP_TOP_K=5 放宽。"
+        ),
+    ),
     # --- Phase 2 R5: Hypothesis-Alignment Dual-Bridge LLM Judge ---
     "ENABLE_LLM_JUDGE": FlagSpec(
         name="ENABLE_LLM_JUDGE",

@@ -2670,6 +2670,34 @@ async def node_evaluate(
             )
     # === end R1a hook ===
 
+    # === Phase 2 R10 Family-cap (Hubble v2, 2026-05-18) ===
+    # Apply AFTER R1a/R5 hooks so per-alpha scores (composite_score / sharpe)
+    # are already finalized — family cap ranks by score within each
+    # (pillar, family) group. Soft-fail: any error logged but never blocks
+    # the round. Drops are marked quality_status='FAIL' +
+    # metrics["_r10_family_cap_dropped"]=True so downstream persistence /
+    # optimization queue skips them.
+    if getattr(settings, "ENABLE_FAMILY_CAP", False):
+        try:
+            from backend.family_classifier import apply_family_cap  # noqa: E402
+            _top_k = int(getattr(settings, "FAMILY_CAP_TOP_K", 2))
+            _drop_idx = apply_family_cap(updated_alphas, top_k=_top_k)
+            if _drop_idx:
+                for _i in _drop_idx:
+                    _a = updated_alphas[_i]
+                    _a.quality_status = "FAIL"
+                    _new_metrics = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+                    _new_metrics["_r10_family_cap_dropped"] = True
+                    _new_metrics["_r10_family_cap_top_k"] = _top_k
+                    _a.metrics = _new_metrics
+                logger.info(
+                    f"[R10] family-cap dropped {len(_drop_idx)}/{len(updated_alphas)} "
+                    f"alphas (top_k={_top_k})"
+                )
+        except Exception as _r10_e:  # noqa: BLE001
+            logger.warning(f"[R10] family-cap failed (non-fatal): {_r10_e}")
+    # === end R10 family-cap ===
+
     return {
         "pending_alphas": updated_alphas,
         **trace_update
