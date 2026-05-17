@@ -2534,7 +2534,51 @@ async def node_evaluate(
         duration_ms,
         "SUCCESS"
     )
-    
+
+    # === R1a hook (Phase 0, 2026-05-17): capture AttributionType into alpha.metrics ===
+    # Activates DORMANT shim backend/agents/core/integration.py:342-407 to enrich
+    # alpha.metrics with HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN attribution.
+    # Data flows to Phase 1 R2/Q7 bandit arm-set design. Default OFF; flip via
+    # FeatureFlagOverride ENABLE_R1A_HOOK=true. See plan v1.3 §1.4.
+    if getattr(settings, "ENABLE_R1A_HOOK", False):
+        # Lazy import: avoid cold-start cost when flag OFF (core/ is 3223 LOC DORMANT)
+        from backend.agents.core.integration import enhance_existing_node_evaluate  # noqa: E402
+        _r1a_failures = 0
+        for _a in updated_alphas:  # _a is AlphaCandidate (Pydantic BaseModel)
+            # V-26.79 detach: rebind to fresh dict before mutating
+            _new_metrics = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+            try:
+                _sim = {
+                    "sharpe": _new_metrics.get("sharpe"),
+                    "fitness": _new_metrics.get("fitness"),
+                }
+                _hyp = {"statement": getattr(_a, "hypothesis", "") or ""}
+                _fb = enhance_existing_node_evaluate(_a, _sim, _hyp, trace=None)
+                _new_metrics["_r1a_attribution"] = _fb.attribution.value
+                _new_metrics["_r1a_attribution_confidence"] = _fb.attribution_confidence
+                if _fb.attribution_evidence:  # skip empty list — saves storage
+                    _new_metrics["_r1a_attribution_evidence"] = list(_fb.attribution_evidence)
+                _new_metrics["_r1a_should_retry"] = bool(_fb.should_retry_implementation)
+                _new_metrics["_r1a_should_modify"] = bool(_fb.should_modify_hypothesis)
+                _new_metrics["_r1a_hook_version"] = "v1"
+            except Exception as _r1a_e:  # noqa: BLE001 — must isolate per-alpha failures
+                _r1a_failures += 1
+                logger.warning(
+                    "[R1a] hook failed for alpha {}: {}",
+                    getattr(_a, "alpha_id", "?"), _r1a_e
+                )
+                _new_metrics["_r1a_attribution"] = None
+                _new_metrics["_r1a_hook_error"] = str(_r1a_e)[:200]
+                _new_metrics["_r1a_hook_version"] = "v1"  # mark even on fail so GO denominator includes
+            # Pydantic field reassignment (AlphaCandidate is Pydantic BaseModel —
+            # no flag_modified needed; persistence.py INSERT path doesn't need dirty marker)
+            _a.metrics = _new_metrics
+        if _r1a_failures:
+            logger.warning(
+                "[R1a] {}/{} hook failed this round", _r1a_failures, len(updated_alphas)
+            )
+    # === end R1a hook ===
+
     return {
         "pending_alphas": updated_alphas,
         **trace_update

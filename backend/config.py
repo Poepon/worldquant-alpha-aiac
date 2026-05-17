@@ -182,6 +182,20 @@ class Settings(BaseSettings):
         "EUR": "TOP2500",
     }
 
+    # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
+    # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
+    # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入
+    # alpha.metrics["_r1a_attribution"] 等 7 个字段,为 Phase 1 R2/Q7 bandit
+    # arm 集设计提供 attribution 反证数据。
+    # 数据量观察期门槛(详 docs/master_implementation_plan_2026-05-17.md §4.1
+    # + ~/.claude/plans/docs-master-implementation-plan-2026-05-compressed-shore.md §7):
+    # - 触发 ≥ 200 / non_null_pct ≥ 95% / non_unknown_pct ≥ 70% / errs < 10
+    # - 0 production crash(per-alpha try/except 守护)
+    # 默认 False,通过 FeatureFlagOverride (flag_type=bool, flag_value="true")
+    # 翻开,无需重启。软回滚:UPDATE feature_flag_overrides SET flag_value='false'
+    # (< 1 分钟)。
+    ENABLE_R1A_HOOK: bool = False
+
     # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
     # T1: 裸 ts_op 信号；2026-05-07 P0 收紧到 BRAIN 提交 gate
     # 旧值 0.8/0.5 是 探索 bar — batch 276-283 产生 8 条 PASS 全部 can_submit=False
