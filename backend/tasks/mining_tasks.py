@@ -8,6 +8,7 @@ import asyncio
 import os
 from datetime import datetime
 from sqlalchemy import select, update, func
+from sqlalchemy.orm.attributes import flag_modified  # Phase 1.5-B JSONB dirty trigger
 from loguru import logger
 
 from backend.celery_app import celery_app
@@ -1000,26 +1001,47 @@ async def _run_cascade_phase(
 
     async def _stamp_heartbeat(round_result: dict | None = None) -> None:
         # V-19.10 H1: heartbeat at every round boundary regardless of PASS count.
-        # V-26.3 (2026-05-13): also accumulate progress_current on the
-        # cascade path. Pre-fix only the discrete loop wrote progress_current
-        # (line 279 via result.get('total_success')); cascade rounds went
-        # silent — frontend progress bar stuck at 0 and daily_goal checks
-        # never fired. Use SQL update-with-expression so concurrent prefetch
-        # rounds don't clobber each other via ORM-staleness.
+        # V-26.3 (2026-05-13): also accumulate progress_current on cascade path.
+        # Phase 1.5-B (2026-05-17) [V1.2-B2 fix]: switched from bulk SQL
+        # `update(MiningTask)...values()` to instance-level mutation so the
+        # in-memory `task` and `run` stay coherent post-commit. Previously
+        # bulk SQL bypassed the ORM identity map → split-brain reads of
+        # `task.last_alpha_persisted_at` returned stale-vs-fresh values.
+        # Cascade lock token guarantees exactly 1 writer per task (no
+        # concurrent prefetch race) so instance-level is race-safe at
+        # this layer. If Phase 2+ adds a concurrent writer to
+        # `progress_current` from outside the cascade worker, revisit this.
+        # Also dual-writes Phase 1.5-A runtime_state["last_persisted_at"]
+        # + ["round_idx"] + ["progress"] to ExperimentRun for Phase 1.5-C
+        # cut-over readers.
         try:
             from datetime import timezone as _tz
             success_count = int((round_result or {}).get("total_success", 0) or 0)
-            values = {"last_alpha_persisted_at": datetime.now(_tz.utc)}
+            now_utc = datetime.now(_tz.utc)
+
+            # --- Instance-level write to MiningTask (replaces bulk UPDATE) ---
+            task.last_alpha_persisted_at = now_utc
             if success_count > 0:
-                values["progress_current"] = MiningTask.progress_current + success_count
-            await db.execute(
-                update(MiningTask)
-                .where(MiningTask.id == task.id)
-                .values(**values)
-            )
+                task.progress_current = (task.progress_current or 0) + success_count
+
+            # --- Phase 1.5-B dual-write to ExperimentRun.runtime_state ---
+            if run is not None and isinstance(run.runtime_state, dict):
+                new_state = dict(run.runtime_state)
+                new_state["last_persisted_at"] = now_utc.isoformat()
+                new_state["round_idx"] = (new_state.get("round_idx") or 0) + 1
+                if success_count > 0:
+                    new_state["progress"] = (new_state.get("progress") or 0) + success_count
+                run.runtime_state = new_state
+                flag_modified(run, "runtime_state")
+
             await db.commit()
+            # task and run instances reflect committed state — no refresh needed
         except Exception as _e:
             logger.warning(f"[cascade T{tier}] heartbeat update failed: {_e}")
+            try:
+                await db.rollback()
+            except Exception:
+                pass
 
     # V-20.1 (2026-05-10) FIX: V-20 originally scheduled the next-round
     # prefetch AFTER awaiting the current round, which made the main loop
@@ -1285,6 +1307,10 @@ async def _run_continuous_cascade(db, task, run, celery_task_id, *, lock_key, lo
                     break
                 # Move to T2
                 task.cascade_phase = "T2"
+                # Phase 1.5-B dual-write current_tier on ExperimentRun.runtime_state
+                if run is not None and isinstance(run.runtime_state, dict):
+                    run.runtime_state = {**run.runtime_state, "current_tier": 2}
+                    flag_modified(run, "runtime_state")
                 await db.commit()
                 current_phase = "T2"
 
@@ -1318,6 +1344,10 @@ async def _run_continuous_cascade(db, task, run, celery_task_id, *, lock_key, lo
                     )
                 # Move to T3
                 task.cascade_phase = "T3"
+                # Phase 1.5-B dual-write current_tier on ExperimentRun.runtime_state
+                if run is not None and isinstance(run.runtime_state, dict):
+                    run.runtime_state = {**run.runtime_state, "current_tier": 3}
+                    flag_modified(run, "runtime_state")
                 await db.commit()
                 current_phase = "T3"
 
@@ -1366,6 +1396,12 @@ async def _run_continuous_cascade(db, task, run, celery_task_id, *, lock_key, lo
                 # Cascade round complete — increment + reset to T1
                 task.cascade_round_idx += 1
                 task.cascade_phase = "T1"
+                # Phase 1.5-B dual-write current_tier on ExperimentRun.runtime_state
+                # round_idx is already bumped by _stamp_heartbeat per-round;
+                # here we just reset the tier marker.
+                if run is not None and isinstance(run.runtime_state, dict):
+                    run.runtime_state = {**run.runtime_state, "current_tier": 1}
+                    flag_modified(run, "runtime_state")
                 await db.commit()
                 _outer_diag(f"T3_phase_end round_idx_new={task.cascade_round_idx} reset_to=T1")
                 logger.info(

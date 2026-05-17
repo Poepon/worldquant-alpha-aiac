@@ -392,6 +392,21 @@ class TaskService(BaseService):
                     f"(level={level} candidate={candidate})"
                 )
 
+        # Phase 1.5-B (Revision B 3b1c4e5d6a78): dual-write schedule +
+        # starting_tier derived from agent_mode (legacy still SoT until
+        # Phase 1.5-C cut-over). Python `default=` on the model also
+        # backfills schedule='ONESHOT'/starting_tier=1, but dual-write
+        # makes intent explicit + supports Phase 1.5-C reading them.
+        # Mapping rules mirror backfill SQL in alembic Revision B.
+        schedule = "ONESHOT"  # create_task only creates DISCRETE; cascade
+                              # tasks go via _start_cascade_session below
+        if data.agent_mode == "AUTONOMOUS_TIER2":
+            starting_tier = 2
+        elif data.agent_mode == "AUTONOMOUS_TIER3":
+            starting_tier = 3
+        else:
+            starting_tier = 1
+
         task = MiningTask(
             task_name=data.name,
             region=data.region,
@@ -402,6 +417,9 @@ class TaskService(BaseService):
             daily_goal=data.daily_goal,
             config=config,
             status="PENDING",
+            # Phase 1.5-B dual-write
+            schedule=schedule,
+            starting_tier=starting_tier,
         )
 
         created = await self.task_repo.create(task)
@@ -703,6 +721,9 @@ class TaskService(BaseService):
             cascade_phase="T1",
             cascade_round_idx=0,
             status="RUNNING",
+            # Phase 1.5-B dual-write — cascade always starts at T1
+            schedule="CASCADE",
+            starting_tier=1,
         )
         try:
             created = await self.task_repo.create(task)
