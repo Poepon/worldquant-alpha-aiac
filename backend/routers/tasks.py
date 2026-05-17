@@ -41,6 +41,12 @@ class TaskCreateRequest(BaseModel):
     universe: str = "TOP3000"
     dataset_strategy: str = "AUTO"
     target_datasets: List[str] = []
+    # Phase 1.5-Fields (plan v1.3 §5, 2026-05-17): new SoT fields, OPTIONAL.
+    # When unset, fall back to legacy agent_mode → AGENT_MODE_TO_TIER mapping.
+    # When set, take priority over legacy fields (see TaskService.create_task).
+    schedule: Optional[str] = None      # ONESHOT | CASCADE
+    starting_tier: Optional[int] = None  # 1 | 2 | 3
+    # Legacy (still accepted, lower priority than schedule/starting_tier above):
     agent_mode: str = "AUTONOMOUS"
     daily_goal: int = 4
     config: dict = {}
@@ -154,6 +160,9 @@ async def create_task(
         agent_mode=request.agent_mode,
         daily_goal=request.daily_goal,
         config=request.config,
+        # Phase 1.5-Fields (2026-05-17): pipe new SoT fields through
+        schedule=request.schedule,
+        starting_tier=request.starting_tier,
     )
 
     # PR2: tier eligibility check raises ValueError with a user-facing message

@@ -75,6 +75,22 @@ class HumanFeedback(str, enum.Enum):
     DISLIKED = "DISLIKED"
 
 
+class Schedule(str, enum.Enum):
+    """Phase 1.5-Fields (plan v1.3 §5, 2026-05-17) — replaces ``mining_mode``.
+
+    Two values mirror legacy mining_mode semantics:
+      ONESHOT  ≡ DISCRETE          (default; one-off daily-goal run)
+      CASCADE  ≡ CONTINUOUS_CASCADE (T1→T2→T3 loop until paused)
+
+    Legacy ``mining_mode`` column retained until Phase 3 Revision D drops it.
+    New code MUST read ``task.schedule`` (Phase 1.5-A column); read sites in
+    the cascade worker still read ``mining_mode`` during Block 2 (phase15-C)
+    gray rollout until cut-over verifies.
+    """
+    ONESHOT = "ONESHOT"
+    CASCADE = "CASCADE"
+
+
 class KnowledgeEntryType(str, enum.Enum):
     """Type of knowledge entry."""
     SUCCESS_PATTERN = "SUCCESS_PATTERN"

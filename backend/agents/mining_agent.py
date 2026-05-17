@@ -204,11 +204,14 @@ class MiningAgent:
         # CONTINUOUS_CASCADE main loop to switch tier per phase without
         # mutating task.agent_mode (which would persist via auto-flush, see C1
         # in V-19 code review).
+        # Phase 1.5-Fields (2026-05-17): prefer task.starting_tier (Phase 1.5-A
+        # column, Phase 1.5-B backfilled) over legacy agent_mode mapping —
+        # ``tier_from_task`` encapsulates the priority + fallback.
         if factor_tier_override is not None:
             factor_tier = factor_tier_override
         else:
             from backend.services.task_service import TaskService
-            factor_tier = TaskService.factor_tier_from_mode(task.agent_mode) or 1
+            factor_tier = TaskService.tier_from_task(task)
 
         # PR6 fix — inject DB session / brain adapter / alpha service into
         # configurable. T2/T3's node_tier_seed_load reads these from config

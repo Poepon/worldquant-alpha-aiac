@@ -34,7 +34,12 @@ class TaskCreateData:
     agent_mode: str = "AUTONOMOUS"
     daily_goal: int = 4
     config: Dict[str, Any] = None
-    
+    # Phase 1.5-Fields (plan v1.3 §5, 2026-05-17): new SoT fields, OPTIONAL.
+    # When unset, fallback derives from agent_mode (legacy). When set, take
+    # priority — see TaskService.create_task parsing.
+    schedule: Optional[str] = None       # ONESHOT | CASCADE
+    starting_tier: Optional[int] = None  # 1 | 2 | 3
+
     def __post_init__(self):
         if self.target_datasets is None:
             self.target_datasets = []
@@ -277,18 +282,43 @@ class TaskService(BaseService):
     # =========================================================================
     
     # PR2 — agent_mode → factor_tier mapping shared across router and beat task.
+    # Phase 1.5-Fields (2026-05-17): DEPRECATED in favor of task.starting_tier
+    # (Phase 1.5-A column, dual-written by Phase 1.5-B). New code should use
+    # ``tier_from_task(task)`` below — falls back to this mapping when the
+    # task pre-dates Revision B backfill.
+    # INTERACTIVE confirmed 0 rows in production (Phase 1.5 SF-V1.4-E
+    # pre-flight); kept as legacy enum value for type compat. Final delete
+    # at Phase 3 R1b with Revision D.
     AGENT_MODE_TO_TIER = {
         "AUTONOMOUS": 1,        # legacy mode behaves as T1 when tier system on
         "AUTONOMOUS_TIER1": 1,
         "AUTONOMOUS_TIER2": 2,
         "AUTONOMOUS_TIER3": 3,
-        "INTERACTIVE": None,    # tier-agnostic
+        "INTERACTIVE": None,    # tier-agnostic; 0 rows in prod
     }
 
     @classmethod
     def factor_tier_from_mode(cls, agent_mode: str) -> Optional[int]:
         """Resolve agent_mode → factor_tier. Returns None for INTERACTIVE / unknown."""
         return cls.AGENT_MODE_TO_TIER.get(agent_mode)
+
+    @classmethod
+    def tier_from_task(cls, task) -> int:
+        """Phase 1.5-Fields (2026-05-17): resolve task's effective tier.
+
+        Prefers the Phase 1.5-A column ``task.starting_tier`` (1/2/3) when
+        present; falls back to legacy ``AGENT_MODE_TO_TIER`` mapping for
+        tasks created before Revision B backfill. Always returns a valid
+        tier int (1 / 2 / 3); never None.
+
+        Phase 2+ may inline this as ``task.starting_tier`` after the
+        legacy column is dropped at Phase 3 R1b Revision D.
+        """
+        st = getattr(task, "starting_tier", None)
+        if isinstance(st, int) and st in (1, 2, 3):
+            return st
+        agent_mode = getattr(task, "agent_mode", None) or ""
+        return cls.AGENT_MODE_TO_TIER.get(agent_mode) or 1
 
     async def _validate_tier_eligibility(self, data: "TaskCreateData") -> None:
         """PR2: gate tier-mode tasks on feature flag + prerequisites.
@@ -392,15 +422,15 @@ class TaskService(BaseService):
                     f"(level={level} candidate={candidate})"
                 )
 
-        # Phase 1.5-B (Revision B 3b1c4e5d6a78): dual-write schedule +
-        # starting_tier derived from agent_mode (legacy still SoT until
-        # Phase 1.5-C cut-over). Python `default=` on the model also
-        # backfills schedule='ONESHOT'/starting_tier=1, but dual-write
-        # makes intent explicit + supports Phase 1.5-C reading them.
-        # Mapping rules mirror backfill SQL in alembic Revision B.
-        schedule = "ONESHOT"  # create_task only creates DISCRETE; cascade
-                              # tasks go via _start_cascade_session below
-        if data.agent_mode == "AUTONOMOUS_TIER2":
+        # Phase 1.5-B + 1.5-Fields (2026-05-17): write schedule + starting_tier
+        # Priority: explicit data.schedule / data.starting_tier > derived from
+        # legacy agent_mode. create_task only creates DISCRETE tasks (cascade
+        # tasks go via _start_cascade_session); explicit CASCADE schedule from
+        # request also accepted for forward compat.
+        schedule = (data.schedule or "ONESHOT").upper()
+        if data.starting_tier in (1, 2, 3):
+            starting_tier = data.starting_tier
+        elif data.agent_mode == "AUTONOMOUS_TIER2":
             starting_tier = 2
         elif data.agent_mode == "AUTONOMOUS_TIER3":
             starting_tier = 3
