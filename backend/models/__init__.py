@@ -84,6 +84,9 @@ from backend.models.config import (
 # R1a attribution log (Phase 0 v1.6 fix — independent of alpha persistence)
 from backend.models.r1a_attribution import R1aAttributionLog
 
+# DirectionBandit off-policy log (Phase 1 R2/Q7 — independent of task.config)
+from backend.models.direction_bandit_log import DirectionBanditLog
+
 __all__ = [
     # Enums
     "MiningStatus",

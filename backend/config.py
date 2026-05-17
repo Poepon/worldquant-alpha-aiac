@@ -205,6 +205,26 @@ class Settings(BaseSettings):
     # (per [[feedback_enable_flag_double_file]] Phase 0 v1.4 教训)。
     ENABLE_DUAL_CHANNEL_RAG: bool = False
 
+    # ----- R2/Q7 Contextual Thompson Sampling DirectionBandit (Phase 1, 2026-05-17) -----
+    # Beta-Bernoulli per-(segment, arm) bandit 选 strategy 生成方式。
+    # arms = R1a 18:3 hypothesis-dominant 反证集合 (plan §4.2):
+    #   {rag_template, knowledge_pattern, llm_generation, genetic_mutation}
+    # context = (region, dataset_category, recent_failure_pattern) — 三维
+    # segment_id 用字符串拼接 (MF-V1.2-4 防 Python hash() 跨进程不稳定)。
+    # cold-start: segment < 5 pulls 走 global prior fallback。
+    # state 持久化在 mining_tasks.config["contextual_bandit_v1"] JSONB。
+    # off-policy log 写独立 direction_bandit_log 表 (per
+    # [[feedback_r1a_dedicated_log_table]] Phase 0 v1.6 教训)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_DIRECTION_BANDIT: bool = False
+    DIRECTION_BANDIT_ARMS: list = [
+        "rag_template",
+        "knowledge_pattern",
+        "llm_generation",
+        "genetic_mutation",
+    ]
+    DIRECTION_BANDIT_COLD_THRESHOLD: int = 5
+
     # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
     # T1: 裸 ts_op 信号；2026-05-07 P0 收紧到 BRAIN 提交 gate
     # 旧值 0.8/0.5 是 探索 bar — batch 276-283 产生 8 条 PASS 全部 can_submit=False

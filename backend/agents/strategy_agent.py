@@ -294,11 +294,13 @@ class StrategyAgent:
         region: str,
         cumulative_success: int,
         target_goal: int,
-        previous_strategy: Optional[NextRoundStrategy] = None
+        previous_strategy: Optional[NextRoundStrategy] = None,
+        *,
+        bandit_arm: Optional[str] = None,
     ) -> NextRoundStrategy:
         """
         Generate intelligent next-round strategy using LLM analysis.
-        
+
         Args:
             iteration: Current iteration number
             max_iterations: Maximum allowed iterations
@@ -309,7 +311,12 @@ class StrategyAgent:
             cumulative_success: Total successes so far
             target_goal: Target number of successful alphas
             previous_strategy: Strategy from previous round (for continuity)
-            
+            bandit_arm: R2/Q7 (Phase 1, 2026-05-17) DirectionBandit-selected
+                generation strategy hint, one of `settings.DIRECTION_BANDIT_ARMS`
+                or None when flag OFF. Passed through to the LLM prompt as a
+                soft hint via NextRoundStrategy.action_summary prefix; the LLM
+                may still deviate based on round metrics.
+
         Returns:
             NextRoundStrategy with comprehensive guidance
         """
@@ -367,6 +374,27 @@ class StrategyAgent:
             target_goal=target_goal,
             max_iterations=max_iterations
         )
+
+        # R2/Q7 (Phase 1, 2026-05-17): inject DirectionBandit-selected
+        # generation strategy as a soft hint. The LLM still owns the final
+        # strategy decision — bandit_arm is a recommendation, not a mandate.
+        # When `bandit_arm` is None (flag OFF) the prompt stays byte-for-byte
+        # identical to legacy form.
+        if bandit_arm:
+            prompt += (
+                "\n\n## Generation Strategy Hint (Bandit-Selected)\n"
+                f"The ContextualDirectionBandit recommends generation strategy: "
+                f"**{bandit_arm}**. Consider this as the *default* choice for "
+                f"this round's hypothesis generation, but you may override if "
+                f"round metrics clearly suggest a different approach. "
+                f"Reflect your final choice in `action_summary` (e.g. start it "
+                f"with `[arm:{bandit_arm}]` if you agree, or `[arm:other]` if "
+                f"you override).\n\nStrategy meanings:\n"
+                f"- `rag_template`: lean on top RAG SUCCESS_PATTERN as template\n"
+                f"- `knowledge_pattern`: use nearest KnowledgeEntry as base\n"
+                f"- `llm_generation`: free LLM generation (legacy default)\n"
+                f"- `genetic_mutation`: GA-mutate top-3 sharpe recent alphas\n"
+            )
         
         try:
             response = await self.llm_service.call(

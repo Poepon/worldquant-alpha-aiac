@@ -35,9 +35,13 @@ from backend.agents.services import LLMService, get_llm_service
 from backend.agents.services.trace_service import TraceService
 from backend.agents.strategy_agent import StrategyAgent, create_strategy_agent
 from backend.agents.evolution_strategy import (
-    EvolutionStrategy, StrategyMode, RoundResult, 
-    RuleBasedTransition, merge_strategies
+    EvolutionStrategy, StrategyMode, RoundResult,
+    RuleBasedTransition, merge_strategies,
+    # Phase 1 R2/Q7 (2026-05-17)
+    ContextualDirectionBandit, DirectionArm, build_context as _bandit_build_context,
+    compute_arm_reward, segment_id as _bandit_segment_id,
 )
+from backend.config import settings as _settings  # R2/Q7 ENABLE_DIRECTION_BANDIT flag
 from backend.agents.feedback_agent import FeedbackAgent
 from backend.adapters.brain_adapter import BrainAdapter
 
@@ -547,7 +551,14 @@ class MiningAgent:
                         target_goal=target_alphas,
                         max_iterations=max_iterations,
                         dataset_id=dataset_id,
-                        region=task.region
+                        region=task.region,
+                        # R2/Q7 (2026-05-17): pass full task + in-memory alphas
+                        # so DirectionBandit can build context + compute reward
+                        # without DB queries (R1a v1.6 lesson — most alphas don't
+                        # INSERT). When ENABLE_DIRECTION_BANDIT=False these args
+                        # are ignored (legacy invariant).
+                        task=task,
+                        round_alphas=alphas,
                     )
                     
                     # === RECORD ROUND SUMMARY ===
@@ -804,12 +815,22 @@ class MiningAgent:
         target_goal: int,
         max_iterations: int,
         dataset_id: str,
-        region: str
+        region: str,
+        *,
+        task: Optional[MiningTask] = None,
+        round_alphas: Optional[List[Any]] = None,
     ) -> EvolutionStrategy:
         """
         Evolve strategy based on round results.
-        
+
         Uses LLM analysis when available, falls back to rules.
+
+        R2/Q7 (2026-05-17): when ``settings.ENABLE_DIRECTION_BANDIT=True`` AND
+        ``task`` provided, runs the ContextualDirectionBandit's
+        update-then-select cycle before consulting the LLM. The selected arm
+        is passed as ``bandit_arm`` hint to ``strategy_agent.generate_strategy``.
+        Flag-off path is byte-for-byte legacy (no DB writes, no bandit state
+        touched).
         """
         # Compute rule-based strategy (always available)
         rule_strategy = self._rule_transition.compute_next_strategy(
@@ -819,6 +840,22 @@ class MiningAgent:
             target_goal=target_goal,
             max_iterations=max_iterations
         )
+
+        # R2/Q7 bandit decision — happens BEFORE optimization short-circuit so
+        # the previous round's arm gets its reward recorded even if we're
+        # about to forcibly switch into EXPLOIT this round (bandit signal must
+        # not lose data just because the local rule overrides).
+        bandit_arm: Optional[str] = None
+        if getattr(_settings, "ENABLE_DIRECTION_BANDIT", False) and task is not None:
+            try:
+                bandit_arm = await self._bandit_update_and_select(
+                    task=task,
+                    round_result=round_result,
+                    round_alphas=round_alphas,
+                )
+            except Exception as e:
+                # Bandit failure must never block strategy evolution
+                logger.warning(f"[Bandit] non-fatal bandit decision failure: {e}")
 
         # CRITICAL FIX: If we have optimization candidates, FORCE exploit/optimize mode
         # to ensure we don't skip the opportunity to refine them.
@@ -830,18 +867,18 @@ class MiningAgent:
             ]
             rule_strategy.reasoning = "Focusing on optimizing identified promising alphas."
             return rule_strategy
-        
-        
+
+
         # Try LLM-based strategy enhancement
         try:
             # Get recent alphas for this task (for LLM analysis)
             query = select(Alpha).where(
                 Alpha.task_id == task_id
             ).order_by(Alpha.created_at.desc()).limit(10)
-            
+
             res = await self.db.execute(query)
             recent_alphas = res.scalars().all()
-            
+
             llm_response = await self._strategy_agent.generate_strategy(
                 iteration=round_result.iteration,
                 max_iterations=max_iterations,
@@ -851,7 +888,8 @@ class MiningAgent:
                 region=region,
                 cumulative_success=cumulative_success,
                 target_goal=target_goal,
-                previous_strategy=current_strategy
+                previous_strategy=current_strategy,
+                bandit_arm=bandit_arm,  # R2/Q7: None when flag OFF (legacy)
             )
             
             # Convert to dict for merging
@@ -875,7 +913,123 @@ class MiningAgent:
         except Exception as e:
             logger.warning(f"[MiningAgent] LLM strategy failed, using rules: {e}")
             return rule_strategy
-    
+
+    # ------------------------------------------------------------------
+    # Phase 1 R2/Q7 (2026-05-17) ContextualDirectionBandit integration
+    # ------------------------------------------------------------------
+
+    _BANDIT_CONFIG_KEY = "contextual_bandit_v1"
+
+    async def _bandit_update_and_select(
+        self,
+        task: MiningTask,
+        round_result: RoundResult,
+        round_alphas: Optional[List[Any]],
+    ) -> Optional[str]:
+        """One bandit cycle: deserialize → apply reward for previous round →
+        compute new context → select arm → persist state → log to
+        direction_bandit_log. Returns the newly-selected arm name, or None
+        on any soft failure (caller catches the broader except).
+        """
+        # 1. Load bandit state from task.config (initialize fresh on first round)
+        config = task.config if isinstance(task.config, dict) else {}
+        state = config.get(self._BANDIT_CONFIG_KEY)
+        if state:
+            bandit = ContextualDirectionBandit.from_dict(state)
+        else:
+            arm_names = list(
+                getattr(_settings, "DIRECTION_BANDIT_ARMS", None)
+                or ("rag_template", "knowledge_pattern",
+                    "llm_generation", "genetic_mutation")
+            )
+            cold = int(getattr(_settings, "DIRECTION_BANDIT_COLD_THRESHOLD", 5))
+            bandit = ContextualDirectionBandit(
+                arm_names=arm_names, cold_threshold=cold
+            )
+
+        # 2. Apply previous round's reward to last_select (no-op if first round)
+        reward = compute_arm_reward(round_alphas or [])
+        prior_apply = bandit.update_last_round(reward)
+
+        # 3. Build new context for this round's select
+        ctx = await _bandit_build_context(task)
+        cold_at_ctx = bandit.is_cold_at(ctx)
+
+        # 4. Select new arm (caches to bandit.last_select for next round)
+        arm = bandit.select_arm(ctx)
+
+        # 5. Persist bandit state back into task.config (mark JSONB dirty)
+        await self._persist_bandit_state(task, bandit)
+
+        # 6. INSERT a direction_bandit_log row (independent session, R1a v1.6
+        #    pattern). Soft-fail: log failure doesn't break strategy evolution.
+        await self._write_bandit_log_row(
+            task_id=task.id,
+            round_idx=getattr(round_result, "iteration", None),
+            ctx=ctx,
+            selected_arm=arm,
+            observed_reward=reward if prior_apply is not None else None,
+            cold_start=cold_at_ctx,
+        )
+
+        logger.info(
+            f"[Bandit] task={task.id} round={round_result.iteration} "
+            f"ctx={_bandit_segment_id(ctx)} arm={arm} "
+            f"reward_for_prev={reward:.3f} cold={cold_at_ctx}"
+        )
+        return arm
+
+    async def _persist_bandit_state(
+        self,
+        task: MiningTask,
+        bandit: "ContextualDirectionBandit",
+    ) -> None:
+        """Write bandit.to_dict() into task.config and flag JSONB dirty."""
+        from sqlalchemy.orm.attributes import flag_modified
+        if not isinstance(task.config, dict):
+            task.config = {}
+        task.config[self._BANDIT_CONFIG_KEY] = bandit.to_dict()
+        # SQLAlchemy doesn't auto-detect mutation inside JSONB; mark dirty so
+        # the next flush picks it up. (task is a SQLAlchemy mapped instance —
+        # this is NOT the AlphaCandidate Pydantic trap from R1a v1.2.)
+        flag_modified(task, "config")
+        try:
+            await self.db.flush()
+        except Exception as e:
+            logger.warning(f"[Bandit] persist flush failed (non-fatal): {e}")
+
+    async def _write_bandit_log_row(
+        self,
+        task_id: int,
+        round_idx: Optional[int],
+        ctx: tuple,
+        selected_arm: str,
+        observed_reward: Optional[float],
+        cold_start: bool,
+    ) -> None:
+        """INSERT one direction_bandit_log row via fresh AsyncSessionLocal."""
+        # Lazy import to avoid module-load cycle
+        from backend.database import AsyncSessionLocal
+        from backend.models.direction_bandit_log import DirectionBanditLog
+        try:
+            async with AsyncSessionLocal() as s:
+                row = DirectionBanditLog(
+                    task_id=task_id,
+                    round_idx=round_idx,
+                    segment_id=_bandit_segment_id(ctx),
+                    region=ctx[0],
+                    dataset_category=ctx[1],
+                    failure_pattern=ctx[2],
+                    selected_arm=selected_arm,
+                    observed_reward=observed_reward,
+                    cold_start="true" if cold_start else "false",
+                    bandit_version="v1",
+                )
+                s.add(row)
+                await s.commit()
+        except Exception as e:
+            logger.warning(f"[Bandit] log INSERT failed (non-fatal): {e}")
+
     async def _record_round_summary(
         self,
         task: MiningTask,

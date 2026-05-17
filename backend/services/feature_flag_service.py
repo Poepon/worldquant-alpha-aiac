@@ -146,6 +146,13 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase1-R4prime",
         description="hypothesis prompt 拆分 success_patterns / failure_pitfalls 成 Channel A (✓) + Channel B (⛔) 视觉分离。OFF 时 byte-for-byte legacy 单段渲染。",
     ),
+    # --- Phase 1 R2/Q7 Contextual Thompson Sampling DirectionBandit ---
+    "ENABLE_DIRECTION_BANDIT": FlagSpec(
+        name="ENABLE_DIRECTION_BANDIT",
+        flag_type="bool",
+        group="Phase1-R2Q7",
+        description="启用 ContextualDirectionBandit (4-arm Beta-Bernoulli + (region, dataset_category, recent_failure_pattern) 三维 context) 选 strategy 生成方式。任一 segment ≥ 10 select 触发 GO 闸门。",
+    ),
 }
 
 

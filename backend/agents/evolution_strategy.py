@@ -12,8 +12,8 @@ Design Principles:
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field, replace
-from typing import List, Dict, Any, Optional, Protocol
+from dataclasses import asdict, dataclass, field, replace
+from typing import Iterable, List, Dict, Any, Optional, Protocol, Tuple
 from enum import Enum
 import json
 
@@ -412,3 +412,313 @@ def merge_strategies(
         reasoning=next_strat.get("reasoning", rule_strategy.reasoning),
         iteration=rule_strategy.iteration,
     )
+
+
+# ============================================================================
+# Phase 1 R2/Q7 (2026-05-17): Contextual Thompson Sampling DirectionBandit
+# ============================================================================
+#
+# Arms reflect AIAC's strategy-generation-mode space (not RD-Agent's
+# task-direction arms — plan v1.4 §4.2 caveat). R1a Phase 0 production data
+# (236 rows / 18:3 hypothesis-dominant) locks the default 4-arm set per
+# plan §4.2 hypothesis-dominant branch.
+#
+# Per-task contextual segments hash on (region, dataset_category,
+# recent_failure_pattern). Cold segments (< 5 pulls) fall back to a global
+# prior aggregated across all segments to avoid noisy random sampling on
+# fresh tasks.
+#
+# State persistence: ``mining_tasks.config["contextual_bandit_v1"]`` JSONB —
+# no Alembic in Phase 1. Off-policy log writes to ``direction_bandit_log``
+# table (dedicated INSERT, R1a v1.6 lesson — don't piggyback on alpha
+# persistence routing).
+
+import random
+from collections import Counter
+from dataclasses import asdict
+from typing import Tuple
+
+
+# Default arm set reflects R1a 18:3 hypothesis-dominant signal at Phase 0
+# GO gate (plan §4.2 / memory [[project_r1a_attribution_distribution_2026_05_17]]).
+# Override via ``settings.DIRECTION_BANDIT_ARMS`` for Phase 2+ experimentation.
+DEFAULT_BANDIT_ARMS: tuple = (
+    "rag_template",       # top RAG SUCCESS_PATTERN as template
+    "knowledge_pattern",  # nearest KnowledgeEntry as base
+    "llm_generation",     # free LLM generation (current default)
+    "genetic_mutation",   # GA on top-3 sharpe recent alphas
+)
+
+
+# Below this segment-local pull count, ``select_arm`` samples from the global
+# prior to avoid noisy decisions on fresh segments. Override via
+# ``settings.DIRECTION_BANDIT_COLD_THRESHOLD``.
+DEFAULT_COLD_THRESHOLD: int = 5
+
+
+@dataclass
+class DirectionArm:
+    """Single Beta-Bernoulli arm; reward MUST be ∈ [0,1] (caller responsibility,
+    ``update`` clips defensively per plan v1.3 MF-V1.3-5)."""
+
+    name: str
+    alpha: float = 1.0       # Beta α (successes + 1)
+    beta: float = 1.0        # Beta β (failures + 1)
+    total_pulls: int = 0
+    total_reward: float = 0.0
+
+    def sample(self) -> float:
+        """Thompson sample — draw a value from Beta(α, β)."""
+        # ``random.betavariate`` is stdlib (no numpy dep), fine for ~4 arms
+        return random.betavariate(self.alpha, self.beta)
+
+    def update(self, reward: float):
+        """Update posterior after observing ``reward``. Defensive clip to [0,1]."""
+        reward = max(0.0, min(1.0, float(reward)))
+        self.alpha += reward
+        self.beta += (1.0 - reward)
+        self.total_pulls += 1
+        self.total_reward += reward
+
+    @property
+    def mean_reward(self) -> float:
+        if self.total_pulls == 0:
+            return 0.5  # prior mean of Beta(1,1)
+        return self.total_reward / self.total_pulls
+
+
+def segment_id(ctx: Tuple[str, str, str]) -> str:
+    """Stable JSONB key for a context tuple.
+
+    String concat (NOT Python ``hash()``) — Python hash is non-deterministic
+    across processes due to PYTHONHASHSEED randomization (MF-V1.2-4 lesson).
+    Caller normalizes case before passing: region.upper(), category.lower().
+    """
+    return f"{ctx[0]}|{ctx[1]}|{ctx[2]}"
+
+
+class ContextualDirectionBandit:
+    """Per-task contextual Thompson Sampling with cold-start fallback.
+
+    State shape:
+      segments: { segment_id: { arm_name: DirectionArm } }
+      global_arms: { arm_name: DirectionArm }  # shared across all segments
+
+    When a segment has fewer than ``cold_threshold`` pulls, ``select_arm``
+    samples the global prior. Once warm, segment-local prior takes over.
+    ``update`` always writes to BOTH segment AND global so cold segments
+    inherit accumulated wisdom (sf-V1.3-C known bias — global is dominated
+    by hot segments; monitor per-segment arm distribution in Phase 2+).
+
+    ``last_select`` caches the most recent ``select_arm`` ``(ctx, arm)``
+    tuple so the next round's reward (computed AFTER the round runs) can
+    update the right (segment, arm) without the caller having to thread it.
+    """
+
+    def __init__(
+        self,
+        arm_names: Optional[Iterable[str]] = None,
+        cold_threshold: int = DEFAULT_COLD_THRESHOLD,
+    ):
+        self.arm_names: List[str] = list(arm_names) if arm_names else list(DEFAULT_BANDIT_ARMS)
+        self.cold_threshold = cold_threshold
+        self.segments: Dict[str, Dict[str, DirectionArm]] = {}
+        self.global_arms: Dict[str, DirectionArm] = {
+            n: DirectionArm(name=n) for n in self.arm_names
+        }
+        # (ctx_tuple, arm_name) — set by select_arm, consumed by update_last_round
+        self.last_select: Optional[Tuple[Tuple[str, str, str], str]] = None
+
+    def _get_or_init_segment(self, sid: str) -> Dict[str, DirectionArm]:
+        if sid not in self.segments:
+            self.segments[sid] = {n: DirectionArm(name=n) for n in self.arm_names}
+        return self.segments[sid]
+
+    def _segment_total_pulls(self, sid: str) -> int:
+        seg = self.segments.get(sid)
+        if not seg:
+            return 0
+        return sum(arm.total_pulls for arm in seg.values())
+
+    def is_cold_at(self, ctx: Tuple[str, str, str]) -> bool:
+        """True when select_arm at ``ctx`` would fall back to global prior."""
+        return self._segment_total_pulls(segment_id(ctx)) < self.cold_threshold
+
+    def select_arm(self, ctx: Tuple[str, str, str]) -> str:
+        """Sample one arm via Thompson Sampling.
+
+        Caches ``(ctx, arm)`` to ``self.last_select`` so the caller can later
+        invoke ``update_last_round(reward)`` without re-passing ctx.
+        """
+        sid = segment_id(ctx)
+        if self._segment_total_pulls(sid) < self.cold_threshold:
+            source = self.global_arms
+        else:
+            source = self._get_or_init_segment(sid)
+        samples = [(n, arm.sample()) for n, arm in source.items()]
+        arm = max(samples, key=lambda x: x[1])[0]
+        self.last_select = (ctx, arm)
+        return arm
+
+    def update(self, ctx: Tuple[str, str, str], arm_name: str, reward: float):
+        """Update both segment-local and global prior for (ctx, arm).
+
+        Forward-compat: silently skip if ``arm_name`` is no longer in
+        ``self.arm_names`` (Phase 2+ arm rename invariance).
+        """
+        if arm_name not in self.arm_names:
+            return
+        sid = segment_id(ctx)
+        seg = self._get_or_init_segment(sid)
+        seg[arm_name].update(reward)
+        self.global_arms[arm_name].update(reward)
+
+    def update_last_round(self, reward: float) -> Optional[Tuple[Tuple[str, str, str], str]]:
+        """Apply ``reward`` to the (ctx, arm) cached by the last ``select_arm``.
+
+        Returns the (ctx, arm) tuple that was updated, or None if no prior
+        select. Clears ``self.last_select`` so a double-update is a no-op.
+        """
+        if self.last_select is None:
+            return None
+        ctx, arm = self.last_select
+        self.update(ctx, arm, reward)
+        self.last_select = None
+        return (ctx, arm)
+
+    def to_dict(self) -> Dict:
+        """Serialize full state to JSONB-safe dict for ``task.config`` persistence."""
+        return {
+            "v": 1,
+            "arm_names": list(self.arm_names),
+            "cold_threshold": self.cold_threshold,
+            "global_arms": {n: asdict(a) for n, a in self.global_arms.items()},
+            "segments": {
+                sid: {n: asdict(a) for n, a in seg.items()}
+                for sid, seg in self.segments.items()
+            },
+            "last_select": (
+                [list(self.last_select[0]), self.last_select[1]]
+                if self.last_select is not None
+                else None
+            ),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict) -> "ContextualDirectionBandit":
+        arm_names = d.get("arm_names") or list(DEFAULT_BANDIT_ARMS)
+        cold = int(d.get("cold_threshold") or DEFAULT_COLD_THRESHOLD)
+        b = cls(arm_names=arm_names, cold_threshold=cold)
+        for name, arm_dict in (d.get("global_arms") or {}).items():
+            if name in b.global_arms and isinstance(arm_dict, dict):
+                for k, v in arm_dict.items():
+                    if hasattr(b.global_arms[name], k):
+                        setattr(b.global_arms[name], k, v)
+        for sid, seg_dict in (d.get("segments") or {}).items():
+            seg = b._get_or_init_segment(sid)
+            for name, arm_dict in (seg_dict or {}).items():
+                if name in seg and isinstance(arm_dict, dict):
+                    for k, v in arm_dict.items():
+                        if hasattr(seg[name], k):
+                            setattr(seg[name], k, v)
+        ls = d.get("last_select")
+        if isinstance(ls, list) and len(ls) == 2 and isinstance(ls[0], list) and len(ls[0]) == 3:
+            b.last_select = (tuple(ls[0]), ls[1])  # type: ignore[assignment]
+        return b
+
+
+async def build_context(task, db_factory=None) -> Tuple[str, str, str]:
+    """Compute 3-dim segment context for ContextualDirectionBandit.
+
+    Returns ``(region, dataset_category, recent_failure_pattern)`` — all str.
+
+    - ``region``: ``MiningTask.region`` top-level Column (MF-V1.3-1 fix —
+      NOT ``task.config.get("regions")`` which never existed). UPPER-cased.
+    - ``dataset_category``: first ``target_datasets[0]``'s
+      ``DatasetMetadata.category`` lowercased; ``"other"`` on no datasets /
+      lookup miss / DB error.
+    - ``recent_failure_pattern``: majority vote (≥2 of 3) over the last 3
+      rounds' ``R1aAttributionLog.attribution`` values for this task;
+      ``"unknown"`` on insufficient data or tie.
+
+    Each DB read uses a FRESH ``AsyncSessionLocal()`` (default ``db_factory``)
+    to avoid MVCC staleness from the caller's long-lived session — R1a writes
+    commit independently from a separate session (evaluation.py v1.6) so the
+    caller's snapshot may miss recently-inserted rows (MF-V1.3-4 fix).
+    """
+    # Lazy import to keep module import light + dodge potential cycles
+    from backend.database import AsyncSessionLocal
+    from backend.models.metadata import DatasetMetadata
+    from backend.models.r1a_attribution import R1aAttributionLog
+    from sqlalchemy import select
+
+    df = db_factory or AsyncSessionLocal
+
+    region = (getattr(task, "region", None) or "USA").upper()
+
+    ds_ids = getattr(task, "target_datasets", None) or []
+    dataset_category = "other"
+    if ds_ids:
+        try:
+            async with df() as s:
+                row = (await s.execute(
+                    select(DatasetMetadata.category)
+                    .where(DatasetMetadata.dataset_id == str(ds_ids[0]))
+                    .limit(1)
+                )).scalar_one_or_none()
+                if row:
+                    dataset_category = str(row).lower()
+        except Exception:
+            # Fail-soft: leave "other" — bandit still works, just less granular
+            pass
+
+    failure_pattern = "unknown"
+    task_id = getattr(task, "id", None)
+    if task_id is not None:
+        try:
+            async with df() as s:
+                recent = (await s.execute(
+                    select(R1aAttributionLog.attribution)
+                    .where(R1aAttributionLog.task_id == task_id)
+                    .order_by(R1aAttributionLog.created_at.desc())
+                    .limit(3)
+                )).scalars().all()
+            if len(recent) >= 3:
+                # R1aAttributionLog writes lowercase strings; defend just in case.
+                c = Counter((a or "unknown").lower() for a in recent)
+                top, count = c.most_common(1)[0]
+                if count >= 2:
+                    failure_pattern = top
+        except Exception:
+            pass
+
+    return (region, dataset_category, failure_pattern)
+
+
+def compute_arm_reward(round_alphas: list) -> float:
+    """5-dim weighted reward ∈ [0,1] for Beta-Bernoulli ``DirectionArm.update``.
+
+    Weights per plan §1.6:
+      sharpe (+0.30), fitness (+0.20), -turnover (-0.15), -self_corr (-0.20),
+      composite_score (+0.35)
+
+    MUST be called on the in-memory ``updated_alphas`` list (NOT a DB query) —
+    most alphas are FAIL/OPTIMIZE and never INSERT, so DB query misses 95%
+    of signal (R1a v1.6 lesson, plan §1.6 MF-A).
+
+    Empty round → 0.0 (no signal, default Beta prior takes over).
+    """
+    if not round_alphas:
+        return 0.0
+    rewards = []
+    for a in round_alphas:
+        m = getattr(a, "metrics", None) or {}
+        sharpe = max(0.0, float(m.get("sharpe") or 0))
+        fitness = max(0.0, float(m.get("fitness") or 0))
+        turnover = float(m.get("turnover") or 0)
+        self_corr = float(m.get("_self_corr") or 0)
+        cs = float(m.get("composite_score") or 0)
+        r = 0.30 * sharpe + 0.20 * fitness - 0.15 * turnover - 0.20 * self_corr + 0.35 * cs
+        # Defensive [0,1] clip per plan v1.3 MF-V1.3-5 (Beta-Bernoulli contract)
+        rewards.append(max(0.0, min(1.0, r)))
+    return sum(rewards) / len(rewards)
