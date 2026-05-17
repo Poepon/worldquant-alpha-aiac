@@ -77,6 +77,32 @@ OPERATOR_TO_PILLAR: dict[str, set[str]] = {
     "multiply":         set(),
     "add":              set(),
     "subtract":         set(),
+
+    # ---- Phase 1 Q4 (2026-05-17): Qlib operator name aliases ----
+    # LLM-generated alpha 或外部知识 import 可能 emit Qlib-style 名字
+    # (Mean/Std/Rank/Delta/Corr/...) 大小写,_extract_operators lowercases
+    # 后查这里。映射沿用 backend/qlib_translator.py 的 BRAIN 等价物语义。
+    # 与既有 BRAIN 名字 (ts_mean / ts_std_dev / ...) 共存,不覆盖。
+    # 注意:`zscore` / `rank` / `sum` / `max` / `min` 等 lowercase 已是 BRAIN
+    # 横截面算子名 (上方已有 neutral 标注),Qlib 同名 lowercased 不重新登记
+    # 避免覆盖 BRAIN 语义。
+    "mean":     {"momentum", "value"},  # alias of ts_mean
+    "std":      {"volatility"},          # alias of ts_std_dev
+    "var":      {"volatility"},          # alias of ts_std_dev (variance ≈ std²)
+    "med":      {"momentum", "value"},   # median behaves like smoothed mean
+    "median":   {"momentum", "value"},
+    "quantile": {"sentiment"},           # alias of ts_quantile
+    "skew":     {"volatility"},          # alias of ts_skewness
+    "kurt":     {"volatility"},          # alias of ts_kurtosis
+    "idxmax":   {"momentum"},            # alias of ts_arg_max
+    "idxmin":   {"momentum"},            # alias of ts_arg_min
+    "corr":     {"quality", "sentiment"},# alias of ts_corr
+    "cov":      {"quality"},             # alias of ts_covariance
+    "wma":      {"volatility"},          # alias of ts_decay_linear
+    "ema":      {"volatility"},          # alias of ts_decay_exp
+    "slope":    {"quality"},             # alias of ts_regression
+    "delta":    {"momentum"},            # alias of ts_delta
+    "ref":      set(),                   # alias of ts_delay (neutral)
 }
 
 
@@ -317,3 +343,54 @@ def infer_pillar(
     if top_v < 1.0:
         return "other"
     return top_p
+
+
+# =============================================================================
+# Phase 1 Q5 (2026-05-17): Five Pillars × Theoretical anchor
+# =============================================================================
+# Static mapping pillar → academic anchor citations. Phase 1 R8 RAG / hypothesis
+# prompt 可注入"该 pillar 的学术根基"上下文,引导 LLM 生成时锚定文献而非凭空。
+# Phase 2+ R5 LLM judge 可对照 anchor 验 hypothesis ↔ description 一致性。
+
+THEORETICAL_ANCHORS: dict[str, list[str]] = {
+    "momentum": [
+        "Jegadeesh & Titman 1993 (3-12m winner-loser)",
+        "Carhart 1997 UMD (4-factor extension)",
+        "Asness Moskowitz Pedersen 2013 (value+momentum everywhere)",
+    ],
+    "value": [
+        "Fama-French 1993 HML (3-factor)",
+        "Fama-French 2015 FF5 (RMW+CMA augmentation)",
+        "Lakonishok Shleifer Vishny 1994 (contrarian investment)",
+    ],
+    "quality": [
+        "Novy-Marx 2013 GP (gross profitability)",
+        "Asness Frazzini Pedersen 2019 QMJ (Quality-Minus-Junk)",
+        "Sloan 1996 (accruals anomaly)",
+    ],
+    "volatility": [
+        "Frazzini Pedersen 2014 BAB (betting against beta)",
+        "Ang Hodrick Xing Zhang 2006 IVOL (idiosyncratic vol puzzle)",
+        "Baker Bradley Wurgler 2011 (low-vol anomaly)",
+    ],
+    "sentiment": [
+        "Baker Wurgler 2006 (investor sentiment index)",
+        "Tetlock 2007 (news textual sentiment)",
+        "Diether Malloy Scherbina 2002 (analyst dispersion)",
+    ],
+    "other": [],  # explicit empty — caller distinguishes "no anchor" vs missing
+}
+
+
+def get_theoretical_anchor(pillar: str) -> list[str]:
+    """Return academic anchors for a Five Pillars pillar string.
+
+    Accepts normalized canonical pillar name (one of PILLAR_VALUES) OR a raw
+    LLM-emit alias that ``normalize_pillar`` would map. Unknown → empty list
+    (NOT "other" — caller can distinguish "anchor lookup failed" from
+    "explicitly anchored to nothing").
+    """
+    if not pillar or not isinstance(pillar, str):
+        return []
+    p = normalize_pillar(pillar) or pillar.strip().lower()
+    return list(THEORETICAL_ANCHORS.get(p, []))

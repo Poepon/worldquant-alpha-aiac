@@ -139,6 +139,13 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase0-R1a",
         description="启用 enhance_existing_node_evaluate shim,把 AttributionType 写入 alpha.metrics 供 Phase 1 R2/Q7 bandit arm-set 反证。≥200 触发观察期门槛。",
     ),
+    # --- Phase 1 R4' Dual-channel RAG ---
+    "ENABLE_DUAL_CHANNEL_RAG": FlagSpec(
+        name="ENABLE_DUAL_CHANNEL_RAG",
+        flag_type="bool",
+        group="Phase1-R4prime",
+        description="hypothesis prompt 拆分 success_patterns / failure_pitfalls 成 Channel A (✓) + Channel B (⛔) 视觉分离。OFF 时 byte-for-byte legacy 单段渲染。",
+    ),
 }
 
 

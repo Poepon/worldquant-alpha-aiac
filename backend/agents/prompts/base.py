@@ -134,15 +134,82 @@ def build_patterns_context(patterns: List[Dict], label: str, max_items: int = 5)
     """Build pattern reference without implying they must be followed."""
     if not patterns:
         return f"No {label} recorded yet."
-    
+
     lines = []
     for p in patterns[:max_items]:
         pattern = p.get("pattern", p.get("template", ""))
         desc = p.get("description", "")
         if pattern:
             lines.append(f"- `{pattern}`: {desc[:80]}")
-    
+
     return "\n".join(lines) if lines else f"No {label} recorded yet."
+
+
+def build_dual_channel_patterns_block(
+    success_patterns: List[Dict],
+    failure_pitfalls: List[Dict],
+    *,
+    dual_channel: bool = False,
+    max_items: int = 5,
+) -> str:
+    """Phase 1 R4' (2026-05-17): render Historical Patterns block in either
+    legacy single-section form OR dual-channel (Channel A ✓ / Channel B ⛔)
+    visual-separated form.
+
+    OFF (dual_channel=False) returns byte-for-byte legacy block — same lines
+    that hypothesis.py emitted pre-R4'. Test
+    ``test_dual_channel_off_byte_for_byte_legacy`` enforces this.
+
+    ON (dual_channel=True) splits into two clearly-marked channels so the LLM
+    treats positive vs negative evidence as orthogonal signals rather than
+    merging both into a single "patterns" stream. P2-D negative nudge stays
+    intact (rendered separately by build_negative_knowledge_nudge_block).
+
+    Returns the full block including the section header and trailing note —
+    the caller splices it as a single `{block}` placeholder.
+    """
+    if not dual_channel:
+        # Legacy form — preserve exact whitespace / wording from hypothesis.py
+        # pre-R4' rendering (lines 250-258 of the f-string template).
+        return (
+            "## Historical Patterns (For Reference Only)\n"
+            "\n"
+            "**Approaches that have worked in similar contexts**:\n"
+            f"{build_patterns_context(success_patterns, 'patterns', max_items=max_items)}\n"
+            "\n"
+            "**Approaches that have not worked**:\n"
+            f"{build_patterns_context(failure_pitfalls, 'pitfalls', max_items=max_items)}\n"
+            "\n"
+            "Note: These are observations, not rules. What failed before may work in different contexts."
+        )
+
+    # Dual-channel form — visual markers + explicit channel framing so the
+    # LLM doesn't conflate positive and negative evidence streams.
+    success_lines = build_patterns_context(success_patterns, "patterns", max_items=max_items)
+    failure_lines = build_patterns_context(failure_pitfalls, "pitfalls", max_items=max_items)
+    return (
+        "## Historical Patterns — Dual Channel (For Reference Only)\n"
+        "\n"
+        "### ✓ Channel A — Approaches that HAVE WORKED in similar contexts\n"
+        "\n"
+        "Treat this channel as positive evidence. Lean toward these patterns "
+        "when the current research question echoes prior success.\n"
+        "\n"
+        f"{success_lines}\n"
+        "\n"
+        "### ⛔ Channel B — Approaches that have NOT worked / produced pitfalls\n"
+        "\n"
+        "Treat this channel as negative evidence. Avoid mirroring these "
+        "pitfalls unless your hypothesis explicitly addresses why the prior "
+        "failure mode no longer applies.\n"
+        "\n"
+        f"{failure_lines}\n"
+        "\n"
+        "Note: Channel A and Channel B are orthogonal evidence streams. A "
+        "pattern's absence from Channel A does NOT make it bad; a pitfall in "
+        "Channel B may still work in a different context. Reason explicitly "
+        "about which channel informs each hypothesis."
+    )
 
 
 def build_strategy_constraints(ctx: PromptContext) -> str:

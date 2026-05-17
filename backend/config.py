@@ -196,6 +196,15 @@ class Settings(BaseSettings):
     # (< 1 分钟)。
     ENABLE_R1A_HOOK: bool = False
 
+    # ----- R4' Dual-channel RAG (Phase 1, 2026-05-17) -----
+    # 把 hypothesis prompt 的 Historical Patterns 段 (现单段渲染
+    # success_patterns + failure_pitfalls) 拆成 Channel A (✓ worked) +
+    # Channel B (⛔ avoided) 视觉分离,提高 LLM positive/negative 信号区分度。
+    # OFF 时 byte-for-byte 走 legacy 单段渲染(P2-D nudge 兼容)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py
+    # (per [[feedback_enable_flag_double_file]] Phase 0 v1.4 教训)。
+    ENABLE_DUAL_CHANNEL_RAG: bool = False
+
     # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
     # T1: 裸 ts_op 信号；2026-05-07 P0 收紧到 BRAIN 提交 gate
     # 旧值 0.8/0.5 是 探索 bar — batch 276-283 产生 8 条 PASS 全部 can_submit=False

@@ -18,11 +18,13 @@ from typing import Dict, List, Optional
 
 from backend.agents.prompts.base import (
     PromptContext,
+    build_dual_channel_patterns_block,  # R4' (2026-05-17 Phase 1)
     build_fields_context,
     build_macro_context_block,  # P2-A (2026-05-16)
     build_patterns_context,
     build_style_preset_block,   # P2-C (2026-05-16)
 )
+from backend.config import settings  # R4': read ENABLE_DUAL_CHANNEL_RAG
 
 
 HYPOTHESIS_SYSTEM = """You are a quantitative research scientist conducting data-driven research.
@@ -236,6 +238,15 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
         f"\n{style_block}\n" if style_block else ""
     )
 
+    # R4' (Phase 1, 2026-05-17): patterns block dual-channel when flag ON,
+    # byte-for-byte legacy when OFF (test_dual_channel_off_byte_for_byte_legacy
+    # enforces this invariant).
+    patterns_block = build_dual_channel_patterns_block(
+        ctx.success_patterns,
+        ctx.failure_pitfalls,
+        dual_channel=getattr(settings, "ENABLE_DUAL_CHANNEL_RAG", False),
+    )
+
     return f"""## Research Context
 
 **Dataset**: {ctx.dataset_id}
@@ -247,15 +258,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 
 {field_overview}
 {macro_block_with_leading_newline}{style_block_with_leading_newline}
-## Historical Patterns (For Reference Only)
-
-**Approaches that have worked in similar contexts**:
-{build_patterns_context(ctx.success_patterns, "patterns")}
-
-**Approaches that have not worked**:
-{build_patterns_context(ctx.failure_pitfalls, "pitfalls")}
-
-Note: These are observations, not rules. What failed before may work in different contexts.
+{patterns_block}
 {trace_section}
 {strategy_section}
 {pillar_nudge_block}
