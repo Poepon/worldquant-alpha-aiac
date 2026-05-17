@@ -4,7 +4,7 @@ Task Models - Mining tasks and experiment tracking
 Contains MiningTask, ExperimentRun, and TraceStep models.
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -51,6 +51,36 @@ class MiningTask(SQLAlchemyBase):
     # Watchdog liveness signal — updated each time _incremental_save_alphas commits.
     last_alpha_persisted_at = Column(DateTime(timezone=True), nullable=True)
 
+    # === Phase 1.5-A (Revision A 7a3f9e1c2b8d, plan v1.3 §1) ===
+    # Dual-default per V1.2-B4:
+    #   default=        → Python-side, fires for any ORM-INSERT (MiningTask(...)
+    #                     constructor) — covers 21 test fixture files without
+    #                     editing each one.
+    #   server_default= → DB-side, fires for raw SQL INSERT + historical row
+    #                     SELECT (column was added with backfill default).
+    # MUST have BOTH — SQLAlchemy ORM-INSERT does NOT consult server_default
+    # at INSERT time, only at refresh post-INSERT.
+    schedule = Column(
+        String(20),
+        default="ONESHOT",
+        server_default="ONESHOT",
+        nullable=False,
+    )
+    starting_tier = Column(
+        Integer,
+        default=1,
+        server_default="1",
+        nullable=False,
+    )
+    # JSONB server_default uses sa.text("'X'::jsonb") form per MF-V1.4-1/2 —
+    # asyncpg requires explicit ::jsonb cast or the column inherits text type.
+    generation_strategy = Column(
+        JSONB,
+        default=lambda: ["llm"],
+        server_default=text("'[\"llm\"]'::jsonb"),
+        nullable=False,
+    )
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
@@ -79,6 +109,18 @@ class ExperimentRun(SQLAlchemyBase):
     prompt_version = Column(String(100))
     thresholds_version = Column(String(100))
     strategy_snapshot = Column(JSONB, default={})
+
+    # === Phase 1.5-A (Revision A 7a3f9e1c2b8d, plan v1.3 §1) ===
+    # Per-run mutable runtime state (current_tier / round_idx / progress /
+    # iteration / last_persisted_at / dag). Phase 1.5-B dual-writes from
+    # legacy MiningTask cols; Phase 2 R6 owns the `dag` sub-key. Dual-default
+    # per V1.2-B4 (Python default=dict + DB server_default='{}'::jsonb).
+    runtime_state = Column(
+        JSONB,
+        default=dict,
+        server_default=text("'{}'::jsonb"),
+        nullable=False,
+    )
 
     started_at = Column(DateTime, server_default=func.now())
     finished_at = Column(DateTime)

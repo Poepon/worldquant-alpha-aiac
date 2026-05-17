@@ -34,6 +34,36 @@ import backend.tasks  # noqa: F401
 
 
 # =============================================================================
+# Phase 1.5-A [V1.2-C3] requires_postgres mark (plan v1.3 §1.5.1)
+# =============================================================================
+# Register the mark and implement collection-modifying hook so tests carrying
+# @pytest.mark.requires_postgres skip when PG_TEST_DSN env var is unset.
+# Without this, the mark is silently ignored and migration tests run on
+# aiosqlite where JSONB server_default behavior diverges.
+#
+# To exercise the migration tests locally:
+#   $env:PG_TEST_DSN = "postgresql+asyncpg://aiac:aiac@localhost:5433/aiac_test"
+#   pytest backend/tests/migration -v
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "requires_postgres: mark test requiring real PostgreSQL "
+        "(skipped if PG_TEST_DSN unset).",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if not os.getenv("PG_TEST_DSN"):
+        skip_pg = pytest.mark.skip(
+            reason="requires PG_TEST_DSN env var to point at real PostgreSQL"
+        )
+        for item in items:
+            if item.get_closest_marker("requires_postgres"):
+                item.add_marker(skip_pg)
+
+
+# =============================================================================
 # Async Configuration
 # =============================================================================
 
