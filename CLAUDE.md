@@ -124,6 +124,11 @@ The standard mining trace per alpha follows `TraceStepType` (in `models/base.py`
 
 Prompts are in `backend/agents/prompts/` (loaded from `prompts.yaml` via `loader.py` + `registry.py`); the legacy `agents/prompts.py` shim re-exports them.
 
+**Mining mode dispatch** (per master plan §6 D3 "保留 legacy 渐进切换"):`backend/tasks/mining_tasks.py:run_mining_task` branches on `MiningTask.mining_mode`:
+1. `CONTINUOUS_CASCADE` (legacy, default) — `_run_continuous_cascade` persistent T1→T2→T3 cycles, singleton per region (partial unique index). Started via `POST /api/v1/mining-session/start`, paused/resumed via `/mining-session/{stop,resume}`.
+2. `FLAT_CONTINUOUS` (flat-F1 advanced, 2026-05-18) — `_run_flat_iteration` hypothesis-driven flat session at `starting_tier` only, no cascade. Multi-task per region OK. Gated by `settings.ENABLE_FLAT_CONTINUOUS` (default OFF — flat-F2 PR will flip default). Started via `POST /api/v1/ops/start-flat-session`, resumed via `POST /api/v1/ops/flat-sessions/{id}/resume` (preserves `runtime_state["flat_cursor"]` across pause-resume per Q1 V2 — uses `_dispatch_session_worker(inherit_runtime_state=True)`). Legacy `/tasks/{id}/intervene` PAUSE/RESUME **refuses FLAT mode** with 400 (Q2 A guard, would otherwise strand the task RUNNING-with-no-worker since intervene_task skips worker dispatch).
+3. `DISCRETE` — original one-shot task path (kept for backwards compat).
+
 ### Standalone analytics modules
 
 These are pure-function modules orchestrated by services/agents — keep them dependency-free and unit-testable:
