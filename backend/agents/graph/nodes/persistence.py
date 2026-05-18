@@ -784,6 +784,35 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
             None
         )
 
+    # R1b.2c wire (2026-05-18): persist cross-round R1b state (pending hypothesis
+    # + budget ledger) to MiningTask.config so next round's
+    # _run_one_round_inline can consume it. Flag-gated by either retry or
+    # mutate flag — when both OFF this block is byte-equivalent legacy
+    # (early-out before any DB I/O). Soft-fail per plan §6.2: never raises.
+    try:
+        from backend.config import settings as _r1b_settings
+        if (
+            bool(getattr(_r1b_settings, "ENABLE_R1B_RETRY_LOOP", False))
+            or bool(getattr(_r1b_settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False))
+        ):
+            _db = configurable.get("db_session")
+            _task_id = getattr(state, "task_id", None)
+            if _db is not None and _task_id is not None:
+                from backend.models import MiningTask
+                from sqlalchemy import select as _sa_select
+                _task_row = (
+                    await _db.execute(_sa_select(MiningTask).where(MiningTask.id == _task_id))
+                ).scalar_one_or_none()
+                if _task_row is not None:
+                    from backend.agents.graph.nodes.r1b_persistence import (
+                        persist_after_round,
+                    )
+                    await persist_after_round(state, _task_row, _db)
+    except Exception as _r1b_ex:
+        logger.warning(
+            f"[{node_name}] R1b.2c persist_after_round failed (round unaffected): {_r1b_ex}"
+        )
+
     return {
         "generated_alphas": state.generated_alphas + success_batch,
         "failures": state.failures + fail_batch,

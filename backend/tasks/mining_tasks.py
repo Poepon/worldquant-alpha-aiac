@@ -1033,6 +1033,28 @@ async def _run_one_round_inline(
 ) -> dict:
     """Run one round on the foreground session. Returns mining_agent result
     dict (or empty dict on failure)."""
+    # R1b.2c wire (2026-05-18): drain any cross-round pending hypothesis from
+    # the prior round's hypothesis_mutate. v1: log + clear only (the actual
+    # injection into MiningState for next-round hypothesis_propose lands in
+    # R1b.2-v2 via a new state field). Flag-gated; soft-fail.
+    try:
+        from backend.config import settings as _r1b_settings
+        if bool(getattr(_r1b_settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)):
+            from backend.agents.graph.nodes.r1b_persistence import (
+                consume_pending_hypothesis,
+            )
+            _consumed = await consume_pending_hypothesis(task, db)
+            if _consumed:
+                logger.info(
+                    f"[r1b_wire] task={task.id} round-entry consumed pending hypothesis "
+                    f"(v1 log-only, injection in R1b.2-v2): "
+                    f"{_consumed.get('statement', '')[:80]}"
+                )
+    except Exception as _r1b_ex:
+        logger.warning(
+            f"[r1b_wire] task={task.id} consume_pending_hypothesis failed (round unaffected): {_r1b_ex}"
+        )
+
     # R1b.4b: route to typed AlphaMiningPipeline when the task opts in via
     # hypothesis_centric_variant=3 + ENABLE_R1B_TYPED_PIPELINE flag.
     typed_result = await _maybe_run_typed_pipeline_round(
