@@ -559,6 +559,11 @@ async def layer1_pillar(
         pillar_match = cast({"pillar_classified": pillar}, JSONB)
         decayed_match = cast({DECAYED_KEY: "true"}, JSONB)
 
+        # M10 fix: over-fetch SUCCESS so post-SQL region filter still has
+        # room to surface `budget` matching rows (mirrors L3 pattern).
+        # Region filter stays in Python due to list/str ambiguity in meta_data
+        # (knowledge_seed convention uses meta_data['regions']: List[str]
+        # OR meta_data['region']: str; missing → treat as ANY per [V1.0-A1-3]).
         succ_rows = (await db.execute(
             select(KnowledgeEntry)
             .where(KnowledgeEntry.is_active == True)  # noqa: E712
@@ -566,7 +571,7 @@ async def layer1_pillar(
             .where(KnowledgeEntry.meta_data.op("@>")(pillar_match))
             .where(not_(KnowledgeEntry.meta_data.op("@>")(decayed_match)))
             .order_by(KnowledgeEntry.id.desc())  # newest first — surfaces fresh evidence
-            .limit(budget)
+            .limit(budget * 2 if region else budget)
         )).scalars().all()
         fail_rows = (await db.execute(
             select(KnowledgeEntry)
@@ -577,9 +582,28 @@ async def layer1_pillar(
             .limit(budget)
         )).scalars().all()
 
-        def _to_entry(r) -> RAGEntry:
+        def _region_ok(md: Dict[str, Any]) -> bool:
+            """M10: region availability check — same logic L3 uses.
+
+            meta_data['regions'] is List[str] OR meta_data['region'] str.
+            Missing → treat as ANY (per plan [V1.0-A1-3]).
+            """
+            if not region:
+                return True
+            kb_regions = md.get("regions") or (
+                [md["region"]] if md.get("region") else None
+            )
+            if not kb_regions:
+                return True
+            normalized = [str(x).upper() for x in kb_regions]
+            return region.upper() in normalized or "ANY" in normalized
+
+        succ: List[RAGEntry] = []
+        for r in succ_rows:
             md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
-            return RAGEntry(
+            if not _region_ok(md):
+                continue
+            succ.append(RAGEntry(
                 pattern_hash=r.pattern_hash or "",
                 pattern=r.pattern or "",
                 entry_type=r.entry_type or "",
@@ -587,10 +611,23 @@ async def layer1_pillar(
                 meta_data=md,
                 source_layer="L1_pillar",
                 relevance_score=0.75,  # mid-high specificity
-            )
-
-        succ = [_to_entry(r) for r in succ_rows]
-        fail = [_to_entry(r) for r in fail_rows]
+            ))
+            if len(succ) >= budget:
+                break
+        # FAILURE: per L3 convention, ignore region constraint (failures are
+        # universal "avoid this" hints).
+        fail: List[RAGEntry] = []
+        for r in fail_rows:
+            md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
+            fail.append(RAGEntry(
+                pattern_hash=r.pattern_hash or "",
+                pattern=r.pattern or "",
+                entry_type=r.entry_type or "",
+                description=r.description or "",
+                meta_data=md,
+                source_layer="L1_pillar",
+                relevance_score=0.75,
+            ))
         return succ[:budget], fail[:budget]
     except Exception as ex:
         logger.warning(f"[hier_rag L1] pillar query failed (return empty): {ex}")
