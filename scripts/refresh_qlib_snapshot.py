@@ -156,10 +156,19 @@ def refresh_region_snapshot(
         df = _build_synthetic_snapshot(region, years, top)
         actual_source = "synthetic"
 
+    # Atomic write: tmp → fsync → rename. A crashed/Ctrl-C mid-write leaves
+    # the .tmp orphan but never a corrupt out_path that QlibEngine would load.
+    tmp_path = out_path + ".tmp"
     try:
-        df.to_parquet(out_path)
+        df.to_parquet(tmp_path)
+        os.replace(tmp_path, out_path)
     except Exception as ex:
         logger.error(f"failed to write parquet {out_path}: {ex}")
+        # Best-effort cleanup of partial tmp; ignore failure (file may not exist)
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
         return None
     logger.info(
         f"[refresh_qlib_snapshot] region={region} source={actual_source} "

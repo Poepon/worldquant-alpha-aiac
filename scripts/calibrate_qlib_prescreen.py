@@ -83,7 +83,18 @@ class FloorEval:
 # ---------------------------------------------------------------------------
 
 async def fetch_pairs_from_db(*, lookback_days: int) -> List[CalibrationRow]:
-    """JOIN qlib_prescreen_log + alphas on brain_expression for shadow pairs.
+    """JOIN qlib_prescreen_log + alphas on normalized brain_expression.
+
+    NOTE on join key:
+      qlib_prescreen_log.expression_hash uses sha256+raw (R1a audit
+      convention). Alpha.expression_hash uses MD5+normalized via
+      compute_expression_hash (different algorithm + input). The two
+      hash columns are NOT directly comparable. We instead join on
+      whitespace-normalized expression text — both sides come from the
+      same alpha.expression at evaluation time, so byte-equality holds
+      modulo trailing/leading whitespace and newline drift from LLM
+      output. Normalizing via regexp_replace(\\s+ → ' ') + trim()
+      catches the realistic drift cases.
 
     Soft-fail: returns [] on any DB / import error (operator can retry).
     """
@@ -94,11 +105,13 @@ async def fetch_pairs_from_db(*, lookback_days: int) -> List[CalibrationRow]:
         logger.warning(f"DB imports unavailable ({ex}); returning empty set")
         return []
     sql = text(
-        """
+        r"""
         SELECT q.local_sharpe AS local_sharpe,
                (a.quality_status IN ('PASS', 'PROVISIONAL')) AS brain_passed
         FROM qlib_prescreen_log q
-        JOIN alphas a ON a.expression = q.brain_expression
+        JOIN alphas a
+          ON trim(regexp_replace(a.expression,    '\s+', ' ', 'g'))
+           = trim(regexp_replace(q.brain_expression, '\s+', ' ', 'g'))
         WHERE q.local_sharpe IS NOT NULL
           AND a.quality_status IS NOT NULL
           AND q.created_at > NOW() - (:days || ' days')::interval
