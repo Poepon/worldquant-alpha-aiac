@@ -41,15 +41,15 @@ class TaskCreateRequest(BaseModel):
     universe: str = "TOP3000"
     dataset_strategy: str = "AUTO"
     target_datasets: List[str] = []
-    # Phase 1.5-Fields (plan v1.3 §5, 2026-05-17): new SoT fields, OPTIONAL.
-    # When unset, fall back to legacy agent_mode → AGENT_MODE_TO_TIER mapping.
-    # When set, take priority over legacy fields (see TaskService.create_task).
-    schedule: Optional[str] = None      # ONESHOT | CASCADE
-    starting_tier: Optional[int] = None  # 1 | 2 | 3
-    # Legacy (still accepted, lower priority than schedule/starting_tier above):
-    agent_mode: str = "AUTONOMOUS"
+    schedule: Optional[str] = None      # ONESHOT | FLAT
     daily_goal: int = 4
     config: dict = {}
+
+    class Config:
+        # Accept legacy agent_mode / starting_tier / mining_mode / current_tier
+        # from stale clients (e.g. cached frontend bookmarks) without 422 —
+        # they're silently dropped post tier-system removal (2026-05-18).
+        extra = "ignore"
 
 
 class TaskResponse(BaseModel):
@@ -58,7 +58,6 @@ class TaskResponse(BaseModel):
     region: str
     universe: str
     dataset_strategy: str
-    agent_mode: str
     status: str
     daily_goal: int
     progress_current: int
@@ -66,19 +65,7 @@ class TaskResponse(BaseModel):
     max_iterations: int = 10
     created_at: datetime
     updated_at: Optional[datetime] = None
-    # Phase 1.5-C [V1.2-C5] (2026-05-18): new authoritative scheduling fields,
-    # dual-written by Phase 1.5-B. Optional for backward compat with old
-    # clients ignoring them. Frontend can ?? fallback to agent_mode/mining_mode
-    # display. Pydantic from_attributes will auto-populate from MiningTask ORM.
     schedule: Optional[str] = None
-    starting_tier: Optional[int] = None
-    mining_mode: Optional[str] = None
-    # phase15-D PR3b/c (2026-05-18): cascade_phase + cascade_round_idx
-    # removed from MiningTask ORM + DB. cleanup pass (this PR) drops the
-    # leftover Optional[None] response fields. current_tier stays for
-    # forward compat — defaults None until a future enhancement reads
-    # run.runtime_state["current_tier"] via async repo call.
-    current_tier: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -125,17 +112,6 @@ class InterventionRequest(BaseModel):
 
 
 # =============================================================================
-# Helpers
-# =============================================================================
-
-
-# phase15-D PR3b (2026-05-18): cascade_phase column dropped → derivation
-# helper _derive_current_tier removed. current_tier defaults None for
-# now;future enhancement can read run.runtime_state["current_tier"]
-# via async repo call when display priority warrants it.
-
-
-# =============================================================================
 # ENDPOINTS
 # =============================================================================
 
@@ -148,7 +124,7 @@ async def list_tasks(
 ):
     """List all mining tasks with optional status filter."""
     tasks = await service.list_tasks(status=status, limit=limit, offset=offset)
-    
+
     return [
         TaskResponse(
             id=t.id,
@@ -156,7 +132,6 @@ async def list_tasks(
             region=t.region,
             universe=t.universe,
             dataset_strategy=t.dataset_strategy,
-            agent_mode=t.agent_mode,
             status=t.status,
             daily_goal=t.daily_goal,
             progress_current=t.progress_current,
@@ -164,11 +139,7 @@ async def list_tasks(
             max_iterations=t.max_iterations,
             created_at=t.created_at,
             updated_at=t.updated_at,
-            # Phase 1.5-C new fields
             schedule=getattr(t, "schedule", None),
-            starting_tier=getattr(t, "starting_tier", None),
-            mining_mode=getattr(t, "mining_mode", None),
-            current_tier=None,  # phase15-D PR3b: cascade_phase derivation removed
         )
         for t in tasks
     ]
@@ -186,28 +157,22 @@ async def create_task(
         universe=request.universe,
         dataset_strategy=request.dataset_strategy,
         target_datasets=request.target_datasets,
-        agent_mode=request.agent_mode,
         daily_goal=request.daily_goal,
         config=request.config,
-        # Phase 1.5-Fields (2026-05-17): pipe new SoT fields through
         schedule=request.schedule,
-        starting_tier=request.starting_tier,
     )
 
-    # PR2: tier eligibility check raises ValueError with a user-facing message
-    # when prereqs aren't met (feature flag off, missing seed alphas, etc).
     try:
         task = await service.create_task(data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    
+
     return TaskResponse(
         id=task.id,
         task_name=task.task_name,
         region=task.region,
         universe=task.universe,
         dataset_strategy=task.dataset_strategy,
-        agent_mode=task.agent_mode,
         status=task.status,
         daily_goal=task.daily_goal,
         progress_current=task.progress_current,
@@ -215,11 +180,7 @@ async def create_task(
         max_iterations=task.max_iterations,
         created_at=task.created_at,
         updated_at=task.updated_at,
-        # Phase 1.5-C new fields
         schedule=getattr(task, "schedule", None),
-        starting_tier=getattr(task, "starting_tier", None),
-        mining_mode=getattr(task, "mining_mode", None),
-        current_tier=None,  # phase15-D PR3b: cascade_phase derivation removed
     )
 
 
@@ -230,17 +191,16 @@ async def get_task(
 ):
     """Get task details including trace steps."""
     detail = await service.get_task_detail(task_id)
-    
+
     if not detail:
         raise HTTPException(status_code=404, detail="Task not found")
-    
+
     return TaskDetailResponse(
         id=detail.id,
         task_name=detail.task_name,
         region=detail.region,
         universe=detail.universe,
         dataset_strategy=detail.dataset_strategy,
-        agent_mode=detail.agent_mode,
         status=detail.status,
         daily_goal=detail.daily_goal,
         progress_current=detail.progress_current,
@@ -248,13 +208,7 @@ async def get_task(
         max_iterations=detail.max_iterations,
         created_at=detail.created_at,
         updated_at=detail.updated_at,
-        # Phase 1.5-C V1.2-C5 cutover (2026-05-18): TaskDetailResponse
-        # previously missed all new scheduling fields — populated now so
-        # the /tasks/{id} detail view matches /tasks listing shape.
         schedule=getattr(detail, "schedule", None),
-        starting_tier=getattr(detail, "starting_tier", None),
-        mining_mode=getattr(detail, "mining_mode", None),
-        current_tier=None,  # phase15-D PR3b: cascade_phase derivation removed
         trace_steps=[
             TraceStepResponse(
                 id=s.id,

@@ -824,7 +824,7 @@ class RAGService:
         hitl_count = (await self.db.execute(hitl_count_stmt)).scalar() or 0
         apply_hitl_bonus = prefer_hitl and hitl_count >= hitl_min_count
 
-        async def _query(*, with_pillar: bool, with_dataset: bool, with_window: bool) -> list:
+        async def _query(*, with_pillar: bool, with_window: bool) -> list:
             q = (
                 select(KnowledgeEntry)
                 .where(
@@ -840,21 +840,24 @@ class RAGService:
                 q = q.where(
                     KnowledgeEntry.meta_data["hypothesis_pillar"].astext == hypothesis_pillar
                 )
-            if with_dataset and dataset_id:
-                # dataset filter applies post-query via meta_data inspection
-                # below (since rows may store dataset under "dataset_id" or
-                # "dataset"); leave the SQL filter coarse.
-                pass
             res = await self.db.execute(q)
             return list(res.scalars().all())
 
-        rows = await _query(with_pillar=True, with_dataset=True, with_window=True)
+        # Cascade: pillar+dataset → dataset → dataset-relaxed → global. Dataset
+        # filter is enforced post-query (rows store id under "dataset_id" /
+        # "dataset"); we toggle ``effective_dataset_id`` to None at level 3 so
+        # the post-filter below relaxes too — without this, levels 2 and 3
+        # would be identical and the cascade collapses to 3 distinct queries.
+        rows = await _query(with_pillar=True, with_window=True)
+        effective_dataset_id = dataset_id
         if len(rows) < 3:
-            rows += await _query(with_pillar=False, with_dataset=True, with_window=True)
+            rows += await _query(with_pillar=False, with_window=True)
         if len(rows) < 3:
-            rows += await _query(with_pillar=False, with_dataset=False, with_window=True)
+            rows += await _query(with_pillar=False, with_window=True)
+            effective_dataset_id = None  # level 3: drop dataset hard filter
         if len(rows) < 3:
-            rows += await _query(with_pillar=False, with_dataset=False, with_window=False)
+            rows += await _query(with_pillar=False, with_window=False)
+            effective_dataset_id = None  # level 4: drop dataset + window
         # Dedupe preserving order
         seen = set()
         deduped = []
@@ -875,14 +878,17 @@ class RAGService:
 
         # HARD dataset filter: only keep entries whose metadata.dataset matches
         # (or entries with NO dataset metadata — those are region-generic).
-        if dataset_id:
+        # Skipped at cascade levels 3-4 (effective_dataset_id is set to None
+        # there so the relax-dataset / global fallbacks actually surface
+        # cross-dataset rows).
+        if effective_dataset_id:
             filtered = []
             for e in rows:
                 md = e.meta_data or {}
                 entry_ds = md.get("dataset_id") or md.get("dataset")
                 if entry_ds is None or entry_ds == "":
                     filtered.append(e)  # generic patterns OK
-                elif str(entry_ds).lower() == str(dataset_id).lower():
+                elif str(entry_ds).lower() == str(effective_dataset_id).lower():
                     filtered.append(e)
                 # else: drop (hard filter)
             dropped = len(rows) - len(filtered)
@@ -890,7 +896,7 @@ class RAGService:
             if dropped:
                 logger.info(
                     f"[RAGService] few-shot dataset filter | dropped={dropped} "
-                    f"(target={dataset_id})"
+                    f"(target={effective_dataset_id})"
                 )
 
         # Plan v5+ §B8 — hypothesis-keyed retrieval. When the caller knows the

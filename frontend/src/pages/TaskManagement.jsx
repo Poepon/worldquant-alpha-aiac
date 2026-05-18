@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Row,
@@ -64,24 +64,10 @@ const REGION_NAMES = {
   IND: 'IND (India)',
 }
 
-// PR3: tier-aware preset thresholds shown alongside the agent_mode selector
-const TIER_PREVIEW = {
-  AUTONOMOUS_TIER1:
-    'sharpe ≥ 0.8 · fitness ≥ 0.5 · turnover [0.01, 0.70] · sub-universe ≥ 0.1 · 不查 self_corr / concentrated',
-  AUTONOMOUS_TIER2:
-    'sharpe ≥ 1.0 · fitness ≥ 0.8 · turnover [0.01, 0.55] · sub-universe ≥ 0.2 · 检查 concentrated · 不查 self_corr',
-  AUTONOMOUS_TIER3:
-    'sharpe ≥ 1.5 · fitness ≥ 1.0 · turnover [0.01, 0.70] · sub-universe ≥ BRAIN 动态 · self_corr verified < 0.7',
-  AUTONOMOUS:
-    'sharpe ≥ 1.5 · fitness ≥ 1.0 · turnover ≤ 0.70 · self_corr < 0.7 (legacy thresholds)',
-}
-
-
 export default function TaskManagement() {
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [datasetStrategy, setDatasetStrategy] = useState('AUTO')
   const [selectedRegion, setSelectedRegion] = useState('USA')
-  const [agentMode, setAgentMode] = useState('AUTONOMOUS')
   const [searchText, setSearchText] = useState('')
   const [isFlatDrawerOpen, setIsFlatDrawerOpen] = useState(false)
   const [flatRegion, setFlatRegion] = useState('USA')
@@ -95,7 +81,6 @@ export default function TaskManagement() {
   const [form] = Form.useForm()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
-  const [searchParams, setSearchParams] = useSearchParams()
 
   // phase15-D PR4b (2026-05-18): V-19 persistent mining session hooks
   // (useQuery miningSessions + 3 useMutations for start/stop/resume)
@@ -110,45 +95,9 @@ export default function TaskManagement() {
     refetchInterval: 10000,
   })
 
-  // PR3: handle ?mode=AUTONOMOUS_TIER2&seed_alpha_id=123 deep-link from
-  // FactorLibrary's "派生 →" button. Opens the create modal with mode and
-  // task_name pre-filled.
-  useEffect(() => {
-    const modeFromUrl = searchParams.get('mode')
-    const seedId = searchParams.get('seed_alpha_id')
-    if (modeFromUrl) {
-      setIsModalOpen(true)
-      setAgentMode(modeFromUrl)
-      const initial = {
-        agent_mode: modeFromUrl,
-        region: 'USA',
-        universe: 'TOP3000',
-        dataset_strategy: 'AUTO',
-        daily_goal: 4,
-        max_iterations: 10,
-        name: seedId
-          ? `${modeFromUrl.replace('AUTONOMOUS_', '')} from #${seedId}`
-          : '',
-      }
-      form.setFieldsValue(initial)
-      // Clear the URL params after consuming so refresh doesn't reopen
-      setSearchParams({})
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  // PR3: seed availability check for T2/T3 modes (drives start-button enable)
-  const tierFromMode = useMemo(() => {
-    if (agentMode === 'AUTONOMOUS_TIER2') return 2
-    if (agentMode === 'AUTONOMOUS_TIER3') return 3
-    return null
-  }, [agentMode])
-
-  const { data: seedAvail } = useQuery({
-    queryKey: ['seed-availability', tierFromMode, selectedRegion],
-    queryFn: () => api.getSeedAvailability(tierFromMode, selectedRegion),
-    enabled: !!tierFromMode && !!selectedRegion,
-  })
+  // Tier deep-link handler removed post tier-system removal (2026-05-18).
+  // Stale ?mode=AUTONOMOUS_TIER... bookmarks are silently ignored — backend
+  // TaskCreateRequest also accepts unknown fields with extra="ignore".
 
   // Create task mutation
   const createTaskMutation = useMutation({
@@ -242,37 +191,14 @@ export default function TaskManagement() {
       width: 120,
     },
     {
-      title: '模式',
-      dataIndex: 'agent_mode',
-      key: 'agent_mode',
-      width: 160,
-      // Phase 1.5-C frontend cutover (2026-05-18): prefer the new
-      // schedule + starting_tier authoritative fields; fall back to
-      // agent_mode for old clients. current_tier (when CASCADE +
-      // RUNNING) shows live phase next to the static schedule label.
-      render: (mode, record) => {
-        const schedule = record?.schedule
-        const startingTier = record?.starting_tier
-        const currentTier = record?.current_tier
-        if (schedule) {
-          const tierLabel = startingTier ? `T${startingTier}` : ''
-          const liveLabel =
-            currentTier && currentTier !== startingTier ? ` → T${currentTier}` : ''
-          // Flat tasks deliberately store schedule="ONESHOT" (see
-          // backend/services/task_service.py:932) — there is no 'FLAT'
-          // literal in the DB, so ONESHOT (purple) covers both legacy
-          // one-shot and flat-F1/F2 sessions.
-          const color = schedule === 'CASCADE' ? 'blue' : 'purple'
-          return (
-            <Tag color={color}>
-              {schedule}
-              {tierLabel ? ` ${tierLabel}${liveLabel}` : ''}
-            </Tag>
-          )
-        }
-        return (
-          <Tag color={mode === 'AUTONOMOUS' ? 'blue' : 'purple'}>{mode}</Tag>
-        )
+      title: '调度',
+      dataIndex: 'schedule',
+      key: 'schedule',
+      width: 120,
+      render: (schedule) => {
+        const value = schedule || 'ONESHOT'
+        const color = value === 'FLAT' ? 'purple' : 'blue'
+        return <Tag color={color}>{value}</Tag>
       },
     },
     {
@@ -407,7 +333,6 @@ export default function TaskManagement() {
               (t.task_name || '').toLowerCase().includes(q) ||
               (t.region || '').toLowerCase().includes(q) ||
               (t.universe || '').toLowerCase().includes(q) ||
-              (t.agent_mode || '').toLowerCase().includes(q) ||
               (t.schedule || '').toLowerCase().includes(q) ||
               (t.status || '').toLowerCase().includes(q)
             )
@@ -526,13 +451,9 @@ export default function TaskManagement() {
             region: 'USA',
             universe: 'TOP3000',
             dataset_strategy: 'AUTO',
-            agent_mode: 'AUTONOMOUS',
             daily_goal: 4,
             max_iterations: 10,
-            // Phase 1.5-Fields (2026-05-18): explicit schedule + starting_tier
-            // override the legacy agent_mode-derived defaults when set.
             schedule: 'ONESHOT',
-            starting_tier: 1,
           }}
         >
           <Form.Item
@@ -574,74 +495,19 @@ export default function TaskManagement() {
               </Form.Item>
             </Col>
             <Col span={12}>
-              <Form.Item name="agent_mode" label="Agent 模式">
-                <Select onChange={(v) => setAgentMode(v)}>
-                  <Option value="AUTONOMOUS">自动 (Legacy)</Option>
-                  <Option value="AUTONOMOUS_TIER1">T1 — 一阶（裸 ts_op）</Option>
-                  <Option value="AUTONOMOUS_TIER2">T2 — 二阶（横截面 / 平滑包装）</Option>
-                  <Option value="AUTONOMOUS_TIER3">T3 — 三阶（trade_when 择时）</Option>
-                  <Option value="INTERACTIVE">交互 (Step-by-step)</Option>
-                </Select>
-              </Form.Item>
-            </Col>
-          </Row>
-
-          {/* Phase 1.5-Fields (2026-05-18) — schedule field, ONESHOT only.
-              phase15-D PR4b cleanup (2026-05-18): CASCADE option deleted
-              along with the conditional starting_tier Form.Item. Cascade
-              schedule path is retired (backend now rejects CASCADE-mode
-              create_task with FAILED status). Tasks default starting_tier=1
-              via the create payload (TASK_CREATE_DEFAULTS below). */}
-          <Row gutter={16}>
-            <Col span={12}>
               <Form.Item
                 name="schedule"
-                label="Schedule (Phase 1.5)"
-                tooltip="ONESHOT = 单 cycle DISCRETE 任务(唯一支持的 schedule);CASCADE 已于 phase15-D 退役"
+                label="Schedule"
+                tooltip="ONESHOT = 单 cycle DISCRETE 任务;FLAT = 持续 flat session(走 /ops/start-flat-session)"
                 rules={[{ required: true, message: '请选择调度模式' }]}
               >
                 <Select>
                   <Option value="ONESHOT">ONESHOT — 单 cycle</Option>
+                  <Option value="FLAT">FLAT — 持续 session</Option>
                 </Select>
               </Form.Item>
             </Col>
           </Row>
-
-          {/* PR3: tier preview banner — shows the PASS thresholds for the
-              currently selected mode so users have realistic expectations */}
-          {TIER_PREVIEW[agentMode] && (
-            <Alert
-              type={agentMode.startsWith('AUTONOMOUS_TIER') ? 'info' : 'warning'}
-              message={`PASS 阈值预览（${agentMode}）`}
-              description={TIER_PREVIEW[agentMode]}
-              style={{ marginBottom: 16 }}
-              showIcon
-            />
-          )}
-
-          {/* PR3: seed availability for T2/T3 — fetched from
-              /factor-library/seed-availability for the chosen region */}
-          {tierFromMode && seedAvail && (
-            <Alert
-              type={seedAvail.is_ready ? 'success' : 'warning'}
-              message={
-                seedAvail.is_ready
-                  ? `T${tierFromMode} 种子可用：${seedAvail.available_seeds} 条 PASS T${
-                      tierFromMode - 1
-                    } alpha 在 ${seedAvail.region}（最少需 ${seedAvail.min_required}）`
-                  : `T${tierFromMode} 种子不足：${seedAvail.available_seeds}/${seedAvail.min_required}`
-              }
-              description={
-                seedAvail.is_ready
-                  ? null
-                  : `请先跑 AUTONOMOUS_TIER${
-                      tierFromMode - 1
-                    } 任务积累 ≥${seedAvail.min_required} 条 PASS 种子，再启动本任务`
-              }
-              style={{ marginBottom: 16 }}
-              showIcon
-            />
-          )}
 
           {datasetStrategy === 'SPECIFIC' && (
             <Form.Item
@@ -678,7 +544,6 @@ export default function TaskManagement() {
                 type="primary"
                 htmlType="submit"
                 loading={createTaskMutation.isLoading}
-                disabled={tierFromMode && seedAvail && !seedAvail.is_ready}
               >
                 创建
               </Button>
