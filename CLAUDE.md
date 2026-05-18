@@ -124,10 +124,11 @@ The standard mining trace per alpha follows `TraceStepType` (in `models/base.py`
 
 Prompts are in `backend/agents/prompts/` (loaded from `prompts.yaml` via `loader.py` + `registry.py`); the legacy `agents/prompts.py` shim re-exports them.
 
-**Mining mode dispatch** (per master plan §6 D3 "保留 legacy 渐进切换"):`backend/tasks/mining_tasks.py:run_mining_task` branches on `MiningTask.mining_mode`:
-1. `CONTINUOUS_CASCADE` (legacy, default) — `_run_continuous_cascade` persistent T1→T2→T3 cycles, singleton per region (partial unique index). Started via `POST /api/v1/mining-session/start`, paused/resumed via `/mining-session/{stop,resume}`.
-2. `FLAT_CONTINUOUS` (flat-F1 advanced, 2026-05-18) — `_run_flat_iteration` hypothesis-driven flat session at `starting_tier` only, no cascade. Multi-task per region OK. Gated by `settings.ENABLE_FLAT_CONTINUOUS` (default OFF — flat-F2 PR will flip default). Started via `POST /api/v1/ops/start-flat-session`, resumed via `POST /api/v1/ops/flat-sessions/{id}/resume` (preserves `runtime_state["flat_cursor"]` across pause-resume per Q1 V2 — uses `_dispatch_session_worker(inherit_runtime_state=True)`). Legacy `/tasks/{id}/intervene` PAUSE/RESUME **refuses FLAT mode** with 400 (Q2 A guard, would otherwise strand the task RUNNING-with-no-worker since intervene_task skips worker dispatch).
-3. `DISCRETE` — original one-shot task path (kept for backwards compat).
+**Task dispatch** (post tier-system removal, 2026-05-19): `backend/tasks/mining_tasks.py:run_mining_task` branches on `MiningTask.schedule`:
+1. `FLAT` — `_run_flat_iteration` hypothesis-driven flat session (dataset × hypothesis iteration). Multi-task per region OK. Gated by `settings.ENABLE_FLAT_CONTINUOUS`. Started via `POST /api/v1/ops/start-flat-session`, resumed via `POST /api/v1/ops/flat-sessions/{id}/resume` (preserves `runtime_state["flat_cursor"]` across pause-resume via `_dispatch_session_worker(inherit_runtime_state=True)`). Legacy `/tasks/{id}/intervene` PAUSE/RESUME **refuses FLAT** with 400 (would otherwise strand the task RUNNING-with-no-worker since intervene_task skips worker dispatch).
+2. `ONESHOT` (default) — one-shot discrete task path; created via `POST /api/v1/tasks`.
+
+Cascade (`CONTINUOUS_CASCADE` + T1/T2/T3 ladder + `agent_mode` + `starting_tier`) was retired in the tier-system removal big-bang (2026-05-19). The flat `EVAL_*` threshold band in `config.py` replaces the per-tier `TIER{1,2,3}_*` dicts; `_eval_thresholds()` in `agents/graph/nodes/evaluation.py` is the single source of truth.
 
 ### Standalone analytics modules
 
@@ -150,13 +151,13 @@ All HTTP traffic to `platform.worldquantbrain.com` goes through `backend/adapter
 
 ### Configuration
 
-`backend/config.py` (Pydantic Settings) is the single source of truth. It reads `.env` and exposes thresholds (`SHARPE_MIN`, `TURNOVER_MAX`, `FITNESS_MIN`, `MAX_CORRELATION`, `SCORE_PASS_THRESHOLD`), bandit / field / diversity weights, multi-fidelity flags, and rate limits (`MAX_SIMULATIONS_PER_DAY`, `MAX_TOKENS_PER_DAY`). Add new tunables here, not as scattered constants.
+`backend/config.py` (Pydantic Settings) is the single source of truth. It reads `.env` and exposes the flat eval-band thresholds (`EVAL_SHARPE_MIN`, `EVAL_FITNESS_MIN`, `EVAL_TURNOVER_MIN/MAX`, `EVAL_SUBUNIV_MIN`, `EVAL_SELF_CORR_MAX`, `EVAL_SCORE_PASS/OPTIMIZE`, `EVAL_PROVISIONAL_*` — consumed via `_eval_thresholds()` in `agents/graph/nodes/evaluation.py`), legacy globals (`SHARPE_MIN`, `TURNOVER_MAX`, `FITNESS_MIN`, `MAX_CORRELATION`, `SCORE_PASS_THRESHOLD` — kept as fallbacks for the Consultant role-switch path), bandit / field / diversity weights, multi-fidelity flags, and rate limits (`MAX_SIMULATIONS_PER_DAY`, `MAX_TOKENS_PER_DAY`). Add new tunables here, not as scattered constants.
 
 `ENABLE_BRAIN_CONSULTANT_MODE` (P3-Brain, 2026-05-16) is a manual toggle flipped from the ops console (`POST /ops/brain/activate-consultant`) after the user receives a BRAIN Consultant upgrade email. Switching unlocks `effective_sharpe_submit_min` (raised to `max(SHARPE_MIN, 1.58)`), `effective_default_test_period` (`P0Y`), and `effective_region_universes` (5 regions: USA/CHN/HKG/JPN/EUR). Task启动时冻结快照到 `MiningTask.config["brain_role_snapshot"]`,后续 round 内读快照而非全局 settings — see `backend/services/brain_role_switch_service.py` + plan §14.
 
 ### Frontend layout
 
-- Routing in `frontend/src/App.jsx` (Dashboard / Tasks / TaskDetail / AlphaLab / AlphaDetail / DataManagement / ConfigCenter).
+- Routing in `frontend/src/App.jsx` (Dashboard / Tasks / TaskDetail / AlphaDetail / DataManagement / ConfigCenter / Ops sub-routes). `AlphaLab` (and `FactorLibrary`) were retired in 2026-05 — `/alphas` redirects to `/tasks`; alpha detail remains at `/alphas/:id`.
 - All HTTP via `frontend/src/services/api.js`. Vite dev server proxies `/api` → backend on `8001`; **don't hardcode `http://localhost:8001`** in components.
 - Live activity uses SSE on `/api/v1/stats/live-feed`.
 
