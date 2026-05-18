@@ -127,6 +127,15 @@ def _op_min(pd, np, df, series, window):
 def _op_ref(pd, np, df, series, lag):
     # Ref($close, -5) = lag by 5 periods (positive shift). Negative ints in
     # qlib semantics. Per-instrument shift, otherwise leakage across stocks.
+    # Defensive: ``brain_to_qlib`` only emits ``Ref(x, -N)`` (past value).
+    # A positive lag here would translate to ``shift(-N)`` = peek into the
+    # future = look-ahead bias. Fail loud if a future translator regression
+    # ever lets a positive lag through, rather than silently producing a
+    # leaky alpha that passes the Q10 floor.
+    assert lag <= 0, (
+        f"Ref with positive lag {lag} would peek into future; "
+        "translator should not emit this"
+    )
     return series.groupby(level="instrument").shift(-int(lag))
 
 
