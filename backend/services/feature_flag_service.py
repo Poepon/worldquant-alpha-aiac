@@ -308,6 +308,20 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "soft-fall direct call。Rollback < 1min via flag flip OFF。"
         ),
     ),
+    # --- R8 query-level telemetry (per-call layer_hits + cache_hit row) ---
+    "ENABLE_R8_QUERY_LOG": FlagSpec(
+        name="ENABLE_R8_QUERY_LOG",
+        flag_type="bool",
+        group="Phase3-R8",
+        description=(
+            "R8 follow-up (2026-05-18): per-query layer_hits + cache_hit + "
+            "had_failure_tree_elevation row in r8_query_log. Default OFF — "
+            "zero overhead on hot RAG path until promoted. Typical use: "
+            "enable for 7d obs window after ENABLE_HIERARCHICAL_RAG flip "
+            "to measure L0/L1/L2/L3 fall-through patterns. Dedicated "
+            "AsyncSession soft-fail INSERT — DB error never aborts RAG."
+        ),
+    ),
     # --- R8-v2 #3 R5 L2 ranking ---
     "ENABLE_R5_L2_RANKING": FlagSpec(
         name="ENABLE_R5_L2_RANKING",

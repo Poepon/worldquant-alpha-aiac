@@ -393,6 +393,14 @@ class Settings(BaseSettings):
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     ENABLE_HIERARCHICAL_RAG_CACHE: bool = False
 
+    # ----- R8 query-level telemetry (2026-05-18 follow-up) -----
+    # Per-call layer_hits + cache_hit + had_failure_tree_elevation row in
+    # r8_query_log. Default OFF — zero overhead on hot RAG path until
+    # operator promotes (typical use: enable during 7d obs window after
+    # ENABLE_HIERARCHICAL_RAG flip to measure layer fall-through patterns).
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_R8_QUERY_LOG: bool = False
+
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
     # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression

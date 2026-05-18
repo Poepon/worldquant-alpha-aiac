@@ -1079,4 +1079,70 @@ async def query_hierarchical(
         f"pitfalls={len(result.pitfalls)} layer_hits={result.layer_hits} "
         f"sql_queries={result.total_queries}"
     )
+
+    # R8 follow-up (2026-05-18): per-query telemetry INSERT — flag-gated,
+    # soft-fail, dedicated session. Operator enables ENABLE_R8_QUERY_LOG
+    # during 7d obs window after promoting ENABLE_HIERARCHICAL_RAG to
+    # measure runtime layer fall-through patterns. Zero overhead when OFF.
+    try:
+        from backend.config import settings as _r8q_stg
+        if bool(getattr(_r8q_stg, "ENABLE_R8_QUERY_LOG", False)):
+            await _write_r8_query_log(
+                region=region,
+                dataset_id=dataset_id,
+                current_expression=current_expression,
+                layer_hits=dict(result.layer_hits or {}),
+                total_queries=int(result.total_queries or 0),
+                cache_hit=False,  # cache hits short-circuit before this point
+                had_failure_tree_elevation=False,  # populated by L2 helper in future
+            )
+    except Exception as _r8q_ex:
+        logger.warning(f"[hier_rag] R8 query_log write skipped (round unaffected): {_r8q_ex}")
+
     return result
+
+
+async def _write_r8_query_log(
+    *,
+    region: Optional[str],
+    dataset_id: Optional[str],
+    current_expression: Optional[str],
+    layer_hits: Dict[str, int],
+    total_queries: int,
+    cache_hit: bool,
+    had_failure_tree_elevation: bool,
+) -> None:
+    """R8 follow-up (2026-05-18) — soft-fail INSERT one row per
+    query_hierarchical call. NEVER raises (caller wraps in try/except too).
+
+    Dedicated AsyncSessionLocal so DB issues don't poison the RAG caller's
+    session. Mirrors _write_r1b_retry_log_rows pattern.
+    """
+    try:
+        from backend.database import AsyncSessionLocal
+        from backend.models.r8_query_log import R8QueryLog
+        from backend.alpha_semantic_validator import compute_expression_hash
+    except Exception as ex:
+        logger.debug(f"[hier_rag log] deps unavailable ({ex})")
+        return
+    expr_hash = None
+    if current_expression:
+        try:
+            expr_hash = compute_expression_hash(current_expression)[:64]
+        except Exception:
+            expr_hash = None
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(R8QueryLog(
+                task_id=None,  # not threaded through RAG context today
+                region=region,
+                dataset_id=dataset_id,
+                current_expression_hash=expr_hash,
+                layer_hits=layer_hits,
+                total_queries=total_queries,
+                cache_hit=cache_hit,
+                had_failure_tree_elevation=had_failure_tree_elevation,
+            ))
+            await db.commit()
+    except Exception as ex:
+        logger.warning(f"[hier_rag log] write failed (round unaffected): {ex}")

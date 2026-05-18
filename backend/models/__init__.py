@@ -100,6 +100,9 @@ from backend.models.qlib_prescreen_log import QlibPrescreenLog
 # outcome reconciliation from alpha persistence)
 from backend.models.r1b_retry import R1bRetryLog
 
+# R8 query-level telemetry (per-call layer_hits + cache_hit row, flag-gated)
+from backend.models.r8_query_log import R8QueryLog
+
 __all__ = [
     # Enums
     "MiningStatus",
