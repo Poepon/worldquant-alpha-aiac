@@ -71,6 +71,8 @@ from backend.tasks.regime_infer import run_regime_infer
 from backend.tasks.q10_tasks import run_q10_layer_telemetry
 # P3-R1b.3 review LOW (2026-05-18): weekly 90-day failure_tree pruner
 from backend.tasks.r1b_tasks import run_failure_tree_pruner
+# P3-R8 query log review LOW (2026-05-18): weekly 90-day r8_query_log pruner
+from backend.tasks.r8_tasks import run_r8_query_log_pruner
 
 __all__ = [
     # Utilities
@@ -118,4 +120,6 @@ __all__ = [
     "run_q10_layer_telemetry",
     # P3-R1b.3 review LOW: weekly failure_tree pruner
     "run_failure_tree_pruner",
+    # P3-R8 query log review LOW: weekly r8_query_log pruner
+    "run_r8_query_log_pruner",
 ]

@@ -217,4 +217,17 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_failure_tree_pruner",
         "schedule": crontab(hour=4, minute=0, day_of_week=0),
     },
+    # P3-R8 query log review LOW (2026-05-18): weekly 90-day pruner for
+    # r8_query_log table. Per-query telemetry row written by
+    # query_hierarchical when ENABLE_R8_QUERY_LOG flag is ON; with
+    # default OFF this is a no-op safety net, but long-term ON promotion
+    # would let the table grow unbounded. Pruner DELETEs rows older than
+    # ``R8_QUERY_LOG_RETENTION_DAYS`` (default 90). Sunday 04:30
+    # Asia/Shanghai — staggered 30min after r1b-failure-tree-pruner
+    # (04:00 SH) so they don't fight for DB resources on the
+    # Windows --pool=solo worker.
+    "r8-query-log-pruner": {
+        "task": "backend.tasks.run_r8_query_log_pruner",
+        "schedule": crontab(hour=4, minute=30, day_of_week=0),
+    },
 }

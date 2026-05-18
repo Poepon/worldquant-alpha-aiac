@@ -400,6 +400,13 @@ class Settings(BaseSettings):
     # ENABLE_HIERARCHICAL_RAG flip to measure layer fall-through patterns).
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     ENABLE_R8_QUERY_LOG: bool = False
+    # R8 query telemetry review LOW (2026-05-18): TTL for r8_query_log
+    # rows. With ENABLE_R8_QUERY_LOG=False default this is a no-op, but
+    # long-term ON promotion would let the table grow unbounded (one row
+    # per query_hierarchical call). Weekly Sunday 04:30 SH beat task
+    # ``run_r8_query_log_pruner`` deletes rows older than this value.
+    # Operational tunable — no feature flag.
+    R8_QUERY_LOG_RETENTION_DAYS: int = 90
 
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
