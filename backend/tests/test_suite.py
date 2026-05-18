@@ -978,8 +978,10 @@ def test_genetic_optimization_cycle(result: TestSuiteResult):
         seed_metrics = {"sharpe": 0.8, "fitness": 0.6, "turnover": 0.5}
         optimizer.initialize(seed_expr, seed_metrics)
         
-        initial_pop = len(optimizer.population.individuals)
-        
+        # W2/R3 island-model: total pop across islands, not just island 0.
+        # optimizer.population aliases islands[0] for backward compat.
+        initial_pop = sum(len(isl.individuals) for isl in optimizer.islands)
+
         # 模拟一些评估结果
         candidates = optimizer.get_simulation_candidates(batch_size=5)
         for ind in candidates:
@@ -993,11 +995,11 @@ def test_genetic_optimization_cycle(result: TestSuiteResult):
                 },
                 "os": {"sharpe": 0.3 + random.random() * 0.7}
             })
-        
+
         # 进化
         optimizer.evolve()
-        
-        final_pop = len(optimizer.population.individuals)
+
+        final_pop = sum(len(isl.individuals) for isl in optimizer.islands)
         
         checks = [
             ("initialized population", initial_pop >= 10),

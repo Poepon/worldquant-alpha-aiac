@@ -1,6 +1,6 @@
 {
-  "timestamp": "2026-01-29T15:57:30.047553",
-  "git_commit": "7075a16",
+  "timestamp": "2026-05-18T17:53:24.799165",
+  "git_commit": "fba9035",
   "total": 18,
   "passed": 18,
   "failed": 0,
@@ -13,7 +13,7 @@
     "mutation_validity_rate": 1.0,
     "diversity_logic_correct": 1.0,
     "pattern_count": 10,
-    "kb_total_entries": 59
+    "kb_total_entries": 3357
   },
   "tests": [
     {
@@ -21,10 +21,10 @@
       "category": "unit",
       "passed": true,
       "message": "Accuracy: 83% (5/6)",
-      "duration_ms": 10.010719299316406,
+      "duration_ms": 4.149436950683594,
       "details": {
-        "valid_passed": 3,
-        "invalid_passed": 2
+        "valid_passed": 4,
+        "invalid_passed": 1
       }
     },
     {
@@ -32,7 +32,7 @@
       "category": "unit",
       "passed": true,
       "message": "4/4 checks passed",
-      "duration_ms": 4.000663757324219,
+      "duration_ms": 5.036592483520508,
       "details": {
         "USA base sharpe": true,
         "KOR < USA sharpe": true,
@@ -45,7 +45,7 @@
       "category": "unit",
       "passed": true,
       "message": "Accuracy: 100% (9/9)",
-      "duration_ms": 3156.175374984741,
+      "duration_ms": 2482.0218086242676,
       "details": {}
     },
     {
@@ -65,15 +65,15 @@
       "category": "unit",
       "passed": true,
       "message": "8/8 checks passed",
-      "duration_ms": 5.537271499633789,
+      "duration_ms": 0.0,
       "details": {
         "operator_sub works": true,
         "window_param works": true,
         "add_wrapper works": true,
         "sign_flip works": true,
-        "balanced parens: operator_sub: ts_ran": true,
-        "balanced parens: window: ts_rank 5 ->": true,
-        "balanced parens: add_wrapper: abs": true,
+        "balanced parens: operator_sub: ts_del": true,
+        "balanced parens: window: ts_delta 5 -": true,
+        "balanced parens: add_wrapper: ts_deca": true,
         "balanced parens: add_negative": true
       }
     },
@@ -82,10 +82,10 @@
       "category": "unit",
       "passed": true,
       "message": "5/5 checks passed",
-      "duration_ms": 3.013134002685547,
+      "duration_ms": 1.5587806701660156,
       "details": {
-        "same_combo_score": 0.3363636363636364,
-        "new_combo_score": 0.8636363636363636
+        "same_combo_score": 0.3,
+        "new_combo_score": 0.7
       }
     },
     {
@@ -93,7 +93,7 @@
       "category": "unit",
       "passed": true,
       "message": "6/6 checks passed",
-      "duration_ms": 1.0001659393310547,
+      "duration_ms": 1.0061264038085938,
       "details": {
         "total_101_patterns": 10,
         "pv_patterns": 5,
@@ -134,7 +134,7 @@
       "category": "integration",
       "passed": true,
       "message": "5/5 checks passed",
-      "duration_ms": 17.83275604248047,
+      "duration_ms": 2.5177001953125,
       "details": {
         "failure_category": "LOW_SHARPE",
         "recommendation": "Add smoothing (ts_decay_linear), try different fie"
@@ -144,9 +144,13 @@
       "name": "Regression: syntax_validation_accuracy",
       "category": "regression",
       "passed": true,
-      "message": "No baseline (new metric). Current: 0.833",
+      "message": "stable: 0.833 -> 0.833 (diff: +0.000)",
       "duration_ms": 0.0,
-      "details": {}
+      "details": {
+        "baseline": 0.8333333333333334,
+        "current": 0.8333333333333334,
+        "diff": 0.0
+      }
     },
     {
       "name": "Regression: category_inference_accuracy",
@@ -201,20 +205,23 @@
       "category": "e2e",
       "passed": true,
       "message": "Connected successfully",
-      "duration_ms": 73.24337959289551,
+      "duration_ms": 30.451297760009766,
       "details": {}
     },
     {
       "name": "Knowledge Base Seeding",
       "category": "e2e",
       "passed": true,
-      "message": "Total entries: 59",
-      "duration_ms": 209.11669731140137,
+      "message": "Total entries: 3357",
+      "duration_ms": 58.685302734375,
       "details": {
-        "total": 59,
+        "total": 3357,
         "by_type": {
-          "FAILURE_PITFALL": 14,
-          "SUCCESS_PATTERN": 45
+          "FAILURE_PITFALL": 2493,
+          "FIELD_INSIGHT": 22,
+          "ANCHOR_METADATA": 74,
+          "HYPOTHESIS_INSIGHT": 14,
+          "SUCCESS_PATTERN": 754
         }
       }
     },
@@ -223,10 +230,10 @@
       "category": "e2e",
       "passed": true,
       "message": "5/5 checks passed",
-      "duration_ms": 2.012968063354492,
+      "duration_ms": 1.544952392578125,
       "details": {
-        "initial_population": 20,
-        "final_population": 20,
+        "initial_population": 29,
+        "final_population": 32,
         "simulations_used": 5
       }
     }
