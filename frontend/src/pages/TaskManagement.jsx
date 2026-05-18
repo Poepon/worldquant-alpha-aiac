@@ -120,6 +120,15 @@ export default function TaskManagement() {
       queryClient.invalidateQueries(['tasks'])
     },
     onError: (err) => {
+      // phase15-D PR4 (2026-05-18): when backend kill-switch
+      // ENABLE_CASCADE_LEGACY=False returns 410 Gone, show migration
+      // guidance instead of the raw detail.
+      if (err?.response?.status === 410) {
+        message.error(
+          'CASCADE 已停用 (phase15-D)。使用 POST /api/v1/ops/start-flat-session 启动 flat 模式。',
+        )
+        return
+      }
       const detail = err?.response?.data?.detail || err.message
       message.error(`启动失败: ${detail}`)
     },
@@ -131,6 +140,11 @@ export default function TaskManagement() {
       message.success('已发送暂停信号 (worker 跑完当前 round 后退出)')
       queryClient.invalidateQueries(['mining-sessions'])
     },
+    onError: (err) => {
+      if (err?.response?.status === 410) {
+        message.error('CASCADE 已停用 (phase15-D)。flat 任务用 /ops/start-flat-session 控制。')
+      }
+    },
   })
 
   const resumeSessionMutation = useMutation({
@@ -138,6 +152,11 @@ export default function TaskManagement() {
     onSuccess: () => {
       message.success('已恢复挖掘')
       queryClient.invalidateQueries(['mining-sessions'])
+    },
+    onError: (err) => {
+      if (err?.response?.status === 410) {
+        message.error('CASCADE 已停用 (phase15-D)。无法 resume。')
+      }
     },
   })
 

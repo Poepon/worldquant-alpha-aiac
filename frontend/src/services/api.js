@@ -123,6 +123,14 @@ const api = {
 
   // V-19 Persistent Mining Service singleton-per-region
   // Single button start/stop. Backend enforces uniqueness via partial index.
+  //
+  // DEPRECATED (phase15-D PR4, 2026-05-18): backend kill-switch
+  // ENABLE_CASCADE_LEGACY returns 410 Gone for all 5 endpoints below
+  // once operator flips it OFF. Callers should migrate to flat-session
+  // controls (POST /ops/start-flat-session). Wrappers kept for back-
+  // compat with TaskManagement.jsx + Dashboard.jsx — error handlers
+  // there detect 410 + show migration guidance.
+  // PR3c will delete these wrappers once frontend cascade UI is removed.
   listMiningSessions: async () => {
     const { data } = await client.get('/mining-session')
     return data
