@@ -142,7 +142,7 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
 
     from sqlalchemy import select
 
-    from backend.agents.graph.tier_thresholds import get_tier_thresholds
+    from backend.agents.graph.nodes.evaluation import _eval_thresholds
     from backend.database import AsyncSessionLocal
     from backend.models import Alpha
     from backend.services.alpha_service import AlphaService
@@ -206,13 +206,12 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
                     f"alpha={alpha.id}: {e}"
                 )
 
-            # Re-evaluate against tier-specific thresholds; demote PASS rows
+            # Re-evaluate against the flat thresholds; demote PASS rows
             # whose metrics drifted below the bar so KB stays clean.
             # BRAIN role-switch (P3-Brain): read task-snapshot sharpe override
             # so running tasks don't get re-judged by Consultant 1.58 mid-run.
             _role_snapshot = await read_role_snapshot(alpha.task_id, db)
-            t = get_tier_thresholds(
-                alpha.factor_tier,
+            t = _eval_thresholds(
                 sharpe_submit_min_override=_role_snapshot.get("effective_sharpe_submit_min"),
             )
             sharpe_ok = (alpha.is_sharpe or 0) >= t["sharpe_min"]
@@ -244,7 +243,7 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
                         new_status="OPTIMIZE",
                         reason=(
                             f"daily_beat_os: BRAIN check FAIL after sync — "
-                            f"{','.join(brain_check_fails)} (T{alpha.factor_tier})"
+                            f"{','.join(brain_check_fails)}"
                         ),
                         source="daily_beat_os",
                     )
@@ -260,7 +259,7 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
                         new_status="PASS_PROVISIONAL",
                         reason=(
                             f"daily_beat_os: drifted from sharpe={old_sharpe:.2f} → "
-                            f"{alpha.is_sharpe:.2f} (T{alpha.factor_tier} bar)"
+                            f"{alpha.is_sharpe:.2f}"
                         ),
                         source="daily_beat_os",
                     )
@@ -851,12 +850,10 @@ def _parse_to_beijing(iso_str):
 def _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_metrics, date_submitted):
     """Update an existing alpha with new data.
 
-    Auto-fills tier-system fields (factor_tier, can_submit, metrics_snapshot_at)
-    so /alphas/sync produces ready-to-use rows for FactorLibrary + T2/T3
-    seed pools without an extra backfill step.
+    Auto-fills BRAIN-derived can_submit + metrics_snapshot_at so /alphas/sync
+    produces ready-to-use rows without an extra backfill step.
     """
     from backend.can_submit import compute_can_submit
-    from backend.factor_tier_classifier import classify_tier
 
     existing.status = a_data.get("status")
     existing.stage = stage
@@ -879,14 +876,6 @@ def _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_met
 
     existing.dataset_id = settings.get("datasetId")
 
-    # Tier system auto-fill — only set factor_tier when classify_tier returns
-    # a definite value; never overwrite an existing tier with None (prior
-    # backfill might have classified it more precisely than the live value).
-    if existing.expression:
-        new_tier = classify_tier(existing.expression)
-        if new_tier is not None:
-            existing.factor_tier = new_tier
-
     can_sub, failed, pending = compute_can_submit(a_data)
     if can_sub is not None:
         existing.can_submit = can_sub
@@ -907,13 +896,11 @@ def _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_met
 def _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_created, date_submitted):
     """Create a new alpha from BRAIN data.
 
-    Auto-fills tier-system fields (factor_tier, can_submit, metrics_snapshot_at)
-    so /alphas/sync produces ready-to-use rows for FactorLibrary + T2/T3
-    seed pools without an extra backfill step.
+    Auto-fills BRAIN-derived can_submit + metrics_snapshot_at so /alphas/sync
+    produces ready-to-use rows without an extra backfill step.
     """
     from backend.alpha_semantic_validator import compute_expression_hash
     from backend.can_submit import compute_can_submit
-    from backend.factor_tier_classifier import classify_tier
 
     expr_code = (
         a_data.get("regular", {}).get("code") or
@@ -923,7 +910,6 @@ def _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_crea
     )
     expr_hash = compute_expression_hash(expr_code) if expr_code != "N/A" else None
 
-    factor_tier = classify_tier(expr_code) if expr_code != "N/A" else None
     can_sub, failed, pending = compute_can_submit(a_data)
 
     return Alpha(
@@ -952,7 +938,6 @@ def _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_crea
         is_short_count=is_metrics.get("shortCount"),
         date_created=date_created,
         date_submitted=date_submitted,
-        factor_tier=factor_tier,
         can_submit=can_sub,
         metrics_snapshot_at=datetime.now(timezone.utc),
         metrics={

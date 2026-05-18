@@ -22,7 +22,6 @@ from backend.models import AlphaFailure, KnowledgeEntry, Alpha
 from backend.agents.prompts import FAILURE_ANALYSIS_SYSTEM, FAILURE_ANALYSIS_USER
 from backend.config import settings
 from backend.agents.services.llm_service import LLMService, get_llm_service
-from backend.factor_tier_classifier import classify_tier
 from backend.protocols import LLMProtocol
 
 from loguru import logger
@@ -361,9 +360,9 @@ class FeedbackAgent:
             await self._increment_pattern_usage(pattern)
             return {"action": "incremented", "pattern": pattern}
         
-        # Create new success pattern (PR2: tag with factor_tier + alpha_id_ref
-        # so the daily refresh beat can locate the source alpha and so RAG can
-        # filter patterns by tier).
+        # Create new success pattern. alpha_id_ref lets the daily refresh beat
+        # locate the source alpha. Post tier-system removal the row no longer
+        # carries factor_tier — RAG filters by meta_data->>'hypothesis_pillar'.
         entry = KnowledgeEntry(
             entry_type='SUCCESS_PATTERN',
             pattern=pattern,
@@ -375,7 +374,6 @@ class FeedbackAgent:
                 'human_feedback': alpha.human_feedback,
                 'alpha_id_ref': alpha.id,
             },
-            factor_tier=classify_tier(alpha.expression or ''),
             created_by='SYSTEM'
         )
         self.db.add(entry)
@@ -1008,7 +1006,6 @@ class FeedbackAgent:
                         'brain_failed_checks': [],
                         'brain_check_at': None,
                     },
-                    factor_tier=classify_tier(skeleton),
                 )
                 self.db.add(entry)
                 new_entries += 1

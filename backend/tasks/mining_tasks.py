@@ -33,16 +33,11 @@ from backend.tasks import run_async
 
 
 def _is_cascade_schedule(task) -> bool:
-    """Cascade detection via authoritative schedule column.
+    """Detect cascade-scheduled tasks (always refused post tier-removal).
 
-    phase15-D PR3d (2026-05-18): simplified to read only ``task.schedule``
-    post-cascade-retirement. Previous dual-source ENABLE_TASK_SCHEMA_V2
-    branch removed since cascade dispatch always-refuses now anyway —
-    return value only used by:
-      1. run_mining_task dispatcher to mark cascade-typed tasks FAILED
-         with cutover guidance (CONTINUOUS_CASCADE rows in DB still exist
-         as historical artifacts after PR3b column drop kept mining_mode)
-      2. session_watchdog discrete probe to defensively skip cascade rows
+    Cascade is permanently retired (phase15-D + tier-system removal). Any
+    surviving row with schedule='CASCADE' is a historical artifact — the
+    dispatcher marks it FAILED with cutover guidance.
     """
     sched = getattr(task, "schedule", None) or ""
     return sched.upper() == "CASCADE"
@@ -379,17 +374,15 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                 # together — net ~730 LoC trim. Cascade dispatch always-FAILS
                 # above; no further code path reaches the deleted helpers.
 
-            # flat-F1 v1.5 (Phase 3, 2026-05-18): FLAT_CONTINUOUS dispatch.
-            # Parallel to CONTINUOUS_CASCADE per master plan §6 D3 "保留 legacy
-            # (渐进切换)". Hypothesis-driven flat session (dataset × hypothesis)
-            # iterating with no T1→T2→T3 cascade. Gated by ENABLE_FLAT_CONTINUOUS
-            # — if a FLAT task is dispatched while the flag is OFF, refuse to
-            # run (defensive: should be unreachable when /ops/start-flat-session
-            # gates correctly).
-            if task.mining_mode == "FLAT_CONTINUOUS":
+            # Post tier-system removal (2026-05-18): flat sessions are the only
+            # continuous mining path. Detect via task.schedule (mining_mode
+            # column dropped). Gated by ENABLE_FLAT_CONTINUOUS — if a FLAT task
+            # is dispatched while the flag is OFF, refuse to run (defensive:
+            # should be unreachable when /ops/start-flat-session gates correctly).
+            if (task.schedule or "").upper() == "FLAT":
                 if not getattr(settings, "ENABLE_FLAT_CONTINUOUS", False):
                     logger.warning(
-                        f"[flat] task_id={task_id} dispatched as FLAT_CONTINUOUS "
+                        f"[flat] task_id={task_id} dispatched as FLAT "
                         f"but ENABLE_FLAT_CONTINUOUS=False; marking FAILED"
                     )
                     await db.execute(
@@ -859,46 +852,8 @@ def _merge_field_pools(primary, supplement):
 # Persistent mining service: while not paused, cycle T1 → T2 → T3 phases
 # for fixed round budgets per phase (round-driven per IX-2). Phase skip
 # when local + global seed pool both insufficient (IX-1 hybrid C). T3
-# default disabled (IX-4 — V-16 suspicion mode pre-emptively rejects
-# sharpe>3 alphas, T3 PASS rate=0% in spike).
-#
-# State persistence: cascade_phase + cascade_round_idx written after each
-# phase boundary so worker crash + watchdog restart resumes mid-cascade
-# (V-19.4 + V-19.7 collaboration).
-
-async def _count_pass_in_task(db, task_id: int, tier: int) -> int:
-    """Count PASS alphas of a given tier owned by THIS task.
-    Used by IX-1 strict closure: T2 seed = local PASS only when ≥ MIN.
-    """
-    from backend.models import Alpha
-    q = (
-        select(func.count(Alpha.id))
-        .where(Alpha.task_id == task_id)
-        .where(Alpha.factor_tier == tier)
-        .where(Alpha.quality_status == "PASS")
-    )
-    return (await db.execute(q)).scalar() or 0
-
-
-async def _count_pass_global_region(db, region: str, tier: int) -> int:
-    """Count PASS alphas of a given tier across the whole region (any task).
-    Used by IX-1 fallback: when local PASS<MIN, try the historical pool.
-    """
-    from backend.models import Alpha
-    q = (
-        select(func.count(Alpha.id))
-        .where(Alpha.region == region)
-        .where(Alpha.factor_tier == tier)
-        .where(Alpha.quality_status == "PASS")
-    )
-    return (await db.execute(q)).scalar() or 0
-
-
-_TIER_TO_AGENT_MODE = {
-    1: "AUTONOMOUS_TIER1",
-    2: "AUTONOMOUS_TIER2",
-    3: "AUTONOMOUS_TIER3",
-}
+# Post tier-system removal (2026-05-18): cascade body + tier-aware seed
+# counters retired. Flat session is the only continuous path.
 
 
 def _get_active_level(task) -> int:
@@ -1000,7 +955,7 @@ async def _maybe_run_typed_pipeline_round(
 
 async def _run_one_round_inline(
     db, task, run, brain, mining_agent, operators,
-    *, dataset_id: str, tier: int,
+    *, dataset_id: str,
 ) -> dict:
     """Run one round on the foreground session. Returns mining_agent result
     dict (or empty dict on failure)."""
@@ -1073,10 +1028,9 @@ async def _run_one_round_inline(
             experiment_variant=str(
                 (task.config or {}).get("hypothesis_centric_variant", active_level)
             ),
-            factor_tier_override=tier,
         )
     except Exception as e:
-        logger.error(f"[cascade T{tier} {dataset_id}] inline round failed: {e}")
+        logger.error(f"[flat round {dataset_id}] inline round failed: {e}")
         try:
             await db.rollback()
             await db.refresh(task)
@@ -1131,14 +1085,13 @@ def _verify_cascade_ownership(lock_key: str, token: str, *, where: str) -> bool:
 
 
 async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_token):
-    """flat-F1 v1.5 main loop — FLAT_CONTINUOUS mining_mode (Phase 3, 2026-05-18).
+    """Flat session main loop (post tier-system removal, 2026-05-18).
 
-    Hypothesis-driven flat session: iterate over (dataset × hypothesis) tuples
-    at ``starting_tier`` only, no T1→T2→T3 cascade. Persists ``flat_cursor`` in
-    ``run.runtime_state`` so pause-resume picks up where it left off (the
-    cursor is inherited into the new ExperimentRun when
-    ``TaskService._dispatch_session_worker`` is called with
-    ``inherit_runtime_state=True`` — see Q1 V2 in plan v1.5 §3.6).
+    Hypothesis-driven flat session: iterate over (dataset × hypothesis) tuples.
+    Persists ``flat_cursor`` in ``run.runtime_state`` so pause-resume picks up
+    where it left off (cursor is inherited into the new ExperimentRun when
+    ``TaskService._dispatch_session_worker(inherit_runtime_state=True)`` —
+    see Q1 V2 in plan v1.5 §3.6).
 
     Bounds: ``settings.FLAT_CONTINUOUS_MAX_ITERATIONS`` iterations or
     ``settings.FLAT_CONTINUOUS_DAILY_GOAL`` alphas, whichever fires first.
@@ -1193,7 +1146,6 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 dag_state = load_or_init(
                     (run.runtime_state or {}).get("dag") if isinstance(run.runtime_state, dict) else None,
                     run_id=int(run.id),
-                    root_tier=int(task.starting_tier or 1),
                 )
                 logger.info(
                     f"[R6 dag flat] task={task.id} run={run.id} init: "
@@ -1247,10 +1199,9 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 except Exception as e:  # noqa: BLE001
                     logger.warning(f"[R6 dag flat] select_next_parent failed (non-fatal): {e}")
 
-            tier = int(task.starting_tier or 1)
             result = await _run_one_round_inline(
                 db, task, run, brain, mining_agent, operators,
-                dataset_id=dataset_id, tier=tier,
+                dataset_id=dataset_id,
             )
             round_alphas = len(result.get("all_alphas") or [])
             total_alphas += round_alphas
@@ -1268,9 +1219,12 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 await db.commit()
 
             # R6 PR3: DAG update with this iter's alphas (soft-fail in helper).
+            # ``tier`` is kept as a legacy 1 for DAG node bookkeeping (read by
+            # DagMonitor frontend); no longer derived from the dropped
+            # task.starting_tier column.
             await _dag_update_after_round(
                 db, run, dag_state,
-                round_result=result, tier=tier, dataset_id=dataset_id,
+                round_result=result, tier=1, dataset_id=dataset_id,
                 round_idx=iterations,
             )
 

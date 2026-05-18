@@ -41,15 +41,10 @@ from backend.models.task import TraceStep
 from backend.tasks import run_async
 
 
-# Phase 1.5-C (2026-05-18): dual-source cascade detection — flag ON reads
-# task.schedule; OFF reads task.mining_mode (legacy). See
-# backend/tasks/mining_tasks.py:_is_cascade_schedule for the shared helper.
-# Duplicated here to avoid cross-import; both readers identical semantics.
 def _is_cascade_schedule(task) -> bool:
-    if getattr(settings, "ENABLE_TASK_SCHEMA_V2", False):
-        sched = getattr(task, "schedule", None) or ""
-        return sched.upper() == "CASCADE"
-    return task.mining_mode == "CONTINUOUS_CASCADE"
+    """Cascade detection via task.schedule (mining_mode column dropped)."""
+    sched = getattr(task, "schedule", None) or ""
+    return sched.upper() == "CASCADE"
 
 
 # ---------------------------------------------------------------------------
@@ -110,24 +105,16 @@ async def _watchdog_revive_async() -> dict:
                 revived=revived,
             )
 
-        # --- (b) V-22.9 DISCRETE T1/T2/T3 tasks (non-cascade) ---
-        # Discrete tasks don't update last_alpha_persisted_at; use latest
-        # trace_step as the liveness signal instead.
-        # Phase 1.5-C (2026-05-18): SQL still filters by mining_mode (index
-        # efficient + dual-written); Python guard via _is_cascade_schedule
-        # ensures flag-flip semantic correctness.
-        stmt = (
-            select(MiningTask)
-            .where(MiningTask.status == "RUNNING")
-            .where(
-                (MiningTask.mining_mode != "CONTINUOUS_CASCADE")
-                | (MiningTask.mining_mode.is_(None))
-            )
-        )
+        # --- (b) DISCRETE / FLAT tasks (non-cascade) ---
+        # These don't update last_alpha_persisted_at every round; use latest
+        # trace_step as the liveness signal instead. Post tier-system removal
+        # (2026-05-18) cascade is permanently retired so the SQL now only
+        # filters by status RUNNING.
+        stmt = select(MiningTask).where(MiningTask.status == "RUNNING")
         discrete_rows = (await db.execute(stmt)).scalars().all()
         for task in discrete_rows:
             if _is_cascade_schedule(task):
-                # flag ON + schedule says cascade → cascade loop above handles
+                # cascade is retired — skip (cascade loop above is no-op anyway)
                 continue
             if task.created_at and task.created_at > grace_cutoff:
                 continue
@@ -152,7 +139,7 @@ async def _watchdog_revive_async() -> dict:
                         latest_trace.isoformat() if latest_trace else None
                     ),
                     "kind": "DISCRETE",
-                    "agent_mode": task.agent_mode,
+                    "schedule": getattr(task, "schedule", None),
                     "dataset_strategy": task.dataset_strategy,
                 },
                 revived=revived,
@@ -277,15 +264,14 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
         prior_runtime_state: dict = {}
         if prior_run is not None and isinstance(prior_run.runtime_state, dict):
             prior_runtime_state = prior_run.runtime_state
-        # phase15-D PR3b: cascade_phase / cascade_round_idx ORM cols dropped;
-        # use getattr fall-throughs so legacy code path still computes a
-        # phase15-D PR3b dropped cascade_phase/cascade_round_idx ORM cols
-        # and PR3c made cascade always-refuse, so any caller hitting this
-        # branch is a non-cascade revive. Defaults: T1, round 0.
+        # Post tier-system removal (2026-05-18): current_tier runtime key
+        # dropped; round_idx + flat_cursor remain. Cascade revive path is dead
+        # (cascade always-refuse since phase15-D PR3c).
         inherited_runtime_state = {
-            "current_tier": prior_runtime_state.get("current_tier", 1),
             "round_idx": prior_runtime_state.get("round_idx", 0),
         }
+        if "flat_cursor" in prior_runtime_state:
+            inherited_runtime_state["flat_cursor"] = prior_runtime_state["flat_cursor"]
 
         run = ExperimentRun(
             task_id=task.id,
@@ -429,11 +415,11 @@ async def _quota_guard_async() -> dict:
         except Exception:
             inflight = -1
 
+        # Post tier-system removal (2026-05-18): cascade retired; quota guard
+        # now PAUSEs all RUNNING tasks (flat sessions included).
         active = (
             await db.execute(
-                select(MiningTask)
-                .where(MiningTask.mining_mode == "CONTINUOUS_CASCADE")
-                .where(MiningTask.status == "RUNNING")
+                select(MiningTask).where(MiningTask.status == "RUNNING")
             )
         ).scalars().all()
         # V-27.7: log moved below the `active` query so the count is real —

@@ -37,7 +37,7 @@ def refresh_kb_referenced_alphas() -> Dict:
 
 async def _refresh_kb_referenced_alphas_async() -> Dict:
     from backend.adapters.brain_adapter import BrainAdapter
-    from backend.agents.graph.tier_thresholds import get_tier_thresholds
+    from backend.agents.graph.nodes.evaluation import _eval_thresholds
     from backend.config import settings
     from backend.database import AsyncSessionLocal
     from backend.models import Alpha, KnowledgeEntry
@@ -120,12 +120,11 @@ async def _refresh_kb_referenced_alphas_async() -> Dict:
             alpha.metrics_snapshot_at = _dt.utcnow()
             refreshed += 1
 
-            # 3. Re-evaluate against tier-specific thresholds.
+            # 3. Re-evaluate against the flat thresholds.
             # BRAIN role-switch (P3-Brain): read task-snapshot sharpe override
             # so running tasks don't get re-judged by Consultant 1.58 mid-run.
             _role_snapshot = await read_role_snapshot(alpha.task_id, db)
-            t = get_tier_thresholds(
-                alpha.factor_tier,
+            t = _eval_thresholds(
                 sharpe_submit_min_override=_role_snapshot.get("effective_sharpe_submit_min"),
             )
             sharpe_ok = (alpha.is_sharpe or 0) >= t["sharpe_min"]
@@ -142,7 +141,7 @@ async def _refresh_kb_referenced_alphas_async() -> Dict:
                         reason=(
                             f"daily_beat_kb: drifted "
                             f"sharpe={alpha.is_sharpe:.2f} fitness={alpha.is_fitness:.2f} "
-                            f"turnover={alpha.is_turnover:.2f} (T{alpha.factor_tier} bar)"
+                            f"turnover={alpha.is_turnover:.2f}"
                         ),
                         source="daily_beat_kb",
                     )
