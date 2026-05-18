@@ -9,6 +9,7 @@ import {
   Statistic,
   Table,
   Tag,
+  Tooltip as AntdTooltip,
 } from 'antd'
 import {
   Bar,
@@ -29,17 +30,12 @@ import OpsSectionCard from './components/OpsSectionCard'
 import useOpsData from './hooks/useOpsData'
 
 /**
- * CoSTEERMonitor — /ops/costeer page (2026-05-18).
+ * CoSTEERMonitor — /ops/costeer 页面 (2026-05-18).
  *
- * Visualizes the three R1a/R1b telemetry endpoints (e52a381 + 1858db1):
- *  - GET /ops/r1a/telemetry?days=N — attribution distribution + R5 stats
- *  - GET /ops/r1b/telemetry?days=N&top_n=M — retry/mutate success rates
- *  - GET /ops/r1b/chain-depth-distribution — mutation chain histogram
- *
- * Operators use this page to decide flag promotions per plan §10 deploy
- * sequence (e.g. flip ENABLE_R1B_HYPOTHESIS_MUTATE only after retry loop
- * shows ≥15% success in a 7d window). The single days dropdown drives
- * both telemetry calls so KPIs stay comparable.
+ * 可视化 R1a + R1b + R8 三组遥测端点。Operator 用此页判断
+ * 是否可推进 flag (例如 R1b 重试成功率 ≥15% 才打开
+ * ENABLE_R1B_HYPOTHESIS_MUTATE)。顶部时间窗口下拉同时
+ * 驱动所有相关接口,确保 KPI 可比。
  */
 export default function CoSTEERMonitor() {
   const [days, setDays] = useState(7)
@@ -61,7 +57,7 @@ export default function CoSTEERMonitor() {
   const r8QueryPayload = r8Query.data || {}
   const recPayload = deployRec.data || {}
 
-  // ---- R1a attribution pie ------------------------------------------------
+  // R1a 归因饼图
   const ATTR_COLORS = {
     hypothesis: '#1677ff',
     implementation: '#52c41a',
@@ -69,25 +65,48 @@ export default function CoSTEERMonitor() {
     unknown: '#faad14',
     null: '#bfbfbf',
   }
+  const ATTR_LABELS = {
+    hypothesis: '假设问题',
+    implementation: '实现问题',
+    both: '两者都有',
+    unknown: '未能识别',
+    null: '无数据',
+  }
   const pieData = (r1aPayload.distribution || []).map((b) => ({
-    name: b.attribution,
+    name: ATTR_LABELS[b.attribution] || b.attribution,
     value: b.count,
+    raw: b.attribution,
   }))
 
-  // ---- R1b chain depth bar ------------------------------------------------
+  // R1b 变异链深度柱图
   const chainBars = (chainPayload.distribution || []).map((b) => ({
-    depth: `d${b.mutation_depth}`,
+    depth: `第 ${b.mutation_depth} 层`,
     count: b.hypothesis_count,
   }))
 
-  // ---- R1b attempt stats table -------------------------------------------
+  // R1b 尝试统计表
+  const OUTCOME_LABELS = {
+    pass: '通过',
+    fail: '失败',
+    pending: '进行中',
+  }
+  const ATTEMPT_LABELS = {
+    retry_implementation: '重试实现',
+    mutate_hypothesis: '变异假设',
+  }
   const attemptColumns = [
-    { title: 'Attempt', dataIndex: 'attempt_type', key: 'attempt_type', width: 130 },
     {
-      title: 'Outcome',
+      title: '尝试类型',
+      dataIndex: 'attempt_type',
+      key: 'attempt_type',
+      width: 130,
+      render: (t) => ATTEMPT_LABELS[t] || t,
+    },
+    {
+      title: '结果',
       dataIndex: 'outcome',
       key: 'outcome',
-      width: 140,
+      width: 120,
       render: (oc) => {
         const c =
           oc === 'pass'
@@ -97,50 +116,50 @@ export default function CoSTEERMonitor() {
             : oc === 'pending'
             ? 'processing'
             : 'default'
-        return <Tag color={c}>{oc}</Tag>
+        return <Tag color={c}>{OUTCOME_LABELS[oc] || oc}</Tag>
       },
     },
-    { title: 'Count', dataIndex: 'count', key: 'count', width: 80 },
+    { title: '数量', dataIndex: 'count', key: 'count', width: 80 },
     {
-      title: 'Cost (USD)',
+      title: '成本 (USD)',
       dataIndex: 'total_cost_usd',
       key: 'total_cost_usd',
       width: 120,
       render: (v) => v?.toFixed(4) ?? '—',
     },
     {
-      title: 'Tokens',
+      title: 'Token 数',
       dataIndex: 'total_tokens_used',
       key: 'total_tokens_used',
-      width: 100,
+      width: 110,
     },
   ]
 
-  // ---- R1b top tasks by budget table -------------------------------------
+  // R1b 高消耗任务 Top N 表
   const taskColumns = [
-    { title: 'Task ID', dataIndex: 'task_id', key: 'task_id', width: 100 },
-    { title: 'Retries', dataIndex: 'retries_total', key: 'retries_total', width: 100 },
-    { title: 'Mutations', dataIndex: 'mutations_total', key: 'mutations_total', width: 110 },
+    { title: '任务 ID', dataIndex: 'task_id', key: 'task_id', width: 100 },
+    { title: '重试次数', dataIndex: 'retries_total', key: 'retries_total', width: 100 },
+    { title: '变异次数', dataIndex: 'mutations_total', key: 'mutations_total', width: 100 },
     {
-      title: 'Cost (USD)',
+      title: '总成本 (USD)',
       dataIndex: 'cost_usd_total',
       key: 'cost_usd_total',
-      width: 120,
+      width: 130,
       render: (v) => v?.toFixed(4) ?? '—',
     },
   ]
 
-  // ---- Flag summary helper -----------------------------------------------
+  // Flag 状态标签
   const flagTag = (label, on) => (
     <Tag color={on ? 'success' : 'default'} key={label}>
-      {label}: {on ? 'ON' : 'OFF'}
+      {label}: {on ? '开' : '关'}
     </Tag>
   )
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <OpsSectionCard
-        title="CoSTEER Loop Monitor (R1a + R1b + R8)"
+        title="CoSTEER 循环监控 (R1a + R1b + R8)"
         source="live"
         loading={
           r1a.loading || r1b.loading || chainDepth.loading || r8.loading ||
@@ -156,21 +175,21 @@ export default function CoSTEERMonitor() {
         }}
       >
         <Space size="middle" style={{ marginBottom: 16 }}>
-          <span>Window:</span>
+          <span>时间窗口：</span>
           <Select
             value={days}
             onChange={setDays}
-            style={{ width: 120 }}
+            style={{ width: 130 }}
             options={[
-              { value: 1, label: 'Last 1 day' },
-              { value: 7, label: 'Last 7 days' },
-              { value: 14, label: 'Last 14 days' },
-              { value: 30, label: 'Last 30 days' },
+              { value: 1, label: '近 1 天' },
+              { value: 7, label: '近 7 天' },
+              { value: 14, label: '近 14 天' },
+              { value: 30, label: '近 30 天' },
             ]}
           />
         </Space>
 
-        {/* Deploy-gate recommendation — top alert summarises next action */}
+        {/* 部署推荐 — 顶部提示下一步操作 */}
         {recPayload.next_action && (
           <Alert
             type={
@@ -184,10 +203,10 @@ export default function CoSTEERMonitor() {
             style={{ marginBottom: 12 }}
             message={
               <Space direction="vertical" size={4} style={{ width: '100%' }}>
-                <strong>Next action: {recPayload.next_action}</strong>
+                <strong>下一步操作：{recPayload.next_action}</strong>
                 {(recPayload.ready_flags_to_flip || []).length > 0 && (
                   <Space wrap>
-                    <span>Ready:</span>
+                    <span>可翻转的 flag：</span>
                     {recPayload.ready_flags_to_flip.map((f) => (
                       <Tag color="success" key={f}>
                         {f}
@@ -205,15 +224,14 @@ export default function CoSTEERMonitor() {
           />
         )}
 
-        {/* Flag state row — operator sees current ON/OFF at a glance */}
+        {/* 当前 Flag 状态行 */}
         <Alert
           message={
             <Space wrap>
-              <strong>Flag state:</strong>
+              <strong>Flag 状态：</strong>
               {Object.entries(r1aPayload.flags || {}).map(([k, v]) => flagTag(k, v))}
               {Object.entries(r1bPayload.flags || {}).map(([k, v]) => flagTag(k, v))}
               {Object.entries(r8Payload.flags || {}).map(([k, v]) => flagTag(k, v))}
-              {/* R8 query-log adds ENABLE_R8_QUERY_LOG + cache flag dedup */}
               {Object.entries(r8QueryPayload.flags || {})
                 .filter(([k]) => k === 'ENABLE_R8_QUERY_LOG' || k === 'ENABLE_HIERARCHICAL_RAG_CACHE')
                 .map(([k, v]) => flagTag(k, v))}
@@ -224,44 +242,52 @@ export default function CoSTEERMonitor() {
           style={{ marginBottom: 16 }}
         />
 
-        {/* KPI row */}
+        {/* KPI 行 */}
         <Row gutter={[16, 16]}>
           <Col xs={24} md={6}>
-            <Statistic
-              title="R1a total in window"
-              value={r1aPayload.total_in_window ?? 0}
-            />
+            <AntdTooltip title="窗口内被 R1a 钩子捕获的 alpha 数（含成功与失败）">
+              <Statistic
+                title="R1a 窗口内总条数"
+                value={r1aPayload.total_in_window ?? 0}
+              />
+            </AntdTooltip>
           </Col>
           <Col xs={24} md={6}>
-            <Statistic
-              title="R1a non-unknown %"
-              value={((r1aPayload.non_unknown_pct ?? 0) * 100).toFixed(2)}
-              suffix="%"
-            />
+            <AntdTooltip title="R1a 能区分『假设问题 vs 实现问题』的比例。健康部署 ≥ 70%">
+              <Statistic
+                title="R1a 已识别归因占比"
+                value={((r1aPayload.non_unknown_pct ?? 0) * 100).toFixed(2)}
+                suffix="%"
+              />
+            </AntdTooltip>
           </Col>
           <Col xs={24} md={6}>
-            <Statistic
-              title="R1b retry pass rate"
-              value={((r1bPayload.success_rate_retry_impl ?? 0) * 100).toFixed(2)}
-              suffix="%"
-            />
+            <AntdTooltip title="R1b『重试实现』后通过的比例。≥ 15% 才可推进 mutate_hypothesis flag">
+              <Statistic
+                title="R1b 重试实现成功率"
+                value={((r1bPayload.success_rate_retry_impl ?? 0) * 100).toFixed(2)}
+                suffix="%"
+              />
+            </AntdTooltip>
           </Col>
           <Col xs={24} md={6}>
-            <Statistic
-              title="R1b mutate pass rate"
-              value={((r1bPayload.success_rate_mutate_hyp ?? 0) * 100).toFixed(2)}
-              suffix="%"
-            />
+            <AntdTooltip title="R1b『变异假设』后通过的比例">
+              <Statistic
+                title="R1b 变异假设成功率"
+                value={((r1bPayload.success_rate_mutate_hyp ?? 0) * 100).toFixed(2)}
+                suffix="%"
+              />
+            </AntdTooltip>
           </Col>
         </Row>
       </OpsSectionCard>
 
       <Row gutter={[16, 16]}>
-        {/* R1a attribution distribution pie */}
+        {/* R1a 归因分布饼图 */}
         <Col xs={24} lg={12}>
-          <OpsSectionCard title="R1a Attribution Distribution">
+          <OpsSectionCard title="R1a 归因分布（窗口内失败/优化的 alpha 归因）">
             {pieData.length === 0 ? (
-              <Empty description="No R1a data in window" />
+              <Empty description="窗口内暂无 R1a 数据" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <PieChart>
@@ -275,7 +301,7 @@ export default function CoSTEERMonitor() {
                     label={({ name, value }) => `${name}: ${value}`}
                   >
                     {pieData.map((entry) => (
-                      <Cell key={entry.name} fill={ATTR_COLORS[entry.name] || '#8c8c8c'} />
+                      <Cell key={entry.raw} fill={ATTR_COLORS[entry.raw] || '#8c8c8c'} />
                     ))}
                   </Pie>
                   <Tooltip />
@@ -287,35 +313,35 @@ export default function CoSTEERMonitor() {
               {r1aPayload.r5_sample_size > 0 && (
                 <>
                   <Tag color="purple">
-                    R5 sample: {r1aPayload.r5_sample_size}
+                    R5 样本数：{r1aPayload.r5_sample_size}
                   </Tag>
                   <Tag color="purple">
-                    R5 agrees R1a:{' '}
+                    R5 与 R1a 一致率：
                     {((r1aPayload.r5_agrees_r1a_pct ?? 0) * 100).toFixed(1)}%
                   </Tag>
                   <Tag color="purple">
-                    R5 avg score:{' '}
+                    R5 平均评分：
                     {(r1aPayload.r5_avg_composite_score ?? 0).toFixed(3)}
                   </Tag>
                   <Tag color="purple">
-                    R5 cost: ${(r1aPayload.r5_total_cost_usd ?? 0).toFixed(4)}
+                    R5 累计成本：${(r1aPayload.r5_total_cost_usd ?? 0).toFixed(4)}
                   </Tag>
                 </>
               )}
               {r1aPayload.errs_count_total > 0 && (
                 <Tag color="error">
-                  Hook errors: {r1aPayload.errs_count_total}
+                  钩子错误数：{r1aPayload.errs_count_total}
                 </Tag>
               )}
             </Space>
           </OpsSectionCard>
         </Col>
 
-        {/* R1b chain depth histogram */}
+        {/* R1b 变异链深度柱图 */}
         <Col xs={24} lg={12}>
-          <OpsSectionCard title="R1b CoSTEER Chain Depth">
+          <OpsSectionCard title="R1b 变异链深度分布">
             {chainBars.length === 0 ? (
-              <Empty description="No hypotheses in DB" />
+              <Empty description="数据库内暂无假设" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <BarChart data={chainBars}>
@@ -328,13 +354,13 @@ export default function CoSTEERMonitor() {
               </ResponsiveContainer>
             )}
             <Space wrap style={{ marginTop: 12 }}>
-              <Tag>Roots: {chainPayload.total_root_hypotheses ?? 0}</Tag>
+              <Tag>根假设：{chainPayload.total_root_hypotheses ?? 0}</Tag>
               <Tag color="purple">
-                Mutated: {chainPayload.total_mutated_hypotheses ?? 0}
+                已变异：{chainPayload.total_mutated_hypotheses ?? 0}
               </Tag>
-              <Tag>Max depth: {chainPayload.max_depth_observed ?? 0}</Tag>
+              <Tag>最大深度：{chainPayload.max_depth_observed ?? 0}</Tag>
               <Tag>
-                Avg depth: {(chainPayload.chain_depth_avg ?? 0).toFixed(3)}
+                平均深度：{(chainPayload.chain_depth_avg ?? 0).toFixed(3)}
               </Tag>
             </Space>
           </OpsSectionCard>
@@ -342,41 +368,41 @@ export default function CoSTEERMonitor() {
       </Row>
 
       <Row gutter={[16, 16]}>
-        {/* R1b attempt stats table */}
+        {/* R1b 尝试统计表 */}
         <Col xs={24} lg={14}>
-          <OpsSectionCard title="R1b Attempt Stats">
+          <OpsSectionCard title="R1b 尝试统计（按重试 / 变异分类）">
             <Table
               size="small"
               dataSource={r1bPayload.attempt_stats || []}
               columns={attemptColumns}
               rowKey={(r) => `${r.attempt_type}::${r.outcome}`}
               pagination={false}
-              locale={{ emptyText: 'No R1b attempts in window' }}
+              locale={{ emptyText: '窗口内暂无 R1b 尝试' }}
             />
           </OpsSectionCard>
         </Col>
 
-        {/* R1b top tasks by budget */}
+        {/* R1b 高消耗任务 */}
         <Col xs={24} lg={10}>
-          <OpsSectionCard title="R1b Top Tasks by Budget">
+          <OpsSectionCard title="R1b 高消耗任务 Top 5">
             <Table
               size="small"
               dataSource={r1bPayload.top_tasks_by_budget || []}
               columns={taskColumns}
               rowKey="task_id"
               pagination={false}
-              locale={{ emptyText: 'No tasks with R1b budget yet' }}
+              locale={{ emptyText: '尚无消耗 R1b 预算的任务' }}
             />
           </OpsSectionCard>
         </Col>
       </Row>
 
-      {/* R8 hierarchical RAG KB shape — gate evidence for ENABLE_HIERARCHICAL_RAG flip */}
+      {/* R8 知识库 shape — 是 ENABLE_HIERARCHICAL_RAG flag 翻转的证据 */}
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
-          <OpsSectionCard title="R8 KB Entry Types (active vs decayed)">
+          <OpsSectionCard title="R8 知识库条目类型（活跃 vs 已衰减）">
             {(r8Payload.entry_types || []).length === 0 ? (
-              <Empty description="No KB rows" />
+              <Empty description="知识库无数据" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <BarChart
@@ -390,7 +416,7 @@ export default function CoSTEERMonitor() {
                   <XAxis dataKey="type" />
                   <YAxis allowDecimals={false} />
                   <Tooltip />
-                  <Legend />
+                  <Legend formatter={(v) => (v === 'active' ? '活跃' : '已衰减')} />
                   <Bar dataKey="active" stackId="kb" fill="#1677ff" />
                   <Bar dataKey="decayed" stackId="kb" fill="#bfbfbf" />
                 </BarChart>
@@ -398,26 +424,26 @@ export default function CoSTEERMonitor() {
             )}
             <Space wrap style={{ marginTop: 12 }}>
               <Tag color="blue">
-                Total active: {r8Payload.total_active ?? 0}
+                活跃总数：{r8Payload.total_active ?? 0}
               </Tag>
-              <Tag>Total decayed: {r8Payload.total_decayed ?? 0}</Tag>
+              <Tag>已衰减总数：{r8Payload.total_decayed ?? 0}</Tag>
               <Tag color="success">
-                SUCCESS active: {r8Payload.success_pattern_active ?? 0}
+                活跃成功模式：{r8Payload.success_pattern_active ?? 0}
               </Tag>
               <Tag color="error">
-                FAILURE active: {r8Payload.failure_pitfall_active ?? 0}
+                活跃失败教训：{r8Payload.failure_pitfall_active ?? 0}
               </Tag>
               <Tag color="purple">
-                R5-rankable SUCCESS: {r8Payload.r5_rankable_success_count ?? 0}
+                R5 可排序条数：{r8Payload.r5_rankable_success_count ?? 0}
               </Tag>
             </Space>
           </OpsSectionCard>
         </Col>
 
         <Col xs={24} lg={10}>
-          <OpsSectionCard title="R8 Pillar Coverage (active)">
+          <OpsSectionCard title="R8 支柱覆盖（活跃）">
             {(r8Payload.pillars || []).length === 0 ? (
-              <Empty description="No pillar data" />
+              <Empty description="暂无支柱数据" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <PieChart>
@@ -449,19 +475,16 @@ export default function CoSTEERMonitor() {
         </Col>
       </Row>
 
-      {/* R8 query-log runtime telemetry — per-layer hit rates + cache + region
-          Populated only when ENABLE_R8_QUERY_LOG is ON; total_queries=0 banner
-          otherwise. Layer rates are independent (a query may touch multiple
-          layers) so cumulative > 1.0 is valid. */}
+      {/* R8 实时层命中率 — 仅在 ENABLE_R8_QUERY_LOG 打开时有数据 */}
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
-          <OpsSectionCard title="R8 Runtime Layer Hit Rates">
+          <OpsSectionCard title="R8 实时层级命中率（窗口内每层被命中的比例）">
             {(r8QueryPayload.total_queries ?? 0) === 0 ? (
               <Empty
                 description={
                   r8QueryPayload.flags?.ENABLE_R8_QUERY_LOG
-                    ? 'No queries in window'
-                    : 'ENABLE_R8_QUERY_LOG OFF — enable to capture runtime layer fall-through'
+                    ? '窗口内暂无查询'
+                    : 'ENABLE_R8_QUERY_LOG 未开启 — 打开后才会记录实时层级跳转'
                 }
               />
             ) : (
@@ -486,13 +509,13 @@ export default function CoSTEERMonitor() {
               </ResponsiveContainer>
             )}
             <Space wrap style={{ marginTop: 12 }}>
-              <Tag>Total queries: {r8QueryPayload.total_queries ?? 0}</Tag>
+              <Tag>总查询数：{r8QueryPayload.total_queries ?? 0}</Tag>
               <Tag color={r8QueryPayload.cache_hit_rate > 0 ? 'success' : 'default'}>
-                Cache hit:{' '}
+                缓存命中率：
                 {((r8QueryPayload.cache_hit_rate ?? 0) * 100).toFixed(2)}%
               </Tag>
               <Tag color="purple">
-                Failure-tree elev:{' '}
+                失败树升级率：
                 {((r8QueryPayload.failure_tree_elevation_rate ?? 0) * 100).toFixed(2)}%
               </Tag>
             </Space>
@@ -500,9 +523,9 @@ export default function CoSTEERMonitor() {
         </Col>
 
         <Col xs={24} lg={10}>
-          <OpsSectionCard title="R8 Queries by Region">
+          <OpsSectionCard title="R8 各地区查询数">
             {Object.keys(r8QueryPayload.by_region || {}).length === 0 ? (
-              <Empty description="No regional data" />
+              <Empty description="暂无地区数据" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <BarChart

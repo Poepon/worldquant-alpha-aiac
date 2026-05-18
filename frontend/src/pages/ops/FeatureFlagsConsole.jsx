@@ -41,10 +41,7 @@ const SOURCE_TAG_COLORS = {
 // list falls back to alphabetic order.
 const GROUP_ORDER = ['P0', 'P1', 'P2-A', 'P2-B', 'P2-C', 'P2-D', 'P3-Brain']
 
-// BrainRoleEntryCard — light-weight banner pointing operators to the
-// dedicated /ops/brain-role page. The full switch UI (Modal, ack checkbox,
-// before/after diff) lives there. We still fetch role-state here so the
-// banner can show the current mode + warning if state can't be loaded.
+// BrainRoleEntryCard — 轻量入口卡，跳转到 /ops/brain-role 专属页
 function BrainRoleEntryCard() {
   const [state, setState] = useState(null)
 
@@ -53,6 +50,7 @@ function BrainRoleEntryCard() {
   }, [])
 
   const isConsultant = state?.mode === 'CONSULTANT'
+  const modeLabel = isConsultant ? '顾问模式' : '普通模式'
   return (
     <Alert
       type={isConsultant ? 'warning' : 'info'}
@@ -62,15 +60,15 @@ function BrainRoleEntryCard() {
       message={
         <Space>
           <span>BRAIN 模式</span>
-          {state && <Tag color={isConsultant ? 'gold' : 'green'}>{state.mode}</Tag>}
+          {state && <Tag color={isConsultant ? 'gold' : 'green'}>{modeLabel}</Tag>}
           <Link to="/ops/brain-role">前往 BRAIN 模式专属页 →</Link>
         </Space>
       }
       description={
         <Text type="secondary" style={{ fontSize: 12 }}>
-          USER ↔ CONSULTANT 切换、能力对比、操作确认均在专属页完成。
-          <code>ENABLE_BRAIN_CONSULTANT_MODE</code> flag 在下方表中只读，
-          直接 PATCH 会绕过 multi-sim latch 清理 + sync_datasets 任务。
+          普通模式 ↔ 顾问模式 的切换、能力对比、操作确认都在专属页完成。
+          <code>ENABLE_BRAIN_CONSULTANT_MODE</code> 这条 Flag 在下方表里是只读的——
+          直接切换会跳过批量模拟控制位重置和全球数据同步任务。
         </Text>
       }
     />
@@ -108,7 +106,7 @@ export default function FeatureFlagsConsole() {
       const data = await api.listFeatureFlags()
       setFlags(data)
     } catch (e) {
-      message.error(`加载 flag 失败:${e?.response?.data?.detail || e.message}`)
+      message.error(`加载 Flag 失败：${e?.response?.data?.detail || e.message}`)
     } finally {
       setLoading(false)
     }
@@ -146,11 +144,11 @@ export default function FeatureFlagsConsole() {
       const updated = await api.setFeatureFlag(flag.name, nextValue)
       setFlags((prev) => prev.map((f) => (f.name === flag.name ? updated : f)))
       message.success(
-        `${flag.name} → ${String(nextValue)}(60s 内 worker 进程也会感知;点 "全量刷新" 立即生效)`,
+        `${flag.name} → ${String(nextValue)}（60 秒内其他后台进程也会同步；点『全量刷新』可立即生效）`,
       )
     } catch (e) {
       message.error(
-        `flip 失败:${e?.response?.data?.detail || e.message}`,
+        `切换失败：${e?.response?.data?.detail || e.message}`,
       )
       // Refetch to re-sync UI with backend's authoritative state
       fetchFlags()
@@ -164,9 +162,9 @@ export default function FeatureFlagsConsole() {
     try {
       const updated = await api.clearFeatureFlag(flag.name)
       setFlags((prev) => prev.map((f) => (f.name === flag.name ? updated : f)))
-      message.success(`${flag.name} override 已清除,回落 env 默认`)
+      message.success(`${flag.name} 覆盖已清除，回到环境变量默认值`)
     } catch (e) {
-      message.error(`reset 失败:${e?.response?.data?.detail || e.message}`)
+      message.error(`重置失败：${e?.response?.data?.detail || e.message}`)
       fetchFlags()
     } finally {
       setBusyFlag(null)
@@ -178,11 +176,11 @@ export default function FeatureFlagsConsole() {
     try {
       const { refreshed, flags: names } = await api.refreshAllFlags()
       message.success(
-        `已强制刷新本进程缓存(共 ${refreshed} 条 override:${names.join(', ') || '无'})`,
+        `已强制刷新本进程缓存（共 ${refreshed} 条覆盖：${names.join('、') || '无'}）`,
       )
       await fetchFlags()
     } catch (e) {
-      message.error(`refresh-all 失败:${e?.response?.data?.detail || e.message}`)
+      message.error(`全量刷新失败：${e?.response?.data?.detail || e.message}`)
     } finally {
       setRefreshingAll(false)
     }
@@ -195,7 +193,7 @@ export default function FeatureFlagsConsole() {
       const rows = await api.listFeatureFlagAudit(50)
       setAudit(rows)
     } catch (e) {
-      message.error(`加载 audit 失败:${e?.response?.data?.detail || e.message}`)
+      message.error(`加载变更记录失败：${e?.response?.data?.detail || e.message}`)
       setAudit([])
     } finally {
       setAuditLoading(false)
@@ -204,7 +202,7 @@ export default function FeatureFlagsConsole() {
 
   const columns = [
     {
-      title: 'Flag',
+      title: 'Flag 名称',
       dataIndex: 'name',
       width: 320,
       render: (name, row) => (
@@ -233,7 +231,7 @@ export default function FeatureFlagsConsole() {
         // latch 清理 + sync_datasets enqueue,Consultant 模式有名无实。
         if (row.name === 'ENABLE_BRAIN_CONSULTANT_MODE') {
           return (
-            <Tooltip title="此 flag 必须在上方 'BRAIN 模式' 卡片切换 — 直接 PATCH 会绕过 multi-sim latch 清理与全球数据同步">
+            <Tooltip title="此 Flag 必须通过上方『BRAIN 模式』卡片切换 — 直接修改会跳过批量模拟控制位重置和全球数据同步任务">
               <Tag color={row.effective_value ? 'gold' : 'default'}>
                 {String(row.effective_value)} · 见上方卡片
               </Tag>
@@ -257,12 +255,17 @@ export default function FeatureFlagsConsole() {
       title: '来源',
       dataIndex: 'source',
       width: 140,
-      render: (src) => (
-        <Tag color={SOURCE_TAG_COLORS[src] || 'default'}>{src}</Tag>
-      ),
+      render: (src) => {
+        const labels = {
+          env: '环境变量',
+          default: '默认值',
+          'runtime-override': '运行时覆盖',
+        }
+        return <Tag color={SOURCE_TAG_COLORS[src] || 'default'}>{labels[src] || src}</Tag>
+      },
     },
     {
-      title: 'env 默认',
+      title: '默认值',
       dataIndex: 'env_default',
       width: 90,
       render: (v) => <Text code>{String(v)}</Text>,
@@ -288,7 +291,7 @@ export default function FeatureFlagsConsole() {
         }
         return row.source === 'runtime-override' ? (
           <Popconfirm
-            title="清除此 override,回落 env 默认?"
+            title="清除此覆盖，回到环境变量默认值？"
             onConfirm={() => handleReset(row)}
           >
             <Button size="small" type="link">
@@ -312,7 +315,7 @@ export default function FeatureFlagsConsole() {
           Feature Flag 控制台
         </Title>
         <Space>
-          <Tooltip title="强制本进程立即从 DB 重读所有 override(无需等 60s 刷新)">
+          <Tooltip title="强制立即重读所有覆盖（不必等待 60 秒自动刷新）">
             <Button
               icon={<ThunderboltOutlined />}
               onClick={handleRefreshAll}
@@ -322,7 +325,7 @@ export default function FeatureFlagsConsole() {
             </Button>
           </Tooltip>
           <Button icon={<HistoryOutlined />} onClick={openAudit}>
-            查看 audit
+            查看变更记录
           </Button>
           <Button icon={<ReloadOutlined />} onClick={fetchFlags} loading={loading}>
             重新加载
@@ -331,8 +334,8 @@ export default function FeatureFlagsConsole() {
       </Space>
 
       <Text type="secondary">
-        翻转开关后写入 DB + 当前进程立即生效;其他 worker 进程在 60s 内同步,或点
-        "全量刷新" 强制本进程刷新。重置 = 清除 override 回落到 env 默认。
+        切换开关后立即在当前进程生效；其他后台进程会在 60 秒内同步，点
+        『全量刷新』可立即生效。『重置』= 清除运行时覆盖、回到环境变量默认值。
       </Text>
 
       {/* P3-Brain — banner linking to dedicated /ops/brain-role page */}
@@ -343,7 +346,7 @@ export default function FeatureFlagsConsole() {
           <Spin />
         </div>
       ) : groupedFlags.length === 0 ? (
-        <Empty description="无可控 flag(检查 SUPPORTED_FLAGS 白名单)" />
+        <Empty description="无可控 Flag（请检查后端白名单配置）" />
       ) : (
         groupedFlags.map(([group, rows]) => (
           <Card
@@ -365,7 +368,7 @@ export default function FeatureFlagsConsole() {
       )}
 
       <Drawer
-        title="Feature Flag 审计日志(最近 50 条)"
+        title="Flag 变更记录（最近 50 条）"
         open={auditOpen}
         onClose={() => setAuditOpen(false)}
         width={520}
@@ -373,7 +376,7 @@ export default function FeatureFlagsConsole() {
         {auditLoading ? (
           <Spin />
         ) : audit.length === 0 ? (
-          <Empty description="尚无 audit 记录" />
+          <Empty description="尚无变更记录" />
         ) : (
           <Timeline
             items={audit.map((a) => ({
@@ -383,14 +386,16 @@ export default function FeatureFlagsConsole() {
                   <Text strong style={{ fontFamily: 'monospace' }}>
                     {a.flag_name}
                   </Text>
-                  <Tag style={{ marginLeft: 8 }}>{a.action}</Tag>
+                  <Tag style={{ marginLeft: 8 }}>
+                    {a.action === 'set' ? '设置' : a.action === 'clear' ? '清除' : a.action}
+                  </Tag>
                   <div style={{ marginTop: 4, fontSize: 12, color: '#888' }}>
                     {new Date(a.created_at).toLocaleString('zh-CN')} · {a.actor}
                   </div>
                   <div style={{ marginTop: 4 }}>
-                    <Text type="secondary">old:</Text>{' '}
+                    <Text type="secondary">原值：</Text>{' '}
                     <Text code>{a.old_value ?? 'null'}</Text>{' '}
-                    <Text type="secondary">→ new:</Text>{' '}
+                    <Text type="secondary">→ 新值：</Text>{' '}
                     <Text code>{a.new_value}</Text>
                   </div>
                   {a.note && (

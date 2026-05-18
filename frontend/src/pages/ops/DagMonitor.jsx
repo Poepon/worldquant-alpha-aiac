@@ -92,13 +92,13 @@ export default function DagMonitor() {
         style={{ marginBottom: 16 }}
         message={
           <Space>
-            <span>ENABLE_DAG_TRACE:</span>
-            <Tag color={flagOn ? 'green' : 'default'}>{String(flagOn)}</Tag>
+            <span>DAG 追踪开关 (ENABLE_DAG_TRACE)：</span>
+            <Tag color={flagOn ? 'green' : 'default'}>{flagOn ? '已开启' : '已关闭'}</Tag>
             <span>·</span>
-            <span>窗口内带 DAG 的 run:</span>
+            <span>窗口内带 DAG 的运行批次：</span>
             <Tag color={hasRuns ? 'blue' : 'default'}>{data.total_runs_with_dag}</Tag>
             <span>·</span>
-            <span>整体健康度:</span>
+            <span>健康度：</span>
             <Tag color={isHealthy ? 'success' : hasRuns ? 'warning' : 'default'}>
               {!hasRuns ? '无数据' : isHealthy ? '健康' : '需关注'}
             </Tag>
@@ -106,9 +106,9 @@ export default function DagMonitor() {
         }
         description={
           <Text type="secondary" style={{ fontSize: 12 }}>
-            healthy gate: avg_nodes_per_run 在 [5, 40] 之间 (太少 = bandit 未探索;
-            太多 = pruning 失效) AND max_depth ≥ 3 (DAG 真多层而非根+一层 children)。
-            点 run_id 跳详情看完整 runtime_state.dag JSONB。
+            健康门槛：每批次平均节点数在 [5, 40] 之间（太少 = 探索不足；
+            太多 = 剪枝失效），且 DAG 最大层级 ≥ 3（真多层而非只有根节点 + 一层子节点）。
+            点击运行批次 ID 可查看完整 DAG 详情。
           </Text>
         }
       />
@@ -118,7 +118,7 @@ export default function DagMonitor() {
         <Col xs={12} sm={6}>
           <Card className="glass-card">
             <Statistic
-              title="带 DAG 的 run 数"
+              title="带 DAG 的运行批次数"
               value={data.total_runs_with_dag}
               valueStyle={{ color: '#00d4ff' }}
             />
@@ -128,22 +128,22 @@ export default function DagMonitor() {
         <Col xs={12} sm={6}>
           <Card className="glass-card">
             <Statistic
-              title="累计 DAG node 数"
+              title="DAG 节点累计数"
               value={data.total_nodes_across_runs}
               valueStyle={{ color: '#9c88ff' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              单 run 最高 {data.max_node_count}
+              单批次最高 {data.max_node_count} 个节点
             </Text>
           </Card>
         </Col>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="SUM(node_count) / total_runs — 健康区间 5-40">
+            <Tooltip title="平均每个运行批次产生的节点数（健康区间 5-40，过少说明探索不足，过多说明剪枝失效）">
               <Statistic
                 title={
                   <Space>
-                    平均 node / run
+                    每批次平均节点数
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }
@@ -156,11 +156,11 @@ export default function DagMonitor() {
         </Col>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="窗口内观察到的最大 DAG 深度 — 健康 ≥ 3">
+            <Tooltip title="窗口内观察到的 DAG 最大层级（健康 ≥ 3，表示有真多层假设演化）">
               <Statistic
                 title={
                   <Space>
-                    最大深度
+                    DAG 最大层级
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }
@@ -172,14 +172,14 @@ export default function DagMonitor() {
         </Col>
       </Row>
 
-      {/* Depth 分布 */}
+      {/* DAG 层级分布 */}
       <Card
         className="glass-card"
-        title="max_depth_seen 分布（按 run）"
+        title="DAG 层级分布（按运行批次统计）"
         style={{ marginTop: 16 }}
       >
         {distTotal === 0 ? (
-          <Empty description="窗口内无 DAG 数据" />
+          <Empty description="窗口内尚无 DAG 数据" />
         ) : (
           <List
             size="small"
@@ -192,8 +192,8 @@ export default function DagMonitor() {
                 <List.Item>
                   <Space direction="vertical" style={{ width: '100%' }} size={4}>
                     <Space>
-                      <Tag color={color}>depth {b.depth}</Tag>
-                      <Text>{b.run_count} run</Text>
+                      <Tag color={color}>第 {b.depth} 层</Tag>
+                      <Text>{b.run_count} 个批次</Text>
                       <Text type="secondary">({pct.toFixed(1)}%)</Text>
                     </Space>
                     <Progress
@@ -210,10 +210,10 @@ export default function DagMonitor() {
         )}
       </Card>
 
-      {/* 最近 runs 表 */}
+      {/* 最近运行批次表 */}
       <Card
         className="glass-card"
-        title="最近 20 条带 DAG 的 run"
+        title="最近 20 条带 DAG 的运行批次"
         style={{ marginTop: 16 }}
       >
         <Table
@@ -224,7 +224,7 @@ export default function DagMonitor() {
           scroll={{ x: 900 }}
           columns={[
             {
-              title: 'run',
+              title: '运行批次',
               dataIndex: 'run_id',
               width: 100,
               render: (id) => (
@@ -232,9 +232,9 @@ export default function DagMonitor() {
               ),
             },
             {
-              title: 'task',
+              title: '所属任务',
               dataIndex: 'task_id',
-              width: 90,
+              width: 100,
               render: (tid) =>
                 tid ? (
                   <a onClick={() => navigate(`/tasks/${tid}`)}>#{tid}</a>
@@ -243,22 +243,24 @@ export default function DagMonitor() {
                 ),
             },
             {
-              title: 'node count',
+              title: '节点数',
               dataIndex: 'node_count',
-              width: 100,
+              width: 90,
               align: 'right',
             },
             {
-              title: 'max depth',
+              title: '最大层级',
               dataIndex: 'max_depth',
               width: 100,
               align: 'right',
               render: (d) => (
-                <Tag color={d >= 3 ? 'green' : d >= 1 ? 'gold' : 'default'}>{d}</Tag>
+                <Tag color={d >= 3 ? 'green' : d >= 1 ? 'gold' : 'default'}>
+                  第 {d} 层
+                </Tag>
               ),
             },
             {
-              title: 'root',
+              title: '根假设 ID',
               dataIndex: 'root_id',
               ellipsis: true,
               render: (r) => (
@@ -268,7 +270,7 @@ export default function DagMonitor() {
               ),
             },
             {
-              title: '当前 selection',
+              title: '当前选中节点',
               dataIndex: 'current_selection',
               ellipsis: true,
               render: (s) => (
@@ -280,7 +282,7 @@ export default function DagMonitor() {
               ),
             },
             {
-              title: '创建',
+              title: '创建时间',
               dataIndex: 'created_at',
               width: 130,
               render: (t) => (

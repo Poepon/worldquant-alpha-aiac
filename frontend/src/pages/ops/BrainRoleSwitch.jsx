@@ -217,21 +217,21 @@ export default function BrainRoleSwitch() {
 
       <Card
         className="glass-card"
-        title="切换语义（Direction-C，plan §14）"
+        title="切换行为说明"
         size="small"
       >
         <ul style={{ marginBottom: 0 }}>
           <li>
-            <Text strong>数据一致性能力</Text>（Sharpe 阈值 / testPeriod）走任务启动快照 —
-            running task <b>不受切换影响</b>，新发起的 task 用新值
+            <Text strong>数据检查能力</Text>（Sharpe 阈值 / 回测时间窗口）按任务启动时的快照执行 —
+            正在运行的任务 <b>不受切换影响</b>，新创建的任务使用新值
           </li>
           <li>
-            <Text strong>endpoint 选择能力</Text>（multi-sim / PROD-corr 第 3 门 gate）走全局
-            settings —— 切换 <b>立即生效</b>，避免 USER 状态调用 Consultant API
+            <Text strong>API 能力</Text>（批量模拟 / 生产相关性检查）走全局开关 —— 切换
+            <b>立即生效</b>，避免在普通账号状态下误调用顾问级 API
           </li>
           <li>
-            <Text strong>安全网</Text>：若 BRAIN 在 submit 时返回 PROD-corr 403（账号实际未授权），
-            系统自动切回 USER 并写 audit
+            <Text strong>安全网</Text>：若 BRAIN 在提交 alpha 时返回 403（账号实际未升级），
+            系统会自动切回普通模式并记录日志
           </li>
         </ul>
       </Card>
@@ -251,25 +251,25 @@ export default function BrainRoleSwitch() {
             <Alert
               type="warning"
               showIcon
-              message="请确认你已收到 BRAIN 平台 Consultant 升级邮件"
+              message="请确认你已收到 BRAIN 平台的顾问账号升级邮件"
               style={{ marginBottom: 12 }}
             />
-            <Paragraph>切换到 CONSULTANT 模式后：</Paragraph>
+            <Paragraph>切换到顾问模式后：</Paragraph>
             <ul>
-              <li>立即触发后台 5 region 同步（USA/CHN/HKG/JPN/EUR，预计 10-30 分钟）</li>
-              <li>新发起 task 使用 testPeriod=P0Y、Sharpe 提交门槛抬到 1.58</li>
+              <li>立即触发后台 5 个地区数据同步（美国 / 中国 / 香港 / 日本 / 欧洲，预计 10-30 分钟）</li>
+              <li>新创建的任务使用 P0Y 回测窗口、Sharpe 提交门槛抬到 1.58</li>
               <li>
-                当前 {state.running_tasks_count} 个 running task <b>不受影响</b>（读启动时冻结的配置）
+                当前正在运行的 {state.running_tasks_count} 个任务 <b>不受影响</b>（沿用启动时冻结的配置）
               </li>
               <li>
                 <Text type="warning">
-                  <b>注意 legacy alpha</b>：task_id=NULL（v5 之前创建）的旧 alpha 在下次 sync 时会被用 Sharpe=1.58 重判 →
-                  可能批量 PASS → PASS_PROVISIONAL 降级。建议切换前先回填 task_id，或接受此一次性降级。
+                  <b>注意历史 alpha</b>：早期未关联任务的 alpha 在下次同步时会用新 Sharpe = 1.58 重新判定，
+                  可能从『通过』降级为『临时通过』。建议切换前先回填任务归属，或接受此一次性降级。
                 </Text>
               </li>
               <li>
-                <b>安全网</b>：若 BRAIN 在下次 submit_alpha 时返回 PROD-corr 403（账号实际未授权），
-                系统会<b>自动切回 USER</b> 并写 audit 日志
+                <b>安全网</b>：若 BRAIN 在提交 alpha 时返回 403（账号实际未升级），
+                系统会<b>自动切回普通模式</b>并记录日志
               </li>
             </ul>
           </>
@@ -278,25 +278,24 @@ export default function BrainRoleSwitch() {
             <Alert
               type="info"
               showIcon
-              message="切回 USER 模式 — 应用层立即停止调用 Consultant-only BRAIN endpoint"
+              message="切回普通模式 — 应用层立即停止调用顾问级 BRAIN 接口"
               style={{ marginBottom: 12 }}
             />
-            <Paragraph>切回 USER 模式后：</Paragraph>
+            <Paragraph>切回普通模式后：</Paragraph>
             <ul>
               <li>
-                已在跑的 Consultant task 的 <b>Sharpe 门槛、testPeriod 设置</b> 仍按启动时配置（数据一致性保留）
+                正在运行的顾问任务 <b>仍沿用启动时的 Sharpe 门槛与回测窗口</b>（数据一致性保留）
               </li>
               <li>
-                <b>Multi-simulation 立即降级为 single-sim 循环</b>
-                （吞吐率下降 ~10-30x；若 task 还有大量 alpha 待 sim，evaluate 时间会显著拉长）
+                <b>批量模拟立即降级为单条循环</b>
+                （吞吐率下降约 10-30 倍；若任务还有大量 alpha 待模拟，评估耗时会明显拉长）
               </li>
               <li>
-                <b>PROD-correlation 第 3 门 gate 立即停跑</b>
-                ；该 task 后续提交的 alpha 只过 self_corr precheck — BRAIN 服务端可能在 submit 时拒
+                <b>生产相关性检查立即停用</b>
+                ；后续提交的 alpha 只走本地 self_corr 预检 — BRAIN 服务端可能在提交时拒绝
               </li>
               <li>
-                如需完全停止 task，在任务详情页用 &quot;intervene&quot; 操作收尾
-                （/api/v1/tasks/&#123;id&#125;/intervene → status=COMPLETED）
+                如需完全停止任务，请在任务详情页执行『干预』操作收尾（暂停 → 完成）
               </li>
             </ul>
           </>

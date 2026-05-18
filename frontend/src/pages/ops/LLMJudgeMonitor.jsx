@@ -59,32 +59,32 @@ export default function LLMJudgeMonitor() {
   const buckets = data.composite_score_buckets || []
   const bucketTotal = buckets.reduce((s, b) => s + b.count, 0)
 
-  // Each healthy gate: { key, ok, value, threshold, label }
+  // 每个健康度门槛: { key, ok, value, threshold, label }
   const gateChecks = [
     {
       key: 'cost',
-      label: '每次 judge 成本',
+      label: '每次评判平均成本',
       value: `$${data.avg_cost_per_judge.toFixed(6)}`,
       ok: data.avg_cost_per_judge <= gates.avg_cost_per_judge_max,
       threshold: `≤ $${gates.avg_cost_per_judge_max}`,
     },
     {
       key: 'agree',
-      label: 'c1↔c2 内部一致率',
+      label: '两评官内部一致率',
       value: `${(data.c1_c2_internal_agreement * 100).toFixed(1)}%`,
       ok: data.c1_c2_internal_agreement >= gates.c1_c2_internal_agreement_min,
       threshold: `≥ ${(gates.c1_c2_internal_agreement_min * 100).toFixed(0)}%`,
     },
     {
       key: 'err',
-      label: 'LLM 错误率',
+      label: 'LLM 调用错误率',
       value: `${(data.error_rate * 100).toFixed(1)}%`,
       ok: data.error_rate <= gates.error_rate_max,
       threshold: `≤ ${(gates.error_rate_max * 100).toFixed(0)}%`,
     },
     {
       key: 'sample',
-      label: 'judge 样本量',
+      label: '有效评判样本量',
       value: data.total_judges_run,
       ok: data.total_judges_run >= gates.min_judges_run,
       threshold: `≥ ${gates.min_judges_run}`,
@@ -117,19 +117,19 @@ export default function LLMJudgeMonitor() {
         style={{ marginBottom: 16 }}
         message={
           <Space>
-            <span>ENABLE_LLM_JUDGE:</span>
-            <Tag color={flagOn ? 'green' : 'default'}>{String(flagOn)}</Tag>
+            <span>LLM 评判开关 (ENABLE_LLM_JUDGE)：</span>
+            <Tag color={flagOn ? 'green' : 'default'}>{flagOn ? '已开启' : '已关闭'}</Tag>
             <span>·</span>
-            <span>整体 deploy 健康度:</span>
+            <span>部署健康度：</span>
             <Tag color={data.is_healthy ? 'success' : 'warning'}>
-              {data.is_healthy ? '全 gate 通过' : '部分 gate 未达标'}
+              {data.is_healthy ? '所有门槛通过' : '部分门槛未达标'}
             </Tag>
           </Space>
         }
         description={
           <Text type="secondary" style={{ fontSize: 12 }}>
-            R1a telemetry 已含 R5 总览（agreement vs R1a、composite 均值、总 cost）。
-            本页聚焦 R5 内部:cost-per-judge、c1↔c2 critic 间一致率、错误率、composite 分布。
+            R1a 监控页已含 R5 总览（与 R1a 一致率、平均评分、累计成本）；
+            本页聚焦 R5 内部细节：每次评判成本、两评官（c1/c2）内部一致率、调用错误率、综合评分分布。
           </Text>
         }
       />
@@ -152,7 +152,7 @@ export default function LLMJudgeMonitor() {
                   {g.value}
                 </Text>
                 <Text type="secondary" style={{ fontSize: 11 }}>
-                  门槛 {g.threshold}
+                  健康门槛 {g.threshold}
                 </Text>
               </Space>
             </Card>
@@ -163,7 +163,7 @@ export default function LLMJudgeMonitor() {
       {/* Cost + Volume 行 */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} sm={8}>
-          <Card className="glass-card" size="small" title="累计 cost (USD)">
+          <Card className="glass-card" size="small" title="累计成本 (USD)">
             <Statistic
               value={data.total_cost_usd}
               precision={4}
@@ -171,41 +171,41 @@ export default function LLMJudgeMonitor() {
               valueStyle={{ color: '#9c88ff' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              单 judge 最高 ${data.max_cost_per_judge.toFixed(6)}
+              单次评判最高 ${data.max_cost_per_judge.toFixed(6)}
             </Text>
           </Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card className="glass-card" size="small" title="judge 量">
+          <Card className="glass-card" size="small" title="评判数量">
             <Statistic
               value={data.total_judges_run}
               suffix={
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  / 总尝试 {data.total_attempts}
+                  / 总尝试 {data.total_attempts} 次
                 </Text>
               }
               valueStyle={{ color: '#00d4ff' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              错误 {data.error_count} 条
+              其中 LLM 调用失败 {data.error_count} 条
             </Text>
           </Card>
         </Col>
         <Col xs={24} sm={8}>
-          <Card className="glass-card" size="small" title="平均 composite score">
+          <Card className="glass-card" size="small" title="平均综合评分">
             <Statistic
               value={data.avg_composite_score}
               precision={4}
               valueStyle={{ color: '#ffb700' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              AlphaAgent Eq.7 α=0.5
+              两评官加权（权重 α=0.5，越高表示假设/代码越一致）
             </Text>
           </Card>
         </Col>
       </Row>
 
-      {/* c1 / c2 critic 详情 */}
+      {/* 两评官详情 */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} sm={12}>
           <Card
@@ -213,8 +213,8 @@ export default function LLMJudgeMonitor() {
             size="small"
             title={
               <Space>
-                c1 — hyp↔desc critic
-                <Tooltip title="第一 critic 校验 hypothesis 与 description 是否对齐">
+                第 1 评官（假设 ↔ 描述）
+                <Tooltip title="LLM 评判：alpha 的『假设』与其『描述』在语义上是否一致">
                   <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                 </Tooltip>
               </Space>
@@ -228,7 +228,7 @@ export default function LLMJudgeMonitor() {
               valueStyle={{ color: '#00d4ff' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              平均信心 {data.c1_avg_confidence.toFixed(3)}
+              评判时的平均信心 {data.c1_avg_confidence.toFixed(3)}
             </Text>
           </Card>
         </Col>
@@ -238,8 +238,8 @@ export default function LLMJudgeMonitor() {
             size="small"
             title={
               <Space>
-                c2 — desc↔expr critic
-                <Tooltip title="第二 critic 校验 description 与 expression 是否对齐">
+                第 2 评官（描述 ↔ 表达式）
+                <Tooltip title="LLM 评判：alpha 的『描述』与最终生成的『表达式』在语义上是否一致">
                   <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                 </Tooltip>
               </Space>
@@ -253,20 +253,20 @@ export default function LLMJudgeMonitor() {
               valueStyle={{ color: '#00d4ff' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              平均信心 {data.c2_avg_confidence.toFixed(3)}
+              评判时的平均信心 {data.c2_avg_confidence.toFixed(3)}
             </Text>
           </Card>
         </Col>
       </Row>
 
-      {/* composite 分布 */}
+      {/* 综合评分分布 */}
       <Card
         className="glass-card"
-        title="composite score 分布"
+        title="综合评分分布（越高表示假设/描述/代码越一致）"
         style={{ marginTop: 16 }}
       >
         {bucketTotal === 0 ? (
-          <Empty description="窗口内无 composite score 数据" />
+          <Empty description="窗口内尚无综合评分数据" />
         ) : (
           <List
             size="small"
@@ -275,11 +275,15 @@ export default function LLMJudgeMonitor() {
               const pct = bucketTotal > 0 ? (b.count / bucketTotal) * 100 : 0
               const color =
                 b.bucket === '0.7-1.0' ? '#00ff88' : b.bucket === '0.5-0.7' ? '#ffb700' : '#ff4d4f'
+              const desc =
+                b.bucket === '0.7-1.0' ? '（一致性高）'
+                  : b.bucket === '0.5-0.7' ? '（一致性中等）'
+                  : '（一致性低）'
               return (
                 <List.Item>
                   <Space direction="vertical" style={{ width: '100%' }} size={4}>
                     <Space>
-                      <Tag color={color}>{b.bucket}</Tag>
+                      <Tag color={color}>{b.bucket} {desc}</Tag>
                       <Text>{b.count} 条</Text>
                       <Text type="secondary">({pct.toFixed(1)}%)</Text>
                     </Space>

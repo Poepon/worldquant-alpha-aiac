@@ -48,6 +48,31 @@ const stepIcons = {
   EVALUATE: <CheckCircleOutlined />,
 }
 
+// 步骤类型中文映射 — 对 operator 显示
+const STEP_TYPE_LABELS = {
+  RAG_QUERY: '知识检索',
+  HYPOTHESIS: '假设生成',
+  CODE_GEN: '代码生成',
+  VALIDATE: '语法验证',
+  SIMULATE: '模拟回测',
+  SELF_CORRECT: '自我修正',
+  EVALUATE: '评估打分',
+  ROUND_SUMMARY: '本轮总结',
+  DISTILL_CONTEXT: '上下文蒸馏',
+}
+
+// Alpha 质量状态中文映射
+const STATUS_LABELS = {
+  PASS: '通过',
+  PASS_PROVISIONAL: '临时通过',
+  PROVISIONAL: '临时通过',
+  OPTIMIZE: '待优化',
+  FAIL: '失败',
+  PENDING: '待处理',
+  REJECT: '拒绝',
+  OTHER: '其他',
+}
+
 // Step status colors
 const statusColors = {
   SUCCESS: 'green',
@@ -396,11 +421,11 @@ export default function TaskDetail() {
                   <Descriptions.Item label="Run ID">{selectedRunId}</Descriptions.Item>
                   <Descriptions.Item label="数量">
                     <Space wrap>
-                      <Tag color="green">PASS {runAlphaSummary.counts.PASS}</Tag>
-                      <Tag color="gold">OPTIMIZE {runAlphaSummary.counts.OPTIMIZE}</Tag>
-                      <Tag color="red">FAIL {runAlphaSummary.counts.FAIL}</Tag>
+                      <Tag color="green">通过 {runAlphaSummary.counts.PASS}</Tag>
+                      <Tag color="gold">待优化 {runAlphaSummary.counts.OPTIMIZE}</Tag>
+                      <Tag color="red">失败 {runAlphaSummary.counts.FAIL}</Tag>
                       {runAlphaSummary.counts.OTHER > 0 && (
-                        <Tag>OTHER {runAlphaSummary.counts.OTHER}</Tag>
+                        <Tag>其他 {runAlphaSummary.counts.OTHER}</Tag>
                       )}
                     </Space>
                   </Descriptions.Item>
@@ -445,7 +470,9 @@ export default function TaskDetail() {
                         key: 'quality_status',
                         width: 90,
                         render: (s) => (
-                          <Tag color={s === 'PASS' ? 'green' : (s === 'OPTIMIZE' ? 'gold' : 'red')}>{s}</Tag>
+                          <Tag color={s === 'PASS' ? 'green' : (s === 'OPTIMIZE' ? 'gold' : 'red')}>
+                            {STATUS_LABELS[s] || s}
+                          </Tag>
                         ),
                       },
                       {
@@ -463,10 +490,10 @@ export default function TaskDetail() {
                         render: (v) => (typeof v === 'number' ? v.toFixed(2) : '--'),
                       },
                       {
-                        title: 'TO',
+                        title: '换手率',
                         dataIndex: 'turnover',
                         key: 'turnover',
-                        width: 70,
+                        width: 80,
                         render: (v) => (typeof v === 'number' ? v.toFixed(2) : '--'),
                       },
                     ]}
@@ -551,7 +578,7 @@ export default function TaskDetail() {
                                <Space>
                                  {stepIcons[step.step_type]}
                                  <Text strong>
-                                    {step.step_type === 'ROUND_SUMMARY' ? '本轮总结' : `Step ${step.step_order}: ${step.step_type}`}
+                                    {step.step_type === 'ROUND_SUMMARY' ? '本轮总结' : `第 ${step.step_order} 步：${STEP_TYPE_LABELS[step.step_type] || step.step_type}`}
                                  </Text>
                                  <Tag>{step.duration_ms ? `${step.duration_ms}ms` : '--'}</Tag>
                                </Space>
@@ -694,7 +721,7 @@ export default function TaskDetail() {
                                          color={d.status === 'PASS' ? 'green' : (d.status === 'OPTIMIZE' ? 'gold' : 'red')}
                                          style={{ fontSize: 11 }}
                                        >
-                                         {d.status} {d.id || `#${i+1}`}
+                                         {STATUS_LABELS[d.status] || d.status} {d.id || `#${i+1}`}
                                        </Tag>
                                        <Space size="small" wrap>
                                          <Tag>Score: {d.score?.toFixed?.(3) ?? d.score ?? '--'}</Tag>
@@ -722,7 +749,7 @@ export default function TaskDetail() {
                                          <Text type="secondary" style={{ fontSize: 12, fontWeight: 'bold' }}>本轮战绩</Text>
                                          <div style={{ marginTop: 6 }}>
                                             <Tag color={step.output_data.success_rate > 0 ? "green" : "red"} style={{ marginRight: 4 }}>
-                                              {step.output_data.mining_success ? "MINING SUCCESS" : "MINING FAIL"}
+                                              {step.output_data.mining_success ? "本轮挖掘成功" : "本轮挖掘失败"}
                                             </Tag>
                                             <Text style={{ fontSize: 12 }}>
                                               Alphas: {step.output_data.simulated_alphas ?? 0} (✅{step.output_data.succeeded_alphas ?? 0})

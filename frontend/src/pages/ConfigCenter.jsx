@@ -122,7 +122,7 @@ export default function ConfigCenter() {
       width: 80,
       render: (active) => (
         <Tag color={active ? 'success' : 'default'}>
-          {active ? 'Active' : 'Inactive'}
+          {active ? '启用' : '禁用'}
         </Tag>
       ),
     },
@@ -130,10 +130,11 @@ export default function ConfigCenter() {
       title: '来源',
       dataIndex: 'created_by',
       key: 'created_by',
-      width: 80,
-      render: (source) => (
-        <Tag color={source === 'USER' ? 'blue' : 'default'}>{source}</Tag>
-      ),
+      width: 90,
+      render: (source) => {
+        const label = source === 'USER' ? '用户' : source === 'SYSTEM' ? '系统' : source
+        return <Tag color={source === 'USER' ? 'blue' : 'default'}>{label}</Tag>
+      },
     },
   ]
 

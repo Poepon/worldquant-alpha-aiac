@@ -31,6 +31,15 @@ const STATUS_COLORS = {
   REJECT: 'error',
 }
 
+const STATUS_LABELS = {
+  PASS: '通过',
+  PASS_PROVISIONAL: '临时通过',
+  OPTIMIZE: '待优化',
+  FAIL: '失败',
+  PENDING: '待处理',
+  REJECT: '拒绝',
+}
+
 const REGIONS = ['USA', 'CHN', 'EUR', 'ASI', 'GLB', 'KOR', 'HKG', 'JPN']
 
 export default function AlphaList() {
@@ -84,7 +93,7 @@ export default function AlphaList() {
       render: (id) => <a onClick={() => navigate(`/alphas/${id}`)}>#{id}</a>,
     },
     {
-      title: 'BRAIN id',
+      title: 'BRAIN 编号',
       dataIndex: 'alpha_id',
       width: 110,
       render: (aid) => aid ? <Text code style={{ fontSize: 11 }}>{aid}</Text> : '—',
@@ -108,41 +117,57 @@ export default function AlphaList() {
       render: (r) => <Tag>{r}</Tag>,
     },
     {
-      title: 'Dataset',
+      title: '数据集',
       dataIndex: 'dataset_id',
       width: 100,
       ellipsis: true,
       render: (d) => d ? <Tag color="cyan">{d}</Tag> : '—',
     },
     {
-      title: 'Status',
+      title: '状态',
       dataIndex: 'quality_status',
       width: 130,
-      render: (s) => <Tag color={STATUS_COLORS[s] || 'default'}>{s}</Tag>,
+      render: (s) => <Tag color={STATUS_COLORS[s] || 'default'}>{STATUS_LABELS[s] || s}</Tag>,
     },
     {
-      title: 'Sharpe',
+      title: (
+        <AntdTooltip title="Sharpe 比率 — 年化超额收益 / 年化波动率，衡量风险调整后收益">
+          <span>Sharpe</span>
+        </AntdTooltip>
+      ),
       dataIndex: 'sharpe',
       width: 80,
       align: 'right',
       render: (v) => v != null ? <Text strong>{v.toFixed(2)}</Text> : '—',
     },
     {
-      title: 'Fitness',
+      title: (
+        <AntdTooltip title="Fitness — BRAIN 综合评分（Sharpe × √收益 / √换手率），越高越好">
+          <span>Fitness</span>
+        </AntdTooltip>
+      ),
       dataIndex: 'fitness',
       width: 80,
       align: 'right',
       render: (v) => v != null ? v.toFixed(2) : '—',
     },
     {
-      title: 'Turnover',
+      title: (
+        <AntdTooltip title="换手率 — 日均持仓变化比例，越低交易成本越小">
+          <span>换手率</span>
+        </AntdTooltip>
+      ),
       dataIndex: 'turnover',
       width: 80,
       align: 'right',
       render: (v) => v != null ? v.toFixed(2) : '—',
     },
     {
-      title: 'self_corr',
+      title: (
+        <AntdTooltip title="自相关性 — 与已提交 alpha 的最高相关度，> 0.7 不可提交">
+          <span>自相关</span>
+        </AntdTooltip>
+      ),
       dataIndex: 'self_corr',
       width: 80,
       align: 'right',
@@ -234,17 +259,17 @@ export default function AlphaList() {
               value={filters.quality_status}
               onChange={(v) => { setFilters((f) => ({ ...f, quality_status: v })); setPage(1) }}
               options={[
-                { value: 'PASS', label: 'PASS' },
-                { value: 'PASS_PROVISIONAL', label: 'PASS_PROVISIONAL' },
-                { value: 'OPTIMIZE', label: 'OPTIMIZE' },
-                { value: 'FAIL', label: 'FAIL' },
-                { value: 'PENDING', label: 'PENDING' },
-                { value: 'REJECT', label: 'REJECT' },
+                { value: 'PASS', label: '通过' },
+                { value: 'PASS_PROVISIONAL', label: '临时通过' },
+                { value: 'OPTIMIZE', label: '待优化' },
+                { value: 'FAIL', label: '失败' },
+                { value: 'PENDING', label: '待处理' },
+                { value: 'REJECT', label: '拒绝' },
               ]}
             />
           </Space>
           <Space>
-            <Text>min sharpe:</Text>
+            <Text>最小 Sharpe:</Text>
             <InputNumber
               placeholder="任意"
               step={0.1}

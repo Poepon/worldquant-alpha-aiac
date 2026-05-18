@@ -82,15 +82,15 @@ export default function SimulationCacheMonitor() {
         style={{ marginBottom: 16 }}
         message={
           <Space>
-            <span>ENABLE_SIMULATION_CACHE:</span>
-            <Tag color={flagOn ? 'green' : 'default'}>{String(flagOn)}</Tag>
-            <Text type="secondary">TTL: {data.ttl_days} 天 · 过期但未清理: {data.expired_rows} 行</Text>
+            <span>模拟缓存开关 (ENABLE_SIMULATION_CACHE)：</span>
+            <Tag color={flagOn ? 'green' : 'default'}>{flagOn ? '已开启' : '已关闭'}</Tag>
+            <Text type="secondary">缓存有效期 {data.ttl_days} 天 · 已过期但未清理 {data.expired_rows} 条</Text>
           </Space>
         }
         description={
           !flagOn ? (
             <Text type="warning" style={{ fontSize: 12 }}>
-              flag 当前 OFF，新 BRAIN 调用不会走 cache 路径。可在 Feature Flag 控制台开启。
+              开关当前已关闭，新的 BRAIN 模拟调用不会走缓存。可在 Feature Flag 控制台开启。
             </Text>
           ) : null
         }
@@ -99,11 +99,11 @@ export default function SimulationCacheMonitor() {
       <Row gutter={[16, 16]}>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="access_count > 1 的行 / 总行数 — 至少被命中一次的 entry 占比。健康部署 ≥ 30%">
+            <Tooltip title="同一条缓存被命中至少一次的占比（健康部署 ≥ 30%，越高说明缓存越值得保留）">
               <Statistic
                 title={
                   <Space>
-                    Hit Rate (近似)
+                    缓存命中率（近似）
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }
@@ -117,11 +117,11 @@ export default function SimulationCacheMonitor() {
         </Col>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="SUM(access_count) − COUNT(*) — 重复 hit 次数 ≈ 节约的 BRAIN call 数">
+            <Tooltip title="重复命中次数 ≈ 节约的 BRAIN 调用次数（首次写入不计，每次复用记 1 次节约）">
               <Statistic
                 title={
                   <Space>
-                    节约 BRAIN call
+                    节约的 BRAIN 调用
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }
@@ -135,7 +135,7 @@ export default function SimulationCacheMonitor() {
         <Col xs={12} sm={6}>
           <Card className="glass-card">
             <Statistic
-              title="缓存行数"
+              title="缓存总条数"
               value={data.total_cached_rows}
               suffix={
                 <Text type="secondary" style={{ fontSize: 12 }}>
@@ -148,11 +148,11 @@ export default function SimulationCacheMonitor() {
         </Col>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="SUM(access_count) / COUNT(*) — 每个 entry 平均被命中几次。≥ 1.5 说明跨 task 复用充分">
+            <Tooltip title="每条缓存平均被命中几次（≥ 1.5 说明跨任务、跨轮次复用充分）">
               <Statistic
                 title={
                   <Space>
-                    平均访问/entry
+                    每条缓存平均命中数
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }
@@ -167,7 +167,7 @@ export default function SimulationCacheMonitor() {
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} sm={12}>
-          <Card className="glass-card" size="small" title="成功率">
+          <Card className="glass-card" size="small" title="模拟成功率">
             <Statistic
               value={data.success_rate * 100}
               precision={1}
@@ -175,18 +175,18 @@ export default function SimulationCacheMonitor() {
               valueStyle={{ color: data.success_rate >= 0.5 ? '#00ff88' : '#ffb700' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              缓存中 success=true 的行占比（失败的 sim 结果也被 cache 避免重复浪费）
+              缓存中模拟成功的占比（失败的模拟结果也会被缓存以避免重复浪费）
             </Text>
           </Card>
         </Col>
         <Col xs={24} sm={12}>
-          <Card className="glass-card" size="small" title="终身访问总数">
+          <Card className="glass-card" size="small" title="累计访问总数">
             <Statistic
               value={data.total_accesses_lifetime}
               valueStyle={{ color: '#9c88ff' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              SUM(access_count) 全表 — 缓存被命中的累计次数（含初始写入）
+              所有缓存被命中的累计次数（含首次写入）
             </Text>
           </Card>
         </Col>
@@ -194,7 +194,7 @@ export default function SimulationCacheMonitor() {
 
       <Card
         className="glass-card"
-        title="按 region / universe 分布（Top 20，按 access 降序）"
+        title="按地区 / 股票池分布（按访问量降序，前 20）"
         style={{ marginTop: 16 }}
         extra={
           <Tag onClick={() => refetch()} style={{ cursor: 'pointer' }}>
@@ -209,28 +209,28 @@ export default function SimulationCacheMonitor() {
           pagination={false}
           columns={[
             {
-              title: 'Region',
+              title: '地区',
               dataIndex: 'region',
               width: 100,
               render: (r) => <Tag>{r}</Tag>,
             },
-            { title: 'Universe', dataIndex: 'universe', width: 140 },
+            { title: '股票池', dataIndex: 'universe', width: 140 },
             {
-              title: '缓存 entry',
+              title: '缓存条数',
               dataIndex: 'entries',
               width: 110,
               align: 'right',
             },
             {
-              title: '总访问',
+              title: '总访问次数',
               dataIndex: 'accesses',
               width: 110,
               align: 'right',
             },
             {
-              title: '节约 BRAIN call',
+              title: '节约 BRAIN 调用',
               dataIndex: 'saved_brain_calls',
-              width: 140,
+              width: 150,
               align: 'right',
               render: (v) => (
                 <Text strong style={{ color: v > 0 ? '#00d4ff' : undefined }}>
@@ -239,12 +239,15 @@ export default function SimulationCacheMonitor() {
               ),
             },
             {
-              title: '复用倍率',
+              title: '复用倍数',
               key: 'reuse',
               width: 110,
               align: 'right',
-              render: (_, r) =>
-                r.entries > 0 ? (r.accesses / r.entries).toFixed(2) : '—',
+              render: (_, r) => (
+                <Tooltip title="访问总数 / 缓存条数 — 越高说明缓存越值钱">
+                  <span>{r.entries > 0 ? (r.accesses / r.entries).toFixed(2) : '—'}</span>
+                </Tooltip>
+              ),
             },
           ]}
         />

@@ -198,7 +198,12 @@ export default function TaskManagement() {
       render: (schedule) => {
         const value = schedule || 'ONESHOT'
         const color = value === 'FLAT' ? 'purple' : 'blue'
-        return <Tag color={color}>{value}</Tag>
+        const label = value === 'FLAT' ? '持续挖掘' : '单次执行'
+        return (
+          <AntdTooltip title={`${value} — ${label}`}>
+            <Tag color={color}>{label}</Tag>
+          </AntdTooltip>
+        )
       },
     },
     {
@@ -489,7 +494,7 @@ export default function TaskManagement() {
             <Col span={12}>
               <Form.Item name="dataset_strategy" label="数据集策略">
                 <Select onChange={(val) => setDatasetStrategy(val)}>
-                  <Option value="AUTO">自动探索 (Hierarchical RAG)</Option>
+                  <Option value="AUTO">自动探索（基于知识库 RAG）</Option>
                   <Option value="SPECIFIC">指定数据集</Option>
                 </Select>
               </Form.Item>
@@ -497,13 +502,13 @@ export default function TaskManagement() {
             <Col span={12}>
               <Form.Item
                 name="schedule"
-                label="Schedule"
-                tooltip="ONESHOT = 单 cycle DISCRETE 任务;FLAT = 持续 flat session(走 /ops/start-flat-session)"
+                label="调度模式"
+                tooltip="单次执行 = 跑一轮 DISCRETE 任务后结束;持续挖掘 = 持续 flat session(走运维控制台)"
                 rules={[{ required: true, message: '请选择调度模式' }]}
               >
                 <Select>
-                  <Option value="ONESHOT">ONESHOT — 单 cycle</Option>
-                  <Option value="FLAT">FLAT — 持续 session</Option>
+                  <Option value="ONESHOT">单次执行（ONESHOT）</Option>
+                  <Option value="FLAT">持续挖掘（FLAT）</Option>
                 </Select>
               </Form.Item>
             </Col>
