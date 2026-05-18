@@ -34,6 +34,7 @@ from typing import Any, Dict, List
 from unittest.mock import patch
 
 import pytest
+import pytest_asyncio
 
 os.environ.setdefault("POSTGRES_PORT", "5433")
 
@@ -59,6 +60,44 @@ import backend.tasks  # noqa: E402, F401
 from backend.agents.graph.nodes.evaluation import node_evaluate  # noqa: E402
 from backend.agents.graph.state import AlphaCandidate, MiningState  # noqa: E402
 from backend.config import settings  # noqa: E402
+
+
+# All alpha_id values used by tests in this module. node_evaluate writes
+# rows to the prod r1a_attribution_log table when ENABLE_R1A_HOOK=True,
+# and those rows persist after the test commits — polluting prod telemetry
+# (notably the canary R1a crash-rate check, which was tripping on the
+# R1A_TEST_BOOM marker injected by test_r1a_hook_failure_does_not_break_node).
+# Autouse fixture below DELETEs any row matching these ids post-test so
+# integration runs are idempotent. Tests 5-7 still have explicit DELETEs
+# inline as belt-and-suspenders; this fixture is the new safety net.
+_TEST_ALPHA_IDS = (
+    "off_a", "on_a", "fail_a", "impl_a", "hypo_a", "unkn_a",
+    "log_pass_a", "log_fail_a", "log_impl_a",
+    "r5only_a", "both_on_a",
+)
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _cleanup_r1a_log_test_rows():
+    """Module-wide autouse: after each test, scrub r1a_attribution_log of
+    any row whose alpha_id_brain matches a test fixture id. Prevents
+    test-injected rows (e.g. hook_error='R1A_TEST_BOOM') from leaking
+    into prod telemetry and tripping the canary check."""
+    yield
+    from sqlalchemy import text
+    from backend.database import AsyncSessionLocal
+    try:
+        async with AsyncSessionLocal() as s:
+            await s.execute(
+                text(
+                    "DELETE FROM r1a_attribution_log "
+                    "WHERE alpha_id_brain = ANY(:ids)"
+                ),
+                {"ids": list(_TEST_ALPHA_IDS)},
+            )
+            await s.commit()
+    except Exception:  # pragma: no cover - cleanup must never break the test outcome
+        pass
 
 
 def _mk_state(alphas: List[AlphaCandidate], factor_tier: int = 1) -> MiningState:
