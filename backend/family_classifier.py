@@ -78,6 +78,15 @@ def _alpha_pillar(alpha) -> str:
         return "other"
 
 
+#: Terminal-fail QualityStatus values that should NOT participate in the
+#: family-cap top-K race. These alphas are already discarded by downstream
+#: persistence / optimization — counting them toward the per-family quota
+#: would crowd out viable PROV/PASS/PENDING candidates AND re-stamp
+#: quality_status='FAIL' on rows already marked FAIL (cosmetic pollution
+#: in drop counts + R10 logs). See M4 in a425937..HEAD review.
+_FAMILY_CAP_EXCLUDED_STATUSES = frozenset({"FAIL", "REJECT"})
+
+
 def apply_family_cap(
     alphas: Sequence,
     *,
@@ -94,6 +103,14 @@ def apply_family_cap(
             alphas[i].quality_status = "FAIL"
             alphas[i].metrics["_r10_family_cap_dropped"] = True
 
+    Alphas already in a terminal-fail state (``quality_status`` in
+    ``_FAMILY_CAP_EXCLUDED_STATUSES`` = {FAIL, REJECT}) are skipped before
+    the per-(pillar, family) partition so they do not occupy a top-K slot
+    nor get re-stamped FAIL. They are NOT included in the returned drop
+    index list (they were not dropped by the cap — they were already
+    failing). The cap therefore only enforces among PROV / PASS / PENDING
+    / OPTIMIZE / PASS_PROVISIONAL candidates.
+
     Args:
         alphas: sequence of AlphaCandidate (or any obj with .expression /
             .metrics / .quality_status attrs)
@@ -109,9 +126,16 @@ def apply_family_cap(
         logger.warning(f"[family_cap] invalid top_k={top_k}, treating as 1")
         top_k = 1
 
-    # Group: (pillar, family_sig) → list of (score, idx) tuples
+    # Group: (pillar, family_sig) → list of (score, idx) tuples.
+    # M4: skip alphas already in a terminal-fail status — they must not
+    # occupy a top-K slot nor be re-stamped FAIL by the caller.
     groups: dict[Tuple[str, str], List[Tuple[float, int]]] = {}
     for idx, a in enumerate(alphas):
+        status = getattr(a, "quality_status", None)
+        # Normalize to str (handles QualityStatus enum or raw str)
+        status_str = getattr(status, "value", status) if status is not None else None
+        if status_str in _FAMILY_CAP_EXCLUDED_STATUSES:
+            continue
         expr = getattr(a, "expression", "") or ""
         sig = family_signature(expr)
         pillar = _alpha_pillar(a)

@@ -659,17 +659,36 @@ async def node_self_correct(
                                 strict=False,
                             )
                             _new_err_count = len(_new_val.get("errors", []) or [])
-                            _orig_err_count = len([
+                            # M2 review fix (2026-05-18): track whether the
+                            # `or 1` fallback fired. Legacy alphas (no
+                            # _validation_findings cache) or alphas with only
+                            # non-hard findings reported orig=0 originally,
+                            # the `or 1` bumped it to 1 nominal, and the
+                            # strict `<` comparator then rejected any new
+                            # candidate with ≥1 error — i.e. legacy alphas
+                            # could never be auto-fixed. Relax the comparator
+                            # to `<=` only when the fallback fired so a fix
+                            # producing 1 hard error is still accepted.
+                            _findings_list = [
                                 f for f in (current.metrics or {}).get("_validation_findings", [])
                                 if isinstance(f, dict) and f.get("severity") == "hard"
-                            ]) or 1  # original failed validation so ≥1
+                            ]
+                            _orig_err_count = len(_findings_list)
+                            _orig_count_fallback = (_orig_err_count == 0)
+                            if _orig_count_fallback:
+                                _orig_err_count = 1  # nominal; original failed validation so ≥1
                             if _new_val.get("valid"):
-                                _r7_reason = f"new_valid (orig_errs={_orig_err_count})"
-                            elif _new_err_count < _orig_err_count:
+                                _r7_reason = f"new_valid (orig_errs={_orig_err_count}{', fallback' if _orig_count_fallback else ''})"
+                            elif _orig_count_fallback and _new_err_count <= _orig_err_count:
+                                # Relaxed comparator: 1 hard error in fix OK
+                                # when original count is unknown / inferred.
+                                _r7_reason = f"relaxed_fewer_or_eq_errs ({_new_err_count}<={_orig_err_count}, fallback)"
+                            elif (not _orig_count_fallback) and _new_err_count < _orig_err_count:
                                 _r7_reason = f"strict_fewer_errs ({_new_err_count}<{_orig_err_count})"
                             else:
                                 _r7_accept = False
-                                _r7_reason = f"rejected ({_new_err_count}>={_orig_err_count})"
+                                _cmp = "<=" if _orig_count_fallback else "<"
+                                _r7_reason = f"rejected (new={_new_err_count}, orig={_orig_err_count}, cmp={_cmp}{', fallback' if _orig_count_fallback else ''})"
                         except Exception as _r7_e:  # noqa: BLE001
                             logger.debug(f"[{node_name}] R7 re-validate failed (non-fatal, defaulting accept): {_r7_e}")
                             _r7_reason = f"r7_check_error:{str(_r7_e)[:60]}"

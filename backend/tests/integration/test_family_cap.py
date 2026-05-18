@@ -198,3 +198,56 @@ def test_apply_family_cap_returns_sorted_indices():
     assert drop == sorted(drop)
     # Should drop indices 2..9 (alphas with sharpes 8..1)
     assert drop == list(range(2, 10))
+
+
+# ---------------------------------------------------------------------------
+# Test 8 (M4 review fix): FAIL/REJECT alphas excluded from top-K race
+# ---------------------------------------------------------------------------
+
+def test_apply_family_cap_skips_already_failed_alphas():
+    """M4: alphas with quality_status='FAIL' must NOT occupy a top-K slot
+    and must NOT appear in the drop index list (they were already FAIL,
+    not dropped by the cap)."""
+    a_fail = _mk_alpha("rank(close)", sharpe=5.0, pillar="momentum")
+    a_fail.quality_status = "FAIL"
+    a_reject = _mk_alpha("rank(close)", sharpe=4.0, pillar="momentum")
+    a_reject.quality_status = "REJECT"
+    a_keep1 = _mk_alpha("rank(close)", sharpe=2.0, pillar="momentum")  # KEEP
+    a_keep2 = _mk_alpha("rank(close)", sharpe=1.5, pillar="momentum")  # KEEP
+    a_drop  = _mk_alpha("rank(close)", sharpe=1.0, pillar="momentum")  # DROP (3rd PENDING)
+    alphas = [a_fail, a_reject, a_keep1, a_keep2, a_drop]
+    drop = apply_family_cap(alphas, top_k=2)
+    # Only the 3rd PENDING alpha (idx=4, sharpe=1.0) is cap-dropped.
+    # The FAIL (idx=0, sharpe=5.0) and REJECT (idx=1, sharpe=4.0) are
+    # excluded from the race despite having the highest sharpes.
+    assert drop == [4]
+    # Pre-existing FAIL/REJECT status must NOT be re-touched
+    assert alphas[0].quality_status == "FAIL"
+    assert alphas[1].quality_status == "REJECT"
+
+
+def test_apply_family_cap_fail_alpha_does_not_crowd_top_k():
+    """If a FAIL alpha sits at score=0 inside a 3-member family with top_k=2,
+    the two PENDING alphas should both survive — FAIL must not occupy a slot."""
+    a_fail = _mk_alpha("rank(close)", sharpe=0.0, pillar="momentum")
+    a_fail.quality_status = "FAIL"
+    a_p1 = _mk_alpha("rank(close)", sharpe=1.0, pillar="momentum")
+    a_p2 = _mk_alpha("rank(close)", sharpe=2.0, pillar="momentum")
+    alphas = [a_fail, a_p1, a_p2]
+    drop = apply_family_cap(alphas, top_k=2)
+    # Without M4 fix: FAIL@0 + p1@1 + p2@2 → 3 members, cap drops the lowest
+    # (a_fail at score=0 keeps slot if it sorts higher than p1; either way
+    # the FAIL contaminates the count). With M4: FAIL skipped → 2 PENDING ≤ top_k → no drop.
+    assert drop == []
+
+
+def test_apply_family_cap_handles_quality_status_enum():
+    """quality_status may be a QualityStatus enum (str-subclass) or raw str —
+    both must be recognized as FAIL."""
+    from backend.models import QualityStatus
+    a_enum_fail = _mk_alpha("rank(close)", sharpe=5.0, pillar="momentum")
+    a_enum_fail.quality_status = QualityStatus.FAIL
+    a_p1 = _mk_alpha("rank(close)", sharpe=1.0, pillar="momentum")
+    a_p2 = _mk_alpha("rank(close)", sharpe=2.0, pillar="momentum")
+    drop = apply_family_cap([a_enum_fail, a_p1, a_p2], top_k=2)
+    assert drop == []  # enum FAIL excluded → only 2 PENDING remain
