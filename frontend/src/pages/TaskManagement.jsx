@@ -613,8 +613,15 @@ export default function TaskManagement() {
                 name="schedule"
                 label="Schedule (Phase 1.5)"
                 tooltip="ONESHOT = 单 cycle DISCRETE 任务;CASCADE = T1→T2→T3 cascade(走 /mining-session/start 路径,不是 /tasks POST)"
+                rules={[{ required: true, message: '请选择调度模式' }]}
               >
-                <Select>
+                <Select
+                  onChange={(val) => {
+                    if (val !== 'CASCADE') {
+                      form.setFieldsValue({ starting_tier: 1 })
+                    }
+                  }}
+                >
                   <Option value="ONESHOT">ONESHOT — 单 cycle (推荐)</Option>
                   <Option value="CASCADE">CASCADE — T1→T2→T3 链路</Option>
                 </Select>
@@ -622,15 +629,33 @@ export default function TaskManagement() {
             </Col>
             <Col span={12}>
               <Form.Item
-                name="starting_tier"
-                label="Starting Tier"
-                tooltip="1/2/3 — explicit override;若未设,从 agent_mode 派生(AUTONOMOUS_TIER2→2 等);ONESHOT 通常用 1"
+                shouldUpdate={(prev, cur) => prev.schedule !== cur.schedule}
+                noStyle
               >
-                <Select>
-                  <Option value={1}>T1 — 一阶</Option>
-                  <Option value={2}>T2 — 二阶</Option>
-                  <Option value={3}>T3 — 三阶</Option>
-                </Select>
+                {({ getFieldValue }) =>
+                  getFieldValue('schedule') === 'CASCADE' && (
+                    <Form.Item
+                      name="starting_tier"
+                      label="Starting Tier"
+                      tooltip="1/2/3 — explicit override;若未设,从 agent_mode 派生(AUTONOMOUS_TIER2→2 等);CASCADE 专用"
+                      rules={[
+                        {
+                          required: true,
+                          type: 'number',
+                          min: 1,
+                          max: 3,
+                          message: '起始 tier 必须为 1-3',
+                        },
+                      ]}
+                    >
+                      <Select>
+                        <Option value={1}>T1 — 一阶</Option>
+                        <Option value={2}>T2 — 二阶</Option>
+                        <Option value={3}>T3 — 三阶</Option>
+                      </Select>
+                    </Form.Item>
+                  )
+                }
               </Form.Item>
             </Col>
           </Row>
