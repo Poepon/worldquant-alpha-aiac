@@ -354,6 +354,7 @@ class Settings(BaseSettings):
     # ----- R1b.4 — typed AlphaMiningPipeline route -----
     # hypothesis_centric_variant=3 task opt-in;coexists with R1b.1/R1b.2.
     ENABLE_R1B_TYPED_PIPELINE: bool = False
+    R1B_TYPED_NUM_ITER_PER_ROUND: int = 3  # how many run_iteration calls per outer round
     # ----- R1b.5 — R6 DAG retry-aware reward -----
     # Pre-req R1b.1+R1b.2 GO gates + ≥14d observation.
     ENABLE_R1B_DAG_RETRY_REWARD: bool = False
