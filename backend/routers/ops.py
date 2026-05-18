@@ -1560,3 +1560,147 @@ async def r1a_telemetry(
         r5_sample_size=sample_int,
         window_days=int(days),
     )
+
+
+# =============================================================================
+# R8 hierarchical RAG telemetry (2026-05-18) — KB shape visibility
+# =============================================================================
+# Unlike R1a/R1b which write to dedicated log tables, R8 does NOT persist
+# per-query telemetry — layer_hits is in the RAGResult dataclass but
+# ephemeral. The actionable signal for operators is the KB's *shape*:
+# how many SUCCESS_PATTERN / FAILURE_PITFALL entries exist, decayed
+# split, pillar diversity, R5-rankable share. A thin KB → no hits in
+# higher RAG layers regardless of dispatch flag state.
+
+
+class R8EntryTypeBucketOut(BaseModel):
+    entry_type: str
+    active_count: int
+    decayed_count: int
+
+
+class R8PillarBucketOut(BaseModel):
+    pillar: str
+    entry_count: int
+
+
+class R8KbShapeOut(BaseModel):
+    flags: Dict[str, bool]
+    entry_types: List[R8EntryTypeBucketOut]
+    pillars: List[R8PillarBucketOut]
+    total_active: int
+    total_decayed: int
+    success_pattern_active: int
+    failure_pitfall_active: int
+    # R8-v2 #2 R5 ranking coverage — how many SUCCESS_PATTERN rows have an
+    # associated r1a_attribution_log row with non-null r5_composite_score
+    # (joined on expression_hash). High coverage = R5 re-rank is effective;
+    # low coverage = re-rank is a no-op for most queries.
+    r5_rankable_success_count: int
+
+
+@router.get("/r8/kb-shape", response_model=R8KbShapeOut)
+async def r8_kb_shape(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> R8KbShapeOut:
+    """R8 hierarchical RAG KB shape — operator visibility into corpus depth.
+
+    Aggregates ``knowledge_entries`` over the full active table:
+      - per-entry_type counts with active vs decayed split (Q9 dual-filter
+        semantic: SUCCESS-side queries exclude decayed, FAILURE-side
+        include them; operator needs to see both)
+      - per-pillar entry_count distribution (L1 pillar layer matches against
+        this — a missing pillar means L1 is effectively dead for that bucket)
+      - R5-rankable SUCCESS subset (rows with a paired r1a_attribution_log
+        row carrying r5_composite_score) — operator confirms R5 re-rank is
+        non-trivial before flipping ENABLE_R5_L2_RANKING ON
+      - flag state for ENABLE_HIERARCHICAL_RAG + ENABLE_R5_L2_RANKING
+
+    Use BEFORE flipping ENABLE_HIERARCHICAL_RAG default ON (R8-v2 #6
+    canary) to confirm the KB has enough depth for hierarchical layers
+    to actually match.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_HIERARCHICAL_RAG": bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)),
+        "ENABLE_R5_L2_RANKING": bool(getattr(_stg, "ENABLE_R5_L2_RANKING", False)),
+    }
+
+    # Per-entry_type with decayed split. meta_data->>'decayed' is the
+    # canonical marker (R8 layer_0 / layer_2 both filter by it).
+    et_rows = (await db.execute(_text(
+        "SELECT entry_type, "
+        "       COUNT(*) FILTER (WHERE NOT (meta_data @> '{\"decayed\":\"true\"}'::jsonb)) AS active, "
+        "       COUNT(*) FILTER (WHERE meta_data @> '{\"decayed\":\"true\"}'::jsonb) AS decayed "
+        "FROM knowledge_entries "
+        "WHERE is_active = true "
+        "GROUP BY entry_type "
+        "ORDER BY active DESC"
+    ))).all()
+
+    entry_types: List[R8EntryTypeBucketOut] = []
+    total_active = 0
+    total_decayed = 0
+    success_active = 0
+    failure_active = 0
+    for et, a, d in et_rows:
+        a_int = int(a or 0)
+        d_int = int(d or 0)
+        entry_types.append(R8EntryTypeBucketOut(
+            entry_type=et or "unknown",
+            active_count=a_int,
+            decayed_count=d_int,
+        ))
+        total_active += a_int
+        total_decayed += d_int
+        if et == "SUCCESS_PATTERN":
+            success_active = a_int
+        elif et == "FAILURE_PITFALL":
+            failure_active = a_int
+
+    # Per-pillar distribution (only active rows — decayed ones don't
+    # participate in L1 matching). COALESCE NULL pillar → 'none' bucket so
+    # operator sees how many entries lack a pillar tag (RAG L1 won't reach
+    # those — backfill candidates).
+    pillar_rows = (await db.execute(_text(
+        "SELECT COALESCE(meta_data->>'pillar', 'none') AS pillar, COUNT(*) AS n "
+        "FROM knowledge_entries "
+        "WHERE is_active = true "
+        "  AND NOT (meta_data @> '{\"decayed\":\"true\"}'::jsonb) "
+        "GROUP BY pillar "
+        "ORDER BY n DESC"
+    ))).all()
+    pillars = [
+        R8PillarBucketOut(
+            pillar=p or "none",
+            entry_count=int(n or 0),
+        )
+        for p, n in pillar_rows
+    ]
+
+    # R5-rankable SUCCESS subset — JOIN on expression_hash (the link key
+    # used by R8-v2 #2 fetch_r5_avg_scores). DISTINCT because a hash may
+    # have many r1a rows.
+    r5_count_row = (await db.execute(_text(
+        "SELECT COUNT(DISTINCT k.pattern_hash) "
+        "FROM knowledge_entries k "
+        "JOIN r1a_attribution_log r ON r.expression_hash = k.pattern_hash "
+        "WHERE k.is_active = true "
+        "  AND k.entry_type = 'SUCCESS_PATTERN' "
+        "  AND NOT (k.meta_data @> '{\"decayed\":\"true\"}'::jsonb) "
+        "  AND r.r5_composite_score IS NOT NULL"
+    ))).scalar()
+
+    return R8KbShapeOut(
+        flags=flags,
+        entry_types=entry_types,
+        pillars=pillars,
+        total_active=total_active,
+        total_decayed=total_decayed,
+        success_pattern_active=success_active,
+        failure_pitfall_active=failure_active,
+        r5_rankable_success_count=int(r5_count_row or 0),
+    )
