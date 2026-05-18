@@ -361,7 +361,39 @@ async def node_tier_wrap_one(
         except Exception as e:
             logger.warning(f"[{node_name}] T2Strategy deser failed: {e}; using DEFAULT")
             strategy = DEFAULT_T2_STRATEGY
-        variants = expand_t2_strategy(seed["expression"], strategy, region=state.region)
+        # flat-F3 (Phase 3, 2026-05-18): when ENABLE_LLM_MUTATE_ALPHA ON,
+        # replace 8-12 variant sweep with LLM-selected top-K (2-3) wrappers.
+        # Soft-fall to legacy on LLM failure (empty list returned) so a
+        # round always produces variants.
+        from backend.config import settings as _stg
+        variants: list = []
+        if getattr(_stg, "ENABLE_LLM_MUTATE_ALPHA", False):
+            try:
+                from backend.agents.llm_mutate_alpha import llm_mutate_alpha
+                from backend.agents.services.llm_service import get_llm_service
+                llm_variants = await llm_mutate_alpha(
+                    seed["expression"],
+                    region=state.region,
+                    llm_service=get_llm_service(),
+                    failure_context="",  # PR2 to populate from recent _failed_tests
+                    decay_context="",    # PR2 to populate from Q9 KB matches
+                    top_k=int(getattr(_stg, "LLM_MUTATE_TOP_K", 3)),
+                )
+                if llm_variants:
+                    variants = llm_variants
+                    logger.info(
+                        f"[{node_name}] flat-F3 LLM mutate produced {len(variants)} variants "
+                        f"for seed_alpha_id={seed.get('alpha_id')}"
+                    )
+                else:
+                    logger.warning(
+                        f"[{node_name}] flat-F3 LLM returned empty; falling back to legacy sweep"
+                    )
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"[{node_name}] flat-F3 LLM mutate failed (non-fatal): {e}")
+        # Legacy path fallback (also primary when flag OFF)
+        if not variants:
+            variants = expand_t2_strategy(seed["expression"], strategy, region=state.region)
     elif state.factor_tier == 3:
         try:
             strategy = T3Strategy(**strat_dict)

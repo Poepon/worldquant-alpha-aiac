@@ -258,6 +258,17 @@ class Settings(BaseSettings):
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     ENABLE_DEFAULT_FLAT_SESSION: bool = False
 
+    # ----- flat-F3 LLM-driven wrapper mutation (Phase 3, 2026-05-18) -----
+    # 替换 T2 group_* + pure_xs 全 sweep(expand_t2_strategy 产 8-12 variants)
+    # 为 LLM 看 _failed_tests + P2-D pitfalls 选 2-3 wrappers。
+    # 消除盲目穷举,降 BRAIN sim cost(40-75%),提 PASS rate。
+    # 默认 OFF — flag ON 后 T2 path 走 llm_mutate_alpha;OFF 走 legacy
+    # expand_t2_strategy。Soft-fail:LLM 失败 fall back to legacy。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_LLM_MUTATE_ALPHA: bool = False
+    LLM_MUTATE_TOP_K: int = 3                    # cap variants per seed
+    LLM_MUTATE_MODEL: str = "claude-haiku-4-5-20251001"  # cost-effective default
+
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
     # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression

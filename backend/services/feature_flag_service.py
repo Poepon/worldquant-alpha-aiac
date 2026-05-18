@@ -160,6 +160,21 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase1-R3Q8",
         description="启用 DiversityScore 第 6 维 ast_diversity (1 − Jaccard subtree overlap)。Light wiring 仅记录到 ast_distance_log,不 gate 生成。Phase 2+ R10 family-cap 复用此信号。",
     ),
+    # --- flat-F3: LLM-driven wrapper mutation ---
+    "ENABLE_LLM_MUTATE_ALPHA": FlagSpec(
+        name="ENABLE_LLM_MUTATE_ALPHA",
+        flag_type="bool",
+        group="Phase3-flatF3",
+        description=(
+            "Phase 3 flat-F3 (master plan §4.5): T2 path 替换 group_*+pure_xs "
+            "全 sweep (expand_t2_strategy 产 8-12 variants) 为 LLM 看 "
+            "_failed_tests + P2-D pitfalls 选 2-3 wrappers。消除盲目穷举,"
+            "降 BRAIN sim cost ~40-75%,提 PASS rate (LLM 偏避有名失败模式)。"
+            "默认 OFF — flag ON 后 tier_seed.py T2 expand 走 llm_mutate_alpha;"
+            "OFF 走 legacy expand_t2_strategy。Soft-fail: LLM 失败 fall back "
+            "to legacy。Cost: haiku-4-5 ~$0.01/call/seed,top_k=3 variants。"
+        ),
+    ),
     # --- flat-F2: default mining_mode flip ---
     "ENABLE_DEFAULT_FLAT_SESSION": FlagSpec(
         name="ENABLE_DEFAULT_FLAT_SESSION",
