@@ -6,6 +6,13 @@ venv
 *.log
 *.log.*
 logs/
+
+# Local process stderr/stdout from run.bat / nohup dev workflow.
+# Repo-root dot-prefix files like .uvicorn.err / .celery.out / .frontend.err
+# — regenerated on every process start, never source-of-truth.
+# (`*.log` above already covers .log suffix; .err/.out need explicit pattern.)
+/.*.err
+/.*.out
 .cursor/
 .claude/
 .cursorrules
