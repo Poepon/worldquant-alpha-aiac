@@ -111,23 +111,27 @@ class TaskDetail:
 
 @dataclass
 class MiningSessionInfo:
-    """V-19 persistent mining service session info."""
+    """Mining session DTO returned by start_flat_session / resume_flat_session.
+
+    phase15-D PR3e (2026-05-18): cascade_phase + cascade_round_idx fields
+    REMOVED — were only meaningful for CONTINUOUS_CASCADE sessions which
+    are retired. The remaining FLAT path uses runtime_state directly +
+    surfaces current_tier via the Phase 1.5-C dual-write field below.
+    """
     task_id: int
     task_name: str
     region: str
     universe: str
     status: str           # RUNNING / PAUSED
-    mining_mode: str      # CONTINUOUS_CASCADE / FLAT_CONTINUOUS / DISCRETE
-    cascade_phase: Optional[str]   # T1 / T2 / T3 / IDLE
-    cascade_round_idx: int
+    mining_mode: str      # FLAT_CONTINUOUS / DISCRETE (CONTINUOUS_CASCADE retired)
     progress_current: int
     last_alpha_persisted_at: Optional[datetime]
     started_at: Optional[datetime]   # task.created_at
     paused_at: Optional[datetime]    # task.updated_at when status moved to PAUSED
-    # Phase 1.5-C [V1.2-C5 NEW] (2026-05-18): new authoritative scheduling
-    # fields. Populated from MiningTask.schedule / .starting_tier (Phase 1.5-A
-    # cols, dual-written by Phase 1.5-B) + latest run's runtime_state.
-    # Optional for backward compat — old callers ignoring these still work.
+    # Phase 1.5-C [V1.2-C5 NEW] (2026-05-18): authoritative scheduling
+    # fields. Populated from MiningTask.schedule / .starting_tier +
+    # latest run's runtime_state["current_tier"]. Optional for backward
+    # compat — old callers ignoring these still work.
     schedule: Optional[str] = None         # ONESHOT / CASCADE
     starting_tier: Optional[int] = None    # 1 / 2 / 3
     current_tier: Optional[int] = None     # from latest run.runtime_state["current_tier"]
@@ -689,288 +693,6 @@ class TaskService(BaseService):
 
     SUPPORTED_REGIONS = ("USA", "CHN", "EUR", "ASI", "GLB")
 
-    async def get_active_session(self, region: str) -> Optional[MiningSessionInfo]:
-        """Return the active CONTINUOUS_CASCADE session for `region`, or None.
-
-        "active" = status IN ('RUNNING', 'PAUSED'). The unique partial index
-        guarantees at most 1 row matches.
-        """
-        q = (
-            select(MiningTask)
-            .where(MiningTask.region == region)
-            .where(MiningTask.mining_mode == "CONTINUOUS_CASCADE")
-            .where(MiningTask.status.in_(("RUNNING", "PAUSED")))
-            .limit(1)
-        )
-        result = await self.db.execute(q)
-        task = result.scalar_one_or_none()
-        return self._to_session_info(task) if task else None
-
-    async def list_active_sessions(self) -> List[MiningSessionInfo]:
-        """Return active CONTINUOUS_CASCADE sessions across all regions."""
-        q = (
-            select(MiningTask)
-            .where(MiningTask.mining_mode == "CONTINUOUS_CASCADE")
-            .where(MiningTask.status.in_(("RUNNING", "PAUSED")))
-            .order_by(MiningTask.region)
-        )
-        result = await self.db.execute(q)
-        tasks = result.scalars().all()
-        return [self._to_session_info(t) for t in tasks]
-
-    async def start_session(
-        self,
-        region: str = "USA",
-        universe: str = "TOP3000",
-    ) -> MiningSessionInfo:
-        """Start (or resume) the singleton CONTINUOUS_CASCADE session for region.
-
-        Idempotent — if a session already exists for the region:
-          - status=RUNNING: returns it as-is (no-op).
-          - status=PAUSED: flips to RUNNING and dispatches a fresh celery
-            worker. cascade_phase / cascade_round_idx are preserved so the
-            worker resumes mid-cascade.
-
-        If no session exists, creates a new CONTINUOUS_CASCADE task with
-        defaults (daily_goal=0 = unlimited, max_iterations=999999) and
-        dispatches the celery worker.
-
-        flat-F2 (Phase 3, 2026-05-18, 决策 5A): when
-        ``ENABLE_DEFAULT_FLAT_SESSION`` AND ``ENABLE_FLAT_CONTINUOUS`` both ON,
-        delegates to ``start_flat_session`` instead — new session created as
-        FLAT_CONTINUOUS with hypothesis-driven flat path + R6 DAG-guided
-        exploration. Existing per-region cascade tasks (PAUSED/RUNNING) are
-        unaffected — only NEW sessions go flat. Cascade legacy code paths
-        kept until flat-F4. Rollback: flip flag OFF (< 1 min).
-
-        Raises ValueError on unsupported region.
-        """
-        if region not in self.SUPPORTED_REGIONS:
-            raise ValueError(
-                f"region={region!r} not supported; choose one of {self.SUPPORTED_REGIONS}"
-            )
-
-        # flat-F2 default flip — delegate to flat path when flag ON.
-        # Requires BOTH ENABLE_DEFAULT_FLAT_SESSION (Phase 3 flat-F2) AND
-        # ENABLE_FLAT_CONTINUOUS (Phase 3 flat-F1, prerequisite for flat
-        # dispatch to be enabled at all). Without flat-F1 flag ON, the
-        # dispatch branch in mining_tasks.run_mining_task rejects FLAT
-        # tasks — so we guard at the create site too.
-        from backend.config import settings as _stg
-        if (
-            getattr(_stg, "ENABLE_DEFAULT_FLAT_SESSION", False)
-            and getattr(_stg, "ENABLE_FLAT_CONTINUOUS", False)
-        ):
-            logger.info(
-                f"[start_session] flat-F2 active: region={region} routing to start_flat_session"
-            )
-            return await self.start_flat_session(
-                region=region, universe=universe, datasets=None,
-            )
-
-        existing = await self.get_active_session(region)
-        if existing:
-            if existing.status == "RUNNING":
-                logger.info(
-                    f"[start_session] region={region} already RUNNING "
-                    f"(task_id={existing.task_id}); idempotent no-op"
-                )
-                return existing
-            # PAUSED → RUNNING + dispatch fresh worker
-            await self.task_repo.update_status(existing.task_id, "RUNNING")
-            await self.commit()
-            await self._dispatch_session_worker(existing.task_id)
-            refreshed = await self.get_active_session(region)
-            assert refreshed is not None
-            logger.info(
-                f"[start_session] region={region} resumed PAUSED→RUNNING "
-                f"(task_id={refreshed.task_id} phase={refreshed.cascade_phase} "
-                f"round_idx={refreshed.cascade_round_idx})"
-            )
-            return refreshed
-
-        # No existing session — create a new one. The unique partial index
-        # races against concurrent start calls; on conflict we fall back to
-        # reading the winner.
-        from sqlalchemy.exc import IntegrityError
-
-        task = MiningTask(
-            task_name=f"mining-session-{region}",
-            region=region,
-            universe=universe,
-            dataset_strategy="AUTO",
-            target_datasets=[],
-            agent_mode="AUTONOMOUS",  # cascade ignores this — service self-manages tier
-            daily_goal=0,                # 0 = unlimited (CONTINUOUS_CASCADE only stops on pause)
-            max_iterations=999999,
-            config={},
-            mining_mode="CONTINUOUS_CASCADE",
-            cascade_phase="T1",
-            cascade_round_idx=0,
-            status="RUNNING",
-            # Phase 1.5-B dual-write — cascade always starts at T1
-            schedule="CASCADE",
-            starting_tier=1,
-        )
-        try:
-            created = await self.task_repo.create(task)
-            await self.commit()
-        except IntegrityError:
-            await self.db.rollback()
-            # A concurrent caller won the race — return whatever exists.
-            winner = await self.get_active_session(region)
-            if winner is None:
-                raise RuntimeError(
-                    "race against unique partial index but no winner found"
-                )
-            logger.info(
-                f"[start_session] region={region} lost race; returning winner "
-                f"task_id={winner.task_id}"
-            )
-            return winner
-
-        await self._dispatch_session_worker(created.id)
-        logger.info(
-            f"[start_session] region={region} created new session task_id={created.id}"
-        )
-        info = await self.get_active_session(region)
-        assert info is not None
-        return info
-
-    async def stop_session(self, task_id: int) -> MiningSessionInfo:
-        """Pause the session. Worker detects PAUSED at the next round boundary
-        and exits gracefully (the IX-5 alpha-level dedup on resume covers any
-        in-flight alphas). Cascade phase / round idx are preserved.
-        """
-        task = await self.task_repo.get_by_id(task_id)
-        if not task:
-            raise ValueError(f"task_id={task_id} not found")
-        if task.mining_mode != "CONTINUOUS_CASCADE":
-            raise ValueError(
-                f"task_id={task_id} is not CONTINUOUS_CASCADE "
-                f"(mining_mode={task.mining_mode}); use intervene_task PAUSE instead"
-            )
-        if task.status not in ("RUNNING", "PAUSED"):
-            raise ValueError(
-                f"task_id={task_id} cannot be stopped from status={task.status}"
-            )
-        if task.status == "RUNNING":
-            await self.task_repo.update_status(task_id, "PAUSED")
-            await self.commit()
-        info = self._to_session_info(
-            await self.task_repo.get_by_id(task_id)
-        )
-        logger.info(
-            f"[stop_session] task_id={task_id} region={task.region} → PAUSED "
-            f"(phase={info.cascade_phase} round_idx={info.cascade_round_idx})"
-        )
-        return info
-
-    async def resume_session(self, task_id: int) -> MiningSessionInfo:
-        """Explicit RESUME from PAUSED. start_session(region) auto-resumes too;
-        this method is exposed for API parity (POST /mining-session/resume)."""
-        task = await self.task_repo.get_by_id(task_id)
-        if not task:
-            raise ValueError(f"task_id={task_id} not found")
-        if task.mining_mode != "CONTINUOUS_CASCADE":
-            raise ValueError(f"task_id={task_id} is not CONTINUOUS_CASCADE")
-        if task.status == "RUNNING":
-            return self._to_session_info(task)  # already running
-        if task.status != "PAUSED":
-            raise ValueError(
-                f"task_id={task_id} cannot resume from status={task.status}"
-            )
-        await self.task_repo.update_status(task_id, "RUNNING")
-        await self.commit()
-        await self._dispatch_session_worker(task_id)
-        info = self._to_session_info(await self.task_repo.get_by_id(task_id))
-        logger.info(
-            f"[resume_session] task_id={task_id} region={task.region} PAUSED→RUNNING"
-        )
-        return info
-
-    # =========================================================================
-    # flat-F1 Advanced Kickoff (Phase 3, plan v1.5 SHIP-READY, 2026-05-18)
-    # =========================================================================
-    # FLAT_CONTINUOUS mining mode parallel to legacy CONTINUOUS_CASCADE per
-    # master plan §6 D3 "保留 legacy(渐进切换)". Hypothesis-driven flat session
-    # iterating (dataset × hypothesis) tuples without T1→T2→T3 cascade. Gated
-    # by ``settings.ENABLE_FLAT_CONTINUOUS`` (default OFF).
-
-    async def start_flat_session(
-        self,
-        region: str = "USA",
-        universe: str = "TOP3000",
-        datasets: Optional[List[str]] = None,
-    ) -> "MiningSessionInfo":
-        """Create a new FLAT_CONTINUOUS task and dispatch its worker.
-
-        Unlike CONTINUOUS_CASCADE.start_session this is NOT singleton-per-region:
-        multiple FLAT tasks may co-exist (different dataset / hypothesis sets).
-        Caller (admin endpoint) is expected to gate on
-        ``settings.ENABLE_FLAT_CONTINUOUS``.
-        """
-        if region not in self.SUPPORTED_REGIONS:
-            raise ValueError(
-                f"region={region!r} not supported; choose one of {self.SUPPORTED_REGIONS}"
-            )
-
-        task = MiningTask(
-            task_name=f"flat-session-{region}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
-            region=region,
-            universe=universe,
-            dataset_strategy="MANUAL" if datasets else "AUTO",
-            target_datasets=list(datasets or []),
-            agent_mode="AUTONOMOUS",
-            daily_goal=0,                # 0 = unlimited within FLAT_CONTINUOUS_MAX_ITERATIONS
-            max_iterations=999999,
-            config={"flat_cursor": 0},   # v1.5 Q1 V2 initial cursor
-            mining_mode="FLAT_CONTINUOUS",
-            cascade_phase=None,
-            cascade_round_idx=0,
-            status="RUNNING",
-            schedule="ONESHOT",          # flat is single-pass, no CASCADE schedule
-            starting_tier=1,
-        )
-        created = await self.task_repo.create(task)
-        await self.commit()
-        await self._dispatch_session_worker(created.id, inherit_runtime_state=False)
-        logger.info(
-            f"[start_flat_session] region={region} task_id={created.id} "
-            f"datasets={len(datasets or [])} dispatched"
-        )
-        return self._to_session_info(await self.task_repo.get_by_id(created.id))
-
-    async def resume_flat_session(self, task_id: int) -> "MiningSessionInfo":
-        """Resume a paused FLAT_CONTINUOUS session, preserving runtime_state.
-
-        v1.5 Q1 Variant V2: calls ``_dispatch_session_worker`` with
-        ``inherit_runtime_state=True`` so ``flat_cursor`` (and any other
-        per-session keys) carries over to the new ExperimentRun.
-        """
-        task = await self.task_repo.get_by_id(task_id)
-        if not task:
-            raise ValueError(f"task_id={task_id} not found")
-        if task.mining_mode != "FLAT_CONTINUOUS":
-            raise ValueError(
-                f"task_id={task_id} is not FLAT_CONTINUOUS "
-                f"(mining_mode={task.mining_mode}); use /mining-session/resume for cascade"
-            )
-        if task.status == "RUNNING":
-            return self._to_session_info(task)
-        if task.status != "PAUSED":
-            raise ValueError(
-                f"task_id={task_id} cannot resume from status={task.status}"
-            )
-        await self.task_repo.update_status(task_id, "RUNNING")
-        await self.commit()
-        await self._dispatch_session_worker(task_id, inherit_runtime_state=True)
-        logger.info(
-            f"[resume_flat_session] task_id={task_id} region={task.region} "
-            f"PAUSED→RUNNING (runtime_state inherited)"
-        )
-        return self._to_session_info(await self.task_repo.get_by_id(task_id))
-
     async def _dispatch_session_worker(
         self,
         task_id: int,
@@ -1023,12 +745,13 @@ class TaskService(BaseService):
         return celery_task.id
 
     def _to_session_info(self, task: MiningTask) -> MiningSessionInfo:
-        # Phase 1.5-C [V1.2-C5] (2026-05-18): populate new authoritative
-        # fields from MiningTask cols (dual-written by Phase 1.5-B). For
-        # current_tier we derive from cascade_phase since it's dual-written
-        # with runtime_state.current_tier — avoids async run lookup here.
-        _phase_to_tier = {"T1": 1, "T2": 2, "T3": 3}
-        current_tier = _phase_to_tier.get(task.cascade_phase) if task.cascade_phase else None
+        """phase15-D PR3e (2026-05-18): cascade_phase + cascade_round_idx
+        fields removed from MiningSessionInfo. current_tier now defaults
+        to None — flat-session callers don't surface tier-via-cascade
+        derivation since flat starts at task.starting_tier and stays there.
+        Future enhancement: read latest run.runtime_state["current_tier"]
+        via async repo call (sync method today; YAGNI).
+        """
         return MiningSessionInfo(
             task_id=task.id,
             task_name=task.task_name,
@@ -1036,8 +759,6 @@ class TaskService(BaseService):
             universe=task.universe,
             status=task.status,
             mining_mode=task.mining_mode,
-            cascade_phase=task.cascade_phase,
-            cascade_round_idx=task.cascade_round_idx,
             progress_current=task.progress_current,
             last_alpha_persisted_at=task.last_alpha_persisted_at,
             started_at=task.created_at,
@@ -1045,5 +766,5 @@ class TaskService(BaseService):
             # Phase 1.5-C new fields (Optional, backward-compat)
             schedule=getattr(task, "schedule", None),
             starting_tier=getattr(task, "starting_tier", None),
-            current_tier=current_tier,
+            current_tier=None,  # PR3e: cascade derivation removed
         )
