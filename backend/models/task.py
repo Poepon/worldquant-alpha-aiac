@@ -42,11 +42,21 @@ class MiningTask(SQLAlchemyBase):
 
     # V-19 Persistent Mining Service mode (2026-05-10)
     # mining_mode: 'DISCRETE' (legacy task — finishes when daily_goal met)
-    #              'CONTINUOUS_CASCADE' (service singleton — runs T1→T2→T3 loop until paused)
+    #              'CONTINUOUS_CASCADE' (cascade — kill-switched via
+    #                                    ENABLE_CASCADE_LEGACY since phase15-D PR1)
+    #              'FLAT_CONTINUOUS' (flat-F1 path — active)
     mining_mode = Column(String(30), default="DISCRETE", nullable=False)
     # Active cascade phase for CONTINUOUS_CASCADE tasks. T1/T2/T3/IDLE.
+    # Phase 15-D PR3 (2026-05-18): migration `c3f9a7d2e4b8_phase15_d_drop_legacy_cascade_cols`
+    # exists to drop this column post-operator-deploy (after PR1 flag flip OFF +
+    # cascade drain via PR2 endpoint + ≥7d obs). Until that migration applies,
+    # this column remains the source of truth for cascade phase. Once applied,
+    # the column-read sites in 8 production files need migration to
+    # run.runtime_state["current_tier"] — tracked as PR3b follow-up.
     cascade_phase = Column(String(10), nullable=True)
     # Cascade round counter (each round = T1→T2→T3 sequence). Persisted across PAUSE/RESUME.
+    # Phase 15-D PR3 (2026-05-18): same migration drops this column; readers in
+    # 8 prod files need PR3b update to run.runtime_state["round_idx"].
     cascade_round_idx = Column(Integer, default=0, nullable=False)
     # Watchdog liveness signal — updated each time _incremental_save_alphas commits.
     last_alpha_persisted_at = Column(DateTime(timezone=True), nullable=True)
