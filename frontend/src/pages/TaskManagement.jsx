@@ -27,7 +27,7 @@ import {
 } from '@ant-design/icons'
 import api from '../services/api'
 
-const { Title, Text } = Typography
+const { Title } = Typography
 const { Option } = Select
 
 // V-19 Persistent Mining Service: backend supports these regions

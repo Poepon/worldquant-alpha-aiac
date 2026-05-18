@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
+// phase15-D PR4b hygiene (2026-05-18): useNavigate removed alongside
+// the live-feed nav target that was deleted with the cascade panel.
 import {
   Row,
   Col,
@@ -45,21 +46,22 @@ const mockPnLData = [
 
 export default function Dashboard() {
   const [liveFeed, setLiveFeed] = useState([])
-  const navigate = useNavigate()
 
   // phase15-D PR4b (2026-05-18): V-19.6 mining sessions live-feed removed
   // — cascade retired, backend mining-session endpoints gone (PR3c).
   // Operators see flat session state via /ops/costeer CoSTEERMonitor.
+  // Hygiene pass (2026-05-18): `navigate` + `statsLoading` + `kpiLoading`
+  // destructured-but-unused removed alongside the live-feed nav target.
 
   // Fetch daily stats
-  const { data: dailyStats, isLoading: statsLoading } = useQuery({
+  const { data: dailyStats } = useQuery({
     queryKey: ['dailyStats'],
     queryFn: () => api.getDailyStats(),
     refetchInterval: 30000, // Refresh every 30 seconds
   })
 
   // Fetch KPI metrics
-  const { data: kpi, isLoading: kpiLoading } = useQuery({
+  const { data: kpi } = useQuery({
     queryKey: ['kpiMetrics'],
     queryFn: () => api.getKPIMetrics(),
     refetchInterval: 30000,
