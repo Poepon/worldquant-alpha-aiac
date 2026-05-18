@@ -49,8 +49,25 @@ def _mock_db_multi_execute(*per_call_rows: List[Tuple]):
     return db
 
 
+@pytest.fixture
+def _isolate_r1b_settings():
+    """Snapshot + restore settings that other tests in this file mutate
+    (R1B_MAX_MUTATION_DEPTH most notably). Without this autouse fixture
+    a sibling unit test (test_r1b_mutate.py::test_mutate_depth_cap_*)
+    sees a leaked override and either over- or under-counts the cap.
+    Mirrors the _isolate_flag_state pattern added to
+    test_costeer_deploy_recommendation 2026-05-18."""
+    from backend.config import settings as _stg
+    keys = ("R1B_MAX_MUTATION_DEPTH",)
+    saved = {k: getattr(_stg, k, None) for k in keys}
+    yield
+    for k, v in saved.items():
+        if v is not None:
+            setattr(_stg, k, v)
+
+
 @pytest_asyncio.fixture
-async def client_factory():
+async def client_factory(_isolate_r1b_settings):
     async def _build(per_call_rows, settings_overrides=None):
         app = FastAPI()
         app.include_router(ops_router, prefix="/api/v1")
