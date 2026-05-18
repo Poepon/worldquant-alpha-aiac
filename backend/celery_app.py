@@ -230,4 +230,14 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_r8_query_log_pruner",
         "schedule": crontab(hour=4, minute=30, day_of_week=0),
     },
+    # Canary monitoring (2026-05-18): every-6h red-flag check post v1.3
+    # ship. Runs the 5 SQL checks from docs/production_canary_sop_2026_05_18.md
+    # §4 against the trailing 6h window. Red rows ERROR-log with rollback
+    # target so operator greps .celery.err. Slot at */6:15 so it's between
+    # update-operator-stats (*/6:00) and refresh-portfolio-skeletons (*/6:45)
+    # without DB contention on the Windows --pool=solo worker.
+    "canary-redflag-check": {
+        "task": "backend.tasks.run_canary_redflag_check",
+        "schedule": crontab(hour="*/6", minute=15),
+    },
 }

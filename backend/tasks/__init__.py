@@ -73,6 +73,8 @@ from backend.tasks.q10_tasks import run_q10_layer_telemetry
 from backend.tasks.r1b_tasks import run_failure_tree_pruner
 # P3-R8 query log review LOW (2026-05-18): weekly 90-day r8_query_log pruner
 from backend.tasks.r8_tasks import run_r8_query_log_pruner
+# Canary monitoring (2026-05-18): every-6h red-flag check post v1.3 ship
+from backend.tasks.canary_tasks import run_canary_redflag_check
 
 __all__ = [
     # Utilities
@@ -122,4 +124,6 @@ __all__ = [
     "run_failure_tree_pruner",
     # P3-R8 query log review LOW: weekly r8_query_log pruner
     "run_r8_query_log_pruner",
+    # Canary monitoring: every-6h red-flag check
+    "run_canary_redflag_check",
 ]
