@@ -1704,3 +1704,228 @@ async def r8_kb_shape(
         failure_pitfall_active=failure_active,
         r5_rankable_success_count=int(r5_count_row or 0),
     )
+
+
+# =============================================================================
+# CoSTEER deploy-gate recommendation (2026-05-18) — synthesize the trio
+# =============================================================================
+# Mirrors the cascade-deprecation/readiness verdict pattern: aggregate the
+# raw telemetry signals into a single ranked next-action recommendation
+# so operators don't have to mentally combine 4 endpoints when deciding
+# which R1a/R1b/R5/R8 flag to flip next. NOT a hard gate — operator still
+# decides; this is an evidence-based hint.
+
+
+class DeployRecommendationOut(BaseModel):
+    ready_flags_to_flip: List[str]
+    next_action: str
+    blockers: List[str]                  # plain-English reasons a flag isn't ready yet
+    signals: Dict[str, float]            # raw KPIs the recommendation was based on
+    current_flag_state: Dict[str, bool]
+    window_days: int
+
+
+# Plan §10 deploy gate thresholds — keep in one place so a future plan
+# revision can adjust them without sprinkling magic numbers.
+_DEPLOY_GATES = {
+    "r1a_non_unknown_pct_min": 0.40,         # plan §1.7 mid-point revised
+    "r1a_total_min": 50,                     # min sample size before any KPI is trustworthy
+    "r8_success_active_min": 100,            # corpus depth for hierarchical RAG
+    "r8_pillar_diversity_min": 3,            # ≥ 3 non-empty non-'none' pillars
+    "r8_r5_rankable_min": 30,                # R5 re-rank sample size
+    "r1b_retry_pass_rate_min": 0.15,         # plan §10 — 7d obs / ≥15% success
+    "r1b_mutate_pass_rate_min": 0.10,        # plan §10
+    "r1b_retry_attempts_min": 50,            # plan §10 — ≥ 50 retries before promote
+    "r1b_mutate_attempts_min": 30,           # plan §10 — ≥ 30 mutations
+    "r1b_chain_max_depth_min": 1,            # > 1 confirms R1b.3-v2 chain growing
+}
+
+
+def _count_attempts(rows: List[Dict[str, Any]], attempt_type: str) -> int:
+    return sum(int(r.get("count", 0)) for r in rows if r.get("attempt_type") == attempt_type)
+
+
+@router.get("/costeer/deploy-recommendation", response_model=DeployRecommendationOut)
+async def costeer_deploy_recommendation(
+    days: int = 7,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> DeployRecommendationOut:
+    """Synthesize R1a/R1b/R8 telemetry into next-action recommendation.
+
+    Reads the same SQL the underlying telemetry endpoints read (no
+    HTTP-self-call) so this is a single round-trip from the operator's
+    UI. Returns a ranked list of flags the metrics support flipping
+    next + plain-English blockers + the raw signals so the operator
+    can audit the recommendation.
+
+    This endpoint is advisory — it never changes flag state itself.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    # --- 1. Current flag state ---
+    state = {
+        "ENABLE_R1A_HOOK": bool(getattr(_stg, "ENABLE_R1A_HOOK", False)),
+        "ENABLE_LLM_JUDGE": bool(getattr(_stg, "ENABLE_LLM_JUDGE", False)),
+        "ENABLE_HIERARCHICAL_RAG": bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)),
+        "ENABLE_R5_L2_RANKING": bool(getattr(_stg, "ENABLE_R5_L2_RANKING", False)),
+        "ENABLE_R1B_RETRY_LOOP": bool(getattr(_stg, "ENABLE_R1B_RETRY_LOOP", False)),
+        "ENABLE_R1B_HYPOTHESIS_MUTATE": bool(getattr(_stg, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)),
+        "ENABLE_R1B_FAILURE_TREE": bool(getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False)),
+        "ENABLE_R1B_TYPED_PIPELINE": bool(getattr(_stg, "ENABLE_R1B_TYPED_PIPELINE", False)),
+        "ENABLE_R1B_DAG_RETRY_REWARD": bool(getattr(_stg, "ENABLE_R1B_DAG_RETRY_REWARD", False)),
+    }
+
+    # --- 2. R1a non_unknown_pct + total in window ---
+    r1a_rows = (await db.execute(_text(
+        "SELECT COALESCE(attribution, 'null') AS attr, COUNT(*) AS n "
+        "FROM r1a_attribution_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY attr"
+    ), {"days": str(int(days))})).all()
+    r1a_total = sum(int(n or 0) for _, n in r1a_rows)
+    r1a_non_null = sum(int(n or 0) for attr, n in r1a_rows if attr and attr != "null")
+    r1a_actionable = sum(
+        int(n or 0) for attr, n in r1a_rows
+        if attr in ("hypothesis", "implementation", "both")
+    )
+    r1a_non_unknown_pct = (r1a_actionable / r1a_non_null) if r1a_non_null > 0 else 0.0
+
+    # --- 3. R8 KB shape ---
+    r8_kb_row = (await db.execute(_text(
+        "SELECT "
+        "  COUNT(*) FILTER (WHERE entry_type='SUCCESS_PATTERN' AND NOT (meta_data @> '{\"decayed\":\"true\"}'::jsonb)) AS succ, "
+        "  COUNT(DISTINCT meta_data->>'pillar') FILTER ("
+        "    WHERE NOT (meta_data @> '{\"decayed\":\"true\"}'::jsonb) "
+        "      AND meta_data->>'pillar' IS NOT NULL "
+        "      AND meta_data->>'pillar' != 'none') AS pillar_diversity "
+        "FROM knowledge_entries WHERE is_active=true"
+    ))).one()
+    r8_succ_active = int(r8_kb_row[0] or 0)
+    r8_pillars = int(r8_kb_row[1] or 0)
+
+    r5_rankable_row = (await db.execute(_text(
+        "SELECT COUNT(DISTINCT k.pattern_hash) "
+        "FROM knowledge_entries k "
+        "JOIN r1a_attribution_log r ON r.expression_hash = k.pattern_hash "
+        "WHERE k.is_active=true AND k.entry_type='SUCCESS_PATTERN' "
+        "  AND NOT (k.meta_data @> '{\"decayed\":\"true\"}'::jsonb) "
+        "  AND r.r5_composite_score IS NOT NULL"
+    ))).scalar()
+    r5_rankable = int(r5_rankable_row or 0)
+
+    # --- 4. R1b retry + mutate stats + chain depth ---
+    r1b_rows = (await db.execute(_text(
+        "SELECT attempt_type, COALESCE(outcome,'unknown') AS outcome, COUNT(*) AS n "
+        "FROM r1b_retry_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY attempt_type, outcome"
+    ), {"days": str(int(days))})).all()
+    r1b_dicts = [
+        {"attempt_type": at, "outcome": oc, "count": int(n or 0)}
+        for at, oc, n in r1b_rows
+    ]
+    retry_pass = sum(d["count"] for d in r1b_dicts if d["attempt_type"] == "retry_impl" and d["outcome"] == "pass")
+    retry_fail = sum(d["count"] for d in r1b_dicts if d["attempt_type"] == "retry_impl" and d["outcome"] == "fail")
+    mutate_pass = sum(d["count"] for d in r1b_dicts if d["attempt_type"] == "mutate_hyp" and d["outcome"] == "pass")
+    mutate_fail = sum(d["count"] for d in r1b_dicts if d["attempt_type"] == "mutate_hyp" and d["outcome"] == "fail")
+    retry_pass_rate = retry_pass / (retry_pass + retry_fail) if (retry_pass + retry_fail) > 0 else 0.0
+    mutate_pass_rate = mutate_pass / (mutate_pass + mutate_fail) if (mutate_pass + mutate_fail) > 0 else 0.0
+    retry_attempts = _count_attempts(r1b_dicts, "retry_impl")
+    mutate_attempts = _count_attempts(r1b_dicts, "mutate_hyp")
+
+    max_depth_row = (await db.execute(_text(
+        "SELECT COALESCE(MAX(r1b_mutation_depth), 0) FROM hypotheses"
+    ))).scalar()
+    chain_max_depth = int(max_depth_row or 0)
+
+    # --- 5. Build ready list + blockers ---
+    g = _DEPLOY_GATES
+    ready: List[str] = []
+    blockers: List[str] = []
+
+    def _check(name: str, condition: bool, blocker: str) -> None:
+        if state.get(name):
+            return
+        if condition:
+            ready.append(name)
+        else:
+            blockers.append(blocker)
+
+    _check(
+        "ENABLE_R1A_HOOK",
+        r1a_total >= g["r1a_total_min"],
+        f"R1A: only {r1a_total} samples in window (need ≥{g['r1a_total_min']})",
+    )
+    _check(
+        "ENABLE_HIERARCHICAL_RAG",
+        r8_succ_active >= g["r8_success_active_min"] and r8_pillars >= g["r8_pillar_diversity_min"],
+        f"R8: SUCCESS_PATTERN active={r8_succ_active} (need ≥{g['r8_success_active_min']}) / "
+        f"pillar diversity={r8_pillars} (need ≥{g['r8_pillar_diversity_min']})",
+    )
+    _check(
+        "ENABLE_R5_L2_RANKING",
+        r5_rankable >= g["r8_r5_rankable_min"],
+        f"R5 ranking: rankable SUCCESS={r5_rankable} (need ≥{g['r8_r5_rankable_min']})",
+    )
+    _check(
+        "ENABLE_R1B_RETRY_LOOP",
+        state["ENABLE_R1A_HOOK"] and r1a_non_unknown_pct >= g["r1a_non_unknown_pct_min"]
+        and r1a_total >= g["r1a_total_min"],
+        f"R1b retry: R1A flag={state['ENABLE_R1A_HOOK']} / non_unknown_pct={r1a_non_unknown_pct:.2f}"
+        f" (need ≥{g['r1a_non_unknown_pct_min']}) / R1A total {r1a_total}<{g['r1a_total_min']}",
+    )
+    _check(
+        "ENABLE_R1B_HYPOTHESIS_MUTATE",
+        state["ENABLE_R1B_RETRY_LOOP"]
+        and retry_attempts >= g["r1b_retry_attempts_min"]
+        and retry_pass_rate >= g["r1b_retry_pass_rate_min"],
+        f"R1b mutate: retry flag={state['ENABLE_R1B_RETRY_LOOP']} / "
+        f"retry attempts={retry_attempts}<{g['r1b_retry_attempts_min']} or "
+        f"pass rate={retry_pass_rate:.3f}<{g['r1b_retry_pass_rate_min']}",
+    )
+    _check(
+        "ENABLE_R1B_FAILURE_TREE",
+        state["ENABLE_R1B_HYPOTHESIS_MUTATE"]
+        and mutate_attempts >= g["r1b_mutate_attempts_min"]
+        and mutate_pass_rate >= g["r1b_mutate_pass_rate_min"],
+        f"R1b failure_tree: mutate flag={state['ENABLE_R1B_HYPOTHESIS_MUTATE']} / "
+        f"mutate attempts={mutate_attempts}<{g['r1b_mutate_attempts_min']} or "
+        f"pass rate={mutate_pass_rate:.3f}<{g['r1b_mutate_pass_rate_min']}",
+    )
+    _check(
+        "ENABLE_R1B_DAG_RETRY_REWARD",
+        state["ENABLE_R1B_RETRY_LOOP"] and chain_max_depth > g["r1b_chain_max_depth_min"],
+        f"DAG retry reward: chain max_depth={chain_max_depth} (need >{g['r1b_chain_max_depth_min']})",
+    )
+
+    # next_action picks the first ready flag (deploy order matters per plan §10)
+    if ready:
+        next_action = f"Flip {ready[0]} via PATCH /ops/flags/{ready[0]} — gates met."
+    elif blockers:
+        next_action = f"No flag ready. Top blocker: {blockers[0]}"
+    else:
+        next_action = "All eligible flags already ON or no gates apply. Hold."
+
+    signals = {
+        "r1a_total_in_window": float(r1a_total),
+        "r1a_non_unknown_pct": round(r1a_non_unknown_pct, 4),
+        "r8_success_pattern_active": float(r8_succ_active),
+        "r8_pillar_diversity": float(r8_pillars),
+        "r8_r5_rankable_success": float(r5_rankable),
+        "r1b_retry_pass_rate": round(retry_pass_rate, 4),
+        "r1b_mutate_pass_rate": round(mutate_pass_rate, 4),
+        "r1b_retry_attempts": float(retry_attempts),
+        "r1b_mutate_attempts": float(mutate_attempts),
+        "r1b_chain_max_depth": float(chain_max_depth),
+    }
+
+    return DeployRecommendationOut(
+        ready_flags_to_flip=ready,
+        next_action=next_action,
+        blockers=blockers,
+        signals=signals,
+        current_flag_state=state,
+        window_days=int(days),
+    )

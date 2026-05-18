@@ -48,11 +48,16 @@ export default function CoSTEERMonitor() {
   const r1b = useOpsData(() => api.getOpsR1bTelemetry(days, 5), [days])
   const chainDepth = useOpsData(() => api.getOpsR1bChainDepth(), [])
   const r8 = useOpsData(() => api.getOpsR8KbShape(), [])
+  const deployRec = useOpsData(
+    () => api.getOpsCoSTEERDeployRecommendation(days),
+    [days],
+  )
 
   const r1aPayload = r1a.data || {}
   const r1bPayload = r1b.data || {}
   const chainPayload = chainDepth.data || {}
   const r8Payload = r8.data || {}
+  const recPayload = deployRec.data || {}
 
   // ---- R1a attribution pie ------------------------------------------------
   const ATTR_COLORS = {
@@ -135,12 +140,16 @@ export default function CoSTEERMonitor() {
       <OpsSectionCard
         title="CoSTEER Loop Monitor (R1a + R1b + R8)"
         source="live"
-        loading={r1a.loading || r1b.loading || chainDepth.loading || r8.loading}
+        loading={
+          r1a.loading || r1b.loading || chainDepth.loading || r8.loading ||
+          deployRec.loading
+        }
         onRefresh={() => {
           r1a.refetch()
           r1b.refetch()
           chainDepth.refetch()
           r8.refetch()
+          deployRec.refetch()
         }}
       >
         <Space size="middle" style={{ marginBottom: 16 }}>
@@ -157,6 +166,41 @@ export default function CoSTEERMonitor() {
             ]}
           />
         </Space>
+
+        {/* Deploy-gate recommendation — top alert summarises next action */}
+        {recPayload.next_action && (
+          <Alert
+            type={
+              (recPayload.ready_flags_to_flip || []).length > 0
+                ? 'success'
+                : (recPayload.blockers || []).length > 0
+                ? 'warning'
+                : 'info'
+            }
+            showIcon
+            style={{ marginBottom: 12 }}
+            message={
+              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <strong>Next action: {recPayload.next_action}</strong>
+                {(recPayload.ready_flags_to_flip || []).length > 0 && (
+                  <Space wrap>
+                    <span>Ready:</span>
+                    {recPayload.ready_flags_to_flip.map((f) => (
+                      <Tag color="success" key={f}>
+                        {f}
+                      </Tag>
+                    ))}
+                  </Space>
+                )}
+                {(recPayload.blockers || []).slice(0, 3).map((b, i) => (
+                  <div key={i} style={{ color: '#8c8c8c', fontSize: 12 }}>
+                    · {b}
+                  </div>
+                ))}
+              </Space>
+            }
+          />
+        )}
 
         {/* Flag state row — operator sees current ON/OFF at a glance */}
         <Alert
