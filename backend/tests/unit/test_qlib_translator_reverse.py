@@ -48,8 +48,14 @@ def test_brain_to_qlib_field_close():
 
 
 def test_brain_to_qlib_field_returns_synthetic():
-    """returns is a synthetic — Ref($close,-1)/$close-1."""
-    assert brain_to_qlib("ts_mean(returns, 20)") == "Mean(Ref($close,-1)/$close-1, 20)"
+    """returns = (today - yesterday) / yesterday = $close/Ref($close,-1) - 1.
+
+    Convention check vs same-repo callers: factor_tier_classifier.py:140 +
+    qlib_prescreen.py:212 both use target/anchor - 1. Earlier form
+    Ref($close,-1)/$close-1 was inverted (yesterday/today - 1) which would
+    sign-flip Sharpe/IC for any alpha using BRAIN `returns` field.
+    """
+    assert brain_to_qlib("ts_mean(returns, 20)") == "Mean($close/Ref($close,-1)-1, 20)"
 
 
 def test_brain_to_qlib_adv20_synthetic():

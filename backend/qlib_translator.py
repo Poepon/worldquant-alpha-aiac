@@ -481,7 +481,7 @@ BRAIN_TO_QLIB_FIELD: Dict[str, Optional[str]] = {
     "vwap":    "$vwap",
     # ---- Synthetic equivalents ----
     "adv20":   "Mean($volume, 20)",
-    "returns": "Ref($close,-1)/$close-1",
+    "returns": "$close/Ref($close,-1)-1",
     # ---- Out of scope in v1.0 (explicit None) ----
     "cap":     None,
     "pv6":     None,
