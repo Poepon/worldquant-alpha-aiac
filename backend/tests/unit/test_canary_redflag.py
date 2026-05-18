@@ -32,6 +32,23 @@ def test_red_flag_labels_unique():
     assert len(labels) == len(set(labels))
 
 
+def test_r1a_crash_rate_filters_test_rows():
+    """R1a hook crash rate check excludes test-injected error rows
+    (e.g. R1A_TEST_BOOM from test_r1a_hook_failure_does_not_break_node).
+    Without this filter, every integration test run that exercises the
+    hook-failure path would push crash rate over the 10% threshold and
+    trigger spurious operator alerts on every */6:15 beat fire."""
+    r1a_entry = next(e for e in RED_FLAGS if e[0] == "R1a hook crash rate")
+    sql = r1a_entry[1]
+    assert "NOT LIKE '%TEST%'" in sql, (
+        "R1a crash rate SQL must filter out hook_error rows tagged with "
+        "TEST — otherwise integration test runs trigger false RED alerts"
+    )
+    # COALESCE for NULL safety — PostgreSQL `NULL NOT LIKE 'x'` evaluates
+    # to NULL not False, which can interact unexpectedly with FILTER WHERE.
+    assert "COALESCE(hook_error" in sql
+
+
 @pytest.mark.parametrize("pred,value,expected", [
     ("value > 0.10", 0.05, False),
     ("value > 0.10", 0.15, True),

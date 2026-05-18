@@ -25,8 +25,15 @@ RED_FLAGS: List[Tuple[str, str, str, str]] = [
     # (label, sql, trigger_predicate, suggested_rollback_flag)
     (
         "R1a hook crash rate",
-        "SELECT COALESCE((COUNT(*) FILTER (WHERE hook_error IS NOT NULL))::float "
-        "/ NULLIF(COUNT(*), 0), 0.0) "
+        # Filter out test-injected error rows (e.g. R1A_TEST_BOOM from
+        # test_r1a_hook_failure_does_not_break_node) so canary signal-to-noise
+        # stays high. Tests should rollback their INSERTs but until that's
+        # fixed (separate scope), this filter prevents test runs from
+        # triggering operator alerts on every */6:15 beat fire.
+        "SELECT COALESCE((COUNT(*) FILTER ("
+        "WHERE hook_error IS NOT NULL "
+        "AND COALESCE(hook_error, '') NOT LIKE '%TEST%'"
+        "))::float / NULLIF(COUNT(*), 0), 0.0) "
         "FROM r1a_attribution_log WHERE created_at > :t0",
         "value > 0.10",
         "ENABLE_R1A_HOOK",
