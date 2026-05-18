@@ -125,16 +125,45 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.execute("DROP INDEX IF EXISTS ix_hypotheses_parent_id")
-    op.execute(
-        "ALTER TABLE hypotheses "
-        "DROP CONSTRAINT IF EXISTS fk_hypotheses_parent_id"
+    """Downgrade schema.
+
+    R1b.3-v2 review LOW 1 fix (2026-05-18, mirrors PR1a M5 commit 09fe704):
+      The upgrade() guards the ``hypotheses`` column / FK / index additions
+      with ``IF NOT EXISTS`` because:
+        * ``parent_hypothesis_id`` is declared on the ORM model (Phase 2 era,
+          V-27.B comment) and may have landed on the table via
+          ``metadata.create_all()`` dev fallback BEFORE this migration ran.
+        * ``r1b_mutation_depth`` is added in R1b.3-v2 alongside this hotfix
+          but the ORM declaration similarly lets ``metadata.create_all()``
+          land it in dev DBs without Alembic.
+      We cannot tell from this revision whether a given DB had those columns
+      pre-existing (and thus holding live R1b chain data) or whether this
+      revision added them. To stay data-safe we DELIBERATELY DO NOT drop
+      the two columns on downgrade — dropping them would wipe production
+      / dev parent_hypothesis_id + r1b_mutation_depth history.
+
+      If you actually want them gone, drop them manually:
+        DROP INDEX IF EXISTS ix_hypotheses_parent_id;
+        ALTER TABLE hypotheses DROP CONSTRAINT IF EXISTS fk_hypotheses_parent_id;
+        ALTER TABLE hypotheses DROP COLUMN IF EXISTS r1b_mutation_depth;
+        ALTER TABLE hypotheses DROP COLUMN IF EXISTS parent_hypothesis_id;
+
+      The cleanup of the broken d6f8a3b1e9c4 singular-table artifacts in
+      upgrade() is forward-only — there is nothing to revert.
+    """
+    import logging
+    logger = logging.getLogger("alembic.runtime.migration")
+    logger.warning(
+        "[a7d2f9e4b8c3 downgrade / R1b.3-v2 review LOW 1 guard] NOT dropping "
+        "hypotheses.parent_hypothesis_id / hypotheses.r1b_mutation_depth / "
+        "fk_hypotheses_parent_id / ix_hypotheses_parent_id — the ORM model "
+        "declares both columns so they may have been created via "
+        "metadata.create_all() dev fallback before this revision Alembic-"
+        "formalized them. Drop manually if needed."
     )
-    op.execute(
-        "ALTER TABLE hypotheses "
-        "DROP COLUMN IF EXISTS r1b_mutation_depth"
-    )
-    op.execute(
-        "ALTER TABLE hypotheses "
-        "DROP COLUMN IF EXISTS parent_hypothesis_id"
-    )
+
+    # R1b.3-v2 review LOW 1: do NOT drop the columns / FK / index — preserves
+    # any R1b chain data that landed via ORM metadata.create_all(). Operator
+    # must drop manually if desired. Same asymmetry pattern as PR1a M5 fix
+    # (commit 09fe704, revision 7a3f9e1c2b8d).
+    op.execute("-- downgrade no-op per asymmetry pattern, see PR1a M5 (commit 09fe704)")

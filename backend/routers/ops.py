@@ -1684,10 +1684,19 @@ async def r8_kb_shape(
     # R5-rankable SUCCESS subset — JOIN on expression_hash (the link key
     # used by R8-v2 #2 fetch_r5_avg_scores). DISTINCT because a hash may
     # have many r1a rows.
+    # NOTE: r1a_attribution_log.expression_hash is sha256[:64] while
+    # knowledge_entries.pattern_hash is sha256[:32]. Postgres string
+    # equality still matches because both columns are derived by hashing
+    # the same canonicalized expression — the 32-char column is exactly
+    # the 32-char prefix of the 64-char column. The JOIN works only when
+    # the writer pipelines stay aligned on this convention; if you change
+    # either hash length, update both writers + this JOIN together.
     r5_count_row = (await db.execute(_text(
         "SELECT COUNT(DISTINCT k.pattern_hash) "
         "FROM knowledge_entries k "
-        "JOIN r1a_attribution_log r ON r.expression_hash = k.pattern_hash "
+        "JOIN r1a_attribution_log r "
+        # expression_hash(64) vs pattern_hash(32) — see comment above
+        "  ON r.expression_hash = k.pattern_hash "
         "WHERE k.is_active = true "
         "  AND k.entry_type = 'SUCCESS_PATTERN' "
         "  AND NOT (k.meta_data @> '{\"decayed\":\"true\"}'::jsonb) "
@@ -1805,6 +1814,11 @@ async def costeer_deploy_recommendation(
     r8_succ_active = int(r8_kb_row[0] or 0)
     r8_pillars = int(r8_kb_row[1] or 0)
 
+    # JOIN: r1a_attribution_log.expression_hash is sha256[:64] while
+    # knowledge_entries.pattern_hash is sha256[:32]. String equality
+    # works because the 32-char column is the 32-char prefix of the
+    # 64-char column (both hash the same canonical expression). See
+    # r8_kb_shape() above for the full convention note.
     r5_rankable_row = (await db.execute(_text(
         "SELECT COUNT(DISTINCT k.pattern_hash) "
         "FROM knowledge_entries k "
@@ -1927,5 +1941,100 @@ async def costeer_deploy_recommendation(
         blockers=blockers,
         signals=signals,
         current_flag_state=state,
+        window_days=int(days),
+    )
+
+
+# =============================================================================
+# R8 query-level telemetry (2026-05-18) — per-call layer hit rates
+# =============================================================================
+# Aggregates r8_query_log written by query_hierarchical when ENABLE_R8_QUERY_LOG
+# is ON. Complements /ops/r8/kb-shape (corpus snapshot) with runtime
+# fall-through stats — operator confirms hierarchical RAG actually reaches
+# higher layers before promoting ENABLE_HIERARCHICAL_RAG to default-ON.
+
+
+class R8QueryStatsOut(BaseModel):
+    flags: Dict[str, bool]
+    total_queries: int
+    cache_hit_rate: float                # cache_hit=true / total
+    failure_tree_elevation_rate: float   # had_failure_tree_elevation=true / total
+    layer_hit_rates: Dict[str, float]    # {L0_exact, L1_pillar, L2_family, L3_field} → ratio of queries that touched that layer
+    by_region: Dict[str, int]            # region → query count
+    window_days: int
+
+
+@router.get("/r8/query-stats", response_model=R8QueryStatsOut)
+async def r8_query_stats(
+    days: int = 7,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> R8QueryStatsOut:
+    """R8 per-query telemetry — layer hit rates + cache effectiveness.
+
+    Aggregates ``r8_query_log`` over the last ``days`` window. Use to
+    confirm runtime layer fall-through patterns before promoting
+    ENABLE_HIERARCHICAL_RAG default-ON: healthy deploy shows L0+L1
+    dominant (high specificity hits) with L2/L3 as fall-through tail.
+    If L3 dominates that's a KB-shape signal (corpus too thin for
+    higher layers).
+
+    Returns zero rates when ENABLE_R8_QUERY_LOG flag was OFF in the
+    window (no rows written). Cache hit rate stays 0.0 today because
+    cache hits short-circuit before the log INSERT — a future
+    revision can move the log into the cache helper to capture that.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_HIERARCHICAL_RAG": bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)),
+        "ENABLE_R8_QUERY_LOG": bool(getattr(_stg, "ENABLE_R8_QUERY_LOG", False)),
+        "ENABLE_HIERARCHICAL_RAG_CACHE": bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG_CACHE", False)),
+    }
+
+    # Aggregate: total + cache hit + failure_tree_elevation + per-layer
+    # presence count. layer_hits is JSONB; (layer_hits->'L0_exact')::int > 0
+    # counts as a touch. COALESCE handles NULL layer_hits.
+    row = (await db.execute(_text(
+        "SELECT "
+        "  COUNT(*) AS total, "
+        "  COUNT(*) FILTER (WHERE cache_hit = true) AS cache, "
+        "  COUNT(*) FILTER (WHERE had_failure_tree_elevation = true) AS elev, "
+        "  COUNT(*) FILTER (WHERE COALESCE((layer_hits->>'L0_exact')::int, 0) > 0) AS l0, "
+        "  COUNT(*) FILTER (WHERE COALESCE((layer_hits->>'L1_pillar')::int, 0) > 0) AS l1, "
+        "  COUNT(*) FILTER (WHERE COALESCE((layer_hits->>'L2_family')::int, 0) > 0) AS l2, "
+        "  COUNT(*) FILTER (WHERE COALESCE((layer_hits->>'L3_field')::int, 0) > 0) AS l3 "
+        "FROM r8_query_log "
+        "WHERE created_at > now() - (:days || ' day')::interval"
+    ), {"days": str(int(days))})).one()
+
+    total, cache, elev, l0, l1, l2, l3 = row
+    total_int = int(total or 0)
+    cache_rate = round(int(cache or 0) / total_int, 4) if total_int > 0 else 0.0
+    elev_rate = round(int(elev or 0) / total_int, 4) if total_int > 0 else 0.0
+    layer_rates = {
+        "L0_exact": round(int(l0 or 0) / total_int, 4) if total_int > 0 else 0.0,
+        "L1_pillar": round(int(l1 or 0) / total_int, 4) if total_int > 0 else 0.0,
+        "L2_family": round(int(l2 or 0) / total_int, 4) if total_int > 0 else 0.0,
+        "L3_field": round(int(l3 or 0) / total_int, 4) if total_int > 0 else 0.0,
+    }
+
+    # Per-region breakdown — operator sees if one region dominates.
+    region_rows = (await db.execute(_text(
+        "SELECT COALESCE(region, 'none') AS r, COUNT(*) AS n "
+        "FROM r8_query_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY r ORDER BY n DESC"
+    ), {"days": str(int(days))})).all()
+    by_region = {(r or "none"): int(n or 0) for r, n in region_rows}
+
+    return R8QueryStatsOut(
+        flags=flags,
+        total_queries=total_int,
+        cache_hit_rate=cache_rate,
+        failure_tree_elevation_rate=elev_rate,
+        layer_hit_rates=layer_rates,
+        by_region=by_region,
         window_days=int(days),
     )
