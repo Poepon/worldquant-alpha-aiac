@@ -173,22 +173,24 @@ async def test_prescreen_alpha_engine_disabled_still_skips(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_prescreen_alpha_pandas_tier_reaches_evaluate(synthetic_snapshot):
-    """Snapshot present → engine='pandas_snapshot' → evaluate returns Series.
+    """Snapshot present → engine='pandas_snapshot' → evaluate returns Series →
+    PR1f-wired _compute_ic_and_sharpe produces real metrics → verdict ∈
+    {pass, reject} on synthetic random OHLCV.
 
-    PR1e leaves _compute_ic_and_sharpe as a stub returning (None, None), so
-    the skip_reason becomes 'metrics_nan' (Step 5 in prescreen_alpha). The
-    important transition: we are NOW past 'engine_disabled' and 'empty_series'.
-    PR1f will wire _compute_ic_and_sharpe to produce real numbers and the
-    skip_reason flips to None plus verdict ∈ {pass, reject}.
+    The synthetic OHLCV is essentially white-noise so a vanilla Mean signal
+    has no real predictive power → verdict='reject' (low |IC| / low Sharpe
+    below default floors 0.3/0.005). The KEY assertion is that we've moved
+    past skip — Q10 algorithm chain is now closed end-to-end.
     """
     from backend.qlib_prescreen import prescreen_alpha
     r = await prescreen_alpha("ts_mean(close, 5)", region="USA")
     assert r.engine_kind == "pandas_snapshot"
-    # Translation succeeded
     assert r.qlib_expression == "Mean($close, 5)"
-    # In PR1e, metrics are still stubbed; verdict stays skip with 'metrics_nan'
-    assert r.verdict == "skip"
-    assert r.skip_reason == "metrics_nan"
+    # Q10 algorithm chain closure — verdict is no longer 'skip' with metrics_nan
+    assert r.verdict in ("pass", "reject")
+    assert r.skip_reason is None
+    assert r.local_sharpe is not None
+    assert r.local_ic is not None
     assert r.translation_error is None
 
 

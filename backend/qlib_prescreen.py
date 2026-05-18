@@ -192,6 +192,30 @@ class QlibEngine:
             logger.warning(f"[QlibEngine] pandas evaluate failed: {ex}")
             return None
 
+    def get_forward_returns(self, region: str) -> Optional[Any]:
+        """Compute 1-day forward returns from snapshot $close (PR1f).
+
+        Returns a pd.Series indexed by (datetime, instrument), per-instrument
+        forward 1-day return = close.shift(-1) / close - 1. Cached per
+        region after first compute. None when snapshot missing.
+        """
+        key = (region or "").upper()
+        cache_key = f"__fwd_ret_{key}"
+        if cache_key in self._snapshots:
+            return self._snapshots[cache_key]
+        df = self._load_snapshot(region)
+        if df is None or "close" not in df.columns:
+            return None
+        try:
+            grouped = df["close"].groupby(level="instrument", group_keys=False)
+            shifted = grouped.shift(-1)
+            fwd = (shifted / df["close"]) - 1.0
+            self._snapshots[cache_key] = fwd
+            return fwd
+        except Exception as ex:
+            logger.warning(f"[QlibEngine] forward returns compute failed: {ex}")
+            return None
+
 
 # Module-level singleton — built lazily on first prescreen_alpha call to
 # avoid paying the probe cost during test collection.
@@ -219,15 +243,78 @@ def _reset_engine_for_test() -> None:
 def _compute_ic_and_sharpe(
     signal_series: Any, forward_returns: Any
 ) -> tuple[Optional[float], Optional[float]]:
-    """Per plan §4.2: compute IC + naive long-short Sharpe from local OHLCV.
+    """Per plan §4.2 — compute IC + naive long-short Sharpe from local OHLCV.
 
-    PR1c stub returns (None, None) — PR1d adds the pandas implementation
-    (cross-section rank → unit-gross weights → daily PnL → Spearman IC +
-    annualized Sharpe × sqrt(252)).
+    PR1f wires the pandas implementation:
+      - Cross-section rank: ``rank = signal.groupby('datetime').rank(pct=True) - 0.5``
+      - Unit-gross weights: ``w = rank / rank.abs().sum()`` per day
+      - Daily PnL: ``pnl[t] = sum(w[t-1] * fwd_return[t])``
+      - Annualized Sharpe = ``mean(pnl) / std(pnl) * sqrt(252)``
+      - IC = mean across days of daily Spearman corr(signal_rank, fwd_return)
 
-    Deliberately ignores cost / decay / neutralization (plan §4.2 [V1.1-S6]).
+    Deliberately ignores cost / decay / neutralization / turnover (plan
+    §4.2 [V1.1-S6]). The floor is calibrated for THIS approximation, not
+    BRAIN-equivalent Sharpe.
+
+    Returns (ic, sharpe) — either may be None if not enough data points
+    or numerical degeneration.
     """
-    return None, None
+    if signal_series is None or forward_returns is None:
+        return None, None
+    try:
+        import numpy as np
+        import pandas as pd
+    except ImportError:
+        return None, None
+    try:
+        # Align on shared index — both should be MultiIndex (datetime, instrument)
+        joined = pd.concat(
+            [signal_series.rename("sig"), forward_returns.rename("fwd")],
+            axis=1, join="inner",
+        ).dropna()
+        if len(joined) < 5:  # need at least a handful of (date, instrument) pairs
+            return None, None
+
+        # Cross-section pct rank centered on 0 per datetime
+        sig_rank = joined.groupby(level="datetime")["sig"].rank(pct=True) - 0.5
+
+        # Unit-gross weights — long-short normalized per day
+        def _normalize(s):
+            denom = s.abs().sum()
+            return s / denom if denom > 0 else s * 0.0
+
+        weights = sig_rank.groupby(level="datetime").transform(_normalize)
+        # Lag weights by one day per instrument so we trade on t-1 signal
+        # against t fwd_return (avoid look-ahead bias).
+        weights_lagged = weights.groupby(level="instrument").shift(1)
+        pnl_contrib = weights_lagged * joined["fwd"]
+        daily_pnl = pnl_contrib.groupby(level="datetime").sum().dropna()
+        if len(daily_pnl) < 2 or daily_pnl.std(ddof=0) == 0:
+            return None, None
+        sharpe = float(daily_pnl.mean() / daily_pnl.std(ddof=0) * np.sqrt(252))
+
+        # Spearman IC — per-day rank-correlation between signal and forward
+        def _ic_one_day(group):
+            if len(group) < 3:
+                return np.nan
+            return group["sig"].corr(group["fwd"], method="spearman")
+
+        ic_per_day = joined.groupby(level="datetime", group_keys=False).apply(_ic_one_day)
+        ic_per_day = ic_per_day.dropna()
+        if len(ic_per_day) == 0:
+            ic = None
+        else:
+            ic = float(ic_per_day.mean())
+
+        # Sanitize NaN / inf
+        if not np.isfinite(sharpe):
+            sharpe = None
+        if ic is not None and not np.isfinite(ic):
+            ic = None
+        return ic, sharpe
+    except Exception as ex:
+        logger.warning(f"[Q10 metrics] _compute_ic_and_sharpe failed: {ex}")
+        return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -313,8 +400,9 @@ async def prescreen_alpha(
             result.skip_reason = "empty_series"
             return _stamp_elapsed(result, t0)
 
-        # Step 4: compute IC + Sharpe (PR1d implementation)
-        ic, sharpe = _compute_ic_and_sharpe(signal, None)
+        # Step 4: compute IC + Sharpe (PR1f implementation)
+        fwd_returns = engine.get_forward_returns(region)
+        ic, sharpe = _compute_ic_and_sharpe(signal, fwd_returns)
         result.local_ic = ic
         result.local_sharpe = sharpe
 
