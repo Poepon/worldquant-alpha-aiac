@@ -62,33 +62,60 @@ from backend.models.knowledge import compute_pattern_hash  # noqa: E402
 DEFAULT_ROLE = "both"
 
 
-async def fetch_backfill_targets() -> List[Tuple[int, str]]:
-    """Return [(id, pattern), ...] for rows missing ANY of the 4 fields."""
+async def fetch_backfill_targets() -> List[Tuple[int, str, str]]:
+    """Return [(id, pattern, region), ...] for rows missing ANY of the 4 fields.
+
+    MEDIUM-N1 fix (re-review a425937..HEAD): SELECT existing
+    ``meta_data->>'region'`` so backfill_row can re-hash with the row's
+    real region (mirroring the FixA pattern from commit 52fab57). Rows
+    without a region default to "USA" — academically reasonable for
+    legacy 101-Alpha / paper / forum sources.
+    """
     sql = text("""
-        SELECT id, pattern FROM knowledge_entries
+        SELECT id, pattern, COALESCE(meta_data ->> 'region', 'USA') AS region
+        FROM knowledge_entries
         WHERE is_active = TRUE
           AND (
             pattern_hash IS NULL
             OR (meta_data ->> 'requires_role') IS NULL
             OR (meta_data ->> 'import_batch') IS NULL
             OR (meta_data -> 'pattern_operators') IS NULL
+            OR (meta_data ->> 'region') IS NULL
           )
         ORDER BY id
     """)
     async with AsyncSessionLocal() as s:
         r = await s.execute(sql)
-        return [(int(row[0]), row[1] or "") for row in r.all()]
+        return [
+            (int(row[0]), row[1] or "", (row[2] or "USA").upper())
+            for row in r.all()
+        ]
 
 
-async def backfill_row(row_id: int, pattern: str, *, dry_run: bool) -> bool:
-    """Atomically write all 4 fields to one row. Returns True on success."""
-    phash = compute_pattern_hash(pattern, None, None)
+async def backfill_row(
+    row_id: int, pattern: str, region: str, *, dry_run: bool
+) -> bool:
+    """Atomically write all 5 fields to one row. Returns True on success.
+
+    MEDIUM-N1 fix (re-review a425937..HEAD): pattern_hash is computed
+    WITH region so cross-region rows don't collide on the global UNIQUE
+    index. Because we match by ``id`` (PK) and UPDATE pattern_hash
+    in-place via ``COALESCE`` only when NULL, this is idempotent: a row
+    that was previously hashed with a different region keeps its old
+    hash (no dup row created); a row with NULL hash gets the new
+    region-scoped hash on first run.
+    """
+    region = (region or "USA").upper()
+    phash = compute_pattern_hash(pattern, region, None)
     pops = parse_pattern_operators(pattern)
     # Per-row single UPDATE: PostgreSQL row-level atomicity guarantees the
-    # 4 fields land together. ON CONFLICT not needed — id is PK, no
+    # 5 fields land together. ON CONFLICT not needed — id is PK, no
     # concurrent insert can collide here.
     # ::text casts are required because asyncpg's strict type inference can't
     # pick a `jsonb_build_object(text, anyelement)` overload from bare $N params.
+    # MEDIUM-N1: also write meta_data["region"]/["regions"] so R8
+    # hierarchical RAG L3 region filter (hierarchical_rag.py:228
+    # dual-read) treats backfilled rows as region-scoped.
     sql = text("""
         UPDATE knowledge_entries
         SET
@@ -97,6 +124,8 @@ async def backfill_row(row_id: int, pattern: str, *, dry_run: bool) -> bool:
                 || jsonb_build_object('requires_role', cast(:role as text))
                 || jsonb_build_object('import_batch', cast(:batch as text))
                 || jsonb_build_object('pattern_operators', cast(:pops_json as jsonb))
+                || jsonb_build_object('region', cast(:region as text))
+                || jsonb_build_object('regions', cast(:regions_json as jsonb))
         WHERE id = :id
     """)
     params = {
@@ -105,11 +134,13 @@ async def backfill_row(row_id: int, pattern: str, *, dry_run: bool) -> bool:
         "role": DEFAULT_ROLE,
         "batch": LEGACY_SEED_IMPORT_BATCH,
         "pops_json": __import__("json").dumps(pops),
+        "region": region,
+        "regions_json": __import__("json").dumps([region]),
     }
     if dry_run:
         print(f"  [dry-run] would UPDATE id={row_id} hash={phash[:8]}… "
               f"role={DEFAULT_ROLE} batch={LEGACY_SEED_IMPORT_BATCH} "
-              f"pops={pops}")
+              f"region={region} pops={pops}")
         return True
     try:
         async with AsyncSessionLocal() as s:
@@ -135,8 +166,8 @@ async def main_async(args: argparse.Namespace) -> int:
 
     ok = 0
     failed = 0
-    for row_id, pattern in targets:
-        if await backfill_row(row_id, pattern, dry_run=args.dry_run):
+    for row_id, pattern, region in targets:
+        if await backfill_row(row_id, pattern, region, dry_run=args.dry_run):
             ok += 1
         else:
             failed += 1

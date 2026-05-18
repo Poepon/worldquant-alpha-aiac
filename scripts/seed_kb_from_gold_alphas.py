@@ -92,11 +92,16 @@ async def main(confirm: bool, wipe_first: bool) -> None:
                 f"Tier {tier or '?'} pattern."
             )
 
+            # MEDIUM-N1 fix (re-review a425937..HEAD): normalize region
+            # (default USA when alpha row lacks one) so the per-region
+            # pattern_hash is well-defined and meta_data["regions"] is the
+            # list form matching hierarchical_rag.py:228 dual-read convention.
+            entry_region = (a.region or "USA").upper()
             entry = KnowledgeEntry(
                 entry_type="SUCCESS_PATTERN",
                 pattern=skeleton,
                 pattern_hash=compute_pattern_hash(
-                    skeleton, region=a.region, dataset_id=a.dataset_id
+                    skeleton, region=entry_region, dataset_id=a.dataset_id
                 ),
                 description=description,
                 factor_tier=tier,
@@ -104,7 +109,8 @@ async def main(confirm: bool, wipe_first: bool) -> None:
                     "source": "cold_start_can_submit_gold",
                     "alpha_id_ref": a.alpha_id,
                     "alpha_pk": a.id,
-                    "region": a.region,
+                    "region": entry_region,
+                    "regions": [entry_region],
                     "dataset_id": a.dataset_id,
                     "universe": a.universe,
                     "sharpe": a.is_sharpe,

@@ -120,6 +120,13 @@ class ExternalKnowledge:
     theoretical_anchor: Optional[str] = None        # academic citation, e.g. "Sloan 1996"
     paper_citation: Optional[str] = None            # full reference
 
+    # MEDIUM-N1 fix (re-review a425937..HEAD): per-region pattern_hash to
+    # avoid cross-region UNIQUE collision (same root cause as FixA in
+    # scripts/seed_decayed_alphas.py commit 52fab57). USA default is
+    # academically reasonable for forum / 101-Alphas / paper sources;
+    # CHN / EUR / etc must be set explicitly (Q6 alpha191 → "CHN").
+    region: str = "USA"
+
 
 # =============================================================================
 # Pattern Extraction
@@ -551,12 +558,21 @@ class ExternalKnowledgeSyncer:
             Number of patterns imported (existing pattern_hash rows are
             skipped via _pattern_hash_exists; the previously latent
             missing-hash bug is also fixed here — every new row carries
-            pattern_hash, populated by compute_pattern_hash(text, None, None)).
+            pattern_hash, populated by compute_pattern_hash(text, region, None)
+            where region defaults to "USA" and may be overridden per-entry
+            via ExternalKnowledge.region (MEDIUM-N1 fix from re-review).
         """
         imported = 0
 
         for ext in patterns:
-            phash = compute_pattern_hash(ext.pattern, None, None)
+            # MEDIUM-N1 fix (re-review a425937..HEAD): per-region
+            # pattern_hash to avoid cross-region UNIQUE collision (same
+            # root cause as FixA commit 52fab57). Without region in the
+            # hash, re-import with a different region silently UPDATE-
+            # overwrites the existing row's meta_data instead of INSERTing
+            # a region-scoped row.
+            ext_region = (ext.region or "USA").upper()
+            phash = compute_pattern_hash(ext.pattern, ext_region, None)
             if await self._pattern_hash_exists(phash):
                 continue
 
@@ -572,6 +588,11 @@ class ExternalKnowledgeSyncer:
                 # v1.5 SF-FC forward-compat fields
                 'requires_role': requires_role,
                 'pattern_operators': parse_pattern_operators(ext.pattern),
+                # MEDIUM-N1: region tagging so R8 hierarchical RAG L3
+                # region filter (hierarchical_rag.py:228 dual-read) treats
+                # rows as region-scoped instead of region-agnostic.
+                'region': ext_region,
+                'regions': [ext_region],
             }
             if batch_id is not None:
                 # v1.3 SF-12: precise rollback marker, optional for
@@ -749,6 +770,14 @@ def _load_external_patterns_json(filename: str) -> List[ExternalKnowledge]:
                 translation_notes=item.get("translation_notes"),
                 theoretical_anchor=item.get("theoretical_anchor"),
                 paper_citation=item.get("paper_citation"),
+                # MEDIUM-N1 fix: per-entry region override (USA default in
+                # ExternalKnowledge dataclass). Accept either "region": str
+                # or "regions": [str, ...] (first element wins for hash).
+                region=(
+                    str(item["regions"][0]).upper()
+                    if isinstance(item.get("regions"), list) and item["regions"]
+                    else (str(item.get("region")).upper() if item.get("region") else "USA")
+                ),
             ))
         except KeyError as ex:
             logger.warning(f"[ExternalKnowledge] {filename} item missing key {ex}; skipping")
@@ -796,6 +825,9 @@ async def import_alpha191_knowledge(db: AsyncSession) -> int:
                 source_url=item.get("source_url", ""),
                 raw_feature=item.get("raw_feature"),
                 qlib_origin=item.get("qlib_origin"),
+                # MEDIUM-N1 fix: alpha191 is JoinQuant CHN-region source.
+                # Default per-entry; entry may override via "region" field.
+                region=str(item.get("region", "CHN")).upper(),
             ))
             q6_extras.append({
                 "alpha191_id": item.get("alpha191_id"),
@@ -817,7 +849,9 @@ async def import_alpha191_knowledge(db: AsyncSession) -> int:
     from sqlalchemy import update, select as _select
     from sqlalchemy.dialects.postgresql import JSONB as _JSONB
     for ext, extras in zip(patterns, q6_extras):
-        phash = compute_pattern_hash(ext.pattern, None, None)
+        # MEDIUM-N1 fix: must mirror the per-region hash from
+        # import_curated_patterns (above) to find the just-inserted row.
+        phash = compute_pattern_hash(ext.pattern, (ext.region or "USA").upper(), None)
         row = (await db.execute(
             _select(KnowledgeEntry).where(KnowledgeEntry.pattern_hash == phash)
         )).scalar_one_or_none()
