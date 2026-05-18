@@ -1611,10 +1611,14 @@ class R8KbShapeOut(BaseModel):
     total_decayed: int
     success_pattern_active: int
     failure_pitfall_active: int
-    # R8-v2 #2 R5 ranking coverage — how many SUCCESS_PATTERN rows have an
-    # associated r1a_attribution_log row with non-null r5_composite_score
-    # (joined on expression_hash). High coverage = R5 re-rank is effective;
-    # low coverage = re-rank is a no-op for most queries.
+    # R8-v2 #2 R5 ranking coverage signal.
+    # Semantic (post-1470c6e HIGH #4 fix): COUNT(DISTINCT expression_hash)
+    # in r1a_attribution_log where r5_composite_score IS NOT NULL. Answers
+    # "is R5 producing enough data for L2 ranking to be effective?" The
+    # prior KB-JOIN semantic was silently broken (see ops.py:1703 comment)
+    # so the field name retains "_success_count" for API-shape stability
+    # despite no longer touching knowledge_entries; new field name like
+    # `r5_evaluated_expression_count` would be cleaner but breaks frontend.
     r5_rankable_success_count: int
 
 
@@ -1631,9 +1635,12 @@ async def r8_kb_shape(
         include them; operator needs to see both)
       - per-pillar entry_count distribution (L1 pillar layer matches against
         this — a missing pillar means L1 is effectively dead for that bucket)
-      - R5-rankable SUCCESS subset (rows with a paired r1a_attribution_log
-        row carrying r5_composite_score) — operator confirms R5 re-rank is
-        non-trivial before flipping ENABLE_R5_L2_RANKING ON
+      - R5-rankable signal — distinct expressions evaluated by R5 (count
+        of unique expression_hash in r1a_attribution_log with non-null
+        r5_composite_score) — operator confirms R5 produces enough data
+        for L2 ranking before flipping ENABLE_R5_L2_RANKING ON. (Field
+        name r5_rankable_success_count is legacy; semantic shifted in
+        1470c6e HIGH #4 fix away from a broken KB JOIN.)
       - flag state for ENABLE_HIERARCHICAL_RAG + ENABLE_R5_L2_RANKING
 
     Use BEFORE flipping ENABLE_HIERARCHICAL_RAG default ON (R8-v2 #6
