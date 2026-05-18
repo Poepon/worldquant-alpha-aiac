@@ -314,3 +314,54 @@ async def test_per_round_cost_cap_accumulator_advances(monkeypatch):
     # Accumulator advanced past starting 0.50
     assert out["r1b_cost_this_round"] > 0.50
     assert out["pending_alphas"][0].expression == "rank(close - open)"
+
+
+# ---------------------------------------------------------------------------
+# Review MEDIUM #5 regression — log rows record per-iteration cost not cumulative
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_per_iteration_cost_logged_not_cumulative(monkeypatch):
+    """3 retry alphas, identical token cost → 3 log rows should ALL show
+    the same per-call cost (≈ $0.0023 for 512-token haiku call), not the
+    cumulative 0.0023 / 0.0046 / 0.0069 progression the bug produced.
+
+    Pre-fix: /ops/r1b/telemetry SUM(llm_cost_usd) would overcount by
+    ~N²/2; for 3 retries the SUM would have been ~$0.0138 instead of
+    the correct ~$0.0069.
+    """
+    captured_rows = []
+
+    async def _capture(rows):
+        captured_rows.extend(rows)
+
+    monkeypatch.setattr(
+        "backend.agents.graph.nodes.r1b_loop._write_r1b_retry_log_rows",
+        _capture,
+    )
+
+    alphas = [
+        _mk_alpha("0", "rank(close)"),
+        _mk_alpha("1", "rank(volume)"),
+        _mk_alpha("2", "rank(returns)"),
+    ]
+    state = _mk_state(alphas)
+    llm = _mk_llm(
+        {"fixed_expression": "rank(x)", "changes_made": "rewrite"},
+        tokens=512,
+    )
+    await node_code_gen_retry(state, llm)
+
+    # All 3 alphas got retry log rows
+    retry_rows = [r for r in captured_rows if r.get("attempt_type") == "retry_impl"]
+    assert len(retry_rows) == 3
+    # Every row's llm_cost_usd must equal the same per-call cost — NOT a
+    # monotonically increasing cumulative.
+    costs = [r["llm_cost_usd"] for r in retry_rows]
+    assert costs[0] == costs[1] == costs[2], (
+        f"per-iter cost should be uniform; got cumulative-looking {costs}"
+    )
+    # Sanity: cost is non-zero (haiku 512 tokens ≈ $0.002)
+    assert costs[0] > 0.0
+    # Cumulative bug would yield costs = [c, 2c, 3c]; verify NOT that pattern
+    assert not (costs[1] == 2 * costs[0] and costs[2] == 3 * costs[0])

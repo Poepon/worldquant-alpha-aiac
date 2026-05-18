@@ -186,6 +186,14 @@ async def node_code_gen_retry(
 
         original = pending[idx]
         original_metrics = dict(getattr(original, "metrics", None) or {})
+        # Review MEDIUM #5 fix (2026-05-18): per-iteration call cost so
+        # each log row records its OWN cost, not the loop-cumulative sum.
+        # Was: every successive log row carried cost_delta_usd (running
+        # total) → /ops/r1b/telemetry's SUM(llm_cost_usd) overcounted
+        # by ~N²/2 for an N-retry round. cost_delta_usd is still the
+        # accumulator for the per-alpha + per-round state ledger below.
+        _call_cost = 0.0
+        tokens = 0
         try:
             sys_p, user_p = build_r1b_retry_prompt(
                 original_expression=getattr(original, "expression", "") or "",
@@ -201,7 +209,8 @@ async def node_code_gen_retry(
                 node_key="r1b_retry",
             )
             tokens = int(getattr(resp, "tokens_used", 0) or 0)
-            cost_delta_usd += _estimate_cost(model_name, tokens)
+            _call_cost = _estimate_cost(model_name, tokens)
+            cost_delta_usd += _call_cost
         except Exception as ex:
             logger.warning(
                 f"[r1b_loop] LLM call failed for alpha idx={idx}: {ex}"
@@ -223,7 +232,7 @@ async def node_code_gen_retry(
                 new_expression=None, llm_changes_made=None,
                 outcome="pending",
                 loop_error="LLM returned non-success / non-dict",
-                llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
+                llm_cost_usd=_call_cost, llm_tokens_used=tokens,
             ))
             continue
 
@@ -237,7 +246,7 @@ async def node_code_gen_retry(
                 llm_changes_made=str(parsed.get("changes_made", "")),
                 outcome="pending",
                 loop_error="LLM returned same/empty expression",
-                llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
+                llm_cost_usd=_call_cost, llm_tokens_used=tokens,
             ))
             continue
 
@@ -282,7 +291,7 @@ async def node_code_gen_retry(
             llm_changes_made=str(parsed.get("changes_made", "")),
             outcome="pending",  # filled by post-BRAIN reconciliation hook
             loop_error=None,
-            llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
+            llm_cost_usd=_call_cost, llm_tokens_used=tokens,
         ))
 
     await _write_r1b_retry_log_rows(log_rows)
