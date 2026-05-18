@@ -120,7 +120,14 @@ QLIB_TO_BRAIN_OPERATORS: Dict[str, str] = {
     "SUM":       "ts_sum",
     "STD":       "ts_std_dev",
     # "VAR" — see CamelCase "Var" note above; routed through _convert_var.
-    "MAX":       "ts_max",             # Alpha191 MAX is window max (single arg list with window)
+    # "MAX"/"MIN"/"TSMAX"/"TSMIN"/"MAXIMUM"/"MINIMUM" — arity-aware
+    # dispatch via _convert_max_min (review M9, 2026-05-18). Alpha191
+    # uses `MAX(a, b)` as element-wise max while Qlib/JoinQuant use
+    # `MAX(x, w)` as rolling window max; the dispatcher picks based on
+    # the 2nd arg being a small int literal vs a field/expression.
+    # Entries kept here as fall-through table values for arity=1 or
+    # legacy callers, though normal flow goes through _convert_max_min.
+    "MAX":       "ts_max",
     "MIN":       "ts_min",
     "TSMAX":     "ts_max",
     "TSMIN":     "ts_min",
@@ -237,6 +244,72 @@ def _convert_var(args: List[str]) -> str:
     return f"power(ts_std_dev({translate(x)}, {w.strip()}), 2)"
 
 
+# Window-arg heuristic for MAX/MIN arity-aware dispatch (review M9
+# 2026-05-18). A rolling window arg is typically an int literal in
+# [2, 252] (≈ one trading year). Anything else (a field name, an
+# arithmetic expression, a float literal, an int outside that range)
+# is treated as the second operand of an element-wise call.
+_WINDOW_LITERAL_RE = re.compile(r"^-?\d+$")
+
+
+def _looks_like_window_literal(arg: str) -> bool:
+    """True iff arg is an int literal that plausibly represents a
+    rolling-window size (2..252). Used by _convert_max_min to
+    disambiguate Alpha191 element-wise ``MAX(a, b)`` from rolling
+    Qlib/JoinQuant ``MAX(x, w)``.
+    """
+    s = arg.strip()
+    if not _WINDOW_LITERAL_RE.match(s):
+        return False
+    try:
+        n = int(s)
+    except ValueError:
+        return False
+    return 2 <= n <= 252
+
+
+def _convert_max_min(op_name: str, args: List[str]) -> str:
+    """Review M9 (2026-05-18): Alpha191 uses ``MAX(a, b)`` as
+    element-wise max (two operands, no window) while Qlib/JoinQuant
+    use ``MAX(x, w)`` as rolling window max. Disambiguate by arity +
+    window heuristic:
+
+        * 1 arg                      → rolling (unusual; pass through)
+        * 2 args, 2nd is int 2..252  → rolling ts_max/ts_min
+        * 2 args, 2nd is anything else → element-wise max/min(a, b)
+        * 3+ args                    → element-wise variadic max/min
+
+    BRAIN element-wise op names are ``max`` / ``min`` (already used by
+    Qlib ``Less``/``Greater`` mapping above), so reuse them rather than
+    introducing if_else. CamelCase ``Max``/``Min`` in Alpha158 stay
+    rolling-only and continue to dispatch through the generic table —
+    only the ALLCAPS aliases (Alpha191 surface) hit this handler.
+    """
+    if not args:
+        raise NotImplementedError(f"{op_name} expects ≥1 arg, got 0")
+
+    is_min = op_name.upper() in ("MIN", "MINIMUM", "TSMIN")
+    rolling_brain = "ts_min" if is_min else "ts_max"
+    elementwise_brain = "min" if is_min else "max"
+
+    if len(args) == 1:
+        # Single arg — preserve as rolling-style call without window;
+        # downstream validator will likely reject, but at least we
+        # don't silently mis-classify intent.
+        return f"{rolling_brain}({translate(args[0])})"
+
+    if len(args) == 2:
+        x, w = args
+        if _looks_like_window_literal(w):
+            return f"{rolling_brain}({translate(x)}, {w.strip()})"
+        # Element-wise: two operands, recursively translate both
+        return f"{elementwise_brain}({translate(x)}, {translate(w)})"
+
+    # 3+ args: treat as variadic element-wise (BRAIN max/min accept >2 args)
+    translated = ", ".join(translate(a) for a in args)
+    return f"{elementwise_brain}({translated})"
+
+
 def _convert_call(op_name: str, raw_args: str) -> str:
     """Dispatch a Qlib call to its BRAIN equivalent with recursive arg translation."""
     args = _split_args(raw_args)
@@ -249,6 +322,13 @@ def _convert_call(op_name: str, raw_args: str) -> str:
     # Review M8 (2026-05-18): Var ≠ Std; emit power(ts_std_dev, 2).
     if op_name in ("Var", "VAR"):
         return _convert_var(args)
+    # Review M9 (2026-05-18): MAX/MIN ALLCAPS aliases are arity-aware
+    # (Alpha191 element-wise vs Qlib rolling). MAXIMUM/MINIMUM/TSMAX/
+    # TSMIN funnel through the same dispatcher so they share the
+    # heuristic. CamelCase "Max"/"Min" (Alpha158 surface) stay rolling-
+    # only and continue to dispatch through the generic table below.
+    if op_name in ("MAX", "MIN", "MAXIMUM", "MINIMUM", "TSMAX", "TSMIN"):
+        return _convert_max_min(op_name, args)
 
     brain_op = QLIB_TO_BRAIN_OPERATORS.get(op_name)
     if brain_op is None:
@@ -314,3 +394,271 @@ def translate_batch(qlib_exprs: List[str]) -> List[Tuple[str, Optional[str]]]:
         except (NotImplementedError, ValueError) as ex:
             out.append(("", str(ex)))
     return out
+
+
+# =============================================================================
+# Phase 3 Q10 PR1a (2026-05-18): reverse direction — BRAIN → qlib DSL
+# =============================================================================
+#
+# Plan: ~/.claude/plans/phase3-q10-pyqlib-prescreen-2026-05-18.md §2.2-§2.4.
+# Powers `backend/qlib_prescreen.py` (PR1b) which evaluates a translated qlib
+# expression on local OHLCV to compute an approximate Sharpe / IC before the
+# real BRAIN simulate call. Untranslatable expressions return None — caller
+# treats that as "no opinion, proceed to BRAIN".
+#
+# Coverage gap by design (plan §2.3 [V1.2-A1-3]):
+#   * fundamental fields (`fnd*`, `analyst_*`, `news_*`) have no qlib analog
+#   * `group_neutralize`, `trade_when` are BRAIN-only execution-layer ops
+#   * unknown ops cascade → entire expression marked untranslatable
+# Net translatable rate ~30-45% of T1 traffic (price-volume-only alphas).
+
+from functools import lru_cache
+
+
+BRAIN_TO_QLIB_OPERATORS: Dict[str, Optional[str]] = {
+    # Direct one-to-one (semantic equivalent in qlib)
+    "ts_mean":          "Mean",
+    "ts_sum":           "Sum",
+    "ts_std_dev":       "Std",
+    "ts_max":           "Max",
+    "ts_min":           "Min",
+    "ts_rank":          "Rank",            # TRAP #2 reversed: BRAIN ts_rank IS qlib Rank
+    "ts_corr":          "Corr",
+    "ts_covariance":    "Cov",
+    "ts_delta":         "Delta",
+    "ts_decay_linear":  "WMA",
+    "ts_zscore":        "ZScore",
+    "ts_skewness":      "Skew",
+    "ts_kurtosis":      "Kurt",
+    "ts_argmax":        "IdxMax",
+    "ts_argmin":        "IdxMin",
+    "ts_median":        "Med",
+    "ts_quantile":      "Quantile",
+    "ts_product":       "PROD",
+    # Element-wise arithmetic
+    "add":              "Add",
+    "subtract":         "Sub",
+    "multiply":         "Mul",
+    "divide":           "Div",
+    "min":              "Less",            # qlib `Less` = element-wise minimum
+    "max":              "Greater",         # qlib `Greater` = element-wise maximum
+    # Unary
+    "abs":              "Abs",
+    "sign":             "Sign",
+    "log":              "Log",
+    "sqrt":             "Sqrt",
+    "power":            "Power",
+    "signed_power":     "SignedPower",
+    # Control flow
+    "if_else":          "If",
+    # ts_delay handled by _brain_convert_ts_delay (sign flip — plan §2.2 TRAP #1)
+    "ts_delay":         "Ref",
+    # rank(x) single-arg = qlib cross-sectional Rank — emit as-is
+    "rank":             "Rank",
+    # ---- Explicitly untranslatable (None — plan §2.2 REJECT rows) ----
+    "group_neutralize": None,
+    "group_rank":       None,
+    "group_zscore":     None,
+    "group_mean":       None,
+    "group_scale":      None,
+    "trade_when":       None,
+    "vector_neut":      None,
+    "regression_neut":  None,
+    "indneutralize":    None,
+    "winsorize":        None,
+    "rank_by_side":     None,
+    "scale":            None,
+}
+
+
+BRAIN_TO_QLIB_FIELD: Dict[str, Optional[str]] = {
+    # ---- Standard OHLCV in pyqlib's CSI300 / SP500 bundle ----
+    "close":   "$close",
+    "open":    "$open",
+    "high":    "$high",
+    "low":     "$low",
+    "volume":  "$volume",
+    "vwap":    "$vwap",
+    # ---- Synthetic equivalents ----
+    "adv20":   "Mean($volume, 20)",
+    "returns": "Ref($close,-1)/$close-1",
+    # ---- Out of scope in v1.0 (explicit None) ----
+    "cap":     None,
+    "pv6":     None,
+    "pv13":    None,
+    "fnd6":    None,
+    "fnd28":   None,
+}
+
+
+_BRAIN_CALL_RE = re.compile(r"\b([a-z][a-z0-9_]*)\s*\(")
+_BRAIN_FIELD_RE = re.compile(r"\b([a-z][a-z0-9_]*)\b")
+_BRAIN_OP_NAMES = set(BRAIN_TO_QLIB_OPERATORS.keys())
+
+
+def _brain_split_args(arg_text: str) -> List[str]:
+    """Top-level comma split respecting paren depth — mirror of _split_args."""
+    args: List[str] = []
+    depth = 0
+    buf: List[str] = []
+    for ch in arg_text:
+        if ch == "(":
+            depth += 1
+            buf.append(ch)
+        elif ch == ")":
+            depth -= 1
+            buf.append(ch)
+        elif ch == "," and depth == 0:
+            args.append("".join(buf).strip())
+            buf = []
+        else:
+            buf.append(ch)
+    if buf:
+        args.append("".join(buf).strip())
+    return args
+
+
+def _brain_field_to_qlib(token: str) -> Optional[str]:
+    """Whitelist field-name map; unknown → None (plan §2.3 [V1.1-S3])."""
+    if token in _BRAIN_OP_NAMES:
+        return token
+    if token.isdigit():
+        return token
+    if token in BRAIN_TO_QLIB_FIELD:
+        return BRAIN_TO_QLIB_FIELD[token]
+    return None
+
+
+def _brain_replace_leaf_fields(expr: str) -> Optional[str]:
+    """Replace bare field tokens with qlib equivalents in a leaf expression.
+
+    Returns None if any token maps to None (cascade-to-untranslatable).
+    """
+    out_parts: List[str] = []
+    last = 0
+    for m in _BRAIN_FIELD_RE.finditer(expr):
+        token = m.group(1)
+        start, end = m.span(1)
+        after = expr[end:end + 2].lstrip()
+        if after.startswith("("):
+            continue  # call site — handled by recursion
+        if token in _BRAIN_OP_NAMES:
+            continue
+        if token.isdigit() or token in ("True", "False"):
+            continue
+        mapped = _brain_field_to_qlib(token)
+        if mapped is None:
+            return None
+        out_parts.append(expr[last:start])
+        out_parts.append(mapped)
+        last = end
+    out_parts.append(expr[last:])
+    return "".join(out_parts)
+
+
+def _brain_convert_ts_delay(args: List[str], region: str) -> Optional[str]:
+    """TRAP #1 reversed: ts_delay(x, N) → Ref(x, -N) (sign flip)."""
+    if len(args) != 2:
+        return None
+    inner = _brain_to_qlib_inner(args[0], region)
+    if inner is None:
+        return None
+    w = args[1].strip()
+    if w.startswith("-"):
+        flipped = w[1:].strip()
+    else:
+        flipped = f"-{w}"
+    return f"Ref({inner}, {flipped})"
+
+
+def _brain_convert_call(op_name: str, raw_args: str, region: str) -> Optional[str]:
+    """Recursive dispatch — return qlib call str or None on untranslatable."""
+    if op_name == "ts_delay":
+        return _brain_convert_ts_delay(_brain_split_args(raw_args), region)
+    qlib_op = BRAIN_TO_QLIB_OPERATORS.get(op_name)
+    if qlib_op is None:
+        return None
+    args = _brain_split_args(raw_args)
+    translated: List[str] = []
+    for a in args:
+        inner = _brain_to_qlib_inner(a, region)
+        if inner is None:
+            return None
+        translated.append(inner)
+    return f"{qlib_op}({', '.join(translated)})"
+
+
+def _brain_to_qlib_inner(brain_expr: str, region: str) -> Optional[str]:
+    """Core recursive translator (no lru_cache — public entry caches)."""
+    if not brain_expr:
+        return None
+    expr = brain_expr.strip()
+    if not expr:
+        return None
+    match = _BRAIN_CALL_RE.search(expr)
+    if match is None:
+        return _brain_replace_leaf_fields(expr)
+    op_name = match.group(1)
+    paren_open = match.end() - 1
+    depth = 0
+    paren_close = -1
+    for i in range(paren_open, len(expr)):
+        if expr[i] == "(":
+            depth += 1
+        elif expr[i] == ")":
+            depth -= 1
+            if depth == 0:
+                paren_close = i
+                break
+    if paren_close == -1:
+        return None
+    raw_args = expr[paren_open + 1:paren_close]
+    translated_call = _brain_convert_call(op_name, raw_args, region)
+    if translated_call is None:
+        return None
+    prefix = expr[:match.start()]
+    suffix = expr[paren_close + 1:]
+    prefix_translated = _brain_replace_leaf_fields(prefix) if prefix.strip() else prefix
+    if prefix_translated is None:
+        return None
+    suffix_translated = ""
+    if suffix.strip():
+        s = _brain_to_qlib_inner(suffix, region)
+        if s is None:
+            return None
+        suffix_translated = s
+    return f"{prefix_translated}{translated_call}{suffix_translated}"
+
+
+@lru_cache(maxsize=1024)
+def brain_to_qlib(brain_expr: str, region: str = "USA") -> Optional[str]:
+    """Reverse-translate a BRAIN expression to qlib DSL.
+
+    Plan §2.4 — returns the qlib expression string on success, None on
+    untranslatable (unknown op, unknown field, group_neutralize,
+    trade_when, etc.). Caller treats None as 'skip pre-screen, go straight
+    to BRAIN'.
+
+    Memoized per process via lru_cache(maxsize=1024) keyed on (brain_expr,
+    region) per plan §2.1 [V1.2-A1-2].
+
+    Region: v1.0 unused (single shared table); v2 may region-partition.
+    """
+    if not brain_expr or not isinstance(brain_expr, str):
+        return None
+    try:
+        return _brain_to_qlib_inner(brain_expr, region)
+    except Exception:
+        # Defensive — public contract is "returns None, never raises"
+        return None
+
+
+__all__ = [
+    "QLIB_TO_BRAIN_OPERATORS",
+    "QLIB_FIELD_TO_BRAIN",
+    "translate",
+    "translate_batch",
+    "BRAIN_TO_QLIB_OPERATORS",
+    "BRAIN_TO_QLIB_FIELD",
+    "brain_to_qlib",
+]
