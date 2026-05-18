@@ -319,144 +319,182 @@ class LLMService:
             f"node={node_key or '-'} effort={effort_active}"
         )
         
+        # JSON-mode parse retry: 1 extra attempt on JSONDecodeError. LLMs
+        # occasionally truncate mid-string (provider hiccup / network abort);
+        # cheap to reissue. Connection-level retries are handled by the
+        # @retry decorator above. Non-json calls skip the loop.
+        parse_attempts_max = 2 if json_mode else 1
+        parse_error: Optional[json.JSONDecodeError] = None
+        parsed = None
+        content = ""
+        tokens_used = 0
+        finish_reason: Optional[str] = None
+
         try:
             await self._ensure_credentials_loaded()
 
-            # W5: Anthropic provider uses messages.create + system prompt with
-            # cache_control. JSON mode is enforced by prompt instructions
-            # (Anthropic doesn't have a response_format flag; the existing
-            # prompts already say "Output Schema: JSON ...").
-            if self.provider == 'anthropic':
-                # Reasoning models (opus-4-7 family) reject `temperature`;
-                # only send it when the model still accepts it.
-                anth_kwargs: Dict[str, Any] = {
-                    "model": self.model,
-                    "max_tokens": max_tokens,
-                    "system": [{
-                        "type": "text",
-                        "text": system_prompt,
-                        "cache_control": {"type": "ephemeral"},
-                    }],
-                    "messages": [{"role": "user", "content": user_prompt}],
-                }
-                if _anthropic_supports_temperature(self.model):
-                    anth_kwargs["temperature"] = temperature
+            for parse_attempt in range(parse_attempts_max):
+                # W5: Anthropic provider uses messages.create + system prompt with
+                # cache_control. JSON mode is enforced by prompt instructions
+                # (Anthropic doesn't have a response_format flag; the existing
+                # prompts already say "Output Schema: JSON ...").
+                if self.provider == 'anthropic':
+                    # Reasoning models (opus-4-7 family) reject `temperature`;
+                    # only send it when the model still accepts it.
+                    anth_kwargs: Dict[str, Any] = {
+                        "model": self.model,
+                        "max_tokens": max_tokens,
+                        "system": [{
+                            "type": "text",
+                            "text": system_prompt,
+                            "cache_control": {"type": "ephemeral"},
+                        }],
+                        "messages": [{"role": "user", "content": user_prompt}],
+                    }
+                    if _anthropic_supports_temperature(self.model):
+                        anth_kwargs["temperature"] = temperature
 
-                # Extended thinking — opus-4-7 family only; caller's max_tokens
-                # is preserved as the *output* budget (thinking adds on top).
-                thinking_enabled = False
-                # `effort_active` already resolved via the three-tier priority
-                # chain above; alias-normalize "auto" → "adaptive" so downstream
-                # branches only need canonical tier names.
-                effort = _ANTHROPIC_EFFORT_ALIASES.get(effort_active, effort_active)
-                if (
-                    _anthropic_supports_thinking(self.model)
-                    and effort
-                    and effort != 'disabled'
-                ):
-                    thinking_enabled = True
-                    if effort == 'adaptive':
-                        anth_kwargs['thinking'] = {
-                            "type": "adaptive",
-                            "display": "omitted",
-                        }
+                    # Extended thinking — opus-4-7 family only; caller's max_tokens
+                    # is preserved as the *output* budget (thinking adds on top).
+                    thinking_enabled = False
+                    # `effort_active` already resolved via the three-tier priority
+                    # chain above; alias-normalize "auto" → "adaptive" so downstream
+                    # branches only need canonical tier names.
+                    effort = _ANTHROPIC_EFFORT_ALIASES.get(effort_active, effort_active)
+                    if (
+                        _anthropic_supports_thinking(self.model)
+                        and effort
+                        and effort != 'disabled'
+                    ):
+                        thinking_enabled = True
+                        if effort == 'adaptive':
+                            anth_kwargs['thinking'] = {
+                                "type": "adaptive",
+                                "display": "omitted",
+                            }
+                        else:
+                            budget = _ANTHROPIC_THINKING_BUDGETS.get(
+                                effort, _ANTHROPIC_THINKING_BUDGETS['xhigh']
+                            )
+                            # Spec: 1024 <= budget_tokens < max_tokens. Bump
+                            # max_tokens so the original `max_tokens` arg is
+                            # honored as output budget on top of thinking.
+                            anth_kwargs['max_tokens'] = budget + max(max_tokens, 1024)
+                            anth_kwargs['thinking'] = {
+                                "type": "enabled",
+                                "budget_tokens": budget,
+                                "display": "omitted",
+                            }
+
+                    # The SDK forces streaming when total expected output exceeds
+                    # its 10-minute non-streaming budget — that's always the case
+                    # with thinking enabled at medium+ effort. Use the stream
+                    # context manager and aggregate to the same final Message
+                    # shape so the downstream code path stays identical.
+                    if thinking_enabled:
+                        async with self.anthropic_client.messages.stream(**anth_kwargs) as stream:
+                            resp = await stream.get_final_message()
                     else:
-                        budget = _ANTHROPIC_THINKING_BUDGETS.get(
-                            effort, _ANTHROPIC_THINKING_BUDGETS['xhigh']
+                        resp = await self.anthropic_client.messages.create(**anth_kwargs)
+                    # Extract text from the first content block (TextBlock)
+                    content = ""
+                    for block in resp.content:
+                        if getattr(block, "type", "") == "text":
+                            content = block.text
+                            break
+                    if not content:
+                        raise ValueError("Empty content in Anthropic response")
+                    # Capture finish reason for diagnostic logging
+                    finish_reason = getattr(resp, "stop_reason", None)
+                    # Token accounting (input + output, log cache hit ratio).
+                    # Accumulate across parse retries so the final tokens_used
+                    # reflects total cost.
+                    u = resp.usage
+                    tokens_used += (u.input_tokens or 0) + (u.output_tokens or 0)
+                    cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
+                    cache_create = getattr(u, "cache_creation_input_tokens", 0) or 0
+                    if cache_read or cache_create:
+                        logger.debug(
+                            f"[LLMService] Anthropic cache | id={call_id} "
+                            f"input={u.input_tokens} cache_read={cache_read} "
+                            f"cache_create={cache_create}"
                         )
-                        # Spec: 1024 <= budget_tokens < max_tokens. Bump
-                        # max_tokens so the original `max_tokens` arg is
-                        # honored as output budget on top of thinking.
-                        anth_kwargs['max_tokens'] = budget + max(max_tokens, 1024)
-                        anth_kwargs['thinking'] = {
-                            "type": "enabled",
-                            "budget_tokens": budget,
-                            "display": "omitted",
-                        }
-
-                # The SDK forces streaming when total expected output exceeds
-                # its 10-minute non-streaming budget — that's always the case
-                # with thinking enabled at medium+ effort. Use the stream
-                # context manager and aggregate to the same final Message
-                # shape so the downstream code path stays identical.
-                if thinking_enabled:
-                    async with self.anthropic_client.messages.stream(**anth_kwargs) as stream:
-                        resp = await stream.get_final_message()
                 else:
-                    resp = await self.anthropic_client.messages.create(**anth_kwargs)
-                # Extract text from the first content block (TextBlock)
-                content = ""
-                for block in resp.content:
-                    if getattr(block, "type", "") == "text":
-                        content = block.text
-                        break
-                if not content:
-                    raise ValueError("Empty content in Anthropic response")
-                # Token accounting (input + output, log cache hit ratio)
-                u = resp.usage
-                tokens_used = (u.input_tokens or 0) + (u.output_tokens or 0)
-                cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
-                cache_create = getattr(u, "cache_creation_input_tokens", 0) or 0
-                latency_ms = int((time.time() - start_time) * 1000)
-                if cache_read or cache_create:
-                    logger.debug(
-                        f"[LLMService] Anthropic cache | id={call_id} "
-                        f"input={u.input_tokens} cache_read={cache_read} "
-                        f"cache_create={cache_create}"
+                    response = await self.client.chat.completions.create(
+                        model=self.model,
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt}
+                        ],
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_format={"type": "json_object"} if json_mode else None
                     )
-            else:
-                response = await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt}
-                    ],
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format={"type": "json_object"} if json_mode else None
-                )
 
-                # Defensive: handle empty/malformed responses
-                choices = getattr(response, "choices", None)
-                if not response or not choices:
-                    status = getattr(response, "status", None)
-                    msg = getattr(response, "msg", None)
-                    extra = f" | status={status} msg={msg}" if status or msg else ""
-                    raise ValueError(f"Empty response from LLM API{extra}")
+                    # Defensive: handle empty/malformed responses
+                    choices = getattr(response, "choices", None)
+                    if not response or not choices:
+                        status = getattr(response, "status", None)
+                        msg = getattr(response, "msg", None)
+                        extra = f" | status={status} msg={msg}" if status or msg else ""
+                        raise ValueError(f"Empty response from LLM API{extra}")
 
-                if len(choices) == 0:
-                    raise ValueError("Empty choices from LLM API")
+                    if len(choices) == 0:
+                        raise ValueError("Empty choices from LLM API")
 
-                message = response.choices[0].message
-                if not message:
-                    raise ValueError("No message in LLM response")
+                    message = response.choices[0].message
+                    if not message:
+                        raise ValueError("No message in LLM response")
 
-                content = message.content or ""
-                if json_mode and not content.strip():
+                    content = message.content or ""
                     finish_reason = getattr(response.choices[0], "finish_reason", None)
-                    reasoning_content = getattr(message, "reasoning_content", None)
-                    extra = f"finish_reason={finish_reason}" if finish_reason else ""
-                    if reasoning_content:
-                        extra = (extra + " | reasoning_content_present=True").strip()
-                    raise ValueError(f"Empty content in LLM response ({extra})")
-                tokens_used = response.usage.total_tokens if response.usage else 0
-                latency_ms = int((time.time() - start_time) * 1000)
-            
-            # Parse JSON if requested
-            parsed = None
-            if json_mode:
+                    if json_mode and not content.strip():
+                        reasoning_content = getattr(message, "reasoning_content", None)
+                        extra = f"finish_reason={finish_reason}" if finish_reason else ""
+                        if reasoning_content:
+                            extra = (extra + " | reasoning_content_present=True").strip()
+                        raise ValueError(f"Empty content in LLM response ({extra})")
+                    tokens_used += response.usage.total_tokens if response.usage else 0
+
+                # Parse JSON if requested; retry once on JSONDecodeError.
+                if not json_mode:
+                    parse_error = None
+                    break
+
                 try:
-                    cleaned = self._clean_json(content)
-                    parsed = json.loads(cleaned)
+                    parsed = json.loads(self._clean_json(content))
+                    parse_error = None
+                    break
                 except json.JSONDecodeError as e:
-                    logger.warning(f"[LLMService] JSON parse failed | id={call_id} error={e}")
-            
-            logger.info(
-                f"[LLMService] Call success | id={call_id} "
-                f"node={node_key or '-'} effort={effort_active} "
-                f"tokens={tokens_used} latency={latency_ms}ms"
-            )
-            self._emit_metrics(node_key, effort_active, tokens_used, latency_ms, success=True)
+                    parse_error = e
+                    is_last = (parse_attempt + 1) >= parse_attempts_max
+                    prefix = (
+                        "JSON parse failed (final)"
+                        if is_last
+                        else f"JSON parse failed, retry {parse_attempt + 1}/{parse_attempts_max - 1}"
+                    )
+                    logger.warning(
+                        f"[LLMService] {prefix} | id={call_id} node={node_key or '-'} "
+                        f"len={len(content)} finish={finish_reason!r} "
+                        f"head={content[:60]!r} error={e}"
+                    )
+                    if not is_last:
+                        await asyncio.sleep(0.5)
+
+            latency_ms = int((time.time() - start_time) * 1000)
+            # json_mode + parse_error = soft failure (content returned but
+            # unparseable). success=False so callers can branch on .success
+            # without re-checking .parsed.
+            success_final = parse_error is None if json_mode else True
+
+            if success_final:
+                logger.info(
+                    f"[LLMService] Call success | id={call_id} "
+                    f"node={node_key or '-'} effort={effort_active} "
+                    f"tokens={tokens_used} latency={latency_ms}ms"
+                )
+            # parse-fail warning already emitted inside the loop.
+            self._emit_metrics(node_key, effort_active, tokens_used, latency_ms, success=success_final)
 
             return LLMResponse(
                 content=content,
@@ -464,7 +502,8 @@ class LLMService:
                 model=self.model,
                 tokens_used=tokens_used,
                 latency_ms=latency_ms,
-                success=True
+                success=success_final,
+                error=(f"JSON parse failed: {parse_error}" if parse_error else None),
             )
 
         except Exception as e:

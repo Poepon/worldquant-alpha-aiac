@@ -1048,8 +1048,9 @@ class FeedbackAgent:
             # signal. Toggle settings.WRITE_FIELD_HYPOTHESIS_INSIGHTS=True if
             # someone wires retrieve paths later.
             from backend.config import settings as _settings
+            field_insights = analysis.get("field_insights", {}) or {}
+            hypothesis_evo = analysis.get("hypothesis_evolution", {}) or {}
             if getattr(_settings, "WRITE_FIELD_HYPOTHESIS_INSIGHTS", False):
-                field_insights = analysis.get("field_insights", {})
                 if field_insights:
                     for field in field_insights.get("effective_fields", []):
                         field_pattern = f"FIELD_EFFECTIVE:{field}"
@@ -1081,7 +1082,6 @@ class FeedbackAgent:
                             )
                             self.db.add(entry)
                             new_entries += 1
-                hypothesis_evo = analysis.get("hypothesis_evolution", {})
                 if hypothesis_evo:
                     for direction in hypothesis_evo.get("promising_directions", []):
                         hypo_pattern = f"HYPOTHESIS_PROMISING:{direction[:50]}"
@@ -1100,9 +1100,9 @@ class FeedbackAgent:
                             new_entries += 1
             else:
                 # Log the analysis output for traceability without persisting
-                f_eff = len((analysis.get("field_insights") or {}).get("effective_fields", []))
-                f_prob = len((analysis.get("field_insights") or {}).get("problematic_fields", []))
-                h_dir = len((analysis.get("hypothesis_evolution") or {}).get("promising_directions", []))
+                f_eff = len(field_insights.get("effective_fields", []))
+                f_prob = len(field_insights.get("problematic_fields", []))
+                h_dir = len(hypothesis_evo.get("promising_directions", []))
                 if f_eff + f_prob + h_dir > 0:
                     logger.debug(
                         f"[Feedback] V-24.E gated insights skipped | "
