@@ -11,6 +11,7 @@ import {
   Space, 
   Descriptions,
   Table,
+  Timeline,
   Collapse,
   Spin,
   Empty,
@@ -195,60 +196,51 @@ export default function TaskDetail() {
   const [activeIterations, setActiveIterations] = React.useState([])
   const lastMaxIterationRef = React.useRef(0)
   
-  // Sort and group steps by iteration, then sub-group by dataset_id within
-  // each iteration. Cross-dataset steps (ROUND_SUMMARY / HYPOTHESIS_FEEDBACK
-  // with no input_data.dataset_id) collect into a "summarySteps" bucket
-  // rendered full-width below the swim-lane columns.
+  // Sort and group steps by iteration (consolidate all steps of same iteration)
   const groupedSteps = React.useMemo(() => {
     const traceSteps = runTrace || task?.trace_steps
     if (!traceSteps) return {}
-
-    const sortedSteps = [...traceSteps].sort((a, b) => (a.id || 0) - (b.id || 0))
-
+    
+    // Sort steps by created_at or id first
+    const sortedSteps = [...traceSteps].sort((a, b) => {
+      return (a.id || 0) - (b.id || 0)
+    })
+    
+    // First pass: group by iteration only
     const iterGroups = {}
     sortedSteps.forEach(step => {
       const iter = step.iteration || 1
       if (!iterGroups[iter]) {
         iterGroups[iter] = {
+          steps: [],
           iteration: iter,
-          firstCreatedAt: step.created_at,
-          datasetOrder: [],          // preserve first-seen order
-          datasets: {},              // dsId → steps[]
-          summarySteps: [],          // no-dataset steps (ROUND_SUMMARY / HYPOTHESIS_FEEDBACK)
-          allSteps: [],              // flat list (header count + summaryStep lookup)
+          dataset_ids: new Set(),
+          firstCreatedAt: step.created_at
         }
       }
-      const g = iterGroups[iter]
-      g.allSteps.push(step)
-      const dsId = step.input_data?.dataset_id
-      if (dsId) {
-        if (!g.datasets[dsId]) {
-          g.datasets[dsId] = []
-          g.datasetOrder.push(dsId)
-        }
-        g.datasets[dsId].push(step)
-      } else {
-        g.summarySteps.push(step)
+      iterGroups[iter].steps.push(step)
+      // Collect all dataset_ids from this iteration
+      const datasetId = step.input_data?.dataset_id
+      if (datasetId) {
+        iterGroups[iter].dataset_ids.add(datasetId)
       }
     })
-
+    
+    // Convert to final format with string key
     const groups = {}
-    Object.entries(iterGroups).forEach(([iter, g]) => {
-      // Sort each dataset's steps by step_order so columns align row-wise
-      Object.keys(g.datasets).forEach(dsId => {
-        g.datasets[dsId].sort((a, b) => (a.step_order || 0) - (b.step_order || 0))
-      })
-      g.summarySteps.sort((a, b) => (a.step_order || 0) - (b.step_order || 0))
+    Object.entries(iterGroups).forEach(([iter, group]) => {
+      // Use dataset_ids as array, or null if none
+      const datasetIds = Array.from(group.dataset_ids)
+      const displayDatasetId = datasetIds.length > 0 ? datasetIds.join(', ') : null
+      
       groups[iter] = {
+        steps: group.steps.sort((a, b) => (a.step_order || 0) - (b.step_order || 0)),
         iteration: parseInt(iter),
-        firstCreatedAt: g.firstCreatedAt,
-        datasetOrder: g.datasetOrder,
-        datasets: g.datasets,
-        summarySteps: g.summarySteps,
-        allSteps: g.allSteps,
+        dataset_id: displayDatasetId,
+        firstCreatedAt: group.firstCreatedAt
       }
     })
-
+    
     return groups
   }, [runTrace, task?.trace_steps])
 
@@ -310,337 +302,7 @@ export default function TaskDetail() {
     }
   }
 
-  // Renders a single trace_step Card. Called from per-dataset columns AND
-  // from the cross-dataset summary row, so all step-type variants live here
-  // (RAG_QUERY / DISTILL_CONTEXT / HYPOTHESIS / CODE_GEN / SIMULATE /
-  // EVALUATE / ROUND_SUMMARY / legacy expression / error message).
-  const renderStepCard = (step) => (
-    <Card
-      size="small"
-      style={{
-        background: step.step_type === 'ROUND_SUMMARY' ? 'rgba(0, 50, 20, 0.2)' : 'rgba(0,0,0,0.2)',
-        marginBottom: 8,
-        borderColor: step.step_type === 'ROUND_SUMMARY' ? '#004d26' : undefined
-      }}
-    >
-      <Space>
-        {getStatusIcon(step.status)}
-        {stepIcons[step.step_type]}
-        <Text strong>
-          {step.step_type === 'ROUND_SUMMARY'
-            ? '本轮总结'
-            : `第 ${step.step_order} 步：${STEP_TYPE_LABELS[step.step_type] || step.step_type}`}
-        </Text>
-        <Tag>{step.duration_ms ? `${step.duration_ms}ms` : '--'}</Tag>
-      </Space>
 
-      {/* RAG_QUERY: Show top patterns and pitfalls */}
-      {step.step_type === 'RAG_QUERY' && (
-        <div style={{ marginTop: 8 }}>
-          {step.output_data?.top_patterns?.length > 0 ? (
-            <>
-              <Text type="secondary" style={{ fontSize: 12 }}>参考模式:</Text>
-              <ul style={{ paddingLeft: 20, margin: '4px 0', fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>
-                {step.output_data.top_patterns.map((p, i) => (
-                  <li key={i}>{p}</li>
-                ))}
-              </ul>
-            </>
-          ) : (
-            <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>暂无参考模式</Text>
-          )}
-          {step.output_data?.top_pitfalls?.length > 0 && (
-            <>
-              <Text type="secondary" style={{ fontSize: 12, marginTop: 8, display: 'block' }}>避坑指南:</Text>
-              <ul style={{ paddingLeft: 20, margin: '4px 0', fontSize: 12, color: '#ff7875' }}>
-                {step.output_data.top_pitfalls.map((p, i) => (
-                  <li key={i}>{p}</li>
-                ))}
-              </ul>
-            </>
-          )}
-        </div>
-      )}
-
-      {/* DISTILL_CONTEXT: Show reasoning and selected concepts */}
-      {step.step_type === 'DISTILL_CONTEXT' && (
-        <div style={{ marginTop: 8 }}>
-          {step.output_data?.reasoning && (
-            <Paragraph
-              ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
-              style={{ fontSize: 13, color: 'rgba(255,255,255,0.85)', fontStyle: 'italic', marginBottom: 8 }}
-            >
-              "{step.output_data.reasoning}"
-            </Paragraph>
-          )}
-          {step.output_data?.selected_concepts && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-              {step.output_data.selected_concepts.map((c, i) => (
-                <Tag key={i} color="blue" style={{ fontSize: 11 }}>{c}</Tag>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* HYPOTHESIS: Show generated hypotheses */}
-      {step.step_type === 'HYPOTHESIS' && (
-        <div style={{ marginTop: 8 }}>
-          {step.output_data?.hypotheses?.map((h, i) => {
-            const content = typeof h === 'string' ? h : (h.idea || JSON.stringify(h));
-            const rationale = typeof h === 'object' && h.rationale ? h.rationale : null;
-            return (
-              <div key={i} style={{ marginBottom: 4 }}>
-                <Paragraph ellipsis={{ rows: 2, expandable: true, symbol: '展开' }} style={{ fontSize: 13, marginBottom: 0 }}>
-                  <Text strong style={{ color: '#00d4ff', marginRight: 8 }}>H{i + 1}:</Text>
-                  {content}
-                </Paragraph>
-                {rationale && (
-                  <Text type="secondary" style={{ fontSize: 12, marginLeft: 22 }}>
-                    {rationale}
-                  </Text>
-                )}
-              </div>
-            );
-          })}
-          {!step.output_data?.hypotheses && step.output_data?.hypothesis && (
-            <Paragraph ellipsis={{ rows: 2 }} style={{ fontSize: 13 }}>
-              💡 {step.output_data.hypothesis}
-            </Paragraph>
-          )}
-        </div>
-      )}
-
-      {/* CODE_GEN: Show expressions */}
-      {step.step_type === 'CODE_GEN' && step.output_data?.expressions && (
-        <div style={{ marginTop: 8 }}>
-          {step.output_data.expressions.map((expr, i) => (
-            <pre key={i} style={{
-              fontSize: 11,
-              background: '#1f1f1f',
-              padding: 4,
-              borderRadius: 4,
-              marginBottom: 4,
-              overflowX: 'auto'
-            }}>
-              {expr}
-            </pre>
-          ))}
-        </div>
-      )}
-
-      {/* SIMULATE: Show Results with Metrics */}
-      {step.step_type === 'SIMULATE' && step.output_data?.results && (
-        <div style={{ marginTop: 8 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            模拟结果: {step.output_data.success_count || 0} 成功
-          </Text>
-          {step.output_data.results.map((r, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-              <Tag color={r.err ? 'red' : 'blue'} style={{ fontSize: 11 }}>
-                {r.id || `#${i + 1}`}
-              </Tag>
-              {r.metrics && (
-                <Space size="small" wrap>
-                  <Tag color={r.metrics.sharpe >= 1.2 ? 'green' : (r.metrics.sharpe >= 0 ? 'orange' : 'red')}>
-                    Sharpe: {r.metrics.sharpe?.toFixed(2) ?? '--'}
-                  </Tag>
-                  <Tag>Returns: {(r.metrics.returns * 100)?.toFixed(1) ?? '--'}%</Tag>
-                  <Tag>Turnover: {r.metrics.turnover?.toFixed(2) ?? '--'}</Tag>
-                  <Tag>Fitness: {r.metrics.fitness?.toFixed(2) ?? '--'}</Tag>
-                </Space>
-              )}
-              {r.err && <Text type="danger" style={{ fontSize: 11 }}>{r.err}</Text>}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* EVALUATE: per-alpha pass/optimize/fail breakdown */}
-      {step.step_type === 'EVALUATE' && step.output_data?.details && (
-        <div style={{ marginTop: 8 }}>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            评估结果: ✅ {step.output_data.pass_count || 0} 通过, ⚡ {step.output_data.optimize_count || 0} 优化, ❌ {step.output_data.fail_count || 0} 失败
-          </Text>
-          {step.output_data.details.map((d, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
-              <Tag
-                color={d.status === 'PASS' ? 'green' : (d.status === 'OPTIMIZE' ? 'gold' : 'red')}
-                style={{ fontSize: 11 }}
-              >
-                {STATUS_LABELS[d.status] || d.status} {d.id || `#${i + 1}`}
-              </Tag>
-              <Space size="small" wrap>
-                <Tag>Score: {d.score?.toFixed?.(3) ?? d.score ?? '--'}</Tag>
-                <Tag color={d.sharpe >= 1.5 ? 'green' : 'default'}>Sharpe: {d.sharpe?.toFixed(2) ?? '--'}</Tag>
-                <Tag color={d.turnover <= 0.3 ? 'green' : 'orange'}>Turnover: {d.turnover?.toFixed(2) ?? '--'}</Tag>
-                <Tag>Fitness: {d.fitness?.toFixed(2) ?? '--'}</Tag>
-              </Space>
-              {d.optimize_reason && (
-                <Text type="secondary" style={{ fontSize: 11 }}>
-                  {d.optimize_reason}
-                </Text>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* ROUND_SUMMARY: Rich Round Stats & Intelligent Strategy */}
-      {step.step_type === 'ROUND_SUMMARY' && step.output_data && (
-        <div style={{ marginTop: 12 }}>
-          <Row gutter={[12, 12]}>
-            <Col span={12}>
-              <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 4 }}>
-                <Text type="secondary" style={{ fontSize: 12, fontWeight: 'bold' }}>本轮战绩</Text>
-                <div style={{ marginTop: 6 }}>
-                  <Tag color={step.output_data.success_rate > 0 ? "green" : "red"} style={{ marginRight: 4 }}>
-                    {step.output_data.mining_success ? "本轮挖掘成功" : "本轮挖掘失败"}
-                  </Tag>
-                  <Text style={{ fontSize: 12 }}>
-                    Alphas: {step.output_data.simulated_alphas ?? 0} (✅{step.output_data.succeeded_alphas ?? 0})
-                  </Text>
-                </div>
-                <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
-                  <Text style={{ fontSize: 11 }}>
-                    Best Sharpe: <span style={{ color: '#00ff88', fontWeight: 'bold' }}>{step.output_data.best_sharpe?.toFixed(2) ?? 'N/A'}</span>
-                  </Text>
-                  <Text style={{ fontSize: 11 }}>
-                    Avg Sharpe: <span style={{ color: '#87d068' }}>{step.output_data.avg_sharpe?.toFixed(2) ?? 'N/A'}</span>
-                  </Text>
-                  <Text style={{ fontSize: 11 }}>
-                    Best Fitness: <span style={{ color: '#00d4ff' }}>{step.output_data.best_fitness?.toFixed(2) ?? 'N/A'}</span>
-                  </Text>
-                  <Text style={{ fontSize: 11 }}>
-                    Avg Fitness: <span style={{ color: '#69c0ff' }}>{step.output_data.avg_fitness?.toFixed(2) ?? 'N/A'}</span>
-                  </Text>
-                  <Text style={{ fontSize: 11 }}>
-                    Avg Turnover: <span style={{ color: '#faad14' }}>{step.output_data.avg_turnover?.toFixed(2) ?? 'N/A'}</span>
-                  </Text>
-                  <Text style={{ fontSize: 11 }}>
-                    Avg Returns: <span style={{ color: '#b37feb' }}>{step.output_data.avg_returns ? (step.output_data.avg_returns * 100).toFixed(1) + '%' : 'N/A'}</span>
-                  </Text>
-                </div>
-                {step.output_data.error_breakdown && (
-                  <div style={{ marginTop: 8, borderTop: '1px solid #303030', paddingTop: 6 }}>
-                    <Text type="secondary" style={{ fontSize: 11 }}>错误分析:</Text>
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 2 }}>
-                      {step.output_data.error_breakdown.syntax_errors > 0 && (
-                        <Tag color="red" style={{ fontSize: 10 }}>语法: {step.output_data.error_breakdown.syntax_errors}</Tag>
-                      )}
-                      {step.output_data.error_breakdown.simulation_errors > 0 && (
-                        <Tag color="orange" style={{ fontSize: 10 }}>模拟: {step.output_data.error_breakdown.simulation_errors}</Tag>
-                      )}
-                      {step.output_data.error_breakdown.quality_failures > 0 && (
-                        <Tag color="gold" style={{ fontSize: 10 }}>质量: {step.output_data.error_breakdown.quality_failures}</Tag>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {step.output_data.problematic_fields?.length > 0 && (
-                  <div style={{ marginTop: 4 }}>
-                    <Text type="secondary" style={{ fontSize: 10 }}>问题字段: </Text>
-                    {step.output_data.problematic_fields.slice(0, 3).map((f, i) => (
-                      <Tag key={i} color="volcano" style={{ fontSize: 9 }}>{f}</Tag>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </Col>
-            <Col span={12}>
-              <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 4 }}>
-                <Text type="secondary" style={{ fontSize: 12, fontWeight: 'bold' }}>下轮策略 (RD-Agent Style)</Text>
-                {step.output_data.next_strategy ? (
-                  <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                    <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                      <Tag color="geekblue">Temp: {step.output_data.next_strategy.temperature?.toFixed(1) ?? 'N/A'}</Tag>
-                      <Tag color="purple">Exploration: {step.output_data.next_strategy.exploration_weight?.toFixed(1) ?? 'N/A'}</Tag>
-                    </div>
-                    {step.output_data.next_strategy.action && (
-                      <Text style={{ fontSize: 11, color: '#00d4ff' }}>
-                        📋 {step.output_data.next_strategy.action}
-                      </Text>
-                    )}
-                    {step.output_data.next_strategy.reasoning && (
-                      <Paragraph
-                        ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
-                        style={{ fontSize: 10, color: 'rgba(255,255,255,0.65)', marginBottom: 0 }}
-                      >
-                        💭 {step.output_data.next_strategy.reasoning}
-                      </Paragraph>
-                    )}
-                    {step.output_data.next_strategy.focus_hypotheses?.length > 0 && (
-                      <div>
-                        <Text type="secondary" style={{ fontSize: 10 }}>🎯 聚焦方向:</Text>
-                        <div style={{ marginTop: 2 }}>
-                          {step.output_data.next_strategy.focus_hypotheses.slice(0, 2).map((h, i) => (
-                            <Tag key={i} color="cyan" style={{ fontSize: 9, marginBottom: 2 }}>{h}</Tag>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      {step.output_data.next_strategy.amplify_patterns?.length > 0 && (
-                        <div style={{ flex: 1 }}>
-                          <Text type="secondary" style={{ fontSize: 10 }}>✅ 强化:</Text>
-                          {step.output_data.next_strategy.amplify_patterns.slice(0, 2).map((p, i) => (
-                            <Tag key={i} color="green" style={{ fontSize: 9, display: 'block', marginTop: 2 }}>{p}</Tag>
-                          ))}
-                        </div>
-                      )}
-                      {step.output_data.next_strategy.avoid_patterns?.length > 0 && (
-                        <div style={{ flex: 1 }}>
-                          <Text type="secondary" style={{ fontSize: 10 }}>❌ 避免:</Text>
-                          {step.output_data.next_strategy.avoid_patterns.slice(0, 2).map((p, i) => (
-                            <Tag key={i} color="red" style={{ fontSize: 9, display: 'block', marginTop: 2 }}>{p}</Tag>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    {step.output_data.next_strategy.optimization_suggestions?.length > 0 && (
-                      <div style={{ borderTop: '1px solid #303030', paddingTop: 4 }}>
-                        <Text type="secondary" style={{ fontSize: 10 }}>💡 优化建议:</Text>
-                        {step.output_data.next_strategy.optimization_suggestions.slice(0, 1).map((s, i) => (
-                          <Text key={i} style={{ fontSize: 10, display: 'block', color: '#fadb14' }}>
-                            [{s.type}] {s.suggestion}
-                          </Text>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ) : (
-                  <div style={{ marginTop: 4 }}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>迭代完成或无新策略</Text>
-                  </div>
-                )}
-              </div>
-            </Col>
-          </Row>
-        </div>
-      )}
-
-      {/* Legacy single expression display */}
-      {!['ROUND_SUMMARY', 'CODE_GEN'].includes(step.step_type) && !step.output_data?.expressions && (step.output_data?.expression || step.input_data?.expression) && (
-        <pre style={{
-          marginTop: 8,
-          marginBottom: 0,
-          fontSize: 12,
-          maxHeight: 100,
-          overflow: 'auto',
-          background: '#1f1f1f',
-          padding: 5
-        }}>
-          {step.output_data?.expression || step.input_data?.expression}
-        </pre>
-      )}
-
-      {step.error_message && (
-        <Text type="danger" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
-          ❌ {step.error_message}
-        </Text>
-      )}
-    </Card>
-  )
 
   return (
     <div>
@@ -874,85 +536,387 @@ export default function TaskDetail() {
               >
                 {iterationKeys.map(groupKey => {
                    const group = groupedSteps[groupKey]
+                   const steps = group.steps
                    const iter = group.iteration
-                   const datasetIds = group.datasetOrder
-                   const datasetsLabel = datasetIds.length > 0 ? datasetIds.join(', ') : null
-                   const totalSteps = group.allSteps.length
-
-                   // Cross-dataset summary step lives in summarySteps now
-                   const summaryStep = group.summarySteps.find(s => s.step_type === 'ROUND_SUMMARY')
-
+                   const datasetId = group.dataset_id
+                   
+                   // Try to find summary step for this iteration
+                   const summaryStep = steps.find(s => s.step_type === 'ROUND_SUMMARY')
+                   
                    const header = (
                      <Space>
                        <Text strong>第 {iter} 轮</Text>
-                       {datasetsLabel && (
-                         <Tag color="purple" style={{ fontSize: 11 }}>{datasetsLabel}</Tag>
+                       {datasetId && (
+                         <Tag color="purple" style={{ fontSize: 11 }}>{datasetId}</Tag>
                        )}
                        {summaryStep && summaryStep.output_data?.success_rate !== undefined && (
                          <Tag color={summaryStep.output_data.success_rate > 0 ? 'green' : 'orange'}>
                            成功率: {(summaryStep.output_data.success_rate * 100).toFixed(0)}%
                          </Tag>
                        )}
-                       <Text type="secondary" style={{ fontSize: 12 }}>
-                         ({datasetIds.length} datasets · {totalSteps} 步)
-                       </Text>
+                       <Text type="secondary" style={{ fontSize: 12 }}>({steps.length} 步)</Text>
                      </Space>
                    )
 
                    return (
                      <Panel header={header} key={groupKey} style={{ marginBottom: 12, border: '1px solid #303030', borderRadius: 8 }}>
-                       {/* Swim-lane: one column per dataset, side-by-side with
-                           horizontal scroll on narrow screens. Steps within a
-                           column are sorted by step_order so rows align across
-                           datasets for easy horizontal comparison. */}
-                       {datasetIds.length > 0 && (
-                         <div style={{
-                           display: 'flex',
-                           overflowX: 'auto',
-                           gap: 12,
-                           paddingBottom: 8,
-                           marginTop: 8,
-                         }}>
-                           {datasetIds.map(dsId => {
-                             const dsSteps = group.datasets[dsId]
-                             return (
-                               <div key={dsId} style={{ flex: '0 0 300px', minWidth: 300 }}>
-                                 <div style={{
-                                   textAlign: 'center',
-                                   padding: '6px 8px',
-                                   background: 'rgba(150,80,200,0.12)',
-                                   border: '1px solid rgba(150,80,200,0.3)',
-                                   borderRadius: 4,
-                                   marginBottom: 8,
-                                 }}>
-                                   <Tag color="purple" style={{ margin: 0, fontSize: 12 }}>📊 {dsId}</Tag>
-                                   <Text type="secondary" style={{ fontSize: 11, marginLeft: 6 }}>
-                                     {dsSteps.length} 步
-                                   </Text>
+                       <Timeline mode="left" style={{ marginTop: 16 }}>
+                         {steps.map((step) => (
+                           <Timeline.Item
+                             key={step.id}
+                             dot={getStatusIcon(step.status)}
+                             color={statusColors[step.status] || 'gray'}
+                           >
+                             <Card 
+                               size="small" 
+                               style={{ 
+                                 background: step.step_type === 'ROUND_SUMMARY' ? 'rgba(0, 50, 20, 0.2)' : 'rgba(0,0,0,0.2)',
+                                 marginBottom: 8,
+                                 borderColor: step.step_type === 'ROUND_SUMMARY' ? '#004d26' : undefined
+                               }}
+                             >
+                               <Space>
+                                 {stepIcons[step.step_type]}
+                                 <Text strong>
+                                    {step.step_type === 'ROUND_SUMMARY' ? '本轮总结' : `第 ${step.step_order} 步：${STEP_TYPE_LABELS[step.step_type] || step.step_type}`}
+                                 </Text>
+                                 <Tag>{step.duration_ms ? `${step.duration_ms}ms` : '--'}</Tag>
+                               </Space>
+                               
+                               {/* Rich Content Rendering */}
+                               
+                               {/* RAG_QUERY: Show top patterns and pitfalls */}
+                               {step.step_type === 'RAG_QUERY' && (
+                                 <div style={{ marginTop: 8 }}>
+                                   {step.output_data?.top_patterns?.length > 0 ? (
+                                     <>
+                                       <Text type="secondary" style={{ fontSize: 12 }}>参考模式:</Text>
+                                       <ul style={{ paddingLeft: 20, margin: '4px 0', fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>
+                                         {step.output_data.top_patterns.map((p, i) => (
+                                           <li key={i}>{p}</li>
+                                         ))}
+                                       </ul>
+                                     </>
+                                   ) : (
+                                      <Text type="secondary" style={{ fontSize: 12, marginRight: 8 }}>暂无参考模式</Text>
+                                   )}
+                                   
+                                   {step.output_data?.top_pitfalls?.length > 0 && (
+                                     <>
+                                       <Text type="secondary" style={{ fontSize: 12, marginTop: 8, display: 'block' }}>避坑指南:</Text>
+                                       <ul style={{ paddingLeft: 20, margin: '4px 0', fontSize: 12, color: '#ff7875' }}>
+                                         {step.output_data.top_pitfalls.map((p, i) => (
+                                           <li key={i}>{p}</li>
+                                         ))}
+                                       </ul>
+                                     </>
+                                   )}
                                  </div>
-                                 {dsSteps.map(step => (
-                                   <div key={step.id}>{renderStepCard(step)}</div>
-                                 ))}
-                               </div>
-                             )
-                           })}
-                         </div>
-                       )}
+                               )}
+         
+                               {/* DISTILL_CONTEXT: Show reasoning and selected concepts */}
+                               {step.step_type === 'DISTILL_CONTEXT' && (
+                                 <div style={{ marginTop: 8 }}>
+                                   {step.output_data?.reasoning && (
+                                     <Paragraph 
+                                       ellipsis={{ rows: 2, expandable: true, symbol: '展开' }} 
+                                       style={{ fontSize: 13, color: 'rgba(255,255,255,0.85)', fontStyle: 'italic', marginBottom: 8 }}
+                                     >
+                                        "{step.output_data.reasoning}"
+                                     </Paragraph>
+                                   )}
+                                   {step.output_data?.selected_concepts && (
+                                     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                                       {step.output_data.selected_concepts.map((c, i) => (
+                                         <Tag key={i} color="blue" style={{ fontSize: 11 }}>{c}</Tag>
+                                       ))}
+                                     </div>
+                                   )}
+                                 </div>
+                               )}
+         
+                               {/* HYPOTHESIS: Show generated hypotheses */}
+                               {step.step_type === 'HYPOTHESIS' && (
+                                 <div style={{ marginTop: 8 }}>
+                                    {step.output_data?.hypotheses?.map((h, i) => {
+                                      const content = typeof h === 'string' ? h : (h.idea || JSON.stringify(h));
+                                      const rationale = typeof h === 'object' && h.rationale ? h.rationale : null;
+                                      
+                                      return (
+                                        <div key={i} style={{ marginBottom: 4 }}>
+                                          <Paragraph ellipsis={{ rows: 2, expandable: true, symbol: '展开' }} style={{ fontSize: 13, marginBottom: 0 }}>
+                                            <Text strong style={{ color: '#00d4ff', marginRight: 8 }}>H{i+1}:</Text>
+                                            {content}
+                                          </Paragraph>
+                                          {rationale && (
+                                            <Text type="secondary" style={{ fontSize: 12, marginLeft: 22 }}>
+                                              {rationale}
+                                            </Text>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
+                                    {/* Legacy support */}
+                                    {!step.output_data?.hypotheses && step.output_data?.hypothesis && (
+                                       <Paragraph ellipsis={{ rows: 2 }} style={{ fontSize: 13 }}>
+                                         💡 {step.output_data.hypothesis}
+                                       </Paragraph>
+                                    )}
+                                 </div>
+                               )}
+                               
+                               {/* CODE_GEN: Show expressions */}
+                               {step.step_type === 'CODE_GEN' && step.output_data?.expressions && (
+                                 <div style={{ marginTop: 8 }}>
+                                    {step.output_data.expressions.map((expr, i) => (
+                                      <pre key={i} style={{ 
+                                        fontSize: 11, 
+                                        background: '#1f1f1f', 
+                                        padding: 4, 
+                                        borderRadius: 4,
+                                        marginBottom: 4,
+                                        overflowX: 'auto'
+                                      }}>
+                                        {expr}
+                                      </pre>
+                                    ))}
+                                 </div>
+                               )}
+                               
+                               {/* SIMULATE: Show Results with Metrics */}
+                               {step.step_type === 'SIMULATE' && step.output_data?.results && (
+                                 <div style={{ marginTop: 8 }}>
+                                   <Text type="secondary" style={{ fontSize: 12 }}>
+                                     模拟结果: {step.output_data.success_count || 0} 成功
+                                   </Text>
+                                   {step.output_data.results.map((r, i) => (
+                                     <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+                                       <Tag color={r.err ? 'red' : 'blue'} style={{ fontSize: 11 }}>
+                                         {r.id || `#${i+1}`}
+                                       </Tag>
+                                       {r.metrics && (
+                                         <Space size="small" wrap>
+                                           <Tag color={r.metrics.sharpe >= 1.2 ? 'green' : (r.metrics.sharpe >= 0 ? 'orange' : 'red')}>
+                                             Sharpe: {r.metrics.sharpe?.toFixed(2) ?? '--'}
+                                           </Tag>
+                                           <Tag>Returns: {(r.metrics.returns * 100)?.toFixed(1) ?? '--'}%</Tag>
+                                           <Tag>Turnover: {r.metrics.turnover?.toFixed(2) ?? '--'}</Tag>
+                                           <Tag>Fitness: {r.metrics.fitness?.toFixed(2) ?? '--'}</Tag>
+                                         </Space>
+                                       )}
+                                       {r.err && <Text type="danger" style={{ fontSize: 11 }}>{r.err}</Text>}
+                                     </div>
+                                   ))}
+                                 </div>
+                               )}
 
-                       {/* Cross-dataset summary row (ROUND_SUMMARY +
-                           HYPOTHESIS_FEEDBACK), full-width below the columns */}
-                       {group.summarySteps.length > 0 && (
-                         <div style={{
-                           marginTop: 12,
-                           borderTop: '1px solid #303030',
-                           paddingTop: 12,
-                         }}>
-                           {group.summarySteps.map(step => (
-                             <div key={step.id}>{renderStepCard(step)}</div>
-                           ))}
-                         </div>
-                       )}
-                     </Panel>
+                               {step.step_type === 'EVALUATE' && step.output_data?.details && (
+                                 <div style={{ marginTop: 8 }}>
+                                   <Text type="secondary" style={{ fontSize: 12 }}>
+                                     评估结果: ✅ {step.output_data.pass_count || 0} 通过, ⚡ {step.output_data.optimize_count || 0} 优化, ❌ {step.output_data.fail_count || 0} 失败
+                                   </Text>
+                                   {step.output_data.details.map((d, i) => (
+                                     <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4, flexWrap: 'wrap' }}>
+                                       <Tag
+                                         color={d.status === 'PASS' ? 'green' : (d.status === 'OPTIMIZE' ? 'gold' : 'red')}
+                                         style={{ fontSize: 11 }}
+                                       >
+                                         {STATUS_LABELS[d.status] || d.status} {d.id || `#${i+1}`}
+                                       </Tag>
+                                       <Space size="small" wrap>
+                                         <Tag>Score: {d.score?.toFixed?.(3) ?? d.score ?? '--'}</Tag>
+                                         <Tag color={d.sharpe >= 1.5 ? 'green' : 'default'}>Sharpe: {d.sharpe?.toFixed(2) ?? '--'}</Tag>
+                                         <Tag color={d.turnover <= 0.3 ? 'green' : 'orange'}>Turnover: {d.turnover?.toFixed(2) ?? '--'}</Tag>
+                                         <Tag>Fitness: {d.fitness?.toFixed(2) ?? '--'}</Tag>
+                                       </Space>
+                                       {d.optimize_reason && (
+                                         <Text type="secondary" style={{ fontSize: 11 }}>
+                                           {d.optimize_reason}
+                                         </Text>
+                                       )}
+                                     </div>
+                                   ))}
+                                 </div>
+                               )}
+
+                               {/* ROUND_SUMMARY: Show Rich Round Stats & Intelligent Strategy */}
+                               {step.step_type === 'ROUND_SUMMARY' && step.output_data && (
+                                 <div style={{ marginTop: 12 }}>
+                                   <Row gutter={[12, 12]}>
+                                     {/* Left: Performance Metrics */}
+                                     <Col span={12}>
+                                       <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 4 }}>
+                                         <Text type="secondary" style={{ fontSize: 12, fontWeight: 'bold' }}>本轮战绩</Text>
+                                         <div style={{ marginTop: 6 }}>
+                                            <Tag color={step.output_data.success_rate > 0 ? "green" : "red"} style={{ marginRight: 4 }}>
+                                              {step.output_data.mining_success ? "本轮挖掘成功" : "本轮挖掘失败"}
+                                            </Tag>
+                                            <Text style={{ fontSize: 12 }}>
+                                              Alphas: {step.output_data.simulated_alphas ?? 0} (✅{step.output_data.succeeded_alphas ?? 0})
+                                            </Text>
+                                         </div>
+                                         
+                                         {/* Multi-dimensional Quality Metrics */}
+                                         <div style={{ marginTop: 8, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 4 }}>
+                                            <Text style={{ fontSize: 11 }}>
+                                              Best Sharpe: <span style={{ color: '#00ff88', fontWeight: 'bold' }}>{step.output_data.best_sharpe?.toFixed(2) ?? 'N/A'}</span>
+                                            </Text>
+                                            <Text style={{ fontSize: 11 }}>
+                                              Avg Sharpe: <span style={{ color: '#87d068' }}>{step.output_data.avg_sharpe?.toFixed(2) ?? 'N/A'}</span>
+                                            </Text>
+                                            <Text style={{ fontSize: 11 }}>
+                                              Best Fitness: <span style={{ color: '#00d4ff' }}>{step.output_data.best_fitness?.toFixed(2) ?? 'N/A'}</span>
+                                            </Text>
+                                            <Text style={{ fontSize: 11 }}>
+                                              Avg Fitness: <span style={{ color: '#69c0ff' }}>{step.output_data.avg_fitness?.toFixed(2) ?? 'N/A'}</span>
+                                            </Text>
+                                            <Text style={{ fontSize: 11 }}>
+                                              Avg Turnover: <span style={{ color: '#faad14' }}>{step.output_data.avg_turnover?.toFixed(2) ?? 'N/A'}</span>
+                                            </Text>
+                                            <Text style={{ fontSize: 11 }}>
+                                              Avg Returns: <span style={{ color: '#b37feb' }}>{step.output_data.avg_returns ? (step.output_data.avg_returns * 100).toFixed(1) + '%' : 'N/A'}</span>
+                                            </Text>
+                                         </div>
+                                         
+                                         {/* Failure Analysis */}
+                                         {step.output_data.error_breakdown && (
+                                           <div style={{ marginTop: 8, borderTop: '1px solid #303030', paddingTop: 6 }}>
+                                             <Text type="secondary" style={{ fontSize: 11 }}>错误分析:</Text>
+                                             <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 2 }}>
+                                               {step.output_data.error_breakdown.syntax_errors > 0 && (
+                                                 <Tag color="red" style={{ fontSize: 10 }}>语法: {step.output_data.error_breakdown.syntax_errors}</Tag>
+                                               )}
+                                               {step.output_data.error_breakdown.simulation_errors > 0 && (
+                                                 <Tag color="orange" style={{ fontSize: 10 }}>模拟: {step.output_data.error_breakdown.simulation_errors}</Tag>
+                                               )}
+                                               {step.output_data.error_breakdown.quality_failures > 0 && (
+                                                 <Tag color="gold" style={{ fontSize: 10 }}>质量: {step.output_data.error_breakdown.quality_failures}</Tag>
+                                               )}
+                                             </div>
+                                           </div>
+                                         )}
+                                         
+                                         {/* Problematic Fields */}
+                                         {step.output_data.problematic_fields?.length > 0 && (
+                                           <div style={{ marginTop: 4 }}>
+                                             <Text type="secondary" style={{ fontSize: 10 }}>问题字段: </Text>
+                                             {step.output_data.problematic_fields.slice(0, 3).map((f, i) => (
+                                               <Tag key={i} color="volcano" style={{ fontSize: 9 }}>{f}</Tag>
+                                             ))}
+                                           </div>
+                                         )}
+                                       </div>
+                                     </Col>
+                                     
+                                     {/* Right: Intelligent Strategy */}
+                                     <Col span={12}>
+                                        <div style={{ background: 'rgba(0,0,0,0.2)', padding: 10, borderRadius: 4 }}>
+                                          <Text type="secondary" style={{ fontSize: 12, fontWeight: 'bold' }}>下轮策略 (RD-Agent Style)</Text>
+                                          {step.output_data.next_strategy ? (
+                                             <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                                {/* Core Parameters */}
+                                                <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                                                  <Tag color="geekblue">Temp: {step.output_data.next_strategy.temperature?.toFixed(1) ?? 'N/A'}</Tag>
+                                                  <Tag color="purple">Exploration: {step.output_data.next_strategy.exploration_weight?.toFixed(1) ?? 'N/A'}</Tag>
+                                                </div>
+                                                
+                                                {/* Action Summary */}
+                                                {step.output_data.next_strategy.action && (
+                                                  <Text style={{ fontSize: 11, color: '#00d4ff' }}>
+                                                    📋 {step.output_data.next_strategy.action}
+                                                  </Text>
+                                                )}
+                                                
+                                                {/* Reasoning */}
+                                                {step.output_data.next_strategy.reasoning && (
+                                                  <Paragraph 
+                                                    ellipsis={{ rows: 2, expandable: true, symbol: '展开' }}
+                                                    style={{ fontSize: 10, color: 'rgba(255,255,255,0.65)', marginBottom: 0 }}
+                                                  >
+                                                    💭 {step.output_data.next_strategy.reasoning}
+                                                  </Paragraph>
+                                                )}
+                                                
+                                                {/* Focus Areas */}
+                                                {step.output_data.next_strategy.focus_hypotheses?.length > 0 && (
+                                                  <div>
+                                                    <Text type="secondary" style={{ fontSize: 10 }}>🎯 聚焦方向:</Text>
+                                                    <div style={{ marginTop: 2 }}>
+                                                      {step.output_data.next_strategy.focus_hypotheses.slice(0, 2).map((h, i) => (
+                                                        <Tag key={i} color="cyan" style={{ fontSize: 9, marginBottom: 2 }}>{h}</Tag>
+                                                      ))}
+                                                    </div>
+                                                  </div>
+                                                )}
+                                                
+                                                {/* Amplify & Avoid Patterns */}
+                                                <div style={{ display: 'flex', gap: 8 }}>
+                                                  {step.output_data.next_strategy.amplify_patterns?.length > 0 && (
+                                                    <div style={{ flex: 1 }}>
+                                                      <Text type="secondary" style={{ fontSize: 10 }}>✅ 强化:</Text>
+                                                      {step.output_data.next_strategy.amplify_patterns.slice(0, 2).map((p, i) => (
+                                                        <Tag key={i} color="green" style={{ fontSize: 9, display: 'block', marginTop: 2 }}>{p}</Tag>
+                                                      ))}
+                                                    </div>
+                                                  )}
+                                                  {step.output_data.next_strategy.avoid_patterns?.length > 0 && (
+                                                    <div style={{ flex: 1 }}>
+                                                      <Text type="secondary" style={{ fontSize: 10 }}>❌ 避免:</Text>
+                                                      {step.output_data.next_strategy.avoid_patterns.slice(0, 2).map((p, i) => (
+                                                        <Tag key={i} color="red" style={{ fontSize: 9, display: 'block', marginTop: 2 }}>{p}</Tag>
+                                                      ))}
+                                                    </div>
+                                                  )}
+                                                </div>
+                                                
+                                                {/* Optimization Suggestions */}
+                                                {step.output_data.next_strategy.optimization_suggestions?.length > 0 && (
+                                                  <div style={{ borderTop: '1px solid #303030', paddingTop: 4 }}>
+                                                    <Text type="secondary" style={{ fontSize: 10 }}>💡 优化建议:</Text>
+                                                    {step.output_data.next_strategy.optimization_suggestions.slice(0, 1).map((s, i) => (
+                                                      <Text key={i} style={{ fontSize: 10, display: 'block', color: '#fadb14' }}>
+                                                        [{s.type}] {s.suggestion}
+                                                      </Text>
+                                                    ))}
+                                                  </div>
+                                                )}
+                                             </div>
+                                          ) : (
+                                            <div style={{ marginTop: 4 }}>
+                                              <Text type="secondary" style={{ fontSize: 12 }}>迭代完成或无新策略</Text>
+                                            </div>
+                                          )}
+                                        </div>
+                                     </Col>
+                                   </Row>
+                                 </div>
+                               )}
+         
+                               {/* Legacy single expression display */}
+                               {!['ROUND_SUMMARY', 'CODE_GEN'].includes(step.step_type) && !step.output_data?.expressions && (step.output_data?.expression || step.input_data?.expression) && (
+                                 <pre style={{ 
+                                   marginTop: 8, 
+                                   marginBottom: 0,
+                                   fontSize: 12,
+                                   maxHeight: 100,
+                                   overflow: 'auto',
+                                   background: '#1f1f1f',
+                                   padding: 5
+                                 }}>
+                                   {step.output_data?.expression || step.input_data?.expression}
+                                 </pre>
+                               )}
+                               
+                               {step.error_message && (
+                                 <Text type="danger" style={{ display: 'block', marginTop: 8, fontSize: 12 }}>
+                                   ❌ {step.error_message}
+                                 </Text>
+                               )}
+                             </Card>
+                           </Timeline.Item>
+                         ))}
+                       </Timeline>
+                   </Panel>
                    )
                 })}
               </Collapse>
