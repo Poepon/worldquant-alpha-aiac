@@ -371,12 +371,53 @@ async def node_tier_wrap_one(
             try:
                 from backend.agents.llm_mutate_alpha import llm_mutate_alpha
                 from backend.agents.services.llm_service import get_llm_service
+
+                # R8-v2 #5 + flat-F3 PR2 (2026-05-18): when
+                # ENABLE_HIERARCHICAL_RAG ON, populate failure_context +
+                # decay_context from R8 RAG#2 (family-matched pitfalls +
+                # decayed entries). Soft-fall: any error → empty contexts
+                # (llm_mutate_alpha defaults to "(no recent failures recorded)"
+                # placeholders).
+                _failure_context = ""
+                _decay_context = ""
+                if getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False):
+                    try:
+                        from backend.agents.hierarchical_rag import query_hierarchical
+                        async with resolve_db(config) as _rag_db:
+                            _hier = await query_hierarchical(
+                                _rag_db,
+                                current_expression=seed["expression"],
+                                region=state.region,
+                                max_patterns=0,   # only need pitfalls for mutate context
+                                max_pitfalls=8,
+                            )
+                        # Format pitfalls as bullets — separate decayed from non-decayed
+                        _failure_lines: list = []
+                        _decay_lines: list = []
+                        for e in _hier.pitfalls:
+                            line = f"- ({e.source_layer}) {e.pattern[:120]} — {e.description[:120]}"
+                            if str(e.meta_data.get("decayed", "")).lower() == "true":
+                                _decay_lines.append(line)
+                            else:
+                                _failure_lines.append(line)
+                        if _failure_lines:
+                            _failure_context = "\n".join(_failure_lines[:6])
+                        if _decay_lines:
+                            _decay_context = "\n".join(_decay_lines[:4])
+                        if _failure_lines or _decay_lines:
+                            logger.info(
+                                f"[{node_name}] flat-F3 + R8 RAG context: "
+                                f"failure_lines={len(_failure_lines)} decay_lines={len(_decay_lines)}"
+                            )
+                    except Exception as _r8_e:
+                        logger.debug(f"[{node_name}] R8 RAG context fetch failed (non-fatal): {_r8_e}")
+
                 llm_variants = await llm_mutate_alpha(
                     seed["expression"],
                     region=state.region,
                     llm_service=get_llm_service(),
-                    failure_context="",  # PR2 to populate from recent _failed_tests
-                    decay_context="",    # PR2 to populate from Q9 KB matches
+                    failure_context=_failure_context,
+                    decay_context=_decay_context,
                     top_k=int(getattr(_stg, "LLM_MUTATE_TOP_K", 3)),
                 )
                 if llm_variants:
