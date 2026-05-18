@@ -3,10 +3,12 @@
 Tests the GO criteria from plan v1.5 §5:
   1. Flag ON + start_flat_session creates FLAT task
   2. Q1 V2: flat_cursor preserved across resume (inherit_runtime_state=True)
-  3. Q1 V2 sanity: cascade resume does NOT inherit runtime_state
+  3. [REMOVED in phase15-D PR3e cleanup] cascade resume sanity test —
+     cascade path retired
   4. Q2 A: intervene_task blocks FLAT mode (PAUSE + RESUME)
   5. start_flat_session rejects unsupported region
-  6. resume_flat_session rejects non-FLAT task
+  6. resume_flat_session rejects non-FLAT task (DISCRETE since cascade
+     retired)
 
 Uses ``pg_session`` fixture (live Postgres on localhost:5433) per the
 existing repo convention — MiningTask + ExperimentRun use JSONB columns
@@ -161,46 +163,11 @@ async def test_flat_resume_preserves_cursor(pg_session):
 
 
 # ---------------------------------------------------------------------------
-# Test 3: Q1 V2 sanity — cascade resume does NOT inherit runtime_state
+# Test 3 removed (phase15-D PR3e cleanup, 2026-05-18): cascade resume path
+# is retired — svc.resume_session was deleted in PR3e along with the
+# cascade_phase / cascade_round_idx ORM columns (PR3b). The Q1 V2 "cascade
+# callers use default inherit=False" sanity assertion is now vacuous.
 # ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_cascade_resume_does_not_inherit_runtime_state(pg_session):
-    """plan §5 (3) Q1 V2 sanity: cascade callers use default inherit=False."""
-    svc = TaskService(pg_session)
-
-    task = MiningTask(
-        task_name=f"{_TAG}_cascade",
-        region="EUR",                # USA cascade may be occupied by prod task
-        universe="TOP2500",
-        mining_mode="CONTINUOUS_CASCADE",
-        cascade_phase="T1",
-        cascade_round_idx=0,
-        status="PAUSED",
-        schedule="CASCADE",
-        starting_tier=1,
-    )
-    created = await svc.task_repo.create(task)
-    await pg_session.commit()
-    task_id = created.id
-
-    # Seed an old run with non-empty runtime_state
-    old_run = ExperimentRun(
-        task_id=task_id,
-        status="COMPLETED",
-        trigger_source="MINING_SESSION",
-        runtime_state={"cascade_round_idx": 3, "should_not_leak": True},
-    )
-    pg_session.add(old_run)
-    await pg_session.commit()
-
-    # resume_session (cascade) — default inherit_runtime_state=False
-    await svc.resume_session(task_id)
-
-    new_run = await svc.run_repo.get_latest_by_task(task_id)
-    assert new_run.id != old_run.id
-    # Cascade callers do NOT inherit — runtime_state starts fresh (empty)
-    assert (new_run.runtime_state or {}).get("should_not_leak") is None
 
 
 # ---------------------------------------------------------------------------
@@ -253,19 +220,24 @@ async def test_start_flat_session_unknown_region_rejected(pg_session):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_resume_flat_session_rejects_cascade_task(pg_session):
-    """plan §5 (6): resume_flat_session validates mining_mode."""
+async def test_resume_flat_session_rejects_non_flat_task(pg_session):
+    """plan §5 (6): resume_flat_session validates mining_mode.
+
+    phase15-D PR3e cleanup (2026-05-18): originally constructed a
+    CONTINUOUS_CASCADE task to exercise the guard. Cascade ORM cols
+    (cascade_phase / cascade_round_idx) are dropped + cascade is
+    retired — use DISCRETE as the non-FLAT case instead. The guard
+    rejects any non-FLAT_CONTINUOUS mining_mode equally.
+    """
     svc = TaskService(pg_session)
 
     task = MiningTask(
-        task_name=f"{_TAG}_cascade_misroute",
-        region="CHN",                # avoid USA (occupied) and EUR (used in test_3)
+        task_name=f"{_TAG}_discrete_misroute",
+        region="CHN",
         universe="TOP2000A",
-        mining_mode="CONTINUOUS_CASCADE",
-        cascade_phase="T1",
-        cascade_round_idx=0,
+        mining_mode="DISCRETE",
         status="PAUSED",
-        schedule="CASCADE",
+        schedule="ONESHOT",
         starting_tier=1,
     )
     created = await svc.task_repo.create(task)

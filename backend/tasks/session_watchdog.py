@@ -102,8 +102,12 @@ async def _watchdog_revive_async() -> dict:
                         task.last_alpha_persisted_at.isoformat()
                         if task.last_alpha_persisted_at else None
                     ),
-                    "cascade_phase": task.cascade_phase,
-                    "cascade_round_idx": task.cascade_round_idx,
+                    # phase15-D PR3b: cascade_phase / cascade_round_idx ORM
+                    # cols dropped — getattr keeps the reason_payload key
+                    # stable for downstream log consumers while tolerating
+                    # the absent column.
+                    "cascade_phase": getattr(task, "cascade_phase", None),
+                    "cascade_round_idx": getattr(task, "cascade_round_idx", 0),
                     "kind": "CONTINUOUS_CASCADE",
                 },
                 revived=revived,
@@ -276,15 +280,19 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
         prior_runtime_state: dict = {}
         if prior_run is not None and isinstance(prior_run.runtime_state, dict):
             prior_runtime_state = prior_run.runtime_state
+        # phase15-D PR3b: cascade_phase / cascade_round_idx ORM cols dropped;
+        # use getattr fall-throughs so legacy code path still computes a
+        # sensible default (T1=1 / round_idx=0) when called against a row
+        # that no longer carries those columns.
         _phase_to_tier = {"T1": 1, "T2": 2, "T3": 3}
         inherited_runtime_state = {
             "current_tier": prior_runtime_state.get(
                 "current_tier",
-                _phase_to_tier.get(task.cascade_phase or "T1", 1),
+                _phase_to_tier.get(getattr(task, "cascade_phase", None) or "T1", 1),
             ),
             "round_idx": prior_runtime_state.get(
                 "round_idx",
-                task.cascade_round_idx or 0,
+                getattr(task, "cascade_round_idx", 0) or 0,
             ),
         }
 
@@ -456,7 +464,9 @@ async def _quota_guard_async() -> dict:
                 paused.append({
                     "task_id": task.id,
                     "region": task.region,
-                    "phase": task.cascade_phase,
+                    # phase15-D PR3b: cascade_phase col dropped — getattr
+                    # so quota guard pause log stays JSON-serializable.
+                    "phase": getattr(task, "cascade_phase", None),
                 })
                 logger.warning(
                     f"[quota_guard] PAUSED task={task.id} region={task.region} "

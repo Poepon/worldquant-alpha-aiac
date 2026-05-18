@@ -9,8 +9,12 @@ Coverage:
   3. _dag_update_after_round propagates R10 family_capped status
   4. _dag_update_after_round prunes when over cap (uses settings)
   5. _dag_update_after_round handles 0-alpha round (early return)
-  6. _run_cascade_phase signature accepts dag_state kwarg
+  6. _run_flat_iteration signature accepts dag_state kwarg
   7. Flag OFF byte-equivalent — _dag_update_after_round with dag_state=None no-op
+
+phase15-D PR3d cleanup (2026-05-18): _run_cascade_phase +
+_run_continuous_cascade signature tests removed — both helpers were
+deleted along with the cascade execution path.
 """
 from __future__ import annotations
 
@@ -216,21 +220,9 @@ async def test_dag_update_after_round_prunes_when_over_cap():
 # Test 6: signature acceptance for downstream callers
 # ---------------------------------------------------------------------------
 
-def test_run_cascade_phase_accepts_dag_state_kwarg():
-    from backend.tasks.mining_tasks import _run_cascade_phase
-    sig = inspect.signature(_run_cascade_phase)
-    assert "dag_state" in sig.parameters
-    # Default None — flag OFF callers unaffected
-    assert sig.parameters["dag_state"].default is None
-
-
-def test_run_continuous_cascade_signature_unchanged():
-    """Outer cascade signature unchanged — DAG state init is internal."""
-    from backend.tasks.mining_tasks import _run_continuous_cascade
-    sig = inspect.signature(_run_continuous_cascade)
-    expected = ["db", "task", "run", "celery_task_id", "lock_key", "lock_token"]
-    actual = list(sig.parameters.keys())
-    assert actual == expected, f"signature drift: {actual}"
+# phase15-D PR3d cleanup: test_run_cascade_phase_accepts_dag_state_kwarg
+# + test_run_continuous_cascade_signature_unchanged removed — both
+# referenced deleted helpers (_run_cascade_phase / _run_continuous_cascade).
 
 
 def test_run_flat_iteration_signature_unchanged():
