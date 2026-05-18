@@ -206,4 +206,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_q10_layer_telemetry",
         "schedule": crontab(hour=9, minute=0),
     },
+    # P3-R1b.3 review LOW (2026-05-18): weekly 90-day pruner for
+    # FAILURE_PITFALL entries with meta_data->'failure_tree'. R1b.3 writes
+    # one KnowledgeEntry per unique root_skeleton at mining-round boundaries;
+    # at 50 alpha/round × N rounds × multi-root mutations the table grows
+    # linearly with no TTL. Pruner DELETEs rows older than
+    # ``R1B_FAILURE_TREE_RETENTION_DAYS`` (default 90). Sunday 04:00
+    # Asia/Shanghai — off-peak, weekly cadence is fine for a 90-day TTL.
+    "r1b-failure-tree-pruner": {
+        "task": "backend.tasks.run_failure_tree_pruner",
+        "schedule": crontab(hour=4, minute=0, day_of_week=0),
+    },
 }

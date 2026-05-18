@@ -69,6 +69,8 @@ from backend.tasks.macro_narrative_extract import run_macro_narrative_extract
 from backend.tasks.regime_infer import run_regime_infer
 # P3-Q10 PR2d (2026-05-18): daily Q10 telemetry report beat task
 from backend.tasks.q10_tasks import run_q10_layer_telemetry
+# P3-R1b.3 review LOW (2026-05-18): weekly 90-day failure_tree pruner
+from backend.tasks.r1b_tasks import run_failure_tree_pruner
 
 __all__ = [
     # Utilities
@@ -114,4 +116,6 @@ __all__ = [
     "run_regime_infer",
     # P3-Q10 PR2d: daily Q10 telemetry report
     "run_q10_layer_telemetry",
+    # P3-R1b.3 review LOW: weekly failure_tree pruner
+    "run_failure_tree_pruner",
 ]

@@ -351,6 +351,13 @@ class Settings(BaseSettings):
     # ----- R1b.3 — cross-round failure trees -----
     ENABLE_R1B_FAILURE_TREE: bool = False
     R1B_FAILURE_TREE_MAX_DEPTH: int = 4
+    # R1b.3 review LOW (2026-05-18): retention TTL for FAILURE_PITFALL rows
+    # that carry meta_data->'failure_tree'. record_failure_tree dedupes on
+    # root_skeleton(200 chars) via UPSERT but the table still grows linearly
+    # at scale (50 alpha/round × N rounds × multi-root mutations). The
+    # weekly Sunday 04:00 SH beat task ``run_failure_tree_pruner`` deletes
+    # rows older than this value. Operational tunable — no feature flag.
+    R1B_FAILURE_TREE_RETENTION_DAYS: int = 90
     # ----- R1b.4 — typed AlphaMiningPipeline route -----
     # hypothesis_centric_variant=3 task opt-in;coexists with R1b.1/R1b.2.
     ENABLE_R1B_TYPED_PIPELINE: bool = False
