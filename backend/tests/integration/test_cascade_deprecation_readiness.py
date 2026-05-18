@@ -110,7 +110,9 @@ async def test_readiness_cascade_running_advises_drain(client_factory):
 
 
 @pytest.mark.asyncio
-async def test_readiness_cascade_only_paused_advises_finalize(client_factory):
+async def test_readiness_cascade_only_paused_advises_drain_endpoint(client_factory):
+    """phase15-D PR2 (2026-05-18): wording changed from "finalize" to point
+    at the new POST /ops/cascade-deprecation/drain endpoint."""
     rows = [("CONTINUOUS_CASCADE", "PAUSED", "USA", 2)]
     client = await client_factory(rows, settings_overrides={
         "ENABLE_DEFAULT_FLAT_SESSION": False,
@@ -122,15 +124,18 @@ async def test_readiness_cascade_only_paused_advises_finalize(client_factory):
     assert body["cascade_running_count"] == 0
     assert body["cascade_paused_count"] == 2
     assert body["ready_to_delete"] is False
-    assert "finalize" in body["next_action"].lower()
+    assert "drain" in body["next_action"].lower()
 
 
 @pytest.mark.asyncio
-async def test_readiness_ready_to_delete_when_drained_and_default_flat(client_factory):
+async def test_readiness_drained_default_flat_kill_switch_still_on_advises_flip(client_factory):
+    """phase15-D PR2 (2026-05-18): ready_to_delete now ALSO requires
+    ENABLE_CASCADE_LEGACY OFF. When it's still ON we advise the flip."""
     rows = [("FLAT_CONTINUOUS", "RUNNING", "USA", 3)]
     client = await client_factory(rows, settings_overrides={
         "ENABLE_DEFAULT_FLAT_SESSION": True,
         "ENABLE_FLAT_CONTINUOUS": True,
+        "ENABLE_CASCADE_LEGACY": True,
     })
     async with client as ac:
         r = await ac.get("/api/v1/ops/cascade-deprecation/readiness")
@@ -138,8 +143,25 @@ async def test_readiness_ready_to_delete_when_drained_and_default_flat(client_fa
     assert body["cascade_running_count"] == 0
     assert body["cascade_paused_count"] == 0
     assert body["flat_running_count"] == 3
+    assert body["ready_to_delete"] is False
+    assert "ENABLE_CASCADE_LEGACY" in body["next_action"]
+
+
+@pytest.mark.asyncio
+async def test_readiness_all_green_after_kill_switch_off(client_factory):
+    """phase15-D PR2 (2026-05-18): the only path to ready_to_delete=True
+    is cascade drained + flat active + kill-switch OFF."""
+    rows = [("FLAT_CONTINUOUS", "RUNNING", "USA", 3)]
+    client = await client_factory(rows, settings_overrides={
+        "ENABLE_DEFAULT_FLAT_SESSION": True,
+        "ENABLE_FLAT_CONTINUOUS": True,
+        "ENABLE_CASCADE_LEGACY": False,
+    })
+    async with client as ac:
+        r = await ac.get("/api/v1/ops/cascade-deprecation/readiness")
+    body = r.json()
     assert body["ready_to_delete"] is True
-    assert "flat-F4" in body["next_action"]
+    assert "PR3" in body["next_action"] or "column drop" in body["next_action"]
 
 
 @pytest.mark.asyncio

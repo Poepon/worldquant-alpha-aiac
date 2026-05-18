@@ -1123,6 +1123,7 @@ class CascadeDeprecationReadinessOut(BaseModel):
     flat_paused_count: int
     flat_default_flag_on: bool
     flat_continuous_flag_on: bool
+    cascade_legacy_flag_on: bool   # phase15-D PR2 (2026-05-18)
     ready_to_delete: bool
     next_action: str
 
@@ -1174,15 +1175,9 @@ async def cascade_deprecation_readiness(
 
     default_flat = bool(getattr(_stg, "ENABLE_DEFAULT_FLAT_SESSION", False))
     flat_on = bool(getattr(_stg, "ENABLE_FLAT_CONTINUOUS", False))
+    cascade_legacy_on = bool(getattr(_stg, "ENABLE_CASCADE_LEGACY", True))
 
-    if cascade_running + cascade_paused == 0 and flat_running > 0 and default_flat:
-        next_action = (
-            "Cascade has no live tasks and flat is the active default. "
-            "Proceed to flat-F4 code removal after the 4-week stability "
-            "window per plan §4.7."
-        )
-        ready = True
-    elif cascade_running > 0:
+    if cascade_running > 0:
         next_action = (
             f"Drain {cascade_running} RUNNING cascade task(s) in "
             f"{sorted(set(cascade_regions))} before flat-F4. Pause them via "
@@ -1191,16 +1186,16 @@ async def cascade_deprecation_readiness(
         ready = False
     elif cascade_paused > 0:
         next_action = (
-            f"{cascade_paused} cascade task(s) PAUSED — finalize "
-            "(/tasks/{id}/intervene FINISH or DELETE) before flat-F4."
+            f"{cascade_paused} cascade task(s) PAUSED — call "
+            "POST /api/v1/ops/cascade-deprecation/drain to convert to "
+            "STOPPED with audit trail (phase15-D PR2)."
         )
         ready = False
     elif not default_flat:
         next_action = (
-            "Cascade is drained but ENABLE_DEFAULT_FLAT_SESSION is OFF. "
-            "Flip via PATCH /ops/flags/ENABLE_DEFAULT_FLAT_SESSION so new "
-            "tasks default to flat, then wait for the 4-week stability "
-            "window."
+            "Cascade drained. Flip ENABLE_DEFAULT_FLAT_SESSION ON via "
+            "PATCH /ops/flags/ENABLE_DEFAULT_FLAT_SESSION so new tasks "
+            "default to flat, then start at least one flat session."
         )
         ready = False
     elif flat_running == 0:
@@ -1209,9 +1204,26 @@ async def cascade_deprecation_readiness(
             "and confirm at least one round LIVE before proceeding."
         )
         ready = False
-    else:
-        next_action = "Indeterminate state — check raw counts."
+    elif cascade_legacy_on:
+        # Phase 15-D PR2 upgrade: ready_to_delete now requires the
+        # kill-switch flag to have been flipped OFF. PR3 (column drop)
+        # gates on this signal.
+        next_action = (
+            "Cascade fully drained + flat active. Flip "
+            "ENABLE_CASCADE_LEGACY OFF via PATCH /ops/flags/"
+            "ENABLE_CASCADE_LEGACY to quarantine cascade entry points. "
+            "Observe ≥7d clean (no 410 surprises) before phase15-D PR3 "
+            "(column drop)."
+        )
         ready = False
+    else:
+        # All gates green: cascade drained + flat active + kill-switch OFF
+        next_action = (
+            "Cascade fully drained, flat active, kill-switch OFF. "
+            "Phase 15-D PR3 (column drop + code delete) safe to ship "
+            "after ≥7d obs of kill-switch OFF in production."
+        )
+        ready = True
 
     return CascadeDeprecationReadinessOut(
         cascade_running_count=cascade_running,
@@ -1221,6 +1233,7 @@ async def cascade_deprecation_readiness(
         flat_paused_count=flat_paused,
         flat_default_flag_on=default_flat,
         flat_continuous_flag_on=flat_on,
+        cascade_legacy_flag_on=cascade_legacy_on,
         ready_to_delete=ready,
         next_action=next_action,
     )
@@ -2062,4 +2075,94 @@ async def r8_query_stats(
         layer_hit_rates=layer_rates,
         by_region=by_region,
         window_days=int(days),
+    )
+
+
+# =============================================================================
+# Phase 15-D PR2 — operator cascade drain (2026-05-18)
+# =============================================================================
+# Idempotent drain action: convert PAUSED CONTINUOUS_CASCADE rows to
+# STOPPED + write audit metadata so phase15-D PR3 (column drop) doesn't
+# lose state. Refuses RUNNING cascade rows — operator must first call
+# /mining-session/stop to flush in-flight rounds cleanly.
+
+
+class CascadeDrainResult(BaseModel):
+    task_id: int
+    prior_status: str
+    new_status: str
+
+
+class CascadeDrainOut(BaseModel):
+    drained: List[CascadeDrainResult]
+    skipped_running: List[int]      # task_ids still RUNNING — must stop first
+    already_drained: List[int]      # task_ids that already had cascade_drained audit
+    total_paused_before: int
+    total_paused_after: int
+
+
+@router.post("/cascade-deprecation/drain", response_model=CascadeDrainOut)
+async def cascade_deprecation_drain(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> CascadeDrainOut:
+    """Drain all PAUSED CONTINUOUS_CASCADE rows → STOPPED + audit.
+
+    Idempotent: re-running on already-drained tasks is a no-op (they
+    show in already_drained). RUNNING cascade rows are refused (operator
+    must first POST /api/v1/mining-session/stop).
+
+    Phase 15-D PR3 (column drop) requires this drain to have run so no
+    state is lost when mining_mode / cascade_phase are removed.
+    """
+    import json as _json
+    from datetime import datetime as _dt, timezone as _tz
+    from sqlalchemy import text as _text
+
+    # 1. RUNNING cascade rows refused
+    running_rows = (await db.execute(_text(
+        "SELECT id FROM mining_tasks "
+        "WHERE mining_mode = 'CONTINUOUS_CASCADE' AND status = 'RUNNING'"
+    ))).all()
+    skipped_running = [int(r[0]) for r in running_rows]
+
+    # 2. Iterate PAUSED rows, drain idempotently
+    paused_rows = (await db.execute(_text(
+        "SELECT id, COALESCE(config, '{}'::jsonb) AS config, status "
+        "FROM mining_tasks "
+        "WHERE mining_mode = 'CONTINUOUS_CASCADE' AND status = 'PAUSED'"
+    ))).all()
+    total_paused_before = len(paused_rows)
+
+    drained: List[CascadeDrainResult] = []
+    already_drained: List[int] = []
+    now_utc = _dt.now(_tz.utc).isoformat()
+
+    for tid, cfg_raw, prior_status in paused_rows:
+        cfg = dict(cfg_raw) if isinstance(cfg_raw, dict) else {}
+        if "cascade_drained" in cfg:
+            already_drained.append(int(tid))
+            continue
+        cfg["cascade_drained"] = {
+            "at": now_utc,
+            "by": "ops_drain",
+            "prior_status": prior_status,
+        }
+        await db.execute(_text(
+            "UPDATE mining_tasks SET status = 'STOPPED', config = :cfg::jsonb "
+            "WHERE id = :i"
+        ), {"i": int(tid), "cfg": _json.dumps(cfg)})
+        drained.append(CascadeDrainResult(
+            task_id=int(tid), prior_status=prior_status, new_status="STOPPED",
+        ))
+
+    await db.commit()
+    total_paused_after = total_paused_before - len(drained)
+
+    return CascadeDrainOut(
+        drained=drained,
+        skipped_running=skipped_running,
+        already_drained=already_drained,
+        total_paused_before=total_paused_before,
+        total_paused_after=total_paused_after,
     )
