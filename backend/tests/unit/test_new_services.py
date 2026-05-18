@@ -12,7 +12,7 @@ Tests cover:
 import pytest
 import pytest_asyncio
 from datetime import datetime
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.services.dataset_service import (
     DatasetService,
@@ -75,19 +75,20 @@ class TestDatasetService:
         assert isinstance(categories, list)
     
     @pytest.mark.asyncio
-    async def test_trigger_dataset_sync(self, db_session, mocker):
+    async def test_trigger_dataset_sync(self, db_session):
         """Test triggering dataset sync."""
         # Mock the celery task
         mock_task = MagicMock()
         mock_task.id = "test-task-id"
-        mocker.patch(
-            "backend.services.dataset_service.sync_datasets_from_brain",
-            MagicMock(delay=MagicMock(return_value=mock_task))
-        )
-        
-        service = DatasetService(db_session)
-        task_id = service.trigger_dataset_sync(region="USA")
-        
+        # Service does lazy `from backend.tasks import sync_datasets_from_brain`
+        # inside trigger_dataset_sync — patch the source module accordingly.
+        with patch(
+            "backend.tasks.sync_datasets_from_brain",
+            MagicMock(delay=MagicMock(return_value=mock_task)),
+        ):
+            service = DatasetService(db_session)
+            task_id = service.trigger_dataset_sync(region="USA")
+
         assert task_id == "test-task-id"
 
 
@@ -245,18 +246,19 @@ class TestOperatorService:
         assert len(operators) >= 0  # May find or not depending on sample
     
     @pytest.mark.asyncio
-    async def test_trigger_operator_sync(self, db_session, mocker):
+    async def test_trigger_operator_sync(self, db_session):
         """Test triggering operator sync."""
         mock_task = MagicMock()
         mock_task.id = "sync-task-id"
-        mocker.patch(
-            "backend.services.operator_service.sync_operators_from_brain",
-            MagicMock(delay=MagicMock(return_value=mock_task))
-        )
-        
-        service = OperatorService(db_session)
-        task_id = service.trigger_operator_sync()
-        
+        # Service does lazy `from backend.tasks import sync_operators_from_brain`
+        # inside trigger_operator_sync — patch the source module accordingly.
+        with patch(
+            "backend.tasks.sync_operators_from_brain",
+            MagicMock(delay=MagicMock(return_value=mock_task)),
+        ):
+            service = OperatorService(db_session)
+            task_id = service.trigger_operator_sync()
+
         assert task_id == "sync-task-id"
 
 
