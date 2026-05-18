@@ -1102,3 +1102,125 @@ async def resume_flat_session(
         mining_mode=info.mining_mode,
         runtime_state_inherited=True,
     )
+
+
+# ---------------------------------------------------------------------------
+# flat-F4 prep (Phase 3, 2026-05-18): cascade-deprecation readiness
+# ---------------------------------------------------------------------------
+# Read-only visibility endpoint reporting cascade-vs-flat adoption so the
+# operator can decide when to safely delete _run_continuous_cascade. The
+# actual cascade removal (flat-F4) is gated on:
+#   (a) ENABLE_DEFAULT_FLAT_SESSION ON in production
+#   (b) Zero RUNNING/PAUSED CONTINUOUS_CASCADE tasks
+#   (c) ≥1 flat task LIVE per region for ≥4 weeks
+# This endpoint surfaces (a)+(b) at a glance; (c) needs trend analysis.
+
+class CascadeDeprecationReadinessOut(BaseModel):
+    cascade_running_count: int
+    cascade_paused_count: int
+    cascade_running_regions: List[str]
+    flat_running_count: int
+    flat_paused_count: int
+    flat_default_flag_on: bool
+    flat_continuous_flag_on: bool
+    ready_to_delete: bool
+    next_action: str
+
+
+@router.get(
+    "/cascade-deprecation/readiness",
+    response_model=CascadeDeprecationReadinessOut,
+)
+async def cascade_deprecation_readiness(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> CascadeDeprecationReadinessOut:
+    """Reports cascade-vs-flat adoption + recommends the next flat-F4 step.
+
+    ``ready_to_delete=True`` is a sufficient signal — not a green light. The
+    operator must additionally confirm the 4-week stability window per
+    plan §4.7 flat-F4 gating, which is not tracked in this query.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    rows = (await db.execute(_text(
+        "SELECT mining_mode, status, region, COUNT(*) AS n "
+        "FROM mining_tasks "
+        "WHERE status IN ('RUNNING', 'PAUSED') "
+        "  AND mining_mode IN ('CONTINUOUS_CASCADE', 'FLAT_CONTINUOUS') "
+        "GROUP BY mining_mode, status, region"
+    ))).all()
+
+    cascade_running = 0
+    cascade_paused = 0
+    cascade_regions: List[str] = []
+    flat_running = 0
+    flat_paused = 0
+    for mode, st, region, n in rows:
+        n = int(n or 0)
+        if mode == "CONTINUOUS_CASCADE":
+            if st == "RUNNING":
+                cascade_running += n
+                if region:
+                    cascade_regions.append(region)
+            elif st == "PAUSED":
+                cascade_paused += n
+        elif mode == "FLAT_CONTINUOUS":
+            if st == "RUNNING":
+                flat_running += n
+            elif st == "PAUSED":
+                flat_paused += n
+
+    default_flat = bool(getattr(_stg, "ENABLE_DEFAULT_FLAT_SESSION", False))
+    flat_on = bool(getattr(_stg, "ENABLE_FLAT_CONTINUOUS", False))
+
+    if cascade_running + cascade_paused == 0 and flat_running > 0 and default_flat:
+        next_action = (
+            "Cascade has no live tasks and flat is the active default. "
+            "Proceed to flat-F4 code removal after the 4-week stability "
+            "window per plan §4.7."
+        )
+        ready = True
+    elif cascade_running > 0:
+        next_action = (
+            f"Drain {cascade_running} RUNNING cascade task(s) in "
+            f"{sorted(set(cascade_regions))} before flat-F4. Pause them via "
+            "/mining-session/stop and start matching flat sessions."
+        )
+        ready = False
+    elif cascade_paused > 0:
+        next_action = (
+            f"{cascade_paused} cascade task(s) PAUSED — finalize "
+            "(/tasks/{id}/intervene FINISH or DELETE) before flat-F4."
+        )
+        ready = False
+    elif not default_flat:
+        next_action = (
+            "Cascade is drained but ENABLE_DEFAULT_FLAT_SESSION is OFF. "
+            "Flip via PATCH /ops/flags/ENABLE_DEFAULT_FLAT_SESSION so new "
+            "tasks default to flat, then wait for the 4-week stability "
+            "window."
+        )
+        ready = False
+    elif flat_running == 0:
+        next_action = (
+            "No flat tasks RUNNING. Start one via POST /ops/start-flat-session "
+            "and confirm at least one round LIVE before proceeding."
+        )
+        ready = False
+    else:
+        next_action = "Indeterminate state — check raw counts."
+        ready = False
+
+    return CascadeDeprecationReadinessOut(
+        cascade_running_count=cascade_running,
+        cascade_paused_count=cascade_paused,
+        cascade_running_regions=sorted(set(cascade_regions)),
+        flat_running_count=flat_running,
+        flat_paused_count=flat_paused,
+        flat_default_flag_on=default_flat,
+        flat_continuous_flag_on=flat_on,
+        ready_to_delete=ready,
+        next_action=next_action,
+    )

@@ -1590,6 +1590,15 @@ async def _run_continuous_cascade(db, task, run, celery_task_id, *, lock_key, lo
         f"[cascade] task={task.id} region={task.region} starting at "
         f"phase={task.cascade_phase or 'T1'} round_idx={task.cascade_round_idx}"
     )
+    # flat-F4 prep (2026-05-18): single deprecation warning per task start.
+    # CONTINUOUS_CASCADE will be removed once flat-F2/F3 hit the 4-week
+    # stability window per plan §4.7 flat-F4 gate. Check readiness via
+    # GET /ops/cascade-deprecation/readiness.
+    logger.warning(
+        f"[cascade-deprecated] task={task.id} started in CONTINUOUS_CASCADE "
+        "mode — this mining_mode is on the flat-F4 removal path. "
+        "Prefer POST /ops/start-flat-session for new sessions."
+    )
 
     # V-26.30: env-gated diagnostic; default OFF in production.
     import os as _os
