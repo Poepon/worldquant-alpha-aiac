@@ -17,7 +17,6 @@ import {
   InputNumber,
   message,
   Alert,
-  Descriptions,
 } from 'antd'
 import {
   PlusOutlined,
