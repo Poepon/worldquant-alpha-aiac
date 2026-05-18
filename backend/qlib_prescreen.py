@@ -31,7 +31,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
 from backend.qlib_translator import brain_to_qlib
 
@@ -82,43 +82,115 @@ class PrescreenResult:
 class QlibEngine:
     """Abstraction over pyqlib availability — 3 fallback tiers.
 
-    PR1c ship is the **skeleton**: probe runs, picks a tier (defaulting to
-    'disabled' until real eval engines land in PR1d / PR2), and exposes
-    ``kind`` for callers. ``evaluate()`` always returns None for now.
+    PR1e wires the **tier-3 pandas-snapshot** path: when a parquet snapshot
+    file exists under ``QLIB_SNAPSHOT_DIR/{region}.parquet``, the engine
+    loads it lazily and dispatches ``evaluate()`` calls to
+    ``backend.qlib_prescreen_pandas_engine.evaluate_pandas``. Tier-1
+    (pyqlib_live) + tier-2 (pyqlib_snapshot) still skeletons until PR2.
 
-    Singleton at module level — engines hold open DataFrame handles + qlib
-    init state that's expensive to rebuild per call.
+    ``QLIB_ENGINE_PREFER_PANDAS=True`` forces the pandas tier even if
+    pyqlib were available — used by tests to deterministically pin the
+    fallback path.
+
+    Singleton at module level — DataFrames are expensive to reload.
     """
 
     def __init__(self):
+        # Per-region snapshot cache: {region_upper: pd.DataFrame}. Loaded
+        # lazily on first evaluate() for that region so multi-region jobs
+        # don't pay for unused regions.
+        self._snapshots: Dict[str, Any] = {}
         self.kind: EngineKind = self._probe_engine()
         logger.info(f"[QlibEngine] selected engine={self.kind}")
 
     def _probe_engine(self) -> EngineKind:
         """Pick the best available engine tier.
 
-        v1.0 (PR1c) always returns 'disabled' — real tier 1/2/3 probes land
-        in PR1d (pandas) and PR2 (pyqlib live + snapshot). Soft-fail respects
-        ``settings.QLIB_ENGINE_PREFER_PANDAS`` for forced-tier-3 testing.
+        Order (PR1e + plan §3.3):
+          1. tier-1 pyqlib_live (deferred to PR2)
+          2. tier-2 pyqlib_snapshot (deferred to PR2)
+          3. tier-3 pandas_snapshot if QLIB_SNAPSHOT_DIR exists with
+             ANY ``{region}.parquet`` OR if QLIB_ENGINE_PREFER_PANDAS=True
+          4. tier-4 disabled — nothing works
         """
-        # Defensive import — never crash at module load
         try:
-            from backend.config import settings as _stg  # noqa: F401
+            from backend.config import settings as _stg
         except Exception as ex:
             logger.debug(f"[QlibEngine] settings import failed: {ex}")
             return "disabled"
-        # PR1c skeleton: no real probe yet. PR1d / PR2 add live/snapshot/
-        # pandas tiers. Return 'disabled' so prescreen_alpha returns skip
-        # for every call until then.
+
+        # PR2 will add tier-1/2 probes here.
+
+        # Tier-3 probe: pandas snapshot directory with at least one region file
+        # OR explicit forced-pandas mode for testing.
+        snap_dir = getattr(_stg, "QLIB_SNAPSHOT_DIR", None)
+        force_pandas = bool(getattr(_stg, "QLIB_ENGINE_PREFER_PANDAS", False))
+        if force_pandas:
+            logger.info("[QlibEngine] QLIB_ENGINE_PREFER_PANDAS=True forces tier-3")
+            return "pandas_snapshot"
+        if snap_dir:
+            try:
+                import os
+                if os.path.isdir(snap_dir):
+                    files = [f for f in os.listdir(snap_dir) if f.endswith(".parquet")]
+                    if files:
+                        logger.info(
+                            f"[QlibEngine] tier-3 pandas_snapshot ready ({len(files)} regions)"
+                        )
+                        return "pandas_snapshot"
+            except Exception as ex:
+                logger.debug(f"[QlibEngine] snapshot dir probe failed: {ex}")
+
         return "disabled"
+
+    def _load_snapshot(self, region: str) -> Optional[Any]:
+        """Lazily load + cache a region snapshot. Returns DataFrame or None.
+
+        Snapshot file convention: ``{QLIB_SNAPSHOT_DIR}/{region_upper}.parquet``
+        with MultiIndex (datetime, instrument) and OHLCV columns
+        (close/open/high/low/volume/vwap). Caller's expression must
+        reference only columns present in the snapshot.
+        """
+        key = (region or "").upper()
+        if key in self._snapshots:
+            return self._snapshots[key]
+        try:
+            from backend.config import settings as _stg
+            import os
+            snap_dir = getattr(_stg, "QLIB_SNAPSHOT_DIR", None)
+            if not snap_dir:
+                return None
+            path = os.path.join(snap_dir, f"{key}.parquet")
+            if not os.path.exists(path):
+                return None
+            import pandas as pd
+            df = pd.read_parquet(path)
+            # Memory-map friendly when shared across Celery workers (plan §3.2
+            # [V1.1-S4]). Pandas read_parquet does not expose memory_map but
+            # PyArrow inherits OS page cache anyway when the file is mmap-able.
+            self._snapshots[key] = df
+            return df
+        except Exception as ex:
+            logger.warning(f"[QlibEngine] snapshot load failed for {region}: {ex}")
+            return None
 
     def evaluate(self, qlib_expr: str, region: str, universe: str) -> Optional[Any]:
         """Evaluate a qlib expression on local OHLCV. Returns Series-like or None.
 
-        PR1c skeleton always returns None (engine="disabled"). PR1d wires
-        the pandas-snapshot tier; PR2 wires pyqlib live + snapshot.
+        PR1e: tier-3 'pandas_snapshot' delegates to ``evaluate_pandas``.
+        Tier-1/2 still skeleton (PR2).
         """
-        return None
+        if self.kind != "pandas_snapshot":
+            return None
+        df = self._load_snapshot(region)
+        if df is None or len(df) == 0:
+            return None
+        try:
+            from backend.qlib_prescreen_pandas_engine import evaluate_pandas
+            return evaluate_pandas(qlib_expr, df)
+        except Exception as ex:
+            logger.warning(f"[QlibEngine] pandas evaluate failed: {ex}")
+            return None
 
 
 # Module-level singleton — built lazily on first prescreen_alpha call to
