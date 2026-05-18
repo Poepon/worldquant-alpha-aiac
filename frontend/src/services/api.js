@@ -121,45 +121,12 @@ const api = {
     return data
   },
 
-  // V-19 Persistent Mining Service singleton-per-region
-  // Single button start/stop. Backend enforces uniqueness via partial index.
-  //
-  // DEPRECATED (phase15-D PR4, 2026-05-18): backend kill-switch
-  // ENABLE_CASCADE_LEGACY returns 410 Gone for all 5 endpoints below
-  // once operator flips it OFF. Callers should migrate to flat-session
-  // controls (POST /ops/start-flat-session). Wrappers kept for back-
-  // compat with TaskManagement.jsx + Dashboard.jsx — error handlers
-  // there detect 410 + show migration guidance.
-  // PR3c will delete these wrappers once frontend cascade UI is removed.
-  listMiningSessions: async () => {
-    const { data } = await client.get('/mining-session')
-    return data
-  },
-
-  getMiningSession: async (region) => {
-    try {
-      const { data } = await client.get(`/mining-session/${region}`)
-      return data
-    } catch (err) {
-      if (err?.response?.status === 404) return null
-      throw err
-    }
-  },
-
-  startMiningSession: async ({ region = 'USA', universe = 'TOP3000' } = {}) => {
-    const { data } = await client.post('/mining-session/start', { region, universe })
-    return data
-  },
-
-  stopMiningSession: async (taskId) => {
-    const { data } = await client.post('/mining-session/stop', { task_id: taskId })
-    return data
-  },
-
-  resumeMiningSession: async (taskId) => {
-    const { data } = await client.post('/mining-session/resume', { task_id: taskId })
-    return data
-  },
+  // phase15-D PR4b (2026-05-18): V-19 Persistent Mining Service api
+  // wrappers (listMiningSessions / getMiningSession / startMiningSession
+  // / stopMiningSession / resumeMiningSession) REMOVED — backend
+  // mining_session router gone (PR3c), task_service cascade methods
+  // gone (PR3e), MiningSessionInfo cascade fields gone. Flat sessions
+  // are created via POST /api/v1/ops/start-flat-session.
 
   getTaskRuns: async (taskId) => {
     const { data } = await client.get(`/tasks/${taskId}/runs`)

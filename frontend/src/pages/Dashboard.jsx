@@ -47,14 +47,9 @@ export default function Dashboard() {
   const [liveFeed, setLiveFeed] = useState([])
   const navigate = useNavigate()
 
-  // V-19.6: persistent mining sessions (1 per region max). Show as small
-  // badges next to the page title. Click a badge to jump to TaskManagement
-  // for control. Polled every 5s to stay in sync with the run loop.
-  const { data: miningSessions } = useQuery({
-    queryKey: ['mining-sessions'],
-    queryFn: api.listMiningSessions,
-    refetchInterval: 5000,
-  })
+  // phase15-D PR4b (2026-05-18): V-19.6 mining sessions live-feed removed
+  // — cascade retired, backend mining-session endpoints gone (PR3c).
+  // Operators see flat session state via /ops/costeer CoSTEERMonitor.
 
   // Fetch daily stats
   const { data: dailyStats, isLoading: statsLoading } = useQuery({
@@ -114,46 +109,6 @@ export default function Dashboard() {
             <RocketOutlined style={{ marginRight: 12, color: '#00d4ff' }} />
             仪表盘
           </Title>
-        </Col>
-        <Col>
-          {/* V-19.6 mining session badges. Click to jump to TaskManagement
-              where the user can start/stop/resume. Empty when no region has
-              an active CONTINUOUS_CASCADE session. */}
-          <Space wrap size={8}>
-            {(miningSessions && miningSessions.length > 0) ? (
-              miningSessions.map((s) => {
-                const tagColor =
-                  s.status === 'RUNNING' ? 'processing' :
-                  s.status === 'PAUSED' ? 'warning' : 'default'
-                return (
-                  <Tag
-                    key={s.task_id}
-                    color={tagColor}
-                    icon={<ThunderboltOutlined />}
-                    style={{ cursor: 'pointer', fontSize: 13, padding: '4px 10px' }}
-                    onClick={() => navigate('/tasks')}
-                  >
-                    {/* Phase 1.5-C frontend cutover (2026-05-18):
-                        prefer current_tier (runtime) → starting_tier → cascade_phase. */}
-                    {s.region} · {s.status} · {
-                      s.current_tier
-                        ? `T${s.current_tier}`
-                        : s.starting_tier
-                        ? `T${s.starting_tier}`
-                        : (s.cascade_phase || '—')
-                    } · #{s.cascade_round_idx}
-                  </Tag>
-                )
-              })
-            ) : (
-              <Tag
-                style={{ cursor: 'pointer' }}
-                onClick={() => navigate('/tasks')}
-              >
-                挖掘服务: 未启动 — 点此前往启动
-              </Tag>
-            )}
-          </Space>
         </Col>
       </Row>
 
