@@ -31,7 +31,11 @@ from backend.agents.graph.nodes.tier_seed import (
     node_tier_strategy_select,
     node_tier_wrap_one,
 )
-from backend.agents.graph.edges import route_after_validate
+from backend.agents.graph.edges import (
+    route_after_validate,
+    _route_after_evaluate,
+    _route_after_r1b_retry,
+)
 from backend.agents.services import LLMService, RAGService, get_llm_service
 from backend.adapters.brain_adapter import BrainAdapter
 from backend.config import settings
@@ -291,7 +295,66 @@ class MiningWorkflow:
 
         # Shared post-pipeline
         workflow.add_edge("simulate", "evaluate")
-        workflow.add_edge("evaluate", "save_results")
+
+        # Phase 3 R1b.1c (2026-05-18): CoSTEER retry cycle.
+        # Plan: ~/.claude/plans/phase3-r1b-costeer-loop-2026-05-18.md v1.3 §2.1.
+        # When ENABLE_R1B_RETRY_LOOP=ON we replace add_edge("evaluate",
+        # "save_results") with a conditional dispatcher. With both R1b flags
+        # OFF, the router falls straight to 'save_results' (byte-equivalent
+        # to legacy). With ENABLE_R1B_RETRY_LOOP ON, FAIL+IMPLEMENTATION
+        # alphas detour through code_gen_retry → validate → simulate →
+        # evaluate, looping until per-alpha retry budget exhausts.
+        #
+        # ENABLE_R1B_HYPOTHESIS_MUTATE wiring (hypothesis_mutate node) lands
+        # in R1b.2; until then we route 'hypothesis_mutate' to 'save_results'
+        # to keep the graph build legal even if an operator flips both flags
+        # on prematurely. The router itself still respects the mutate-on
+        # check so it won't return that branch unless the operator did flip.
+        _r1b_active = (
+            bool(getattr(settings, "ENABLE_R1B_RETRY_LOOP", False))
+            or bool(getattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False))
+        )
+        if _r1b_active:
+            from backend.agents.graph.nodes.r1b_loop import node_code_gen_retry
+            workflow.add_node(
+                "code_gen_retry",
+                partial(node_code_gen_retry, llm_service=self.llm_service),
+            )
+            # Pure-routing node: no LLM, no DB. Stays a dummy fn so the
+            # router can use it as a switch (LangGraph requires every named
+            # branch target to be a real node).
+            workflow.add_node("r1b_retry_router", lambda _state: {})
+            workflow.add_conditional_edges(
+                "evaluate",
+                _route_after_evaluate,
+                {
+                    "save_results": "save_results",
+                    "r1b_retry_router": "r1b_retry_router",
+                },
+            )
+            workflow.add_conditional_edges(
+                "r1b_retry_router",
+                _route_after_r1b_retry,
+                {
+                    "save_results": "save_results",
+                    "code_gen_retry": "code_gen_retry",
+                    # R1b.2 will register a real 'hypothesis_mutate' node;
+                    # until then route to save_results so the build is legal.
+                    "hypothesis_mutate": "save_results",
+                },
+            )
+            # Cycle closure: retry rewrites the alpha then we re-validate +
+            # re-simulate + re-evaluate. Per plan §2.1 the cycle is
+            # validate → simulate → evaluate so we hand back to validate.
+            workflow.add_edge("code_gen_retry", "validate")
+            logger.info(
+                "[Workflow] R1b CoSTEER cycle wired (retry_loop=%s mutate=%s)",
+                getattr(settings, "ENABLE_R1B_RETRY_LOOP", False),
+                getattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False),
+            )
+        else:
+            # Legacy linear path — flag OFF byte-equivalent.
+            workflow.add_edge("evaluate", "save_results")
 
         # After save_results: T1 → END (mining_agent loops); T2/T3 → next seed
         # via advance_seed → tier_strategy_select, or END if last seed.
