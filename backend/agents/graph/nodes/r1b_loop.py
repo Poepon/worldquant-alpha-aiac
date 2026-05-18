@@ -563,11 +563,39 @@ async def node_hypothesis_mutate(
 
     await _write_r1b_retry_log_rows(log_rows)
 
+    # R1b.3-v2 (2026-05-18): persist the new mutated hypothesis as a
+    # Hypothesis row with parent_hypothesis_id FK + r1b_mutation_depth so
+    # the chain can be DB-walked next round + failure_tree skeletons span
+    # past depth=1. Soft-fail: if INSERT fails the pending dict still flows
+    # forward without a DB id (R1b.3c v1 behavior — _maybe_record_failure_tree
+    # will fall back to the 2-node skeleton). Flag-gated by
+    # ENABLE_R1B_HYPOTHESIS_MUTATE (same gate as the mutate node itself).
+    if pending_new_hypothesis is not None:
+        try:
+            from backend.config import settings as _v2_settings
+            if bool(getattr(_v2_settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)):
+                new_id = await _insert_mutated_hypothesis(
+                    task_id=task_id,
+                    parent_hypothesis_id=primary_metrics.get("hypothesis_id"),
+                    pending=pending_new_hypothesis,
+                    region=getattr(primary_alpha, "region", None) or getattr(state, "region", None),
+                )
+                if new_id is not None:
+                    pending_new_hypothesis["hypothesis_id"] = new_id
+                    state.r1b_mutated_hypothesis_ids = list(
+                        state.r1b_mutated_hypothesis_ids or []
+                    ) + [new_id]
+        except Exception as _ins_ex:
+            logger.warning(
+                f"[r1b_loop mutate] R1b.3-v2 INSERT failed (round unaffected): {_ins_ex}"
+            )
+
     # R1b.3c (2026-05-18): on successful mutate, persist failure_tree to KB
     # so R8 RAG L2 surfaces it next round. Plan §7.1 — fires only when the
     # mutate succeeded (pending_new_hypothesis non-None) AND the flag is
-    # ON. Chain is the 2-node {parent → new}; DB-walking the full
-    # parent_hypothesis_id chain is R1b.3-v2 work.
+    # ON. R1b.3-v2: chain is now DB-walked from the parent_hypothesis_id
+    # up to R1B_FAILURE_TREE_MAX_DEPTH, falling back to the 2-node skeleton
+    # when no FK / depth=1.
     if pending_new_hypothesis is not None:
         await _maybe_record_failure_tree(
             primary_hyp=primary_hyp,
@@ -594,11 +622,14 @@ async def _maybe_record_failure_tree(
     primary_alpha: Any,
     primary_metrics: Dict[str, Any],
 ) -> None:
-    """R1b.3c — soft-fail UPSERT failure_tree to KB via dedicated session.
+    """R1b.3c + R1b.3-v2 — soft-fail UPSERT failure_tree to KB via dedicated session.
 
-    Chain: ``[{parent_statement} → {new_statement}]``. ``original_hypothesis_id``
-    is read from primary_metrics if set; the new hypothesis has no DB id
-    yet (R1b.3-v2 will link to a fresh Hypothesis row).
+    R1b.3c (2026-05-18): minimum 2-node chain {parent → new}.
+    R1b.3-v2 (2026-05-18): when parent_id resolves to a real Hypothesis row,
+    walk its parent_hypothesis_id chain via DB SELECT up to
+    R1B_FAILURE_TREE_MAX_DEPTH (default 4) so the failure_tree skeleton
+    captures the full mutation history. Falls back to the 2-node skeleton
+    when no parent / no DB connectivity / chain walk fails.
 
     NEVER raises — DB / import errors logged + swallowed so the mutate
     node's main path is unaffected.
@@ -616,15 +647,22 @@ async def _maybe_record_failure_tree(
         logger.debug(f"[r1b_loop mutate] failure_tree deps unavailable ({ex})")
         return
     parent_id = primary_metrics.get("hypothesis_id") if isinstance(primary_metrics, dict) else None
-    chain = [
-        {"id": parent_id, "statement": primary_hyp, "mutation_depth": 0},
-        {
-            "id": None,
-            "statement": pending.get("statement", ""),
-            "mutation_depth": 1,
-            "diff_from_parent": pending.get("diff_from_original", ""),
-        },
-    ]
+
+    max_depth = int(getattr(_stg, "R1B_FAILURE_TREE_MAX_DEPTH", 4) or 4)
+    chain = await _build_parent_chain(
+        parent_id=parent_id,
+        parent_statement_fallback=primary_hyp,
+        max_depth=max_depth,
+    )
+    # Append the new (uncommitted-id-or-just-INSERTed) tip — pending may
+    # carry hypothesis_id if R1b.3-v2 INSERT succeeded earlier in the node.
+    chain.append({
+        "id": pending.get("hypothesis_id"),
+        "statement": pending.get("statement", ""),
+        "mutation_depth": (chain[-1]["mutation_depth"] + 1) if chain else 1,
+        "diff_from_parent": pending.get("diff_from_original", ""),
+    })
+
     try:
         async with _R1B_SessionLocal() as _r1b_db:
             ok = await record_failure_tree(
@@ -635,13 +673,144 @@ async def _maybe_record_failure_tree(
         if ok:
             logger.info(
                 f"[r1b_loop mutate] failure_tree persisted "
-                f"(parent={primary_hyp[:60]!r} → new={pending.get('statement', '')[:60]!r})"
+                f"(chain_depth={len(chain)} parent={primary_hyp[:60]!r} → "
+                f"new={pending.get('statement', '')[:60]!r})"
             )
     except Exception as ex:
         logger.warning(
             f"[r1b_loop mutate] failure_tree persist failed "
             f"(round unaffected): {ex}"
         )
+
+
+async def _build_parent_chain(
+    *,
+    parent_id: Any,
+    parent_statement_fallback: str,
+    max_depth: int,
+) -> List[Dict[str, Any]]:
+    """R1b.3-v2 (2026-05-18): walk Hypothesis.parent_hypothesis_id chain up
+    to ``max_depth`` rows (inclusive of the parent itself), returning oldest
+    ancestor first. Falls back to a single-node list using
+    ``parent_statement_fallback`` when no parent_id / DB walk fails.
+
+    NEVER raises — returns at minimum [{id: parent_id, statement: fallback,
+    mutation_depth: 0}].
+    """
+    fallback = [{
+        "id": parent_id,
+        "statement": parent_statement_fallback,
+        "mutation_depth": 0,
+    }]
+    if parent_id is None:
+        return fallback
+    try:
+        from backend.database import AsyncSessionLocal as _SL
+        from backend.models import Hypothesis
+        from sqlalchemy import select as _sel
+    except Exception:
+        return fallback
+    try:
+        chain: List[Dict[str, Any]] = []
+        cur_id = parent_id
+        async with _SL() as _db:
+            for _ in range(max(1, max_depth)):
+                if cur_id is None:
+                    break
+                row = (
+                    await _db.execute(
+                        _sel(Hypothesis).where(Hypothesis.id == cur_id)
+                    )
+                ).scalar_one_or_none()
+                if row is None:
+                    break
+                chain.append({
+                    "id": row.id,
+                    "statement": getattr(row, "statement", "") or "",
+                    "mutation_depth": int(
+                        getattr(row, "r1b_mutation_depth", 0) or 0
+                    ),
+                })
+                cur_id = getattr(row, "parent_hypothesis_id", None)
+        if not chain:
+            return fallback
+        # Reverse so oldest ancestor is first (lowest depth → highest).
+        chain.reverse()
+        return chain
+    except Exception as ex:
+        logger.debug(f"[r1b_loop mutate] parent-chain walk failed ({ex}); falling back")
+        return fallback
+
+
+async def _insert_mutated_hypothesis(
+    *,
+    task_id: Any,
+    parent_hypothesis_id: Any,
+    pending: Dict[str, Any],
+    region: Any,
+) -> Any:
+    """R1b.3-v2 (2026-05-18): INSERT a new Hypothesis row for the mutated
+    hypothesis with parent_hypothesis_id FK + r1b_mutation_depth bumped.
+
+    Returns the new row id on success, None on any failure. Uses an
+    independent AsyncSessionLocal so DB issues don't poison the calling
+    LangGraph session's transaction state.
+
+    NEVER raises — caller handles None gracefully.
+    """
+    try:
+        from backend.database import AsyncSessionLocal as _SL
+        from backend.models import Hypothesis
+        from sqlalchemy import select as _sel
+    except Exception as ex:
+        logger.debug(f"[r1b_loop mutate] insert deps unavailable ({ex})")
+        return None
+
+    statement = str(pending.get("statement", "")).strip()
+    if not statement:
+        return None
+
+    parent_depth = 0
+    try:
+        async with _SL() as _r1b_db:
+            if parent_hypothesis_id is not None:
+                parent = (
+                    await _r1b_db.execute(
+                        _sel(Hypothesis).where(Hypothesis.id == parent_hypothesis_id)
+                    )
+                ).scalar_one_or_none()
+                if parent is not None:
+                    parent_depth = int(
+                        getattr(parent, "r1b_mutation_depth", 0) or 0
+                    )
+
+            new_row = Hypothesis(
+                task_id=task_id,
+                region=region or "USA",
+                statement=statement,
+                rationale=str(pending.get("rationale", "")),
+                pillar=pending.get("pillar") or "unknown",
+                key_fields=pending.get("key_fields") or [],
+                suggested_operators=pending.get("suggested_operators") or [],
+                dataset_pool=pending.get("selected_datasets") or [],
+                parent_hypothesis_id=parent_hypothesis_id,
+                r1b_mutation_depth=parent_depth + 1,
+                kind="IMPROVEMENT_RULE",
+                status="PROPOSED",
+            )
+            _r1b_db.add(new_row)
+            await _r1b_db.commit()
+            await _r1b_db.refresh(new_row)
+            logger.info(
+                f"[r1b_loop mutate] R1b.3-v2 INSERT hypothesis_id={new_row.id} "
+                f"parent={parent_hypothesis_id} depth={new_row.r1b_mutation_depth}"
+            )
+            return new_row.id
+    except Exception as ex:
+        logger.warning(
+            f"[r1b_loop mutate] R1b.3-v2 insert failed (round unaffected): {ex}"
+        )
+        return None
 
 
 def _make_mutate_log_row(

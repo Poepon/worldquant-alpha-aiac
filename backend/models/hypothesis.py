@@ -127,13 +127,27 @@ class Hypothesis(SQLAlchemyBase):
         ForeignKey("alphas.id", ondelete="SET NULL"),
         nullable=True,
     )
-    # V-27.B (2026-05-14): parent_hypothesis_id is no longer written — the
-    # G-refine loop (the only writer) was removed (never fired: 0/673 rows
-    # had a parent). Column + FK kept for schema stability; no migration.
+    # V-27.B (2026-05-14): parent_hypothesis_id was no longer written by the
+    # G-refine loop (which was removed; never fired: 0/673 rows had a parent).
+    # R1b.3-v2 (2026-05-18): re-activated as the CoSTEER mutation chain
+    # backbone — node_hypothesis_mutate INSERTs a new row with this FK set
+    # to the parent, and _maybe_record_failure_tree walks the chain to
+    # build failure_tree skeletons past depth=1.
     parent_hypothesis_id = Column(
         Integer,
         ForeignKey("hypotheses.id", ondelete="SET NULL"),
         nullable=True,
+    )
+
+    # R1b.3-v2 (2026-05-18): 0 = original (LLM exploration root);
+    # bumped per mutation event so a chain ROOT → M1 → M2 has depths
+    # 0 → 1 → 2. Used by _maybe_record_failure_tree to cap the walk
+    # at R1B_FAILURE_TREE_MAX_DEPTH and by R8 RAG L2 for skeleton ranking.
+    r1b_mutation_depth = Column(
+        Integer,
+        nullable=True,
+        default=0,
+        server_default="0",
     )
 
     # ---- Variant isolation (Plan v5+ F-5) ----
