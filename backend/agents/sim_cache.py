@@ -25,6 +25,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings as _settings
@@ -90,6 +91,13 @@ async def get_cached(
     On hit: bumps ``accessed_at`` + ``access_count`` (best-effort,
     soft-fail). On miss / expired: returns None. On any DB error: returns
     None + log warn.
+
+    NOTE — requires a fresh / dedicated AsyncSession. The access-stats path
+    issues ``await db.commit()`` to persist the accessed_at/access_count
+    bump, which would clobber any in-flight transaction on a request-scoped
+    session. Call sites (``cached_simulate_batch``) construct a session
+    from ``AsyncSessionLocal`` for exactly this reason — do the same if you
+    add a new caller.
     """
     try:
         ttl = int(ttl_days if ttl_days is not None
@@ -135,31 +143,49 @@ async def set_cached(
     Respects ``SIMULATION_CACHE_ONLY_SUCCESS``: when True (default), only
     caches results with ``result.success == True`` (avoid pinning transient
     errors). Soft-fail on DB error.
+
+    Bug-#7 fix (2026-05-18): race-free Postgres ``INSERT ... ON CONFLICT
+    (cache_key) DO UPDATE`` replaces the prior SELECT-then-INSERT path. Two
+    concurrent workers that both missed in :func:`get_cached` for the same
+    expression now collapse to a single winning INSERT; the loser hits the
+    DO UPDATE branch which only bumps ``access_count`` + ``accessed_at`` and
+    deliberately KEEPS the first writer's ``result_json`` / ``cached_at`` /
+    ``success`` / ``expression`` / ``settings_json`` (no clobber). Either
+    way no UNIQUE-violation rollback churn.
     """
     try:
         if getattr(_settings, "SIMULATION_CACHE_ONLY_SUCCESS", True):
             if not bool(result.get("success", False)):
                 return False
-        # UPSERT — if key exists, update result_json + cached_at (re-warm)
-        existing = (await db.execute(
-            select(SimulationCache).where(SimulationCache.cache_key == cache_key)
-        )).scalar_one_or_none()
-        if existing is not None:
-            existing.result_json = result
-            existing.cached_at = datetime.now(timezone.utc)
-            existing.success = bool(result.get("success", False))
-            existing.expression = expression  # forensic, may have been truncated
-        else:
-            db.add(SimulationCache(
-                cache_key=cache_key,
-                region=(region or "").upper(),
-                universe=universe or "",
-                expression=expression,
-                expression_hash=_expression_hash(expression),
-                settings_json=_canonical_settings(settings),
-                result_json=result,
-                success=bool(result.get("success", False)),
-            ))
+        now = datetime.now(timezone.utc)
+        values = {
+            "cache_key": cache_key,
+            "region": (region or "").upper(),
+            "universe": universe or "",
+            "expression": expression,
+            "expression_hash": _expression_hash(expression),
+            "settings_json": _canonical_settings(settings),
+            "result_json": result,
+            "success": bool(result.get("success", False)),
+            "cached_at": now,
+            "accessed_at": now,
+            "access_count": 1,
+        }
+        stmt = pg_insert(SimulationCache).values(**values)
+        # On conflict: keep the first writer's payload — only bump access
+        # stats. Mirrors get_cached's hit-path bookkeeping. We intentionally
+        # do NOT re-warm cached_at on a conflicting INSERT: doing so would
+        # extend the TTL for free on every duplicate INSERT and break the
+        # "freshly cached vs. recently accessed" distinction. Re-warming is
+        # the caller's job (do a fresh set after an explicit invalidate).
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["cache_key"],
+            set_={
+                "access_count": SimulationCache.access_count + 1,
+                "accessed_at": now,
+            },
+        )
+        await db.execute(stmt)
         await db.commit()
         return True
     except Exception as ex:

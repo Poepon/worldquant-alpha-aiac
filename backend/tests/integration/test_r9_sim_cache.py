@@ -174,8 +174,16 @@ async def test_set_cached_skips_failures_by_default(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_set_cached_upsert_overwrites(pg_session):
-    """Second set_cached for same key → updates result."""
+async def test_set_cached_upsert_first_writer_wins(pg_session):
+    """Bug-#7: ON CONFLICT DO UPDATE preserves the first writer's result.
+
+    Two concurrent workers that both miss in get_cached and race to
+    set_cached must NOT clobber each other's result_json — the second
+    INSERT collapses to an access-stats bump (access_count + accessed_at)
+    only. This avoids wasted BRAIN spend + the cache flapping between
+    different "first" results when two races hit the same expression.
+    """
+    from sqlalchemy import text as _sql_text
     key = compute_cache_key(region="USA", universe="TOP3000",
                              expression=f"{_TAG}_upsert", settings={"delay": 1})
     await set_cached(pg_session, cache_key=key, region="USA",
@@ -187,7 +195,16 @@ async def test_set_cached_upsert_overwrites(pg_session):
                       expression=f"{_TAG}_upsert", settings={"delay": 1},
                       result={"success": True, "sharpe": 2.5})
     hit = await get_cached(pg_session, key)
-    assert hit["sharpe"] == 2.5
+    # First writer wins — sharpe stays 1.0, not 2.5.
+    assert hit["sharpe"] == 1.0
+    # Conflicting INSERT bumped access_count. get_cached itself also
+    # bumps once per call, so we expect ≥ 2 (1 from racing set + 1 from
+    # the get above).
+    row_count = (await pg_session.execute(
+        _sql_text("SELECT access_count FROM simulation_cache WHERE cache_key = :k"),
+        {"k": key},
+    )).scalar_one()
+    assert row_count >= 2
 
 
 @pytest.mark.asyncio

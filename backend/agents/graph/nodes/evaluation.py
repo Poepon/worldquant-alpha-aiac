@@ -1140,6 +1140,18 @@ async def node_simulate(
         try:
             # V-26.65 (2026-05-13): sim defaults pulled from settings.
             # R9 (Phase 3, 2026-05-18): cached wrapper when flag ON; soft-fall.
+            # Bug-#8 fix (2026-05-18): pass all 7 SETTINGS_KEYS explicitly
+            # (region, universe, delay, decay, neutralization, truncation,
+            # test_period) so the R9 cache key matches what an explicit-args
+            # caller would compute. Previously truncation/test_period were
+            # implicit BrainAdapter/wrapper defaults (0.08 / "P2Y0M"), which
+            # silently tied this branch's cache key to wrapper-side constants
+            # and would collide with a future caller passing different values.
+            # P3-Brain: prefer task-startup snapshot `effective_default_test_period`
+            # when present (mirrors smart-settings branch at line ~1054).
+            _fallback_test_period = (
+                getattr(state, "effective_default_test_period", None) or "P2Y0M"
+            )
             _sim_kwargs = dict(
                 expressions=expressions,
                 region=state.region,
@@ -1147,6 +1159,8 @@ async def node_simulate(
                 delay=_v16_settings.SIM_DEFAULT_DELAY,
                 decay=_v16_settings.SIM_DEFAULT_DECAY,
                 neutralization=_v16_settings.SIM_DEFAULT_NEUTRALIZATION,
+                truncation=0.08,
+                test_period=_fallback_test_period,
             )
             if getattr(settings, "ENABLE_SIMULATION_CACHE", False):
                 try:
@@ -2574,20 +2588,34 @@ async def node_evaluate(
         "SUCCESS"
     )
 
-    # === R1a hook (Phase 0 v1.6, 2026-05-17): capture AttributionType ===
-    # v1.5 designed to write into alpha.metrics (Pydantic), relying on
-    # persistence to push it to DB. But empirically only PROV/PASS alphas
-    # INSERT (1/round); FAIL+OPTIMIZE (49/round) get GC'd with their
-    # AlphaCandidate. v1.6 fix: ALSO INSERT a dedicated row into
-    # r1a_attribution_log per evaluated alpha, captured independent of
-    # alpha persistence. 50× better R1a accumulation throughput.
-    # Default OFF; flip via FeatureFlagOverride ENABLE_R1A_HOOK=true.
-    if getattr(settings, "ENABLE_R1A_HOOK", False):
-        # Lazy import: avoid cold-start cost when flag OFF (core/ is 3223 LOC DORMANT)
-        from backend.agents.core.integration import enhance_existing_node_evaluate  # noqa: E402
+    # === R1a hook + R5 LLM judge (Phase 0 v1.6 / Phase 2 R5) ===
+    # R1a writes AttributionType into alpha.metrics + dedicated
+    # r1a_attribution_log table (50× INSERT throughput vs. relying on
+    # alpha persistence — FAIL/OPTIMIZE alphas get GC'd, only 1/round
+    # actually persists). R5 LLM judge runs AFTER R1a heuristic so it
+    # can OVERWRITE R1a verdict per [V1.0-A2-3] conflict-resolution lock.
+    #
+    # Bug-#6 fix (2026-05-18): R5 used to be NESTED under ENABLE_R1A_HOOK
+    # so ENABLE_LLM_JUDGE alone did nothing and turning R1a off silently
+    # killed R5. Now each flag has its own guard; if either is ON we
+    # walk updated_alphas once and apply whichever hooks are enabled. The
+    # r1a_attribution_log row is still written when ANY hook ran so the
+    # R5-only configuration has a place to land its r5_* columns.
+    _r1a_on = bool(getattr(settings, "ENABLE_R1A_HOOK", False))
+    _r5_on = bool(getattr(settings, "ENABLE_LLM_JUDGE", False))
+    if _r1a_on or _r5_on:
+        # Lazy imports: avoid cold-start cost when both flags OFF.
+        import hashlib  # noqa: E402
         from backend.database import AsyncSessionLocal  # noqa: E402
         from backend.models.r1a_attribution import R1aAttributionLog  # noqa: E402
-        import hashlib  # noqa: E402
+
+        # Only import R1a integration shim when its flag is on — keeps
+        # the legacy "core/ is 3223 LOC DORMANT" cost gate intact.
+        if _r1a_on:
+            from backend.agents.core.integration import enhance_existing_node_evaluate  # noqa: E402
+        if _r5_on:
+            from backend.agents.graph.r5_judge import run_r5_judge  # noqa: E402
+            from backend.agents.services.llm_service import get_llm_service  # noqa: E402
 
         _r1a_failures = 0
         _r1a_log_rows = []  # collect first, INSERT in one batch after loop
@@ -2612,49 +2640,52 @@ async def node_evaluate(
                 "should_modify_hypothesis": None,
                 "hook_error": None,
             }
-            try:
-                _sim = {
-                    "sharpe": _new_metrics.get("sharpe"),
-                    "fitness": _new_metrics.get("fitness"),
-                }
-                _hyp = {"statement": getattr(_a, "hypothesis", "") or ""}
-                _fb = enhance_existing_node_evaluate(_a, _sim, _hyp, trace=None)
-                _new_metrics["_r1a_attribution"] = _fb.attribution.value
-                _new_metrics["_r1a_attribution_confidence"] = _fb.attribution_confidence
-                if _fb.attribution_evidence:  # skip empty list — saves storage
-                    _new_metrics["_r1a_attribution_evidence"] = list(_fb.attribution_evidence)
-                _new_metrics["_r1a_should_retry"] = bool(_fb.should_retry_implementation)
-                _new_metrics["_r1a_should_modify"] = bool(_fb.should_modify_hypothesis)
-                _new_metrics["_r1a_hook_version"] = "v1"
-                # log row mirrors metrics
-                _r1a_log["attribution"] = _fb.attribution.value
-                _r1a_log["attribution_confidence"] = _fb.attribution_confidence
-                _r1a_log["attribution_evidence"] = list(_fb.attribution_evidence) if _fb.attribution_evidence else None
-                _r1a_log["should_retry_implementation"] = "true" if _fb.should_retry_implementation else "false"
-                _r1a_log["should_modify_hypothesis"] = "true" if _fb.should_modify_hypothesis else "false"
-            except Exception as _r1a_e:  # noqa: BLE001 — must isolate per-alpha failures
-                _r1a_failures += 1
-                logger.warning(
-                    "[R1a] hook failed for alpha {}: {}",
-                    getattr(_a, "alpha_id", "?"), _r1a_e
-                )
-                _new_metrics["_r1a_attribution"] = None
-                _new_metrics["_r1a_hook_error"] = str(_r1a_e)[:200]
-                _new_metrics["_r1a_hook_version"] = "v1"  # mark even on fail so GO denominator includes
-                _r1a_log["hook_error"] = str(_r1a_e)[:200]
+            # Shared context for both hooks — populated even when R1a flag
+            # is off so the R5-only path still has a hypothesis statement
+            # to feed run_r5_judge.
+            _hyp = {"statement": getattr(_a, "hypothesis", "") or ""}
+
+            if _r1a_on:
+                try:
+                    _sim = {
+                        "sharpe": _new_metrics.get("sharpe"),
+                        "fitness": _new_metrics.get("fitness"),
+                    }
+                    _fb = enhance_existing_node_evaluate(_a, _sim, _hyp, trace=None)
+                    _new_metrics["_r1a_attribution"] = _fb.attribution.value
+                    _new_metrics["_r1a_attribution_confidence"] = _fb.attribution_confidence
+                    if _fb.attribution_evidence:  # skip empty list — saves storage
+                        _new_metrics["_r1a_attribution_evidence"] = list(_fb.attribution_evidence)
+                    _new_metrics["_r1a_should_retry"] = bool(_fb.should_retry_implementation)
+                    _new_metrics["_r1a_should_modify"] = bool(_fb.should_modify_hypothesis)
+                    _new_metrics["_r1a_hook_version"] = "v1"
+                    # log row mirrors metrics
+                    _r1a_log["attribution"] = _fb.attribution.value
+                    _r1a_log["attribution_confidence"] = _fb.attribution_confidence
+                    _r1a_log["attribution_evidence"] = list(_fb.attribution_evidence) if _fb.attribution_evidence else None
+                    _r1a_log["should_retry_implementation"] = "true" if _fb.should_retry_implementation else "false"
+                    _r1a_log["should_modify_hypothesis"] = "true" if _fb.should_modify_hypothesis else "false"
+                except Exception as _r1a_e:  # noqa: BLE001 — must isolate per-alpha failures
+                    _r1a_failures += 1
+                    logger.warning(
+                        "[R1a] hook failed for alpha {}: {}",
+                        getattr(_a, "alpha_id", "?"), _r1a_e
+                    )
+                    _new_metrics["_r1a_attribution"] = None
+                    _new_metrics["_r1a_hook_error"] = str(_r1a_e)[:200]
+                    _new_metrics["_r1a_hook_version"] = "v1"  # mark even on fail so GO denominator includes
+                    _r1a_log["hook_error"] = str(_r1a_e)[:200]
             # Pydantic field reassignment (AlphaCandidate is Pydantic BaseModel —
             # no flag_modified needed; persistence.py INSERT path doesn't need dirty marker)
             _a.metrics = _new_metrics
 
             # === Phase 2 R5 LLM judge (plan v1.0 §1.2, 2026-05-18) ===
-            # Runs AFTER R1a heuristic so R5 can OVERWRITE R1a verdict
-            # per [V1.0-A2-3] conflict resolution lock. R5 None (both
-            # PASS / low conf) preserves R1a verdict.
-            # Per-alpha try/except guard — same as R1a, must not block round.
-            if getattr(settings, "ENABLE_LLM_JUDGE", False):
+            # Runs AFTER R1a heuristic (when both enabled) so R5 can
+            # OVERWRITE R1a verdict per [V1.0-A2-3]. R5 None (both PASS
+            # / low conf) preserves R1a verdict. Per-alpha try/except
+            # guard — same as R1a, must not block round.
+            if _r5_on:
                 try:
-                    from backend.agents.graph.r5_judge import run_r5_judge  # noqa: E402
-                    from backend.agents.services.llm_service import get_llm_service  # noqa: E402
                     # AlphaCandidate (Pydantic, agents/graph/state.py:19) has
                     # field `explanation`; SQLAlchemy Alpha.logic_explanation
                     # is the DB-persisted name (mapped in persistence.py:270).
@@ -2707,7 +2738,7 @@ async def node_evaluate(
             logger.warning(
                 "[R1a] {}/{} hook failed this round", _r1a_failures, len(updated_alphas)
             )
-    # === end R1a hook ===
+    # === end R1a + R5 hooks ===
 
     # === Phase 2 R10 Family-cap (Hubble v2, 2026-05-18) ===
     # Apply AFTER R1a/R5 hooks so per-alpha scores (composite_score / sharpe)
