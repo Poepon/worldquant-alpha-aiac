@@ -1436,16 +1436,16 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
             await db.commit()
         return {"warning": "no_datasets", "total_alphas": 0}
 
-    # Q1 V2: cursor comes from runtime_state, inherited across pause-resume
+    # Q1 V2: cursor comes from runtime_state, inherited across pause-resume.
+    # HIGH-#5 fix (2026-05-18): cursor is monotonically incremented and we
+    # always select via `flat_cursor % len(datasets)` — never compared to
+    # `len(datasets)` for termination (single-dataset MANUAL sessions would
+    # otherwise COMPLETE after iteration 1 with daily_goal unmet). Resume
+    # reads the integer back as-is and keeps incrementing — modulo wrap is
+    # applied at access time only.
     flat_cursor = 0
     if isinstance(run.runtime_state, dict):
         flat_cursor = int(run.runtime_state.get("flat_cursor", 0) or 0)
-    if flat_cursor >= len(datasets):
-        logger.info(
-            f"[flat] task={task.id} cursor={flat_cursor} ≥ len(datasets)={len(datasets)}, "
-            f"session COMPLETED"
-        )
-        flat_cursor = 0  # wrap-around for next session
 
     total_alphas = 0
     iterations = 0
@@ -1479,6 +1479,21 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
             if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
                 logger.info(
                     f"[flat] task={task.id} status={task.status} at cursor={flat_cursor}, "
+                    f"exiting (cursor preserved in runtime_state)"
+                )
+                break
+
+            # HIGH-#4 fix (2026-05-18): V-27.1 ownership self-check at the
+            # iteration boundary, mirroring the cascade pattern (cf. line
+            # 1267-1273). Without this, a watchdog re-assignment mid-FLAT
+            # session lets the old worker keep advancing flat_cursor and
+            # writing alphas concurrently with the replacement — the same
+            # double-write bug cascade had before V-27.1.
+            if not _verify_cascade_ownership(
+                lock_key, lock_token, where="flat iteration boundary"
+            ):
+                logger.info(
+                    f"[flat] task={task.id} ownership lost at cursor={flat_cursor}; "
                     f"exiting (cursor preserved in runtime_state)"
                 )
                 break
@@ -1535,15 +1550,18 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 f"round_alphas={round_alphas} total={total_alphas}/{daily_goal}"
             )
 
-            if flat_cursor >= len(datasets):
-                logger.info(
-                    f"[flat] task={task.id} traversed all {len(datasets)} datasets; "
-                    f"session COMPLETED"
-                )
-                break
-
+    # HIGH-#5 fix (2026-05-18): mirror cascade's V-19.10 H2 finalization
+    # (cf. line 1821-1833). Only mark the run COMPLETED when the loop
+    # exited under its own completion criterion (daily_goal hit or
+    # max_iters exhausted). If the worker exited because of PAUSED /
+    # STOPPED or ownership takeover, reflect that on the run so history
+    # isn't misrepresented as finished work.
     if run is not None:
-        run.status = "COMPLETED"
+        await db.refresh(task)
+        if task.status in ("PAUSED", "STOPPED"):
+            run.status = task.status
+        else:
+            run.status = "COMPLETED"
         run.finished_at = datetime.utcnow()
         await db.commit()
 
