@@ -1,5 +1,18 @@
 """R1a hook attribution observation report (Phase 0, 2026-05-17).
 
+DEPRECATED (2026-05-18) — superseded by `GET /api/v1/ops/r1a/telemetry`
+(commit e52a381) which exposes the same KPIs as a live endpoint instead
+of a one-shot diagnostic script. Use the CoSTEERMonitor frontend page
+(`/ops/costeer`) or curl the endpoint directly:
+
+    curl -H "X-Ops-Token: $OPS_API_TOKEN" \\
+         "$AIAC_URL/api/v1/ops/r1a/telemetry?days=7"
+
+This script remains for backward compat with existing cron jobs but
+will be removed once those are migrated. The endpoint additionally
+returns R5 c1/c2 LLM judge stats (agreement rate + cost) which this
+script does NOT compute.
+
 Reports the 5 KPI fields defined in plan v1.3 §1.7:
     - total                     hook_version rows (success + fail combined)
     - non_null_pct              attribution != NULL / total
@@ -252,6 +265,15 @@ async def main_async(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    # DEPRECATED (2026-05-18): emit runtime warning to stderr so cron-driven
+    # invocations leave a discoverable signal in logs. Doesn't change exit
+    # code or output — purely informational.
+    print(
+        "[DEPRECATED] scripts/r1a_attribution_report.py — use "
+        "GET /api/v1/ops/r1a/telemetry instead (commit e52a381). "
+        "Script will be removed once existing cron jobs migrate.",
+        file=sys.stderr,
+    )
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--days", type=int, default=None,
                    help="Calendar-window mode (default: full dataset)")
