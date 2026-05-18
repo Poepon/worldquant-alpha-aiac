@@ -43,13 +43,20 @@ def _mock_db(r1a_rows, r8_kb_pair, r5_count, r1b_rows, chain_max_depth):
     return db
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def _isolate_flag_state():
     """Snapshot + restore relevant ENABLE_* flags so tests don't leak into
     sibling test files (real bug observed 2026-05-18 — without this, test
     test_dispatch_flag_off_uses_legacy_path in test_r8_rag_dispatch.py
     fails when run AFTER test_all_flags_on_returns_hold_verdict because the
-    flag flip was not reverted)."""
+    flag flip was not reverted).
+
+    Review LOW #1 fix (2026-05-18): converted to ``autouse=True`` so EVERY
+    test in this module gets isolation regardless of whether it goes through
+    ``client_factory``. Previously the fixture was wired in via parameter
+    injection on ``client_factory`` — any future test that mutates
+    ``settings.ENABLE_*`` directly without using the factory would leak.
+    The autouse pattern enforces isolation universally."""
     from backend.config import settings as _stg
     keys = [
         "ENABLE_R1A_HOOK", "ENABLE_LLM_JUDGE",
@@ -65,7 +72,7 @@ def _isolate_flag_state():
 
 
 @pytest_asyncio.fixture
-async def client_factory(_isolate_flag_state):
+async def client_factory():
     async def _build(r1a_rows, r8_kb_pair, r5_count, r1b_rows, chain_max_depth, flags=None):
         app = FastAPI()
         app.include_router(ops_router, prefix="/api/v1")
