@@ -689,6 +689,85 @@ async def layer1_pillar(
 # Layer 2: family_signature (uses backfilled meta_data['family_signature'])
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# R1b.3b (2026-05-18): R8 L2 elevation for failure_tree-bearing FAILURE_PITFALL
+# ---------------------------------------------------------------------------
+# Plan: ~/.claude/plans/phase3-r1b-costeer-loop-2026-05-18.md v1.3 §7.3
+# [V1.0-A2-5]: R1b.3 does NOT modify R8 SQL or function signatures. R1b.3a's
+# record_failure_tree writes JSONB; this helper reads it back from
+# layer2_family's already-fetched fail rows and elevates relevance for
+# entries whose root_statement is semantically close to the current
+# hypothesis (Jaccard token similarity).
+
+
+_R1B_FAILURE_TREE_TOKEN_RE = re.compile(r"\b([a-z][a-z0-9_]*)\b")
+_R1B_FAILURE_TREE_STOPWORDS: Set[str] = {
+    "the", "a", "an", "is", "in", "on", "of", "for", "and", "or", "not",
+    "with", "by", "to", "from", "as", "at", "this", "that", "these", "those",
+    "be", "are", "was", "were", "has", "have", "had", "do", "does", "did",
+    "rank", "ts_rank", "close", "open", "high", "low", "volume", "vwap",
+}
+
+
+def _r1b_tokens(text: str) -> Set[str]:
+    """Lowercased word tokens minus common stopwords + OHLCV field names."""
+    if not text:
+        return set()
+    toks = _R1B_FAILURE_TREE_TOKEN_RE.findall(text.lower())
+    return {t for t in toks if t not in _R1B_FAILURE_TREE_STOPWORDS and len(t) > 2}
+
+
+def _r1b_jaccard_distance(a: Set[str], b: Set[str]) -> float:
+    """Jaccard distance = 1 - |A∩B| / |A∪B|. Empty sets → distance 1.0."""
+    if not a or not b:
+        return 1.0
+    union = a | b
+    if not union:
+        return 1.0
+    return 1.0 - len(a & b) / len(union)
+
+
+def _elevate_failure_tree_pitfalls(
+    fail: List["RAGEntry"], current_hypothesis: str, *,
+    jaccard_max: float = 0.4, bonus: float = 0.20,
+) -> List["RAGEntry"]:
+    """Bump relevance_score of FAILURE_PITFALL entries whose
+    ``meta_data['failure_tree']['statement']`` is semantically close to
+    ``current_hypothesis`` (Jaccard distance ≤ ``jaccard_max``).
+
+    No-op when flag OFF, current_hypothesis empty, or no entry carries a
+    failure_tree. Re-sorts ``fail`` by relevance_score DESC so the caller
+    can budget-cap.
+    """
+    if not current_hypothesis:
+        return fail
+    h_tokens = _r1b_tokens(current_hypothesis)
+    if not h_tokens:
+        return fail
+    bumped = False
+    for e in fail:
+        md = e.meta_data or {}
+        tree = md.get("failure_tree") if isinstance(md, dict) else None
+        if not tree or not isinstance(tree, dict):
+            continue
+        root_statement = str(tree.get("statement", "") or "")
+        if not root_statement:
+            continue
+        dist = _r1b_jaccard_distance(h_tokens, _r1b_tokens(root_statement))
+        if dist > jaccard_max:
+            continue
+        e.relevance_score = min(1.0, (e.relevance_score or 0.5) + bonus)
+        e.meta_data = {
+            **md,
+            "_r1b_failure_tree_match_jaccard": round(dist, 4),
+            "_r1b_failure_tree_bonus_applied": bonus,
+        }
+        bumped = True
+    if bumped:
+        fail.sort(key=lambda x: x.relevance_score, reverse=True)
+    return fail
+
+
 async def layer2_family(
     db: AsyncSession,
     *,
@@ -698,6 +777,7 @@ async def layer2_family(
     enable_r5_ranking: bool = False,
     r5_min_samples: int = 1,
     r5_lookback_days: int = 30,
+    current_hypothesis: Optional[str] = None,
 ) -> tuple[List[RAGEntry], List[RAGEntry]]:
     """RAG#2: family JOIN via backfilled meta_data['family_signature'].
 
@@ -803,6 +883,18 @@ async def layer2_family(
                         }
                 succ.sort(key=lambda x: x.relevance_score, reverse=True)
 
+        # R1b.3b (2026-05-18): elevate FAILURE_PITFALL entries that carry a
+        # failure_tree matching the current hypothesis. Flag-gated;
+        # default OFF so legacy fail ordering preserved.
+        try:
+            from backend.config import settings as _stg
+            if getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False) and current_hypothesis:
+                fail = _elevate_failure_tree_pitfalls(fail, current_hypothesis)
+        except Exception as _ft_ex:
+            logger.debug(
+                f"[hier_rag L2] failure_tree elevation failed (skip): {_ft_ex}"
+            )
+
         return succ[:budget], fail[:budget]
     except Exception as ex:
         logger.warning(f"[hier_rag L2] family query failed (return empty): {ex}")
@@ -824,6 +916,7 @@ async def query_hierarchical(
     max_patterns: int = 20,
     max_pitfalls: int = 10,
     layer_budgets: Optional[Dict[str, int]] = None,
+    current_hypothesis: Optional[str] = None,
 ) -> RAGResult:
     """Phase 3 R8 PR3 orchestrator — sequential fall-through L0 → L1 → L2 → L3.
 
@@ -951,13 +1044,15 @@ async def query_hierarchical(
             "L2",
             {"expr": current_expression, "region": region,
              "budget": _l2_budget, "r5_rank": _r5_rank_on,
-             "r5_min": _r5_min_samples, "r5_lb": _r5_lookback_days},
+             "r5_min": _r5_min_samples, "r5_lb": _r5_lookback_days,
+             "hyp": current_hypothesis or ""},
             lambda: layer2_family(
                 db, current_expression=current_expression, region=region,
                 budget=_l2_budget,
                 enable_r5_ranking=_r5_rank_on,
                 r5_min_samples=_r5_min_samples,
                 r5_lookback_days=_r5_lookback_days,
+                current_hypothesis=current_hypothesis,
             ),
         )
         result.total_queries += 1
