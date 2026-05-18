@@ -64,15 +64,22 @@ def _mk_state(alphas, *, mutations=0, cost=0.0, dataset_id="us_pv13"):
 
 
 def _mk_llm_mutate_resp(new_statement, *, success=True, tokens=200,
-                        rationale="", diff=""):
+                        rationale="", diff="",
+                        expected_signal="momentum",
+                        key_fields=("close", "volume"),
+                        suggested_operators=("ts_rank", "ts_mean"),
+                        pillar=None):
+    new_hyp = {
+        "statement": new_statement,
+        "rationale": rationale,
+        "expected_signal": expected_signal,
+        "key_fields": list(key_fields),
+        "suggested_operators": list(suggested_operators),
+    }
+    if pillar is not None:
+        new_hyp["pillar"] = pillar
     parsed = {
-        "new_hypothesis": {
-            "statement": new_statement,
-            "rationale": rationale,
-            "expected_signal": "momentum",
-            "key_fields": ["close", "volume"],
-            "suggested_operators": ["ts_rank", "ts_mean"],
-        },
+        "new_hypothesis": new_hyp,
         "diff_from_original": diff,
         "addresses_failure_modes": ["wrong-sign"],
     }
@@ -280,6 +287,80 @@ async def test_mutate_empty_statement_no_pending_emit():
     llm = _mk_llm_mutate_resp("")
     out = await node_hypothesis_mutate(state, llm)
     assert "r1b_pending_new_hypothesis" not in out
+
+
+# ---------------------------------------------------------------------------
+# R1b.2 review LOW (2026-05-18): pillar preservation enforcement
+# ---------------------------------------------------------------------------
+
+def test_mutate_prompt_enforces_pillar_preservation():
+    """Prompt must contain the strict pillar-preservation rule + canonical
+    pillar list aligned with backend/pillar_classifier.py.
+    """
+    sys_p, user_p = build_r1b_mutate_prompt(
+        original_hypothesis="momentum signals work in low-vol stocks",
+        original_alpha_outcomes=[{"expression": "rank(close)", "sharpe": 0.1}],
+        r5_c1_reason="",
+        region="USA", dataset_id="pv13", pillar="momentum",
+    )
+    # System prompt asserts the hard constraint
+    assert "PILLAR PRESERVATION" in sys_p
+    assert "MUST keep" in sys_p
+    assert "MUST NOT cross pillars" in sys_p
+    # Canonical pillar list (aligned with pillar_classifier.PILLAR_VALUES)
+    for canonical in ("momentum", "value", "quality",
+                      "volatility", "sentiment", "other"):
+        assert canonical in sys_p
+    # User prompt embeds the original pillar as the required value
+    assert '"pillar": "momentum"' in user_p
+    assert "MUST equal the original pillar" in user_p
+
+
+@pytest.mark.asyncio
+async def test_mutate_rejects_cross_pillar_drift():
+    """LLM returns a mutation whose signal source + fields + operators
+    clearly belong to a different pillar (quality, via roe/margin + slope).
+    Defensive fallback in node_hypothesis_mutate must:
+      - NOT emit r1b_pending_new_hypothesis (original stays unchanged)
+      - still bump the mutation counter (router can't loop)
+    """
+    alpha = _mk_alpha("0", "rank(close)", hypothesis="momentum in low-vol stocks")
+    state = _mk_state([alpha])  # current_pillar="momentum"
+    # Mutated payload is unambiguously a `quality` pillar via field+op votes:
+    # roe (quality field) + margin (quality field) + slope/ts_regression
+    # (quality op) — pillar_classifier.infer_pillar will return "quality".
+    llm = _mk_llm_mutate_resp(
+        "REVISED: profitability-based selection across stocks",
+        expected_signal="quality",
+        key_fields=("roe", "margin"),
+        suggested_operators=("slope", "ts_regression"),
+        pillar="quality",  # LLM disobeyed the prompt
+    )
+    out = await node_hypothesis_mutate(state, llm)
+    # Counter still bumped to prevent router loop
+    assert out["r1b_mutations_attempted_this_cycle"] == 1
+    # Cross-pillar mutation rejected → no pending hypothesis emitted
+    assert "r1b_pending_new_hypothesis" not in out
+
+
+@pytest.mark.asyncio
+async def test_mutate_accepts_within_pillar_change():
+    """Same pillar (momentum) but different signal source / horizon must
+    pass — only cross-pillar drift is rejected.
+    """
+    alpha = _mk_alpha("0", "rank(close)", hypothesis="momentum in low-vol stocks")
+    state = _mk_state([alpha])  # current_pillar="momentum"
+    # Within-pillar mutation: still momentum (returns + ts_delta op)
+    llm = _mk_llm_mutate_resp(
+        "REVISED: longer-horizon return momentum",
+        expected_signal="momentum",
+        key_fields=("returns", "close"),
+        suggested_operators=("ts_delta", "ts_rank"),
+        pillar="momentum",
+    )
+    out = await node_hypothesis_mutate(state, llm)
+    assert out["r1b_mutations_attempted_this_cycle"] == 1
+    assert "r1b_pending_new_hypothesis" in out
 
 
 @pytest.mark.asyncio

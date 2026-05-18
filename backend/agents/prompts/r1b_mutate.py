@@ -23,7 +23,7 @@ hypothesis. The original hypothesis was tested via multiple alpha expressions
 and ALL FAILED with quality issues that R5 judge / R1a heuristic attributed
 to the HYPOTHESIS being wrong (the idea, not the implementation). Your job:
 propose a REVISED hypothesis that addresses the specific empirical failure
-mode while staying close to the original investment theme.
+mode WITHIN THE SAME pillar as the original hypothesis.
 
 Rules:
 - Output a strictly NEW hypothesis (not a paraphrase).
@@ -31,7 +31,23 @@ Rules:
 - The new hypothesis must explicitly call out what changed from the original
   AND WHY that addresses the observed failure pattern.
 - Avoid resurrecting hypotheses already in the failure tree (provided).
-- Output strict JSON, no markdown, no commentary."""
+- Output strict JSON, no markdown, no commentary.
+
+PILLAR PRESERVATION (HARD CONSTRAINT):
+- You MUST keep the `pillar` field == original pillar. The canonical pillars
+  are: momentum, value, quality, volatility, sentiment, other.
+  (Note: "mean_reversion" / "reversal" are short-horizon momentum sub-classes
+  and map to pillar=momentum; do NOT emit them as a separate pillar.)
+- Mutation MAY change signal source (which field), time horizon (window size),
+  neutralization (group / industry / subindustry), or weighting (rank / zscore /
+  decay) WITHIN the pillar.
+- Mutation MUST NOT cross pillars. Example: if the original pillar is
+  "momentum", you MAY revise to a different lookback or a different
+  PV/return field, but you MUST NOT pivot to a valuation ratio (value),
+  a profitability metric (quality), an analyst-sentiment field (sentiment),
+  or a dispersion measure (volatility).
+- Pillar boundaries underpin downstream diversity tracking and family caps;
+  cross-pillar drift mid-cycle breaks those stats."""
 
 
 R1B_MUTATE_USER_TEMPLATE = """### Original hypothesis (FAILED)
@@ -55,12 +71,16 @@ region={region}, dataset={dataset_id}, pillar={pillar}
     "statement": "<revised hypothesis>",
     "rationale": "<economic reasoning>",
     "expected_signal": "momentum|mean_reversion|value|quality|other",
+    "pillar": "{pillar}",
     "key_fields": ["field1", "field2"],
     "suggested_operators": ["op1", "op2"]
   }},
   "diff_from_original": "<1-sentence what changed and why>",
   "addresses_failure_modes": ["<failure_mode_1>", "<failure_mode_2>"]
-}}"""
+}}
+
+NOTE: `pillar` field above MUST equal the original pillar ({pillar}). Any
+cross-pillar mutation will be rejected and the original hypothesis kept."""
 
 
 def build_r1b_mutate_prompt(

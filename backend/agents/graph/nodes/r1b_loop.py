@@ -50,11 +50,22 @@ COST_PER_1K_OUTPUT = {
     "gpt-4":                     0.06000,
 }
 
+# R1b.1 review LOW 1 — warn-once per process for unknown models so accounting
+# drift is visible if R1B_RETRY_MODEL is pointed at an exotic endpoint. Falls
+# back to haiku-rate defaults silently otherwise (Pythonic dict.get default).
+_R1B_COST_WARNED_MODELS: set[str] = set()
+
 
 def _estimate_cost(model: str, tokens_used: int) -> float:
     """Per plan §6.1 — 30% input / 70% output split heuristic."""
     if not tokens_used or tokens_used <= 0:
         return 0.0
+    if model not in COST_PER_1K_INPUT and model not in _R1B_COST_WARNED_MODELS:
+        logger.warning(
+            f"[R1b cost] unknown model {model!r}; using haiku-rate fallback "
+            f"for accounting (actual cost may differ)"
+        )
+        _R1B_COST_WARNED_MODELS.add(model)
     in_tok = tokens_used * 0.30
     out_tok = tokens_used * 0.70
     in_rate = COST_PER_1K_INPUT.get(model, 0.001)
@@ -460,23 +471,66 @@ async def node_hypothesis_mutate(
         new_statement = str(new_hyp_block.get("statement", "")).strip()
         diff = str(parsed.get("diff_from_original", "")).strip()
         if new_statement and new_statement != primary_hyp:
-            # Emit pending hypothesis for next-iteration propose node
-            pending_new_hypothesis = {
-                "statement": new_statement,
-                "rationale": str(new_hyp_block.get("rationale", "")),
-                "expected_signal": str(new_hyp_block.get("expected_signal", "")),
-                "key_fields": list(new_hyp_block.get("key_fields", []) or []),
-                "suggested_operators": list(new_hyp_block.get("suggested_operators", []) or []),
-                "parent_hypothesis_statement": primary_hyp,
-                "diff_from_original": diff,
-            }
-            log_rows.append(_make_mutate_log_row(
-                primary_alpha, primary_indices[0], task_id, round_idx, model_name,
-                primary_metrics,
-                new_hypothesis_statement=new_statement, llm_changes_made=diff,
-                outcome="pending", loop_error=None,
-                llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
-            ))
+            # R1b.2 review LOW (2026-05-18): defensive pillar-preservation
+            # fallback — soft-fall if the LLM (despite the strict prompt)
+            # produces a mutation that crosses pillars. Family caps + R10 +
+            # Q10 diversity stats break if mid-cycle mutations drift pillar.
+            new_key_fields = list(new_hyp_block.get("key_fields", []) or [])
+            new_suggested_ops = list(new_hyp_block.get("suggested_operators", []) or [])
+            new_expected_signal = str(new_hyp_block.get("expected_signal", ""))
+            new_emitted_pillar = new_hyp_block.get("pillar")
+            pillar_drift_detected = False
+            if pillar:  # only enforce when we know the original pillar
+                try:
+                    from backend.pillar_classifier import infer_pillar
+                    inferred = infer_pillar(
+                        hypothesis_pillar=new_emitted_pillar,
+                        key_fields=new_key_fields,
+                        suggested_operators=new_suggested_ops,
+                        expected_signal=new_expected_signal,
+                    )
+                    # "other" inference is ambiguous, not a confirmed drift —
+                    # don't reject on it. Reject only on a confirmed different
+                    # canonical pillar.
+                    if inferred and inferred != "other" and inferred != pillar:
+                        pillar_drift_detected = True
+                        logger.warning(
+                            f"[r1b_loop mutate] cross-pillar drift rejected: "
+                            f"original pillar={pillar!r}, mutated inferred={inferred!r}"
+                            f" (emitted pillar field={new_emitted_pillar!r})"
+                        )
+                except Exception as ex:
+                    logger.debug(f"[r1b_loop mutate] pillar inference skipped: {ex}")
+
+            if pillar_drift_detected:
+                log_rows.append(_make_mutate_log_row(
+                    primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+                    primary_metrics,
+                    new_hypothesis_statement=new_statement,
+                    llm_changes_made=diff,
+                    outcome="pending",
+                    loop_error=f"cross-pillar drift rejected (orig={pillar})",
+                    llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
+                ))
+                # Do NOT emit pending_new_hypothesis — original stays unchanged
+            else:
+                # Emit pending hypothesis for next-iteration propose node
+                pending_new_hypothesis = {
+                    "statement": new_statement,
+                    "rationale": str(new_hyp_block.get("rationale", "")),
+                    "expected_signal": new_expected_signal,
+                    "key_fields": new_key_fields,
+                    "suggested_operators": new_suggested_ops,
+                    "parent_hypothesis_statement": primary_hyp,
+                    "diff_from_original": diff,
+                }
+                log_rows.append(_make_mutate_log_row(
+                    primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+                    primary_metrics,
+                    new_hypothesis_statement=new_statement, llm_changes_made=diff,
+                    outcome="pending", loop_error=None,
+                    llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
+                ))
         else:
             log_rows.append(_make_mutate_log_row(
                 primary_alpha, primary_indices[0], task_id, round_idx, model_name,
