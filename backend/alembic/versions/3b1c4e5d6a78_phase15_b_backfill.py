@@ -97,8 +97,107 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Reset backfilled values to server_defaults.
 
+    Bug M6 fix (review 2026-05-18):
+      The blanket UPDATE that resets schedule / starting_tier / runtime_state
+      back to defaults is dangerous while Phase 1.5-C is live. With
+      ENABLE_TASK_SCHEMA_V2=ON, the cascade orchestrator reads cursor +
+      tier state from runtime_state['current_tier'] / ['round_idx'] /
+      ['progress'] — wiping those mid-flight silently regresses an
+      in-cascade T2/T3 task back to T1 and the worker re-mines T1 from
+      scratch, defeating the entire cascade.
+
+      Two guards before the blanket UPDATE runs:
+        1. Refuse if ENABLE_TASK_SCHEMA_V2 is ON. Check the runtime
+           feature_flag_overrides DB row first (production source of truth)
+           and fall back to settings.ENABLE_TASK_SCHEMA_V2 (env default).
+           Operator must flip the flag OFF first.
+        2. Refuse if any CONTINUOUS_CASCADE task is currently RUNNING.
+           Even with the flag OFF, a live cascade still relies on
+           runtime_state for its mining_tasks columns derived state.
+
+      A logger.warning at downgrade start tells the operator how many rows
+      will be affected.
+
     Old legacy columns (mining_mode / agent_mode / cascade_phase) were
-    never touched, so no data loss. Read paths still authoritative.
+    never touched, so legacy-mode read paths are still authoritative.
     """
+    import json
+    import logging
+    from sqlalchemy import text
+
+    logger = logging.getLogger("alembic.runtime.migration")
+    bind = op.get_bind()
+
+    # --- Bug M6 guard 1: refuse if ENABLE_TASK_SCHEMA_V2 is ON ---
+    flag_on = False
+    try:
+        row = bind.execute(text(
+            "SELECT flag_value FROM feature_flag_overrides "
+            "WHERE flag_name = 'ENABLE_TASK_SCHEMA_V2'"
+        )).fetchone()
+        if row is not None and row[0] is not None:
+            # flag_value is JSON-encoded text (per FeatureFlagOverride model)
+            try:
+                decoded = json.loads(row[0])
+                flag_on = bool(decoded)
+            except (ValueError, TypeError):
+                # Fallback to truthy string check
+                flag_on = str(row[0]).lower() in ("true", "1", "yes", "on")
+    except Exception as ex:
+        # feature_flag_overrides table may not exist on very old DBs
+        logger.warning(
+            "[phase15-B downgrade / Bug M6] could not read "
+            "feature_flag_overrides: %s — falling back to env default", ex
+        )
+
+    if not flag_on:
+        # Fall back to env-default from settings
+        try:
+            from backend.config import settings
+            flag_on = bool(getattr(settings, "ENABLE_TASK_SCHEMA_V2", False))
+        except Exception as ex:
+            logger.warning(
+                "[phase15-B downgrade / Bug M6] could not import settings: "
+                "%s — assuming flag OFF", ex
+            )
+
+    if flag_on:
+        raise Exception(
+            "refusing downgrade: ENABLE_TASK_SCHEMA_V2 is ON; flip flag OFF "
+            "first (POST /api/v1/ops/feature-flags with "
+            "{name='ENABLE_TASK_SCHEMA_V2', value=false}) then retry. "
+            "Downgrading while v2 reads are live would wipe in-flight "
+            "runtime_state cursors and silently regress T2/T3 tasks to T1."
+        )
+
+    # --- Bug M6 guard 2: refuse if any live CONTINUOUS_CASCADE running ---
+    running_count_row = bind.execute(text(
+        "SELECT COUNT(*) FROM mining_tasks "
+        "WHERE status = 'RUNNING' AND mining_mode = 'CONTINUOUS_CASCADE'"
+    )).fetchone()
+    running_count = int(running_count_row[0]) if running_count_row else 0
+    if running_count > 0:
+        raise Exception(
+            f"refusing downgrade: {running_count} CONTINUOUS_CASCADE task(s) "
+            "currently RUNNING. Stop / pause them via "
+            "POST /api/v1/mining-session/stop first — blanket UPDATE would "
+            "wipe their in-flight cascade cursors and force re-mine from T1."
+        )
+
+    # --- Pre-flight notice: how many rows will be reset ---
+    mt_count_row = bind.execute(text(
+        "SELECT COUNT(*) FROM mining_tasks"
+    )).fetchone()
+    er_count_row = bind.execute(text(
+        "SELECT COUNT(*) FROM experiment_runs"
+    )).fetchone()
+    logger.warning(
+        "[phase15-B downgrade] resetting schedule/starting_tier on %d "
+        "mining_tasks rows and runtime_state on %d experiment_runs rows. "
+        "Legacy mining_mode / agent_mode / cascade_phase columns untouched.",
+        int(mt_count_row[0]) if mt_count_row else 0,
+        int(er_count_row[0]) if er_count_row else 0,
+    )
+
     op.execute("UPDATE mining_tasks SET schedule = 'ONESHOT', starting_tier = 1;")
     op.execute("UPDATE experiment_runs SET runtime_state = '{}'::jsonb;")

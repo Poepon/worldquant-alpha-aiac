@@ -67,6 +67,47 @@ class TestRevisionBFile:
         assert "'ONESHOT'" in src
         assert "starting_tier = 1" in src
 
+    def test_downgrade_guards_enable_task_schema_v2_bug_m6(self, revision_path):
+        """Bug M6 guard 1: downgrade must refuse when ENABLE_TASK_SCHEMA_V2
+        is ON — wiping runtime_state would silently regress in-flight
+        cascades.
+        """
+        src = revision_path.read_text(encoding="utf-8")
+        idx = src.find("def downgrade(")
+        assert idx >= 0
+        downgrade_section = src[idx:]
+        # Reads override row first, falls back to settings
+        assert "feature_flag_overrides" in downgrade_section
+        assert "ENABLE_TASK_SCHEMA_V2" in downgrade_section
+        # Refuses with a clear exception
+        assert "refusing downgrade" in downgrade_section
+        assert "ENABLE_TASK_SCHEMA_V2 is ON" in downgrade_section
+
+    def test_downgrade_guards_live_cascade_running_bug_m6(self, revision_path):
+        """Bug M6 guard 2: downgrade must refuse if any RUNNING
+        CONTINUOUS_CASCADE task exists — even with the flag OFF, a live
+        cascade still depends on runtime_state.
+        """
+        src = revision_path.read_text(encoding="utf-8")
+        idx = src.find("def downgrade(")
+        downgrade_section = src[idx:]
+        # Checks mining_tasks for live cascade
+        assert "status = 'RUNNING'" in downgrade_section
+        assert "mining_mode = 'CONTINUOUS_CASCADE'" in downgrade_section
+        # Refuses with row count in the message
+        assert "CONTINUOUS_CASCADE task(s) " in downgrade_section or \
+               "CONTINUOUS_CASCADE task" in downgrade_section
+
+    def test_downgrade_emits_pre_flight_warning_bug_m6(self, revision_path):
+        """Bug M6: downgrade emits a logger.warning before the blanket
+        UPDATE so the operator sees how many rows will be affected.
+        """
+        src = revision_path.read_text(encoding="utf-8")
+        idx = src.find("def downgrade(")
+        downgrade_section = src[idx:]
+        assert "logger.warning" in downgrade_section
+        assert "Bug M6" in downgrade_section
+
 
 # ---------------------------------------------------------------------------
 # TaskService dual-write — model introspection
@@ -219,3 +260,125 @@ class TestImportSync:
         )
         src = path.read_text(encoding="utf-8")
         assert "from sqlalchemy.orm.attributes import flag_modified" in src
+
+
+# ---------------------------------------------------------------------------
+# Bug M6 runtime guard tests — exercise downgrade() with a mocked bind
+# ---------------------------------------------------------------------------
+
+class TestM6DowngradeRuntimeGuards:
+    """Bug M6: exercise the downgrade() guards in-process by loading the
+    migration module under a controlled `op.get_bind()` mock. Verifies the
+    Exception fires before the blanket UPDATE runs.
+    """
+
+    @pytest.fixture
+    def migration_module(self):
+        """Load the revision module without triggering Alembic's runner."""
+        import importlib.util
+        path = (
+            Path(__file__).parent.parent.parent / "alembic" / "versions"
+            / f"{REVISION}_phase15_b_backfill.py"
+        )
+        spec = importlib.util.spec_from_file_location(
+            "phase15_b_migration", str(path)
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_downgrade_refuses_when_flag_on_via_override_row(
+        self, migration_module, monkeypatch
+    ):
+        """ENABLE_TASK_SCHEMA_V2 override row = 'true' → Exception."""
+        # Mock op.get_bind() to return a fake bind whose execute() answers
+        # the override SELECT with a true value.
+        class FakeRow:
+            def __init__(self, v): self._v = v
+            def __getitem__(self, i): return self._v
+        class FakeResult:
+            def __init__(self, row): self._row = row
+            def fetchone(self): return self._row
+        class FakeBind:
+            def execute(self, stmt):
+                s = str(stmt)
+                if "feature_flag_overrides" in s:
+                    return FakeResult(FakeRow("true"))
+                # mining_tasks count should never run — but be safe
+                return FakeResult(FakeRow(0))
+
+        monkeypatch.setattr(migration_module.op, "get_bind", lambda: FakeBind())
+
+        with pytest.raises(Exception, match="ENABLE_TASK_SCHEMA_V2 is ON"):
+            migration_module.downgrade()
+
+    def test_downgrade_refuses_when_live_cascade_running(
+        self, migration_module, monkeypatch
+    ):
+        """Flag OFF but a RUNNING CONTINUOUS_CASCADE row exists → Exception."""
+        class FakeRow:
+            def __init__(self, v): self._v = v
+            def __getitem__(self, i): return self._v
+        class FakeResult:
+            def __init__(self, row): self._row = row
+            def fetchone(self): return self._row
+        class FakeBind:
+            def execute(self, stmt):
+                s = str(stmt)
+                if "feature_flag_overrides" in s:
+                    # no override row
+                    return FakeResult(None)
+                if "RUNNING" in s and "CONTINUOUS_CASCADE" in s:
+                    # 3 live cascades
+                    return FakeResult(FakeRow(3))
+                return FakeResult(FakeRow(0))
+
+        monkeypatch.setattr(migration_module.op, "get_bind", lambda: FakeBind())
+        # Force settings flag OFF too
+        from backend.config import settings
+        monkeypatch.setattr(settings, "ENABLE_TASK_SCHEMA_V2", False)
+
+        with pytest.raises(Exception, match="CONTINUOUS_CASCADE"):
+            migration_module.downgrade()
+
+    def test_downgrade_proceeds_when_flag_off_and_no_live_cascade(
+        self, migration_module, monkeypatch
+    ):
+        """Both guards pass → blanket UPDATEs are issued (captured)."""
+        executed_sql = []
+
+        class FakeRow:
+            def __init__(self, v): self._v = v
+            def __getitem__(self, i): return self._v
+        class FakeResult:
+            def __init__(self, row): self._row = row
+            def fetchone(self): return self._row
+        class FakeBind:
+            def execute(self, stmt):
+                s = str(stmt)
+                if "feature_flag_overrides" in s:
+                    return FakeResult(None)
+                if "RUNNING" in s and "CONTINUOUS_CASCADE" in s:
+                    return FakeResult(FakeRow(0))
+                if "COUNT(*) FROM mining_tasks" in s:
+                    return FakeResult(FakeRow(10))
+                if "COUNT(*) FROM experiment_runs" in s:
+                    return FakeResult(FakeRow(5))
+                return FakeResult(FakeRow(0))
+
+        monkeypatch.setattr(migration_module.op, "get_bind", lambda: FakeBind())
+        monkeypatch.setattr(
+            migration_module.op, "execute",
+            lambda sql: executed_sql.append(sql)
+        )
+        from backend.config import settings
+        monkeypatch.setattr(settings, "ENABLE_TASK_SCHEMA_V2", False)
+
+        migration_module.downgrade()
+
+        # Both blanket UPDATEs ran
+        joined = "\n".join(executed_sql)
+        assert "UPDATE mining_tasks" in joined
+        assert "'ONESHOT'" in joined
+        assert "UPDATE experiment_runs" in joined
+        assert "'{}'::jsonb" in joined
