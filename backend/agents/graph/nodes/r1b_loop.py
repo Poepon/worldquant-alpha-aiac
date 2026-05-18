@@ -316,8 +316,238 @@ def _make_log_row(
     }
 
 
+# ---------------------------------------------------------------------------
+# node_hypothesis_mutate — R1b.2
+# ---------------------------------------------------------------------------
+
+async def node_hypothesis_mutate(
+    state: Any,
+    llm_service: Any,
+    config: Any = None,
+) -> Dict[str, Any]:
+    """LangGraph node — propose a revised hypothesis via LLM.
+
+    Plan §4.2 — **dataset-cycle-scoped** (not per-alpha). One LLM call per
+    unique original hypothesis; existing FAIL alphas of that hypothesis
+    are dropped from the round (caller's hypothesis-propose node picks up
+    ``state.r1b_pending_new_hypothesis`` in the next iteration).
+
+    Per [V1.0-A2-3] — mutate dominates retry on BOTH attribution because
+    rewriting the hypothesis usually changes the expression family entirely,
+    making implementation retry stale.
+
+    Self-guards (V-26.57 + plan §4.1):
+      - per-cycle mutation budget (R1B_MAX_MUTATIONS_PER_DATASET_CYCLE)
+      - per-alpha token cost ceiling (shared with retry node)
+
+    Per-hypothesis try/except — single LLM failure does NOT block round.
+    """
+    # Self-guards
+    if getattr(state, "r1b_mutations_attempted_this_cycle", 0) >= int(
+        getattr(settings, "R1B_MAX_MUTATIONS_PER_DATASET_CYCLE", 2)
+    ):
+        logger.debug("[r1b_loop] per-cycle mutation budget exhausted; no-op")
+        return {
+            "r1b_mutations_attempted_this_cycle": state.r1b_mutations_attempted_this_cycle
+        }
+    if getattr(state, "r1b_token_cost_this_alpha", 0.0) >= float(
+        getattr(settings, "R1B_TOKEN_COST_CEILING_USD_PER_ALPHA", 0.05)
+    ):
+        logger.warning(
+            f"[r1b_loop mutate] token ceiling hit "
+            f"${state.r1b_token_cost_this_alpha:.4f}; no-op"
+        )
+        return {
+            "r1b_token_cost_this_alpha": state.r1b_token_cost_this_alpha
+        }
+
+    pending = list(getattr(state, "pending_alphas", []) or [])
+
+    # Plan §4.2 dataset-cycle dedupe: group FAIL+HYPOTHESIS|BOTH alphas by
+    # hypothesis statement so each unique hypothesis triggers ONE mutate.
+    groups: Dict[str, List[int]] = {}
+    for i, a in enumerate(pending):
+        if getattr(a, "quality_status", None) != "FAIL":
+            continue
+        attr = (getattr(a, "metrics", None) or {}).get("_r1a_attribution")
+        if attr not in ("hypothesis", "both"):
+            continue
+        hyp = (getattr(a, "hypothesis", "") or "").strip()
+        if not hyp:
+            continue
+        groups.setdefault(hyp, []).append(i)
+
+    if not groups:
+        logger.debug("[r1b_loop mutate] no FAIL+HYPOTHESIS alphas to mutate")
+        return {}
+
+    from backend.agents.prompts.r1b_mutate import build_r1b_mutate_prompt
+
+    cost_delta_usd = 0.0
+    pending_new_hypothesis = None
+    log_rows: List[Dict[str, Any]] = []
+    model_name = getattr(llm_service, "model", None) or getattr(
+        settings, "R1B_MUTATE_MODEL", "claude-haiku-4-5-20251001"
+    )
+    region = getattr(state, "region", None)
+    task_id = getattr(state, "task_id", None)
+    round_idx = getattr(state, "round_idx", None) or getattr(state, "round_index", None)
+    pillar = getattr(state, "current_pillar", None) or ""
+
+    # Plan §4.2 — v1.0 mutates ONE hypothesis per node invocation. If more
+    # than one unique hypothesis failed, pick the one with the most failed
+    # alphas (highest impact). Future v2 may batch.
+    primary_hyp = max(groups.items(), key=lambda kv: len(kv[1]))[0]
+    primary_indices = groups[primary_hyp]
+
+    # Build outcome bullets from the primary group
+    outcomes = []
+    primary_alpha = pending[primary_indices[0]]
+    primary_metrics = dict(getattr(primary_alpha, "metrics", None) or {})
+    r5_c1_reason = primary_metrics.get("_r5_c1_reason") or ""
+    for idx in primary_indices[:8]:
+        a = pending[idx]
+        m = getattr(a, "metrics", None) or {}
+        outcomes.append({
+            "expression": getattr(a, "expression", ""),
+            "sharpe": m.get("sharpe"),
+            "fitness": m.get("fitness"),
+        })
+
+    try:
+        sys_p, user_p = build_r1b_mutate_prompt(
+            original_hypothesis=primary_hyp,
+            original_alpha_outcomes=outcomes,
+            r5_c1_reason=r5_c1_reason,
+            failure_tree_summary=primary_metrics.get("_r1b_failure_tree_summary") or "",
+            region=region or "USA",
+            dataset_id=getattr(state, "dataset_id", "") or "",
+            pillar=pillar,
+        )
+        resp = await llm_service.call(
+            system_prompt=sys_p, user_prompt=user_p,
+            json_mode=True, max_tokens=768,
+            node_key="r1b_mutate",
+        )
+        tokens = int(getattr(resp, "tokens_used", 0) or 0)
+        cost_delta_usd += _estimate_cost(model_name, tokens)
+    except Exception as ex:
+        logger.warning(f"[r1b_loop mutate] LLM call failed: {ex}")
+        log_rows.append(_make_mutate_log_row(
+            primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+            primary_metrics,
+            new_hypothesis_statement=None, llm_changes_made=None,
+            outcome="pending", loop_error=str(ex)[:200],
+            llm_cost_usd=0.0, llm_tokens_used=0,
+        ))
+        await _write_r1b_retry_log_rows(log_rows)
+        return {
+            "r1b_mutations_attempted_this_cycle": state.r1b_mutations_attempted_this_cycle + 1,
+        }
+
+    parsed = getattr(resp, "parsed", None)
+    if not getattr(resp, "success", False) or not isinstance(parsed, dict):
+        log_rows.append(_make_mutate_log_row(
+            primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+            primary_metrics,
+            new_hypothesis_statement=None, llm_changes_made=None,
+            outcome="pending",
+            loop_error="LLM returned non-success / non-dict",
+            llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
+        ))
+    else:
+        new_hyp_block = parsed.get("new_hypothesis") or {}
+        new_statement = str(new_hyp_block.get("statement", "")).strip()
+        diff = str(parsed.get("diff_from_original", "")).strip()
+        if new_statement and new_statement != primary_hyp:
+            # Emit pending hypothesis for next-iteration propose node
+            pending_new_hypothesis = {
+                "statement": new_statement,
+                "rationale": str(new_hyp_block.get("rationale", "")),
+                "expected_signal": str(new_hyp_block.get("expected_signal", "")),
+                "key_fields": list(new_hyp_block.get("key_fields", []) or []),
+                "suggested_operators": list(new_hyp_block.get("suggested_operators", []) or []),
+                "parent_hypothesis_statement": primary_hyp,
+                "diff_from_original": diff,
+            }
+            log_rows.append(_make_mutate_log_row(
+                primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+                primary_metrics,
+                new_hypothesis_statement=new_statement, llm_changes_made=diff,
+                outcome="pending", loop_error=None,
+                llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
+            ))
+        else:
+            log_rows.append(_make_mutate_log_row(
+                primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+                primary_metrics,
+                new_hypothesis_statement=new_statement or None,
+                llm_changes_made=diff,
+                outcome="pending",
+                loop_error="LLM returned same/empty hypothesis statement",
+                llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
+            ))
+
+    await _write_r1b_retry_log_rows(log_rows)
+
+    out: Dict[str, Any] = {
+        "r1b_mutations_attempted_this_cycle": state.r1b_mutations_attempted_this_cycle + 1,
+        "r1b_token_cost_this_alpha": state.r1b_token_cost_this_alpha + cost_delta_usd,
+    }
+    if pending_new_hypothesis is not None:
+        out["r1b_pending_new_hypothesis"] = pending_new_hypothesis
+    return out
+
+
+def _make_mutate_log_row(
+    original: Any,
+    idx: int,
+    task_id: Any,
+    round_idx: Any,
+    model_name: str,
+    original_metrics: Dict[str, Any],
+    *,
+    new_hypothesis_statement: Any,
+    llm_changes_made: Any,
+    outcome: str,
+    loop_error: Any,
+    llm_cost_usd: float,
+    llm_tokens_used: int,
+) -> Dict[str, Any]:
+    import hashlib
+    expr = getattr(original, "expression", "") or ""
+    return {
+        "task_id": task_id,
+        "round_idx": round_idx,
+        "attempt_type": "mutate_hyp",
+        "triggering_attribution": original_metrics.get("_r1a_attribution"),
+        "triggering_attribution_source": (
+            "r5_judge" if original_metrics.get("_r5_c1_reason") else "r1a_heuristic"
+        ),
+        "original_expression_hash": hashlib.sha256(
+            expr.encode("utf-8")
+        ).hexdigest()[:64],
+        "original_alpha_id_brain": getattr(original, "alpha_id", None),
+        "original_hypothesis_id": original_metrics.get("hypothesis_id"),
+        "original_quality_status": getattr(original, "quality_status", None),
+        "new_expression": None,
+        "new_hypothesis_statement": new_hypothesis_statement,
+        "new_hypothesis_id": None,
+        "llm_changes_made": llm_changes_made,
+        "outcome": outcome,
+        "outcome_alpha_id_brain": None,
+        "outcome_sharpe": None,
+        "outcome_fitness": None,
+        "llm_cost_usd": llm_cost_usd,
+        "llm_tokens_used": llm_tokens_used,
+        "llm_model": model_name,
+        "loop_error": loop_error,
+    }
+
+
 __all__ = [
     "node_code_gen_retry",
+    "node_hypothesis_mutate",
     "_estimate_cost",
     "_write_r1b_retry_log_rows",
 ]
