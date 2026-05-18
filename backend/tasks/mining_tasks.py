@@ -517,9 +517,7 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                         try:
                             # PR4 fix — honor the task's configured daily_goal as
                             # num_alphas_per_round (was hardcoded 4 ignoring user
-                            # input). With T1's expand_t1_strategy producing
-                            # daily_goal × 1.5 candidates, daily_goal=4 → 6
-                            # candidates/round, daily_goal=20 → 30 candidates.
+                            # input).
                             num_per_round = task.daily_goal if task.daily_goal else 4
                             result = await mining_agent.run_evolution_loop(
                                 task=task,

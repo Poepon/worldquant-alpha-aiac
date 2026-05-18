@@ -1429,9 +1429,8 @@ class BrainAdapter:
         """GET /alphas/{id} — full alpha detail with current is.sharpe / is.fitness /
         metrics.checks. Distinct from get_alpha_pnl which fetches the PnL series.
 
-        Used by node_tier_seed_load to refresh metrics on T2/T3 candidate seeds at
-        task start. Goes through _safe_api_call so cross-process rate-limit
-        cooldowns and retries apply.
+        Goes through _safe_api_call so cross-process rate-limit cooldowns and
+        retries apply.
         """
         try:
             response = await self._safe_api_call("GET", f"/alphas/{alpha_id}")

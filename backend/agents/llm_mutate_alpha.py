@@ -1,10 +1,7 @@
-"""Phase 3 flat-F3: LLM-driven T2 wrapper mutation (2026-05-18).
+"""Phase 3 flat-F3: LLM-driven wrapper mutation (2026-05-18).
 
-Per master plan §4.5 flat-F3: replace T2 group_* + pure_xs full sweep
-(`backend/factor_wrapping.py:expand_t2_strategy` produces 8-12 variants
-of group_neutralize / group_rank / group_zscore / group_mean /
-group_scale / winsorize / signed_power) with an LLM call that looks at:
-  - The seed expression (T1 PASS alpha)
+LLM call that looks at:
+  - The seed expression
   - Recent _failed_tests / _brain_failed_checks from the alphas table
     (same region, same hypothesis if available)
   - Top P2-D pitfalls (KnowledgeEntry entry_type='FAILURE_PITFALL'
@@ -14,21 +11,19 @@ group_scale / winsorize / signed_power) with an LLM call that looks at:
 …and proposes 2-3 wrapper expressions (capped by LLM_MUTATE_TOP_K) with
 rationale, avoiding documented failure modes.
 
-Why: cascade T2 phase often sweeps 8-12 wrappers per seed, ~70% FAIL.
-LLM-guided 2-3 wrappers (cost ~$0.01 per seed) replaces this with
-informed selection. Empirical estimate (master plan §4.5): 40-75% BRAIN
-sim cost reduction + higher PASS rate.
+Why: informed 2-3 wrappers (cost ~$0.01/seed) replaces blind enumeration.
+Empirical estimate (master plan §4.5): 40-75% BRAIN sim cost reduction
+plus higher PASS rate.
 
 Architecture
-- Pure-function module-level helpers + `async llm_mutate_alpha(seed, ...)`
-  primary API. Mirrors `r5_judge.py` / `factor_wrapping.py` pattern.
+- Pure-function module-level helpers + ``async llm_mutate_alpha(seed, ...)``
+  primary API. Mirrors r5_judge.py pattern.
 - Strict-JSON output schema parsed via shared parser
 - Soft-fail: on LLM exception / parse error / 0 valid variants returned,
-  callers should fall back to `expand_t2_strategy`
+  callers fall back to legacy enumeration
 - Cost: haiku-4-5 default, ~$0.01/call/seed at low effort
 
-Caller is `backend/agents/graph/nodes/tier_seed.py:node_tier_seed_load`
-T2 branch — gated by `settings.ENABLE_LLM_MUTATE_ALPHA`.
+Gated by ``settings.ENABLE_LLM_MUTATE_ALPHA``.
 """
 from __future__ import annotations
 
@@ -205,7 +200,7 @@ async def llm_mutate_alpha(
     """Generate up to top_k wrapper variants for the seed via LLM.
 
     Soft-fails to empty list on any error — caller MUST fall back to
-    legacy `expand_t2_strategy` to ensure round produces variants.
+    legacy enumeration to ensure round produces variants.
 
     Returns: list of dicts {expression, wrapper_kind, rationale}. Each
     expression has <SEED> already substituted with the seed_expression.
