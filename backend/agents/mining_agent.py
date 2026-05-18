@@ -1070,6 +1070,17 @@ class MiningAgent:
                 run_id=run_id,
             )
             
+            # 2026-05-19: rewrite output_data to a FLAT schema the frontend
+            # ROUND_SUMMARY card actually reads from (the old shape nested
+            # everything under `round_metrics` + omitted next_strategy
+            # fields entirely → the card displayed mostly N/A). Backwards
+            # compat: keep `round_metrics` and `next_action` / `next_reasoning`
+            # alongside the new top-level keys so any older reader survives.
+            pass_count = round_result.passed_count
+            alpha_count = round_result.total_generated or round_result.total_simulated
+            avg_turnover = getattr(round_result, "avg_turnover", None)
+            avg_fitness = getattr(round_result, "avg_fitness", None)
+            problematic_fields = list(getattr(round_result, "problematic_fields", []) or [])
             record = trace_service.create_record(
                 step_type="ROUND_SUMMARY",
                 status="SUCCESS",
@@ -1081,16 +1092,52 @@ class MiningAgent:
                         "temperature": strategy.temperature,
                         "exploration": strategy.exploration_weight,
                         "focus_hypos": len(strategy.focus_hypotheses),
-                        "avoid_patterns": len(strategy.avoid_patterns)
-                    }
+                        "avoid_patterns": len(strategy.avoid_patterns),
+                    },
                 },
                 output_data={
+                    # Top-level performance keys (flat, as frontend expects)
+                    "mining_success": pass_count > 0,
+                    "success_rate": round_result.success_rate,
+                    "simulated_alphas": round_result.total_simulated,
+                    "succeeded_alphas": pass_count,
+                    "alphas_count": alpha_count,
+                    "best_sharpe": round_result.best_sharpe,
+                    "avg_sharpe": round_result.avg_sharpe,
+                    "best_fitness": round_result.best_fitness,
+                    "avg_fitness": avg_fitness,
+                    "avg_turnover": avg_turnover,
+                    # No avg_returns source — leave omitted (frontend → N/A).
+                    "error_breakdown": {
+                        "syntax_errors": round_result.syntax_errors,
+                        "simulation_errors": round_result.simulation_errors,
+                        "quality_failures": round_result.quality_failures,
+                    },
+                    "problematic_fields": problematic_fields[:5],
                     "cumulative_success": cumulative_success,
+                    # Next-round strategy (computed from this round via
+                    # _evolve_strategy before this writer is called) —
+                    # frontend reads `next_strategy.<field>`.
+                    "next_strategy": {
+                        "mode": strategy.mode.value,
+                        "temperature": strategy.temperature,
+                        "exploration_weight": strategy.exploration_weight,
+                        "action": strategy.action_summary,
+                        "reasoning": strategy.reasoning,
+                        "focus_hypotheses": list(strategy.focus_hypotheses),
+                        "amplify_patterns": list(strategy.amplify_patterns),
+                        "avoid_patterns": list(strategy.avoid_patterns),
+                        "avoid_fields": list(strategy.avoid_fields),
+                        # `optimization_suggestions` not produced by current
+                        # EvolutionStrategy — omitted (frontend tolerates).
+                    },
+                    # Back-compat for any code path still reading the old
+                    # nested shape:
                     "round_metrics": round_result.to_dict(),
                     "next_action": strategy.action_summary,
                     "next_reasoning": strategy.reasoning,
-                    "optimization_candidates": len(round_result.optimization_candidates)
-                }
+                    "optimization_candidates": len(round_result.optimization_candidates),
+                },
             )
             
             await trace_service.persist_record(record)

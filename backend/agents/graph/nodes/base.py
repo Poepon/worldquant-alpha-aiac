@@ -132,7 +132,7 @@ async def record_trace(
     if trace_service:
         try:
             step_order = state.step_order + 1
-            
+
             record = TraceStepRecord(
                 step_type=step_type,
                 step_order=step_order,
@@ -143,7 +143,14 @@ async def record_trace(
                 error_message=error_message
             )
             await trace_service.persist_record(record)
+            # In-place bump so a SECOND record_trace call inside the same
+            # node body (e.g. node_save_results emits HYPOTHESIS_FEEDBACK
+            # then SAVE_RESULTS) sees the updated counter — without this,
+            # both reads see the entry-state value and collide on the
+            # same step_order. The LangGraph returned-dict still carries
+            # the final step_order for cross-node propagation.
+            state.step_order = step_order
         except Exception as e:
             logger.error(f"Failed to persist trace step: {e}")
-            
+
     return state_update

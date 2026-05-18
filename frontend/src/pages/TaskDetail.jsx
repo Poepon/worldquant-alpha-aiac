@@ -59,6 +59,22 @@ const STEP_TYPE_LABELS = {
   EVALUATE: '评估打分',
   ROUND_SUMMARY: '本轮总结',
   DISTILL_CONTEXT: '上下文蒸馏',
+  HYPOTHESIS_FEEDBACK: '假设反馈',
+  SAVE_RESULTS: '保存结果',
+}
+
+// HYPOTHESIS_FEEDBACK 归因颜色映射
+const ATTRIBUTION_COLORS = {
+  hypothesis: 'purple',
+  implementation: 'volcano',
+  both: 'orange',
+  unknown: 'default',
+}
+const ATTRIBUTION_LABELS = {
+  hypothesis: '假设弱',
+  implementation: '实现弱',
+  both: '双弱',
+  unknown: '未知',
 }
 
 // Alpha 质量状态中文映射
@@ -683,6 +699,49 @@ export default function TaskDetail() {
                                  </div>
                                )}
                                
+                               {/* VALIDATE: syntax/semantic check counts + warnings + failure details */}
+                               {step.step_type === 'VALIDATE' && step.output_data && (
+                                 <div style={{ marginTop: 8 }}>
+                                   <Space wrap size="small">
+                                     <Tag color={step.output_data.valid_count > 0 ? 'green' : 'default'}>
+                                       ✓ 通过: {step.output_data.valid_count ?? 0}
+                                     </Tag>
+                                     {step.output_data.invalid_count > 0 && (
+                                       <Tag color="red">✗ 失败: {step.output_data.invalid_count}</Tag>
+                                     )}
+                                     {step.output_data.duplicate_count > 0 && (
+                                       <Tag color="gold">重复: {step.output_data.duplicate_count}</Tag>
+                                     )}
+                                     {step.output_data.static_block_count > 0 && (
+                                       <Tag color="volcano">硬阻断: {step.output_data.static_block_count}</Tag>
+                                     )}
+                                     {step.output_data.static_warn_count > 0 && (
+                                       <Tag color="orange">软警告: {step.output_data.static_warn_count}</Tag>
+                                     )}
+                                   </Space>
+                                   {step.output_data.type_warnings?.length > 0 && (
+                                     <div style={{ marginTop: 6 }}>
+                                       <Text type="secondary" style={{ fontSize: 11 }}>风险提示:</Text>
+                                       <ul style={{ paddingLeft: 20, margin: '2px 0 0', fontSize: 11, color: '#faad14' }}>
+                                         {step.output_data.type_warnings.map((w, i) => (
+                                           <li key={i}>{w}</li>
+                                         ))}
+                                       </ul>
+                                     </div>
+                                   )}
+                                   {step.output_data.failures?.length > 0 && (
+                                     <div style={{ marginTop: 6 }}>
+                                       <Text type="secondary" style={{ fontSize: 11 }}>失败详情:</Text>
+                                       <ul style={{ paddingLeft: 20, margin: '2px 0 0', fontSize: 11, color: '#ff7875' }}>
+                                         {step.output_data.failures.map((f, i) => (
+                                           <li key={i}>{typeof f === 'string' ? f : (f.reason || f.error || JSON.stringify(f))}</li>
+                                         ))}
+                                       </ul>
+                                     </div>
+                                   )}
+                                 </div>
+                               )}
+
                                {/* SIMULATE: Show Results with Metrics */}
                                {step.step_type === 'SIMULATE' && step.output_data?.results && (
                                  <div style={{ marginTop: 8 }}>
@@ -736,6 +795,111 @@ export default function TaskDetail() {
                                        )}
                                      </div>
                                    ))}
+                                 </div>
+                               )}
+
+                               {/* HYPOTHESIS_FEEDBACK: attribution verdict + LLM reasoning + lifecycle counts */}
+                               {step.step_type === 'HYPOTHESIS_FEEDBACK' && step.output_data && (
+                                 <div style={{ marginTop: 8 }}>
+                                   {(() => {
+                                     const attr = step.output_data.attribution || 'unknown'
+                                     const rs = step.output_data.round_summary || {}
+                                     const activated = step.output_data.activated || []
+                                     const promoted = step.output_data.promoted || []
+                                     const abandoned = step.output_data.abandoned || []
+                                     return (
+                                       <>
+                                         <Space wrap size="small" style={{ marginBottom: 6 }}>
+                                           <Tag color={ATTRIBUTION_COLORS[attr] || 'default'}>
+                                             归因: {ATTRIBUTION_LABELS[attr] || attr}
+                                           </Tag>
+                                           <Tag>round #{rs.round_index ?? '?'}</Tag>
+                                           <Tag color={rs.pass_count > 0 ? 'green' : 'default'}>
+                                             ✅ {rs.pass_count ?? 0} / {rs.alpha_count ?? 0}
+                                           </Tag>
+                                           {rs.best_sharpe !== undefined && (
+                                             <Tag>best sh {rs.best_sharpe?.toFixed?.(2) ?? rs.best_sharpe}</Tag>
+                                           )}
+                                         </Space>
+                                         {rs.attribution_reason && (
+                                           <Paragraph
+                                             ellipsis={{ rows: 3, expandable: true, symbol: '展开' }}
+                                             style={{ fontSize: 12, color: 'rgba(255,255,255,0.78)', fontStyle: 'italic', marginBottom: 6 }}
+                                           >
+                                             💭 {rs.attribution_reason}
+                                           </Paragraph>
+                                         )}
+                                         <Space wrap size={[6, 4]} style={{ fontSize: 11 }}>
+                                           {rs.quality_fail_count > 0 && (
+                                             <Tag color="gold" style={{ fontSize: 10 }}>质量失败: {rs.quality_fail_count}</Tag>
+                                           )}
+                                           {rs.simulate_fail_count > 0 && (
+                                             <Tag color="orange" style={{ fontSize: 10 }}>模拟失败: {rs.simulate_fail_count}</Tag>
+                                           )}
+                                           {rs.syntax_fail_count > 0 && (
+                                             <Tag color="red" style={{ fontSize: 10 }}>语法失败: {rs.syntax_fail_count}</Tag>
+                                           )}
+                                           {rs.flip_alpha_count > 0 && (
+                                             <Tag color="cyan" style={{ fontSize: 10 }}>
+                                               sign-flip: {rs.flip_pass_count}/{rs.flip_alpha_count}
+                                             </Tag>
+                                           )}
+                                           {rs.retryable_count > 0 && (
+                                             <Tag color="blue" style={{ fontSize: 10 }}>可重试: {rs.retryable_count}</Tag>
+                                           )}
+                                         </Space>
+                                         {(activated.length + promoted.length + abandoned.length) > 0 && (
+                                           <div style={{ marginTop: 6, fontSize: 11 }}>
+                                             {activated.length > 0 && (
+                                               <Text type="secondary" style={{ marginRight: 8 }}>
+                                                 激活: {activated.join(', ')}
+                                               </Text>
+                                             )}
+                                             {promoted.length > 0 && (
+                                               <Text style={{ color: '#52c41a', marginRight: 8 }}>
+                                                 ⬆ 升级: {promoted.join(', ')}
+                                               </Text>
+                                             )}
+                                             {abandoned.length > 0 && (
+                                               <Text style={{ color: '#ff4d4f' }}>
+                                                 ⬇ 弃用: {abandoned.join(', ')}
+                                               </Text>
+                                             )}
+                                           </div>
+                                         )}
+                                       </>
+                                     )
+                                   })()}
+                                 </div>
+                               )}
+
+                               {/* SAVE_RESULTS: persisted counts + early-stop notice */}
+                               {step.step_type === 'SAVE_RESULTS' && step.output_data && (
+                                 <div style={{ marginTop: 8 }}>
+                                   <Space wrap size="small">
+                                     <Tag color={step.output_data.saved > 0 ? 'green' : 'default'}>
+                                       💾 入库: {step.output_data.saved ?? 0}
+                                     </Tag>
+                                     <Tag color={step.output_data.failed > 0 ? 'orange' : 'default'}>
+                                       失败: {step.output_data.failed ?? 0}
+                                     </Tag>
+                                     {step.output_data.round_summary?.best_sharpe !== undefined && (
+                                       <Tag>best sh {step.output_data.round_summary.best_sharpe?.toFixed?.(2) ?? step.output_data.round_summary.best_sharpe}</Tag>
+                                     )}
+                                     {step.output_data.round_summary?.pass_rate !== undefined && (
+                                       <Tag color={step.output_data.round_summary.pass_rate > 0 ? 'green' : 'default'}>
+                                         pass率 {(step.output_data.round_summary.pass_rate * 100).toFixed(0)}%
+                                       </Tag>
+                                     )}
+                                     {step.output_data.early_stopped && (
+                                       <Tag color="warning">⚠ 提前停止</Tag>
+                                     )}
+                                   </Space>
+                                   {step.output_data.early_stop_reason && (
+                                     <Paragraph style={{ fontSize: 11, color: '#faad14', marginTop: 4, marginBottom: 0 }}>
+                                       停止原因: {step.output_data.early_stop_reason}
+                                     </Paragraph>
+                                   )}
                                  </div>
                                )}
 
