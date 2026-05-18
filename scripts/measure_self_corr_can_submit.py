@@ -42,7 +42,7 @@ async def main() -> int:
     async with AsyncSessionLocal() as db:
         rows = (await db.execute(text("""
             SELECT id, alpha_id, expression, is_sharpe, is_fitness, is_turnover,
-                   factor_tier, quality_status
+                   quality_status
             FROM alphas
             WHERE can_submit = true AND date_submitted IS NULL
               AND region = :region AND alpha_id IS NOT NULL
@@ -121,7 +121,7 @@ async def main() -> int:
 
     print(f"=== SAFE (self_corr < {DEMOTE_THRESHOLD}): {len(safe)} ===")
     for r, mx, cp in safe:
-        print(f"  #{r.id} {r.alpha_id} T{r.factor_tier} sh={r.is_sharpe} fit={r.is_fitness} "
+        print(f"  #{r.id} {r.alpha_id} sh={r.is_sharpe} fit={r.is_fitness} "
               f"to={r.is_turnover}  self_corr={mx:.4f} (vs {cp})")
         print(f"      {(r.expression or '')[:100]}")
     print(f"\n=== TOO HIGH (>= {DEMOTE_THRESHOLD}, demoted): {len(high)} ===")

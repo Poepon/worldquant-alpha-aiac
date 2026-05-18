@@ -220,7 +220,7 @@ COHORTS = {
 async def fetch_cohort(db, where_clause: str) -> list[dict]:
     sql = text(f"""
         SELECT id, alpha_id, expression, is_sharpe, is_fitness, is_turnover,
-               can_submit, date_submitted, factor_tier, quality_status
+               can_submit, date_submitted, quality_status
         FROM alphas {where_clause}
     """)
     result = await db.execute(sql)

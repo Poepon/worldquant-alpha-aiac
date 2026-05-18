@@ -36,7 +36,7 @@ async def summary(db, cold_days: int) -> dict:
     sql = text(f"""
         SELECT
             entry_type,
-            factor_tier,
+            COALESCE(meta_data->>'hypothesis_pillar', '—') AS pillar,
             COUNT(*) AS total,
             COUNT(*) FILTER (WHERE usage_count = 0) AS never_used,
             COUNT(*) FILTER (
@@ -46,8 +46,8 @@ async def summary(db, cold_days: int) -> dict:
             MAX(usage_count) AS max_usage
         FROM knowledge_entries
         WHERE is_active = true
-        GROUP BY entry_type, factor_tier
-        ORDER BY entry_type, factor_tier NULLS LAST
+        GROUP BY entry_type, pillar
+        ORDER BY entry_type, pillar
     """)
     rows = (await db.execute(sql)).all()
     return rows
@@ -55,7 +55,9 @@ async def summary(db, cold_days: int) -> dict:
 
 async def top_patterns(db, top_n: int):
     sql = text(f"""
-        SELECT id, entry_type, factor_tier, usage_count, updated_at,
+        SELECT id, entry_type,
+               COALESCE(meta_data->>'hypothesis_pillar', '—') AS pillar,
+               usage_count, updated_at,
                LEFT(COALESCE(pattern, description, ''), 80) AS sample
         FROM knowledge_entries
         WHERE is_active = true
@@ -68,7 +70,9 @@ async def top_patterns(db, top_n: int):
 async def bottom_patterns(db, bottom_n: int, cold_days: int):
     """Patterns most likely pruning candidates: 0 usage AND old."""
     sql = text(f"""
-        SELECT id, entry_type, factor_tier, usage_count, updated_at,
+        SELECT id, entry_type,
+               COALESCE(meta_data->>'hypothesis_pillar', '—') AS pillar,
+               usage_count, updated_at,
                LEFT(COALESCE(pattern, description, ''), 80) AS sample
         FROM knowledge_entries
         WHERE is_active = true
@@ -81,28 +85,27 @@ async def bottom_patterns(db, bottom_n: int, cold_days: int):
 
 
 async def main(top_n: int, bottom_n: int, cold_days: int) -> None:
-    print(f"=== V-24.D KB hit-rate audit (cold threshold: {cold_days}d) ===\n")
+    print(f"=== KB hit-rate audit (cold threshold: {cold_days}d) ===\n")
     async with AsyncSessionLocal() as db:
         sm = await summary(db, cold_days)
         tops = await top_patterns(db, top_n)
         bots = await bottom_patterns(db, bottom_n, cold_days)
 
     # Summary table
-    print("## Aggregate by (entry_type, factor_tier)")
-    print(f"  {'type':<22s} {'tier':>4s} {'total':>6s} {'never_used':>10s} "
+    print("## Aggregate by (entry_type, hypothesis_pillar)")
+    print(f"  {'type':<22s} {'pillar':<10s} {'total':>6s} {'never_used':>10s} "
           f"{'cold':>5s} {'mean_uc':>8s} {'max_uc':>7s}")
     grand_total = 0
     grand_never = 0
     grand_cold = 0
     for r in sm:
-        tier_s = str(r.factor_tier) if r.factor_tier is not None else "—"
-        print(f"  {r.entry_type:<22s} {tier_s:>4s} {r.total:>6d} "
+        print(f"  {r.entry_type:<22s} {r.pillar:<10s} {r.total:>6d} "
               f"{r.never_used:>10d} {r.cold:>5d} "
               f"{r.mean_usage:>8.2f} {r.max_usage:>7d}")
         grand_total += r.total
         grand_never += r.never_used
         grand_cold += r.cold
-    print(f"  {'TOTAL':<22s}  {'  ':>4s} {grand_total:>6d} "
+    print(f"  {'TOTAL':<22s} {'':<10s} {grand_total:>6d} "
           f"{grand_never:>10d} {grand_cold:>5d}")
     print()
 
@@ -116,11 +119,10 @@ async def main(top_n: int, bottom_n: int, cold_days: int) -> None:
 
     # Top
     print(f"## Top {top_n} by usage_count")
-    print(f"  {'id':>6s} {'type':<22s} {'tier':>4s} {'uc':>5s} {'updated':<20s} sample")
+    print(f"  {'id':>6s} {'type':<22s} {'pillar':<10s} {'uc':>5s} {'updated':<20s} sample")
     for r in tops:
-        tier_s = str(r.factor_tier) if r.factor_tier is not None else "—"
         ts = r.updated_at.strftime("%Y-%m-%d %H:%M") if r.updated_at else "—"
-        print(f"  {r.id:>6d} {r.entry_type:<22s} {tier_s:>4s} {r.usage_count:>5d} "
+        print(f"  {r.id:>6d} {r.entry_type:<22s} {r.pillar:<10s} {r.usage_count:>5d} "
               f"{ts:<20s} {r.sample!s}")
     print()
 
@@ -131,8 +133,7 @@ async def main(top_n: int, bottom_n: int, cold_days: int) -> None:
     else:
         for r in bots:
             ts = r.updated_at.strftime("%Y-%m-%d %H:%M") if r.updated_at else "—"
-            tier_s = str(r.factor_tier) if r.factor_tier is not None else "—"
-            print(f"  {r.id:>6d} {r.entry_type:<22s} {tier_s:>4s} "
+            print(f"  {r.id:>6d} {r.entry_type:<22s} {r.pillar:<10s} "
                   f"{ts:<20s} {r.sample!s}")
     print()
 

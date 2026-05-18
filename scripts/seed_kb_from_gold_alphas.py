@@ -4,11 +4,9 @@ Strict filter: can_submit=true AND sharpe>=1.5 AND fitness>=1.0 — only the
 17 alphas BRAIN itself certifies as submittable get into the seed pool.
 Zero contamination tolerance: anything BRAIN's checks rejected stays out.
 
-Tradeoff: most gold alphas are user-authored complex expressions and
-classify_tier=None. Tier-aware RAG (T1/T2/T3 task RAG_QUERY filtered by
-factor_tier) won't retrieve these; tier-agnostic RAG (default path) will.
-First mining tasks may produce thin few-shot context until natural
-feedback_agent.learn_from_round backfills tier-classified patterns.
+Each seeded SUCCESS_PATTERN entry carries ``meta_data['hypothesis_pillar']``
+inferred from the expression so post tier-removal RAG cascade
+(pillar → region → global) can retrieve them on day 0.
 
 Run after `DELETE FROM knowledge_entries` (or pass --wipe-first).
 

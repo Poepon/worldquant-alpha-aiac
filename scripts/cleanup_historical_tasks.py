@@ -13,7 +13,7 @@ What gets deleted (for tasks NOT in keep set):
 
 What's preserved:
   - All alphas (their task_id / trace_step_id / run_id are nulled out for
-    deleted-task references; factor_tier / metrics / quality_status untouched)
+    deleted-task references; metrics / quality_status untouched)
   - All knowledge_entries
   - All alpha_status_transitions
   - Tasks that produced ≥1 PASS alpha
@@ -50,7 +50,7 @@ async def preview() -> None:
         keep = await collect_keep_set(db)
 
         all_tasks_q = text(
-            "SELECT id, task_name, status, agent_mode, region, created_at "
+            "SELECT id, task_name, status, schedule, region, created_at "
             "FROM mining_tasks ORDER BY id"
         )
         all_tasks = (await db.execute(all_tasks_q)).all()
@@ -62,14 +62,14 @@ async def preview() -> None:
         print("=" * 78)
         print(f"Total tasks: {len(all_tasks)}")
         print(f"Tasks to KEEP: {len(keep_rows)}")
-        for tid, name, status, mode, region, created in keep_rows:
+        for tid, name, status, sched, region, created in keep_rows:
             reason = "RUNNING" if status == "RUNNING" else "produced PASS alpha"
             print(f"  #{tid:<3} {(name or '')[:32]:<32} {status:<14} ({reason})")
 
         print()
         print(f"Tasks to DELETE: {len(del_rows)}")
-        for tid, name, status, mode, region, created in del_rows:
-            print(f"  #{tid:<3} {(name or '')[:32]:<32} {status:<14} {mode}")
+        for tid, name, status, sched, region, created in del_rows:
+            print(f"  #{tid:<3} {(name or '')[:32]:<32} {status:<14} {sched}")
 
         if not del_rows:
             print("  (none)")
@@ -112,7 +112,7 @@ async def apply() -> None:
         step_ids = [row[0] for row in (await db.execute(step_ids_q, {"ids": del_ids})).all()]
 
         # 1. Detach alphas: nullify task_id / run_id / trace_step_id refs.
-        #    alphas table itself is preserved (factor_tier and metrics intact).
+        #    alphas table itself is preserved (metrics intact).
         await db.execute(
             text("UPDATE alphas SET task_id = NULL WHERE task_id = ANY(:ids)"),
             {"ids": del_ids},

@@ -61,7 +61,7 @@ async def main(confirm: bool):
     async with AsyncSessionLocal() as s:
         rows = (await s.execute(text(
             """
-            SELECT id, alpha_id, factor_tier, quality_status, metrics
+            SELECT id, alpha_id, quality_status, metrics
             FROM alphas
             WHERE metrics->>'_optimize_reason' = ANY(:reasons)
               AND (
@@ -84,7 +84,6 @@ async def main(confirm: bool):
             changes.append({
                 "id": row["id"],
                 "alpha_id": row["alpha_id"],
-                "tier": row["factor_tier"],
                 "status": row["quality_status"],
                 "old_opt": old_opt,
                 "old_reason": old_reason,
@@ -94,7 +93,7 @@ async def main(confirm: bool):
 
         for c in changes:
             mark = " " if c["old_reason"] == c["new_reason"] else "*"
-            print(f"{mark} #{c['id']:<5} {c['alpha_id']:<10} tier={c['tier']} {c['status']:<22}")
+            print(f"{mark} #{c['id']:<5} {c['alpha_id']:<10} {c['status']:<22}")
             print(f"     old: opt={c['old_opt']!s:<5} reason={c['old_reason']!r}")
             print(f"     new: opt={c['new_opt']!s:<5} reason={c['new_reason']!r}")
 

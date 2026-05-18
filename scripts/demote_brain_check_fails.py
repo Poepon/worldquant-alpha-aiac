@@ -36,7 +36,6 @@ def find_affected_alphas(conn) -> list:
                 a.id,
                 a.alpha_id,
                 a.task_id,
-                a.factor_tier,
                 a.quality_status,
                 array_agg(c->>'name') FILTER (
                     WHERE c->>'result' = 'FAIL'
@@ -131,10 +130,9 @@ def main() -> int:
     print("First 15 affected:")
     for r in rows[:15]:
         aid = r["alpha_id"] or "(none)"
-        tier = r["factor_tier"] if r["factor_tier"] is not None else "?"
         task = r["task_id"] if r["task_id"] is not None else "?"
         print(f"  id={r['id']:>5} alpha_id={aid:<10} task={task} "
-              f"tier=T{tier} status={r['quality_status']:<20} fails={r['hard_fails']}")
+              f"status={r['quality_status']:<20} fails={r['hard_fails']}")
     if len(rows) > 15:
         print(f"  ... and {len(rows) - 15} more")
     print()

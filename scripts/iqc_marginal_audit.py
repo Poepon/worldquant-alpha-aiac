@@ -72,7 +72,6 @@ async def main(competition: str | None, limit: int | None) -> None:
                 entry = {
                     "alpha_pk": alpha.id,
                     "brain_id": alpha.alpha_id,
-                    "factor_tier": alpha.factor_tier,
                     "expression": (alpha.expression or "")[:200],
                     "is_sharpe": float(alpha.is_sharpe or 0),
                     "is_fitness": float(alpha.is_fitness or 0),
@@ -87,7 +86,7 @@ async def main(competition: str | None, limit: int | None) -> None:
                 ds = r["deltas"].get("score")
                 ds_str = f"{ds:+}" if isinstance(ds, (int, float)) else "—"
                 print(
-                    f"  {tag} {alpha.alpha_id} T{alpha.factor_tier} IS_sh={alpha.is_sharpe:.2f} "
+                    f"  {tag} {alpha.alpha_id} IS_sh={alpha.is_sharpe:.2f} "
                     f"merged_sh={after.get('sharpe'):.2f} Δscore={ds_str}"
                 )
 
@@ -116,8 +115,8 @@ async def main(competition: str | None, limit: int | None) -> None:
         "",
         "Ranked by `Δscore` (descending — positive = adds value to team).",
         "",
-        "| # | brain_id | tier | IS sharpe | merged sharpe | Δsharpe | Δfitness | Δscore | Δpnl |",
-        "|---|---|---|---|---|---|---|---|---|",
+        "| # | brain_id | IS sharpe | merged sharpe | Δsharpe | Δfitness | Δscore | Δpnl |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for i, r in enumerate(results, 1):
         d = r["deltas"]
@@ -128,7 +127,7 @@ async def main(competition: str | None, limit: int | None) -> None:
                 return f"{v:+,.0f}"
             return f"{v:+.{prec}f}"
         lines.append(
-            f"| {i} | `{r['brain_id']}` | T{r['factor_tier']} | "
+            f"| {i} | `{r['brain_id']}` | "
             f"{r['is_sharpe']:.2f} | "
             f"{r['merged_sharpe'] if isinstance(r['merged_sharpe'], (int, float)) else '—'} | "
             f"{fmt(d.get('sharpe'))} | {fmt(d.get('fitness'))} | "

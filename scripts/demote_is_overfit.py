@@ -57,7 +57,6 @@ def find_affected_alphas(conn, task_min=None, task_max=None) -> list:
             a.id,
             a.alpha_id,
             a.task_id,
-            a.factor_tier,
             a.quality_status,
             (a.metrics->>'sharpe')::float AS is_sh,
             COALESCE(
@@ -135,20 +134,10 @@ def main() -> int:
     print("=" * 70)
     print(f"V-12 IS-overfit backfill — {len(rows)} alphas to demote")
     print("=" * 70)
-    by_tier = {}
     by_status = {}
-    by_tier_status = {}
     for r in rows:
-        t = r["factor_tier"]
         s = r["quality_status"]
-        by_tier[t] = by_tier.get(t, 0) + 1
         by_status[s] = by_status.get(s, 0) + 1
-        by_tier_status[(t, s)] = by_tier_status.get((t, s), 0) + 1
-
-    print("By tier:")
-    for t, n in sorted(by_tier.items(), key=lambda x: (x[0] is None, x[0])):
-        tlabel = f"T{t}" if t else "(none)"
-        print(f"  {tlabel:<10} {n}")
     print("By status:")
     for s, n in sorted(by_status.items()):
         print(f"  {s:<20} → OPTIMIZE: {n}")
@@ -157,9 +146,8 @@ def main() -> int:
     print("First 10 affected:")
     for r in rows[:10]:
         aid = r["alpha_id"] or "(none)"
-        tier = r["factor_tier"] if r["factor_tier"] is not None else "?"
         task = r["task_id"] if r["task_id"] is not None else "?"
-        print(f"  id={r['id']:>5} alpha_id={aid:<10} task={task} tier=T{tier}  "
+        print(f"  id={r['id']:>5} alpha_id={aid:<10} task={task}  "
               f"status={r['quality_status']:<18}  {r['overfit_reason']}")
     if len(rows) > 10:
         print(f"  ... and {len(rows) - 10} more")

@@ -116,7 +116,7 @@ async def test_typed_path_bypasses_langgraph_so_retry_mutate_never_fire(monkeypa
         out = await mining_tasks._run_one_round_inline(
             db=None, task=_mk_task(hcv=3), run=None, brain=None,
             mining_agent=fake_mining_agent, operators=[],
-            dataset_id="pv1", tier=1,
+            dataset_id="pv1",
         )
     assert out["all_alphas"][0]["alpha_id"] == "typed-1"
     fake_mining_agent.run_evolution_loop.assert_not_awaited()

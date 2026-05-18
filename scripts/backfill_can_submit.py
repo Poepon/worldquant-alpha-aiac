@@ -3,9 +3,8 @@ and call BRAIN GET /alphas/{id} to compute can_submit + cached failed/pending
 checks. Sequential (1 req/sec) to spare BRAIN quota. Idempotent.
 
 Run:
-  python scripts/backfill_can_submit.py                  # dry-run preview
-  python scripts/backfill_can_submit.py --confirm        # write
-  python scripts/backfill_can_submit.py --tier 3 --confirm    # only T3
+  python scripts/backfill_can_submit.py                       # dry-run preview
+  python scripts/backfill_can_submit.py --confirm             # write
   python scripts/backfill_can_submit.py --status PASS --confirm  # only PASS
 """
 from __future__ import annotations
@@ -23,19 +22,17 @@ from backend.models import Alpha
 from backend.services.alpha_service import AlphaService
 
 
-async def main(confirm: bool, tier: int | None, statuses: List[str]) -> None:
+async def main(confirm: bool, statuses: List[str]) -> None:
     async with AsyncSessionLocal() as db:
         q = (
-            select(Alpha.id, Alpha.alpha_id, Alpha.factor_tier, Alpha.quality_status, Alpha.can_submit)
+            select(Alpha.id, Alpha.alpha_id, Alpha.quality_status, Alpha.can_submit)
             .where(Alpha.quality_status.in_(statuses))
             .where(Alpha.alpha_id.isnot(None))
+            .order_by(Alpha.id.desc())
         )
-        if tier is not None:
-            q = q.where(Alpha.factor_tier == tier)
-        q = q.order_by(Alpha.id.desc())
         rows = (await db.execute(q)).all()
 
-        print(f"Scope: status={statuses} tier={tier or 'any'} → {len(rows)} candidate alpha(s).")
+        print(f"Scope: status={statuses} → {len(rows)} candidate alpha(s).")
         already = sum(1 for r in rows if r.can_submit is not None)
         print(f"  already-checked: {already} (will re-check unless --skip-existing in future).")
 
@@ -44,7 +41,7 @@ async def main(confirm: bool, tier: int | None, statuses: List[str]) -> None:
         if not confirm:
             print("\nDry-run only. Pass --confirm to actually call BRAIN and write.")
             for r in rows[:10]:
-                print(f"  pk={r.id} brain={r.alpha_id} tier={r.factor_tier} status={r.quality_status} current_can_submit={r.can_submit}")
+                print(f"  pk={r.id} brain={r.alpha_id} status={r.quality_status} current_can_submit={r.can_submit}")
             if len(rows) > 10:
                 print(f"  ... and {len(rows) - 10} more.")
             return
@@ -84,8 +81,7 @@ async def main(confirm: bool, tier: int | None, statuses: List[str]) -> None:
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--confirm", action="store_true", help="actually call BRAIN and write")
-    ap.add_argument("--tier", type=int, default=None, choices=[1, 2, 3])
     ap.add_argument("--status", nargs="+", default=["PASS", "PASS_PROVISIONAL"],
                     help="quality_status values to include (default: PASS + PASS_PROVISIONAL)")
     args = ap.parse_args()
-    asyncio.run(main(args.confirm, args.tier, args.status))
+    asyncio.run(main(args.confirm, args.status))

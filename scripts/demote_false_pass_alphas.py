@@ -1,20 +1,14 @@
 """Find PASS alphas whose BRAIN /check fields contradict their PASS status.
 
-Why this exists: backfill_factor_tier_dryrun.py's _recompute_quality_status
-only inspects sharpe / fitness / turnover / sub_universe — it never looks
-at metrics.checks for CONCENTRATED_WEIGHT or LOW_SHARPE etc. Some alphas
-were marked PASS during early eval iterations BEFORE
-node_evaluate added the concentrated_weight rule (Post-Step1, 2026-04-30),
-so the backfill couldn't catch them.
+This script applies the post tier-system removal (2026-05-18) flat hard-gate:
+every BRAIN check applies uniformly to every PASS alpha. The pre-removal
+per-tier skip logic (T1 ignored all BRAIN-submission checks, T2 ignored
+SELF_CORRELATION) is gone — the flat ``EVAL_*`` band in config.py now
+applies the same thresholds everywhere.
 
-This script applies the FULL hard-gate (mirrors evaluation.node_evaluate's
-T2/T3 logic where check_concentrated=True). For each alpha currently PASS:
-- if metrics.checks contains CONCENTRATED_WEIGHT=FAIL → demote to PROVISIONAL
-- if metrics.checks contains LOW_SHARPE=FAIL → demote to PROVISIONAL
-- if metrics.checks contains LOW_SUB_UNIVERSE_SHARPE=FAIL → demote to PROVISIONAL
-
-Tier 1 alphas SKIP concentrated and low_sharpe checks per design (raw signal
-seeds, not submission-ready). Only T2/T3/None are subject to full gate.
+For each alpha currently PASS, if ``metrics.checks`` contains any FAIL
+entry (excluding the advisory PROD_CORRELATION), the alpha is demoted to
+PASS_PROVISIONAL with an audit-log entry.
 
 Modes:
   --preview   list affected alphas without writing
@@ -45,65 +39,37 @@ def _failed_checks(metrics: dict) -> List[Tuple[str, Optional[float], Optional[f
     return out
 
 
-def _gate_applies_check(check_name: str, factor_tier: Optional[int]) -> bool:
-    """Per-tier gate logic mirroring evaluation.node_evaluate's check_*
-    settings AND the project-level tier thresholds (which deliberately
-    diverge from BRAIN's submission-level thresholds).
-
-    T1 PASS bar (project-level): sharpe>=0.8, fitness>=0.5, turnover<=0.70,
-    sub_universe>=0.1. Concentrated_weight and self_corr explicitly skipped.
-    BRAIN's metrics.checks reflects SUBMISSION-level thresholds (sharpe>=1.25
-    etc.) which are stricter — those FAILs DON'T mean a T1 alpha isn't a
-    valid T1 PASS, just that it can't be submitted as-is. T1 is a seed
-    factory, not a submission candidate, so we skip the entire BRAIN check
-    panel for T1.
-
-    T2 still skips self_corr (same-seed wrapper variants are inherently
-    correlated). Other BRAIN checks (concentrated, low_sharpe at 1.25 bar)
-    apply to T2 because T2 is supposed to be more polished than T1.
-
-    T3 mirrors evaluation.node_evaluate fully — every BRAIN check applies.
-    """
-    if factor_tier == 1:
-        # Skip ALL BRAIN-submission checks for T1 — project thresholds rule.
-        return False
-    if factor_tier == 2 and check_name == "SELF_CORRELATION":
-        return False
-    return True
+# Post tier-system removal: PROD_CORRELATION is the only advisory check we
+# exclude — it's evaluated separately via correlation_service, not as a hard
+# gate. Every other BRAIN check counts.
+_ADVISORY_CHECKS = {"PROD_CORRELATION"}
 
 
 async def survey() -> List[Dict]:
-    """Return the demotion candidates. Each: {id, alpha_id, factor_tier,
-    quality_status, fails: [(name, val, lim), ...]}."""
+    """Return the demotion candidates."""
     from backend.database import AsyncSessionLocal
     from backend.models import Alpha
 
     async with AsyncSessionLocal() as db:
         q = (
-            select(Alpha.id, Alpha.alpha_id, Alpha.factor_tier,
-                   Alpha.quality_status, Alpha.is_sharpe, Alpha.metrics)
+            select(Alpha.id, Alpha.alpha_id, Alpha.quality_status,
+                   Alpha.is_sharpe, Alpha.metrics)
             .where(Alpha.quality_status == "PASS")
         )
         rows = (await db.execute(q)).all()
 
     candidates: List[Dict] = []
     for row in rows:
-        alpha_id_db, brain_id, tier, status, sharpe, metrics = row
+        alpha_id_db, brain_id, status, sharpe, metrics = row
         all_fails = _failed_checks(metrics or {})
-        # Filter to checks that ACTUALLY apply at this tier
-        tier_fails = [
-            (n, v, l) for n, v, l in all_fails
-            if _gate_applies_check(n, tier)
-            and n not in ("PROD_CORRELATION",)  # ignore production-corr (advisory)
-        ]
-        if tier_fails:
+        hard_fails = [(n, v, l) for n, v, l in all_fails if n not in _ADVISORY_CHECKS]
+        if hard_fails:
             candidates.append({
                 "id": alpha_id_db,
                 "alpha_id": brain_id,
-                "factor_tier": tier,
                 "current_status": status,
                 "sharpe": sharpe,
-                "fails": tier_fails,
+                "fails": hard_fails,
             })
     return candidates
 
@@ -114,18 +80,17 @@ async def preview() -> None:
     print("False-PASS demotion preview")
     print("=" * 84)
     if not cands:
-        print("No demotion candidates — every PASS alpha clears its tier-applicable checks.")
+        print("No demotion candidates — every PASS alpha clears its BRAIN checks.")
         return
 
-    print(f"Found {len(cands)} PASS alphas with applicable BRAIN-check failures:\n")
+    print(f"Found {len(cands)} PASS alphas with hard BRAIN-check failures:\n")
     for c in cands:
-        tier_str = f"T{c['factor_tier']}" if c["factor_tier"] else "NULL"
         fail_strs = []
         for name, val, lim in c["fails"]:
             v = f"{val:.3f}" if isinstance(val, (int, float)) else str(val)
             l = f"{lim:.3f}" if isinstance(lim, (int, float)) else str(lim)
             fail_strs.append(f"{name}=FAIL(val={v}, lim={l})")
-        print(f"  alpha #{c['id']:<5} brain={c['alpha_id']:<10} tier={tier_str:<5} sharpe={c['sharpe']:.2f}")
+        print(f"  alpha #{c['id']:<5} brain={c['alpha_id']:<10} sharpe={c['sharpe']:.2f}")
         print(f"    fails: {' | '.join(fail_strs)}")
 
 
@@ -149,7 +114,7 @@ async def apply() -> None:
                 changed = await svc.apply_quality_status_change(
                     alpha_id=c["id"],
                     new_status="PASS_PROVISIONAL",
-                    reason=f"false_pass_audit: applicable BRAIN checks failed [{fail_summary}]",
+                    reason=f"false_pass_audit: BRAIN checks failed [{fail_summary}]",
                     source="manual_api",
                 )
                 if changed:
