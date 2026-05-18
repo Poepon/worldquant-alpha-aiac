@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -94,6 +94,20 @@ export default function TaskManagement() {
     queryFn: () => api.getTasks({ limit: 50 }),
     refetchInterval: 10000,
   })
+
+  // 搜索过滤 — useMemo 避免每次 render 重算（任务规模上千时显著）
+  const filteredTasks = useMemo(() => {
+    const all = tasks || []
+    if (!searchText) return all
+    const q = searchText.toLowerCase()
+    return all.filter((t) =>
+      (t.task_name || '').toLowerCase().includes(q) ||
+      (t.region || '').toLowerCase().includes(q) ||
+      (t.universe || '').toLowerCase().includes(q) ||
+      (t.schedule || '').toLowerCase().includes(q) ||
+      (t.status || '').toLowerCase().includes(q),
+    )
+  }, [tasks, searchText])
 
   // Tier deep-link handler removed post tier-system removal (2026-05-18).
   // Stale ?mode=AUTONOMOUS_TIER... bookmarks are silently ignored — backend
@@ -331,17 +345,7 @@ export default function TaskManagement() {
         />
         <Table
           columns={columns}
-          dataSource={(tasks || []).filter((t) => {
-            if (!searchText) return true
-            const q = searchText.toLowerCase()
-            return (
-              (t.task_name || '').toLowerCase().includes(q) ||
-              (t.region || '').toLowerCase().includes(q) ||
-              (t.universe || '').toLowerCase().includes(q) ||
-              (t.schedule || '').toLowerCase().includes(q) ||
-              (t.status || '').toLowerCase().includes(q)
-            )
-          })}
+          dataSource={filteredTasks}
           rowKey="id"
           loading={isLoading}
           pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}

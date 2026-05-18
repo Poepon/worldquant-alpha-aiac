@@ -99,11 +99,11 @@ export default function SimulationCacheMonitor() {
       <Row gutter={[16, 16]}>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="同一条缓存被命中至少一次的占比（健康部署 ≥ 30%，越高说明缓存越值得保留）">
+            <Tooltip title="『至少被复用过一次』的缓存条目占比（健康部署 ≥ 30%）。注意这不是传统的命中/未命中比 — 复用 1000 次和复用 1 次的条目都只算一次。要看真实复用深度请看右侧『每条缓存平均命中数』">
               <Statistic
                 title={
                   <Space>
-                    缓存命中率（近似）
+                    缓存复用率
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }

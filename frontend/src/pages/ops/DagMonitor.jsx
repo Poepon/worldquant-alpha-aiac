@@ -227,9 +227,7 @@ export default function DagMonitor() {
               title: '运行批次',
               dataIndex: 'run_id',
               width: 100,
-              render: (id) => (
-                <a onClick={() => navigate(`/tasks?run=${id}`)}>#{id}</a>
-              ),
+              render: (id) => <Text code style={{ fontSize: 11 }}>#{id}</Text>,
             },
             {
               title: '所属任务',

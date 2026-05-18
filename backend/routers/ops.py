@@ -1972,17 +1972,33 @@ async def r9_cache_stats(
     _token: str = Depends(_require_ops_token),
     db: AsyncSession = Depends(get_db),
 ) -> R9CacheStatsOut:
-    """R9 simulation cache telemetry — hit-rate + savings approximation.
+    """R9 simulation cache telemetry — reuse-rate + savings approximation.
 
     No dedicated hit/miss counter exists in R9 — we infer from the
-    ``access_count`` distribution on ``simulation_cache``:
+    ``access_count`` distribution on ``simulation_cache``. Per the model
+    (``backend/models/simulation_cache.py``), ``access_count`` defaults to
+    1 on insert (the initial write) and is incremented by 1 on every
+    subsequent hit:
 
     - ``access_count = 1`` rows: a write that has never been re-hit
     - ``access_count > 1`` rows: re-hit at least once
     - **saved_brain_calls = SUM(access_count) - COUNT(*)** (each +1 over
       the initial write is a hit that bypassed BRAIN)
 
-    Healthy R9 deploy: ``hit_rate_approx >= 0.3`` (expressions re-simulated
+    .. warning::
+
+       ``hit_rate_approx`` is NOT a traditional hit/total ratio. It is the
+       *fraction of cache entries reused at least once*
+       (``COUNT(access_count > 1) / COUNT(*)``). An entry hit 1000 times
+       and one hit 1 time both count equally toward the numerator. For
+       true reuse depth use ``avg_accesses_per_entry``. The field name is
+       kept for API stability; the frontend label is "缓存复用率".
+
+       If a future cache refactor changes ``access_count`` init/increment
+       semantics, ``saved_brain_calls`` and ``hit_rate_approx`` will both
+       silently drift — re-derive both formulas.
+
+    Healthy R9 deploy: ``hit_rate_approx >= 0.3`` (≥30% of entries reused
     within TTL window) and ``avg_accesses_per_entry >= 1.5`` (cache reuse
     across tasks/rounds). ``expired_rows > 0`` is normal — entries past
     ``SIMULATION_CACHE_TTL_DAYS`` are filtered out by ``get_cached`` but
