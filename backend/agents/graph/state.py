@@ -270,6 +270,21 @@ class MiningState(BaseModel):
     effective_sharpe_submit_min: Optional[float] = None
     effective_region_universes_at_start: Optional[Dict[str, str]] = None
 
+    # ===== Phase 3 R1b CoSTEER loop counters (2026-05-18) =====
+    # Plan: ~/.claude/plans/phase3-r1b-costeer-loop-2026-05-18.md v1.3 §5.1
+    # All Optional / default-safe per phase15-C serialization-compat (mirror
+    # brain_consultant_mode_at_start pattern above).
+    # Reset boundary: per LangGraph invocation (one round of mining_tasks
+    # _run_one_round_inline). Across rounds these reset to defaults.
+    # Cross-round persistence handled via MiningTask.config in persistence
+    # node when budget actually fired (R1b.1c wiring).
+    r1b_retries_attempted_this_alpha: int = 0
+    r1b_mutations_attempted_this_cycle: int = 0   # R1b.2 sub-phase uses this
+    r1b_token_cost_this_alpha: float = 0.0
+    r1b_loop_attribution_evidence: List[Dict] = Field(default_factory=list)
+    r1b_mutated_hypothesis_ids: List[int] = Field(default_factory=list)
+    r1b_pending_new_hypothesis: Optional[Dict] = None
+
     # -------------------------------------------------------------------------
     # Control Flags
     # -------------------------------------------------------------------------
