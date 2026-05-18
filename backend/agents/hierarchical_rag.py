@@ -917,6 +917,7 @@ async def query_hierarchical(
     max_pitfalls: int = 10,
     layer_budgets: Optional[Dict[str, int]] = None,
     current_hypothesis: Optional[str] = None,
+    task_id: Optional[int] = None,
 ) -> RAGResult:
     """Phase 3 R8 PR3 orchestrator — sequential fall-through L0 → L1 → L2 → L3.
 
@@ -1087,14 +1088,23 @@ async def query_hierarchical(
     try:
         from backend.config import settings as _r8q_stg
         if bool(getattr(_r8q_stg, "ENABLE_R8_QUERY_LOG", False)):
+            # R1b.3-v2 elevation signal — scan result.pitfalls for the meta
+            # marker that _elevate_failure_tree_pitfalls stamps. Cheap
+            # (max_pitfalls is small) and avoids changing the L2 return shape.
+            _had_elevation = any(
+                isinstance(e.meta_data, dict)
+                and "_r1b_failure_tree_bonus_applied" in e.meta_data
+                for e in (result.pitfalls or [])
+            )
             await _write_r8_query_log(
+                task_id=task_id,
                 region=region,
                 dataset_id=dataset_id,
                 current_expression=current_expression,
                 layer_hits=dict(result.layer_hits or {}),
                 total_queries=int(result.total_queries or 0),
                 cache_hit=False,  # cache hits short-circuit before this point
-                had_failure_tree_elevation=False,  # populated by L2 helper in future
+                had_failure_tree_elevation=_had_elevation,
             )
     except Exception as _r8q_ex:
         logger.warning(f"[hier_rag] R8 query_log write skipped (round unaffected): {_r8q_ex}")
@@ -1104,6 +1114,7 @@ async def query_hierarchical(
 
 async def _write_r8_query_log(
     *,
+    task_id: Optional[int] = None,
     region: Optional[str],
     dataset_id: Optional[str],
     current_expression: Optional[str],
@@ -1134,7 +1145,7 @@ async def _write_r8_query_log(
     try:
         async with AsyncSessionLocal() as db:
             db.add(R8QueryLog(
-                task_id=None,  # not threaded through RAG context today
+                task_id=task_id,
                 region=region,
                 dataset_id=dataset_id,
                 current_expression_hash=expr_hash,

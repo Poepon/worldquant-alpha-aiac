@@ -102,6 +102,10 @@ async def node_rag_query(
             max_patterns=5,
             max_pitfalls=10,
             hypothesis_id=_hid_for_rag,
+            # R8 follow-up (2026-05-18): plumb task_id through so the
+            # r8_query_log row (when ENABLE_R8_QUERY_LOG ON) is attributable
+            # to the originating task instead of always NULL.
+            task_id=getattr(state, "task_id", None),
         )
         
         duration_ms = int((time.time() - start_time) * 1000)

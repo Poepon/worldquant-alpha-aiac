@@ -336,6 +336,7 @@ class RAGService:
         hypothesis_id: int = None,
         current_expression: str = None,
         hypothesis_pillar: str = None,
+        task_id: int = None,
     ) -> RAGResult:
         """
         Query knowledge base for relevant patterns and pitfalls.
@@ -392,6 +393,7 @@ class RAGService:
                     dataset_id=dataset_id,
                     max_patterns=max_patterns,
                     max_pitfalls=max_pitfalls,
+                    task_id=task_id,
                 )
                 # Convert RAGEntry list → legacy List[Dict] shape so
                 # existing RAGService.RAGResult callers see no change.

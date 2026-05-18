@@ -144,3 +144,91 @@ def test_write_helper_handles_none_expression():
     asyncio.run(_run())
     assert captured["row"] is not None
     assert captured["row"].current_expression_hash is None
+
+
+# ---------------------------------------------------------------------------
+# R8 cleanup wires (2026-05-18 follow-up): task_id plumbing +
+# had_failure_tree_elevation signal
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_write_helper_records_task_id_when_provided():
+    """task_id kwarg flows into the inserted R8QueryLog row."""
+    from backend.agents import hierarchical_rag
+
+    captured = {"row": None}
+
+    class _OkSession:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return None
+        def add(self, row): captured["row"] = row
+        async def commit(self): pass
+
+    with patch("backend.database.AsyncSessionLocal", lambda: _OkSession()):
+        await hierarchical_rag._write_r8_query_log(
+            task_id=4242,
+            region="USA", dataset_id="fnd6",
+            current_expression="rank(close)",
+            layer_hits={"L0_exact": 1},
+            total_queries=1, cache_hit=False,
+            had_failure_tree_elevation=False,
+        )
+    assert captured["row"].task_id == 4242
+
+
+@pytest.mark.asyncio
+async def test_write_helper_records_had_failure_tree_elevation_true():
+    """had_failure_tree_elevation=True flows into the row."""
+    from backend.agents import hierarchical_rag
+
+    captured = {"row": None}
+
+    class _OkSession:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return None
+        def add(self, row): captured["row"] = row
+        async def commit(self): pass
+
+    with patch("backend.database.AsyncSessionLocal", lambda: _OkSession()):
+        await hierarchical_rag._write_r8_query_log(
+            task_id=None, region="USA", dataset_id="fnd6",
+            current_expression="rank(close)",
+            layer_hits={"L2_family": 1},
+            total_queries=1, cache_hit=False,
+            had_failure_tree_elevation=True,
+        )
+    assert captured["row"].had_failure_tree_elevation is True
+
+
+def test_query_hierarchical_passes_task_id_to_writer():
+    """Static-source sentinel: query_hierarchical wire passes task_id."""
+    import inspect
+    from backend.agents import hierarchical_rag
+    src = inspect.getsource(hierarchical_rag.query_hierarchical)
+    assert "task_id=task_id" in src
+
+
+def test_rag_service_query_accepts_task_id_kwarg():
+    """RAGService.query signature includes task_id."""
+    import inspect
+    from backend.agents.services.rag_service import RAGService
+    sig = inspect.signature(RAGService.query)
+    assert "task_id" in sig.parameters
+
+
+def test_node_rag_query_plumbs_state_task_id():
+    """node_rag_query passes state.task_id to rag_service.query."""
+    import inspect
+    from backend.agents.graph.nodes.generation import node_rag_query
+    src = inspect.getsource(node_rag_query)
+    assert "task_id=getattr(state" in src
+
+
+def test_elevation_detection_via_meta_marker_in_query_hierarchical():
+    """query_hierarchical scans pitfalls for _r1b_failure_tree_bonus_applied
+    marker to set had_failure_tree_elevation. Static-source sentinel."""
+    import inspect
+    from backend.agents import hierarchical_rag
+    src = inspect.getsource(hierarchical_rag.query_hierarchical)
+    assert "_r1b_failure_tree_bonus_applied" in src
+    assert "had_failure_tree_elevation=_had_elevation" in src

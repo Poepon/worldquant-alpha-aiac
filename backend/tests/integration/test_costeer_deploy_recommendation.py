@@ -43,8 +43,29 @@ def _mock_db(r1a_rows, r8_kb_pair, r5_count, r1b_rows, chain_max_depth):
     return db
 
 
+@pytest.fixture
+def _isolate_flag_state():
+    """Snapshot + restore relevant ENABLE_* flags so tests don't leak into
+    sibling test files (real bug observed 2026-05-18 — without this, test
+    test_dispatch_flag_off_uses_legacy_path in test_r8_rag_dispatch.py
+    fails when run AFTER test_all_flags_on_returns_hold_verdict because the
+    flag flip was not reverted)."""
+    from backend.config import settings as _stg
+    keys = [
+        "ENABLE_R1A_HOOK", "ENABLE_LLM_JUDGE",
+        "ENABLE_HIERARCHICAL_RAG", "ENABLE_R5_L2_RANKING",
+        "ENABLE_R1B_RETRY_LOOP", "ENABLE_R1B_HYPOTHESIS_MUTATE",
+        "ENABLE_R1B_FAILURE_TREE", "ENABLE_R1B_TYPED_PIPELINE",
+        "ENABLE_R1B_DAG_RETRY_REWARD",
+    ]
+    saved = {k: getattr(_stg, k, False) for k in keys}
+    yield
+    for k, v in saved.items():
+        setattr(_stg, k, v)
+
+
 @pytest_asyncio.fixture
-async def client_factory():
+async def client_factory(_isolate_flag_state):
     async def _build(r1a_rows, r8_kb_pair, r5_count, r1b_rows, chain_max_depth, flags=None):
         app = FastAPI()
         app.include_router(ops_router, prefix="/api/v1")
