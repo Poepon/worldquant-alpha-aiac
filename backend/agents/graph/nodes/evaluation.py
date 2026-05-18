@@ -2618,6 +2618,12 @@ async def node_evaluate(
             from backend.agents.services.llm_service import get_llm_service  # noqa: E402
 
         _r1a_failures = 0
+        _r1a_db_failures = 0  # M1 review fix: count per-row DB-side failures
+                              # (savepoint rollbacks) + whole-batch transaction
+                              # failures, separately from heuristic-side
+                              # _r1a_failures. Surfaced via end-of-round stats
+                              # log so log scrapers / GO gate observer can see
+                              # silent data loss.
         _r1a_log_rows = []  # collect first, INSERT in one batch after loop
         _task_id_for_r1a = getattr(state, "task_id", None)
 
@@ -2722,22 +2728,61 @@ async def node_evaluate(
 
             _r1a_log_rows.append(_r1a_log)
 
-        # Batch INSERT to r1a_attribution_log — independent of alpha persistence
+        # Batch INSERT to r1a_attribution_log — independent of alpha persistence.
+        # M1 review fix (2026-05-18): per-row savepoint isolation. Previously a
+        # single bad row (NOT NULL violation, non-JSON-serializable field,
+        # schema drift) failed the whole batch and lost all 50 rows silently.
+        # Now each row gets its own SAVEPOINT (begin_nested) so one bad row
+        # only rolls back its own savepoint, then we commit the outer txn with
+        # whatever survived. _r1a_db_failures counts the dropped rows; an
+        # outer-transaction failure (pool exhaustion etc.) counts ALL queued
+        # rows as failures so the metric remains conservative.
         if _r1a_log_rows:
             try:
                 async with AsyncSessionLocal() as _r1a_db:
                     for _row in _r1a_log_rows:
-                        _r1a_db.add(R1aAttributionLog(**_row))
+                        try:
+                            async with _r1a_db.begin_nested():
+                                _r1a_db.add(R1aAttributionLog(**_row))
+                                # flush inside savepoint surfaces row-specific
+                                # errors (NOT NULL, type, JSON serialize) HERE
+                                # so the outer commit can still succeed for
+                                # the other rows.
+                                await _r1a_db.flush()
+                        except Exception as _r1a_row_e:  # noqa: BLE001
+                            _r1a_db_failures += 1
+                            logger.error(
+                                "[R1a] log row INSERT failed (savepoint rollback, "
+                                "alpha_id_brain={}): {}",
+                                _row.get("alpha_id_brain"), _r1a_row_e,
+                            )
                     await _r1a_db.commit()
             except Exception as _r1a_db_e:  # noqa: BLE001
-                logger.warning(
-                    "[R1a] log INSERT failed (non-fatal): {}", _r1a_db_e
+                # Outer-transaction failure (e.g. pool exhausted, commit fail):
+                # everything queued is lost — count all rows we tried to write.
+                _r1a_db_failures += len(_r1a_log_rows)
+                logger.error(
+                    "[R1a] log batch INSERT failed (whole-batch loss, rows={}): {}",
+                    len(_r1a_log_rows), _r1a_db_e,
                 )
 
         if _r1a_failures:
             logger.warning(
                 "[R1a] {}/{} hook failed this round", _r1a_failures, len(updated_alphas)
             )
+        # M1 review fix: end-of-round stats line so log scrapers see DB-side
+        # losses even when heuristic-side _r1a_failures is zero. Stash on
+        # state too for downstream readers (no metrics_tracker counter wiring
+        # exists for R1a today — keep this surgical).
+        if _r1a_db_failures:
+            logger.error(
+                "[R1a] {}/{} log rows lost this round (DB-side, see prior ERROR for cause)",
+                _r1a_db_failures, len(_r1a_log_rows),
+            )
+        try:
+            setattr(state, "_r1a_db_failures_last_round", _r1a_db_failures)
+        except Exception:  # noqa: BLE001 — state attr-set must never break round
+            pass
     # === end R1a + R5 hooks ===
 
     # === Phase 2 R10 Family-cap (Hubble v2, 2026-05-18) ===
