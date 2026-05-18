@@ -49,6 +49,9 @@ def _mock_db_multi_execute(*per_call_rows: List[Tuple]):
     return db
 
 
+_MISSING = object()
+
+
 @pytest.fixture
 def _isolate_r1b_settings():
     """Snapshot + restore settings that other tests in this file mutate
@@ -56,13 +59,38 @@ def _isolate_r1b_settings():
     a sibling unit test (test_r1b_mutate.py::test_mutate_depth_cap_*)
     sees a leaked override and either over- or under-counts the cap.
     Mirrors the _isolate_flag_state pattern added to
-    test_costeer_deploy_recommendation 2026-05-18."""
+    test_costeer_deploy_recommendation 2026-05-18.
+
+    Review LOW #2 fix (2026-05-18):
+    1. Expand ``keys`` to cover all 4 sibling R1b settings so a future
+       test that overrides ``R1B_MAX_RETRIES_PER_ALPHA``,
+       ``R1B_MAX_MUTATIONS_PER_DATASET_CYCLE``, or
+       ``R1B_MAX_COST_USD_PER_ROUND`` does not leak into other tests.
+    2. Use a sentinel (``_MISSING``) so the restore loop distinguishes
+       "key did not exist on settings at snapshot time" from "key was
+       legitimately ``None``". Restore unconditionally for present keys
+       and ``delattr`` for snapshotted-absent keys (future Optional
+       settings would otherwise round-trip absent → None silently).
+    """
     from backend.config import settings as _stg
-    keys = ("R1B_MAX_MUTATION_DEPTH",)
-    saved = {k: getattr(_stg, k, None) for k in keys}
+    keys = (
+        "R1B_MAX_MUTATION_DEPTH",
+        "R1B_MAX_RETRIES_PER_ALPHA",
+        "R1B_MAX_MUTATIONS_PER_DATASET_CYCLE",
+        "R1B_MAX_COST_USD_PER_ROUND",
+    )
+    saved = {k: getattr(_stg, k, _MISSING) for k in keys}
     yield
     for k, v in saved.items():
-        if v is not None:
+        if v is _MISSING:
+            # key did not exist at snapshot time — drop any value a test added
+            if hasattr(_stg, k):
+                try:
+                    delattr(_stg, k)
+                except AttributeError:
+                    # pydantic model attrs may not be deletable; best effort
+                    pass
+        else:
             setattr(_stg, k, v)
 
 
