@@ -144,7 +144,12 @@ class TestRevisionAUpgradeDowngrade:
         pytest.skip("Requires multi-revision fixture; run manually")
 
     @pytest.mark.asyncio
-    async def test_downgrade_reverses_all(self, pg_engine):
+    async def test_downgrade_reverses_columns_but_preserves_log_tables(self, pg_engine):
+        """Bug M5: downgrade drops the 4 added columns but DELIBERATELY does
+        NOT drop direction_bandit_log / ast_distance_log — we can't tell
+        whether they pre-existed (Phase 1 metadata.create_all() shipped them
+        before Alembic formalized) so we preserve the data.
+        """
         from alembic.config import Config
         from alembic import command as alembic_command
         cfg = Config(str(Path(__file__).parent.parent.parent.parent / "alembic.ini"))
@@ -154,13 +159,20 @@ class TestRevisionAUpgradeDowngrade:
             mt_cols = {c["name"] for c in insp.get_columns("mining_tasks")}
             er_cols = {c["name"] for c in insp.get_columns("experiment_runs")}
             tables = set(insp.get_table_names())
-        # After downgrade, 4 new cols + 2 new tables gone
+        # 4 added columns ARE reverted
         assert "schedule" not in mt_cols
         assert "starting_tier" not in mt_cols
         assert "generation_strategy" not in mt_cols
         assert "runtime_state" not in er_cols
-        assert "direction_bandit_log" not in tables
-        assert "ast_distance_log" not in tables
+        # Bug M5 guard: 2 dedicated log tables are PRESERVED
+        assert "direction_bandit_log" in tables, (
+            "Bug M5: direction_bandit_log must be preserved on downgrade "
+            "(Phase 1 R1a data safety)"
+        )
+        assert "ast_distance_log" in tables, (
+            "Bug M5: ast_distance_log must be preserved on downgrade "
+            "(Phase 1 AST data safety)"
+        )
         # Restore to head for subsequent tests
         alembic_command.upgrade(cfg, "head")
 
@@ -211,6 +223,31 @@ class TestRevisionFile:
         assert "get_table_names()" in src
         assert "direction_bandit_log" in src
         assert "ast_distance_log" in src
+
+    def test_downgrade_does_not_drop_phase1_tables_bug_m5(self):
+        """Bug M5 fix: downgrade() must NOT contain unconditional drop_table
+        calls for direction_bandit_log / ast_distance_log — we can't tell
+        whether they pre-existed Revision A (Phase 1 metadata.create_all()
+        shipped them earlier) so dropping risks wiping R1a / AST data.
+        """
+        path = (
+            Path(__file__).parent.parent.parent / "alembic" / "versions"
+            / f"{REVISION}_phase15_a_add_columns.py"
+        )
+        src = path.read_text(encoding="utf-8")
+        # Slice out the downgrade function body
+        idx = src.find("def downgrade(")
+        assert idx >= 0
+        downgrade_section = src[idx:]
+        # Bug M5: these unconditional drops must be gone
+        assert 'drop_table("ast_distance_log")' not in downgrade_section, (
+            "Bug M5: downgrade still drops ast_distance_log unconditionally"
+        )
+        assert 'drop_table("direction_bandit_log")' not in downgrade_section, (
+            "Bug M5: downgrade still drops direction_bandit_log unconditionally"
+        )
+        # Bug M5 documentation marker present
+        assert "Bug M5" in downgrade_section
 
 
 # ---------------------------------------------------------------------------

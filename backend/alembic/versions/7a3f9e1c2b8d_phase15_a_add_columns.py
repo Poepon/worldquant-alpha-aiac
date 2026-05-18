@@ -147,21 +147,39 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade schema. Symmetric reverse of upgrade.
+    """Downgrade schema.
 
-    NOTE: if the 2 log tables existed pre-this-revision (dev DBs via
-    metadata.create_all()), this downgrade drops them. Operator can re-run
-    init_db() to recreate via metadata.create_all().
+    Bug M5 fix (review 2026-05-18):
+      The upgrade() guards `create_table` for `direction_bandit_log` and
+      `ast_distance_log` with `inspector.has_table()` because Phase 1 shipped
+      those tables via `metadata.create_all()` dev fallback BEFORE Alembic
+      formalized them here. We cannot tell from this revision whether a given
+      DB had those tables pre-existing (and thus holding Phase 1 R1a / AST
+      data) or whether this revision created them. To stay data-safe we
+      DELIBERATELY DO NOT drop those two tables on downgrade — dropping them
+      would wipe production / dev R1a attribution + AST distance history.
+
+      If you actually want them gone, drop them manually:
+        DROP TABLE ast_distance_log;
+        DROP TABLE direction_bandit_log;
+      Or re-run `python backend/migrations/init_database.py` to let
+      `metadata.create_all()` recreate empty shells.
+
+    The 4 added columns ARE safely reverted — those are guaranteed to have
+    been added by this revision (no pre-existing variant in the wild).
     """
-    op.drop_index("ix_adl_expression_hash", table_name="ast_distance_log")
-    op.drop_index("ix_adl_created_at", table_name="ast_distance_log")
-    op.drop_index("ix_adl_task_id", table_name="ast_distance_log")
-    op.drop_table("ast_distance_log")
+    import logging
+    logger = logging.getLogger("alembic.runtime.migration")
+    logger.warning(
+        "[phase15-A downgrade / Bug M5 guard] NOT dropping direction_bandit_log / "
+        "ast_distance_log — Phase 1 shipped them via metadata.create_all() before "
+        "this revision Alembic-formalized them, so we cannot distinguish "
+        "pre-existing data from data created post-upgrade. Drop manually if needed."
+    )
 
-    op.drop_index("ix_dbl_created_at", table_name="direction_bandit_log")
-    op.drop_index("ix_dbl_segment_id", table_name="direction_bandit_log")
-    op.drop_index("ix_dbl_task_id", table_name="direction_bandit_log")
-    op.drop_table("direction_bandit_log")
+    # Bug M5: do NOT drop the 2 dedicated log tables — preserves Phase 1
+    # R1a / AST data on downgrade. Operator must drop manually if desired.
+    # The 4 column reverts below remain safe (additive-only upgrade).
 
     op.drop_column("experiment_runs", "runtime_state")
     op.drop_column("mining_tasks", "generation_strategy")
