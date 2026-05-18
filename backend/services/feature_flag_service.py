@@ -207,6 +207,20 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "~5d shadow → 3d soft → hard per plan §10 stage gates."
         ),
     ),
+    # --- R8-v2 #2 Hierarchical RAG Redis cache ---
+    "ENABLE_HIERARCHICAL_RAG_CACHE": FlagSpec(
+        name="ENABLE_HIERARCHICAL_RAG_CACHE",
+        flag_type="bool",
+        group="Phase3-R8",
+        description=(
+            "Phase 3 R8-v2 #2 (2026-05-18): per-layer Redis cache for "
+            "hierarchical RAG. cache_key=sha256[:16] over (layer + sorted "
+            "params); TTL=RAG_HIER_CACHE_TTL_SEC (default 300s). 无显式 "
+            "invalidation — TTL 自然过期 (KB write 频率 3-50/h 与 5-min "
+            "stale tolerance in plan §10 GO gate)。Redis unreachable → "
+            "soft-fall direct call。Rollback < 1min via flag flip OFF。"
+        ),
+    ),
     # --- R8-v2 #3 R5 L2 ranking ---
     "ENABLE_R5_L2_RANKING": FlagSpec(
         name="ENABLE_R5_L2_RANKING",

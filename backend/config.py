@@ -334,6 +334,13 @@ class Settings(BaseSettings):
     QLIB_SNAPSHOT_DIR: str = os.getenv("QLIB_SNAPSHOT_DIR", "backend/data/qlib_ohlcv_snapshot")
     QLIB_ENGINE_PREFER_PANDAS: bool = False  # force tier-3 for testing
 
+    # R8-v2 #2 (2026-05-18): per-layer Redis cache for hierarchical RAG。
+    # cache_key = sha256[:16](layer + sorted params),TTL = RAG_HIER_CACHE_TTL_SEC
+    # (default 300s)。无显式 invalidation — KB 写入频率 3-50/h,5-min stale window
+    # 在 plan §10 GO gate 容忍范围。redis 不可用 → soft-fall direct layer call。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_HIERARCHICAL_RAG_CACHE: bool = False
+
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
     # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression

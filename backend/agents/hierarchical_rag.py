@@ -102,6 +102,138 @@ async def fetch_r5_avg_scores(
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# R8-v2 #2 (2026-05-18): per-layer Redis cache helpers
+# ---------------------------------------------------------------------------
+#
+# Design: loop-aware Redis singleton (same pattern as BrainAdapter
+# ``_get_slot_redis``). cache_key = sha256[:16] of ``layer|json(params)``;
+# TTL = settings.RAG_HIER_CACHE_TTL_SEC. Stored as JSON ``{succ:[...],
+# fail:[...]}`` lists of dicts mirroring RAGEntry fields. Cache miss /
+# Redis unreachable → caller bypasses (soft-fail).
+#
+# No explicit invalidation: KB write rate is 3-50/h vs 5-min TTL → bounded
+# 5-min stale window is acceptable per plan §10 GO gate. Avoids SCAN /
+# generation-bump complexity.
+
+_rag_redis_client: Optional[Any] = None
+_rag_redis_loop_id: Optional[int] = None
+
+
+async def _get_rag_redis():
+    """Return a loop-bound redis.asyncio client; rebuild if loop changed.
+
+    Mirrors :meth:`backend.adapters.brain_adapter.BrainAdapter._get_slot_redis`
+    — Celery's per-task loop lifecycle would otherwise leave a stale client
+    bound to a closed loop.
+
+    Returns ``None`` on import failure (redis not installed) or connection
+    error so callers can soft-fall.
+    """
+    global _rag_redis_client, _rag_redis_loop_id
+    try:
+        import asyncio
+        import redis.asyncio as _redis
+        from backend.config import settings as _stg
+    except Exception:
+        return None
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    current_loop_id = id(current_loop) if current_loop is not None else None
+    loop_changed = (
+        _rag_redis_client is not None
+        and _rag_redis_loop_id is not None
+        and current_loop_id is not None
+        and current_loop_id != _rag_redis_loop_id
+    )
+    loop_dead = (
+        _rag_redis_client is not None
+        and current_loop is not None
+        and current_loop.is_closed()
+    )
+    if loop_changed or loop_dead:
+        _rag_redis_client = None
+        _rag_redis_loop_id = None
+    if _rag_redis_client is None:
+        try:
+            _rag_redis_client = _redis.from_url(
+                _stg.REDIS_URL, decode_responses=True
+            )
+            _rag_redis_loop_id = current_loop_id
+        except Exception as ex:
+            logger.debug(f"[hier_rag cache] redis init failed: {ex}")
+            return None
+    return _rag_redis_client
+
+
+def _make_layer_cache_key(layer: str, params: Dict[str, Any]) -> str:
+    """Stable sha256[:16] over ``layer|json(sorted(params))``."""
+    import json
+    blob = layer + "|" + json.dumps(params, sort_keys=True, default=str)
+    return "ragcache:" + hashlib.sha256(blob.encode("utf-8")).hexdigest()[:16]
+
+
+def _entry_to_dict(e: "RAGEntry") -> Dict[str, Any]:
+    return {
+        "pattern_hash": e.pattern_hash,
+        "pattern": e.pattern,
+        "entry_type": e.entry_type,
+        "description": e.description,
+        "meta_data": e.meta_data,
+        "source_layer": e.source_layer,
+        "relevance_score": e.relevance_score,
+    }
+
+
+def _entry_from_dict(d: Dict[str, Any]) -> "RAGEntry":
+    return RAGEntry(
+        pattern_hash=d.get("pattern_hash", "") or "",
+        pattern=d.get("pattern", "") or "",
+        entry_type=d.get("entry_type", "") or "",
+        description=d.get("description", "") or "",
+        meta_data=d.get("meta_data") or {},
+        source_layer=d.get("source_layer", "") or "",
+        relevance_score=float(d.get("relevance_score", 0.5)),
+    )
+
+
+async def _cache_get(key: str) -> Optional[tuple]:
+    """Read cached (succ, fail) lists; return None on miss / error."""
+    r = await _get_rag_redis()
+    if r is None:
+        return None
+    try:
+        raw = await r.get(key)
+        if not raw:
+            return None
+        import json
+        payload = json.loads(raw)
+        succ = [_entry_from_dict(d) for d in payload.get("succ", [])]
+        fail = [_entry_from_dict(d) for d in payload.get("fail", [])]
+        return succ, fail
+    except Exception as ex:
+        logger.debug(f"[hier_rag cache] get failed: {ex}")
+        return None
+
+
+async def _cache_set(key: str, succ: List["RAGEntry"], fail: List["RAGEntry"], ttl: int) -> None:
+    """Write cached (succ, fail) lists with TTL; swallow errors."""
+    r = await _get_rag_redis()
+    if r is None:
+        return
+    try:
+        import json
+        payload = json.dumps({
+            "succ": [_entry_to_dict(e) for e in succ],
+            "fail": [_entry_to_dict(e) for e in fail],
+        })
+        await r.setex(key, max(1, int(ttl)), payload)
+    except Exception as ex:
+        logger.debug(f"[hier_rag cache] set failed: {ex}")
+
+
 # Filter constant: SUCCESS-side queries MUST exclude decayed entries
 # (Q9 reference set, meta_data['decayed']=True). FAILURE-side queries
 # INCLUDE them (they're the "avoid this" hints). Centralized so all
@@ -366,6 +498,10 @@ __all__ = [
     "DECAYED_KEY",
     "extract_fields_for_rag",
     "fetch_r5_avg_scores",
+    "_make_layer_cache_key",
+    "_cache_get",
+    "_cache_set",
+    "_get_rag_redis",
     "RAGEntry",
     "RAGResult",
     "layer0_exact_match",
@@ -632,6 +768,31 @@ async def query_hierarchical(
 
     layer_budgets = layer_budgets or {"L0": 5, "L1": 5, "L2": 5, "L3": 5}
 
+    # R8-v2 #2: read cache flag + TTL once per query (saves N×settings reads
+    # across the 4 layer calls).
+    _cache_on = False
+    _cache_ttl = 300
+    try:
+        from backend.config import settings as _stg
+        _cache_on = bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG_CACHE", False))
+        _cache_ttl = int(getattr(_stg, "RAG_HIER_CACHE_TTL_SEC", 300))
+    except Exception:
+        pass
+
+    async def _layer_call(layer_name: str, cache_params: Dict[str, Any], fetcher):
+        """Wrap a layer call with optional Redis cache. ``fetcher`` is an
+        async no-arg callable returning ``(succ, fail)``. Cache miss / disabled
+        → call fetcher + write-through."""
+        if _cache_on:
+            key = _make_layer_cache_key(layer_name, cache_params)
+            cached = await _cache_get(key)
+            if cached is not None:
+                return cached
+            s_, f_ = await fetcher()
+            await _cache_set(key, s_, f_, _cache_ttl)
+            return s_, f_
+        return await fetcher()
+
     def _consume(succ: List[RAGEntry], fail: List[RAGEntry], layer_key: str) -> None:
         nonlocal remaining_pat, remaining_fail
         for e in succ:
@@ -656,19 +817,31 @@ async def query_hierarchical(
 
     # L0 — exact pattern_hash match
     if current_expression and (remaining_pat > 0 or remaining_fail > 0):
-        s, f = await layer0_exact_match(
-            db, current_expression=current_expression, region=region,
-            dataset_id=dataset_id, budget=layer_budgets.get("L0", 5),
+        _l0_budget = layer_budgets.get("L0", 5)
+        s, f = await _layer_call(
+            "L0",
+            {"expr": current_expression, "region": region,
+             "dataset": dataset_id, "budget": _l0_budget},
+            lambda: layer0_exact_match(
+                db, current_expression=current_expression, region=region,
+                dataset_id=dataset_id, budget=_l0_budget,
+            ),
         )
         result.total_queries += 1
         _consume(s, f, "L0")
 
     # L1 — pillar/theme
     if (current_expression or hypothesis_pillar) and (remaining_pat > 0 or remaining_fail > 0):
-        s, f = await layer1_pillar(
-            db, current_expression=current_expression,
-            hypothesis_pillar=hypothesis_pillar, region=region,
-            budget=layer_budgets.get("L1", 5),
+        _l1_budget = layer_budgets.get("L1", 5)
+        s, f = await _layer_call(
+            "L1",
+            {"expr": current_expression, "pillar": hypothesis_pillar,
+             "region": region, "budget": _l1_budget},
+            lambda: layer1_pillar(
+                db, current_expression=current_expression,
+                hypothesis_pillar=hypothesis_pillar, region=region,
+                budget=_l1_budget,
+            ),
         )
         result.total_queries += 1
         _consume(s, f, "L1")
@@ -685,22 +858,35 @@ async def query_hierarchical(
             _r5_lookback_days = int(getattr(_stg, "R5_L2_RANKING_LOOKBACK_DAYS", 30))
         except Exception:
             pass
-        s, f = await layer2_family(
-            db, current_expression=current_expression, region=region,
-            budget=layer_budgets.get("L2", 5),
-            enable_r5_ranking=_r5_rank_on,
-            r5_min_samples=_r5_min_samples,
-            r5_lookback_days=_r5_lookback_days,
+        _l2_budget = layer_budgets.get("L2", 5)
+        s, f = await _layer_call(
+            "L2",
+            {"expr": current_expression, "region": region,
+             "budget": _l2_budget, "r5_rank": _r5_rank_on,
+             "r5_min": _r5_min_samples, "r5_lb": _r5_lookback_days},
+            lambda: layer2_family(
+                db, current_expression=current_expression, region=region,
+                budget=_l2_budget,
+                enable_r5_ranking=_r5_rank_on,
+                r5_min_samples=_r5_min_samples,
+                r5_lookback_days=_r5_lookback_days,
+            ),
         )
         result.total_queries += 1
         _consume(s, f, "L2")
 
     # L3 — field-level
     if current_expression and (remaining_pat > 0 or remaining_fail > 0):
-        s, f = await layer3_field_level(
-            db, current_expression=current_expression,
-            region=region, universe=universe,
-            budget=layer_budgets.get("L3", 5),
+        _l3_budget = layer_budgets.get("L3", 5)
+        s, f = await _layer_call(
+            "L3",
+            {"expr": current_expression, "region": region,
+             "universe": universe, "budget": _l3_budget},
+            lambda: layer3_field_level(
+                db, current_expression=current_expression,
+                region=region, universe=universe,
+                budget=_l3_budget,
+            ),
         )
         result.total_queries += 1
         _consume(s, f, "L3")
