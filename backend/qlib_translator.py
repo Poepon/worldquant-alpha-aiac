@@ -51,7 +51,10 @@ QLIB_TO_BRAIN_OPERATORS: Dict[str, str] = {
     "Mean":      "ts_mean",            # Mean(x, w)
     "Sum":       "ts_sum",
     "Std":       "ts_std_dev",
-    "Var":       "ts_std_dev",         # closest: variance = std^2; warn
+    # NOTE: "Var" is NOT in the dispatch table — it gets a custom handler
+    # (_convert_var) below that emits power(ts_std_dev(x, w), 2). The naive
+    # mapping ts_std_dev was mathematically wrong (variance = std², differ by
+    # squared scale). Review M8 (2026-05-18).
     "Max":       "ts_max",
     "Min":       "ts_min",
     "Quantile":  "ts_quantile",        # Quantile(x, w, q)
@@ -116,7 +119,7 @@ QLIB_TO_BRAIN_OPERATORS: Dict[str, str] = {
     "MEAN":      "ts_mean",
     "SUM":       "ts_sum",
     "STD":       "ts_std_dev",
-    "VAR":       "ts_std_dev",         # std² alias (same as Qlib Var)
+    # "VAR" — see CamelCase "Var" note above; routed through _convert_var.
     "MAX":       "ts_max",             # Alpha191 MAX is window max (single arg list with window)
     "MIN":       "ts_min",
     "TSMAX":     "ts_max",
@@ -222,15 +225,30 @@ def _convert_delta(args: List[str]) -> str:
     return f"ts_delta({translate(x)}, {w.strip()})"
 
 
+def _convert_var(args: List[str]) -> str:
+    """Review M8 (2026-05-18): Var(x, w) = variance ≠ std. Emit
+    ``power(ts_std_dev(x, w), 2)`` so the result truly is variance scaled
+    by squared units, not standard deviation. The previous mapping
+    ``ts_std_dev`` was silently wrong by a squared factor.
+    """
+    if len(args) != 2:
+        raise NotImplementedError(f"Var expects 2 args, got {len(args)}: {args}")
+    x, w = args
+    return f"power(ts_std_dev({translate(x)}, {w.strip()}), 2)"
+
+
 def _convert_call(op_name: str, raw_args: str) -> str:
     """Dispatch a Qlib call to its BRAIN equivalent with recursive arg translation."""
     args = _split_args(raw_args)
 
-    # Special-case the three trap operators
+    # Special-case the trap operators
     if op_name == "Ref":
         return _convert_ref(args)
     if op_name == "Delta":
         return _convert_delta(args)
+    # Review M8 (2026-05-18): Var ≠ Std; emit power(ts_std_dev, 2).
+    if op_name in ("Var", "VAR"):
+        return _convert_var(args)
 
     brain_op = QLIB_TO_BRAIN_OPERATORS.get(op_name)
     if brain_op is None:
