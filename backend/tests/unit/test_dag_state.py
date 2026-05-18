@@ -424,6 +424,49 @@ def test_prune_to_cap_parent_chain_invariant():
             f"node {nid} has dangling parent_id {pid!r}"
 
 
+def test_prune_to_cap_handles_cap_exhausted_without_raise():
+    """Bug M3 (2026-05-18): when actual node count exceeds max_nodes and
+    the eligible-prune set includes intermediate inactive nodes, bottom-up
+    prune must drop enough to bring node_count under cap WITHOUT raising.
+
+    Before fix: original linear-search + "skip if has remaining child"
+    branch left intermediate nodes un-prunable, so `add_node` would raise
+    `ValueError("cannot add_node: after prune still over cap")` on the
+    very next insertion. After fix: leaves processed first → parents
+    become eligible in the same pass → cap honored.
+    """
+    d = init_dag(run_id=1)
+    # Build a chain root → mid1 → mid2 → mid3 → leaf, plus a few siblings
+    # at each level. All marked inactive so all are eligible (root + the
+    # current_selection path remain protected, but we leave selection at
+    # root so only root is protected).
+    mid1 = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
+    mid2 = add_node(d, parent_id=mid1, round_idx=2, tier=1)
+    mid3 = add_node(d, parent_id=mid2, round_idx=3, tier=1)
+    leaf = add_node(d, parent_id=mid3, round_idx=4, tier=1)
+    # A couple of siblings off mid1 to fatten the DAG
+    sib_a = add_node(d, parent_id=mid1, round_idx=5, tier=1)
+    sib_b = add_node(d, parent_id=mid1, round_idx=6, tier=1)
+    # Mark every non-root node inactive — they're all eligible.
+    for nid in (mid1, mid2, mid3, leaf, sib_a, sib_b):
+        mark_status(d, nid, "inactive")
+    # node_count = 7 (root + 6); cap to 3 → must drop 4 nodes.
+    assert d["node_count"] == 7
+
+    # Must NOT raise — bottom-up must drain leaves first, then their
+    # intermediate parents, until under cap.
+    dropped = prune_to_cap(d, max_nodes=3)
+    assert dropped >= 4
+    assert d["node_count"] <= 3
+    # Root always preserved.
+    assert d["root_id"] in d["nodes"]
+    # Parent chain invariant still holds.
+    for nid, node in d["nodes"].items():
+        pid = node.get("parent_id")
+        assert pid is None or pid in d["nodes"], \
+            f"node {nid} has dangling parent_id {pid!r}"
+
+
 # ---------------------------------------------------------------------------
 # to_dict / from_dict round-trip
 # ---------------------------------------------------------------------------

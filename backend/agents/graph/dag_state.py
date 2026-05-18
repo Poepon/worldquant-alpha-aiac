@@ -391,9 +391,22 @@ def prune_to_cap(dag: Dict[str, Any], *, max_nodes: int = 100) -> int:
 
     Per plan §7.2:
       1. Never prune root, never prune active path-to-root from current_selection
-      2. Inactive nodes first (LRU by created_at), then lowest-reward
+      2. Process bottom-up (deepest leaves first) so intermediate inactive
+         nodes become eligible once their descendants are gone [M3 fix]
       3. Preserve parent chain invariant: every remaining node's parent_id
          either is None (root) or still in nodes [V1.0-S6]
+
+    Bug M3 fix (2026-05-18): the original implementation walked candidates
+    with a linear `candidates.index(nid)` lookup (O(n^2)) AND skipped any
+    node that still had a child in `dag["nodes"]`. The combined effect was
+    that intermediate inactive nodes were never pruned even when their
+    descendants were also candidates — so `add_node` would raise at the
+    hard cap instead of `prune_to_cap` quietly making room. Now sort
+    bottom-up (depth DESC, created_at ASC) and iterate until under cap;
+    children are always processed before their parents, so the
+    "has remaining child" skip is no longer needed (the descendants are
+    either already gone or protected for other reasons like active /
+    family-capped / on the current_selection path).
 
     Returns number of nodes dropped.
     """
@@ -407,39 +420,42 @@ def prune_to_cap(dag: Dict[str, Any], *, max_nodes: int = 100) -> int:
         protected.update(path_to_root(dag, sel))
     protected.discard(None)
 
-    # Candidates for pruning: everything not protected
-    candidates = [
-        nid for nid, n in dag["nodes"].items() if nid not in protected
-    ]
-    if not candidates:
-        return 0
-
-    # Sort: inactive first (status not active), then by reward asc, then by created_at asc
+    # Candidates for pruning: everything not protected. Sort bottom-up
+    # (deepest first, oldest first within same depth) so leaves are always
+    # considered before their parents.
     def _prune_key(nid: str) -> tuple:
         n = dag["nodes"][nid]
-        is_inactive = 0 if (n.get("status") or "active") != "active" else 1
-        reward = float(n.get("reward", 0.5) or 0.5)
+        depth = _depth_of(dag, nid)
         created = n.get("created_at", "") or ""
-        return (is_inactive, reward, created)
+        # depth DESC → negate; created_at ASC (oldest first → LRU)
+        return (-depth, created)
 
-    candidates.sort(key=_prune_key)
+    candidates = sorted(
+        (nid for nid in dag["nodes"] if nid not in protected),
+        key=_prune_key,
+    )
+    if not candidates:
+        return 0
 
     to_drop_count = dag["node_count"] - max_nodes
     dropped = 0
     for nid in candidates:
         if dropped >= to_drop_count:
             break
-        # Defense in depth: don't drop a node that any other node still points to
-        # as parent (preserves parent chain invariant [V1.0-S6])
-        has_child = any(
-            other.get("parent_id") == nid
-            for other_id, other in dag["nodes"].items()
-            if other_id != nid and other_id not in candidates[:candidates.index(nid)]
+        # Bottom-up order guarantees descendants are processed first, so a
+        # surviving child of `nid` is necessarily protected (active path /
+        # root) or eligible-but-not-yet-dropped only because the cap was
+        # already met. Either way, dropping `nid` would orphan it, so skip.
+        # Cheap dict-membership check (no linear search).
+        node = dag["nodes"][nid]
+        has_remaining_child = any(
+            child_id in dag["nodes"]
+            for child_id in (node.get("children") or [])
         )
-        if has_child:
+        if has_remaining_child:
             continue
         # Remove from parent's children list
-        parent_id = dag["nodes"][nid].get("parent_id")
+        parent_id = node.get("parent_id")
         if parent_id and parent_id in dag["nodes"]:
             try:
                 dag["nodes"][parent_id]["children"].remove(nid)
