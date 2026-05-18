@@ -561,3 +561,179 @@ def generate_variants(
     
     # Return limited list
     return list(variants)[:max_variants]
+
+
+# =============================================================================
+# Phase 3 R1b.3 failure_tree (2026-05-18)
+# =============================================================================
+#
+# Plan: ~/.claude/plans/phase3-r1b-costeer-loop-2026-05-18.md v1.3 §7.
+#
+# After each R1b mutate event, walk the parent_hypothesis_id chain to build
+# a nested tree of {hypothesis_id, statement, mutation_depth, children,
+# fail_attributions, ...}, then UPSERT to
+# KnowledgeEntry.meta_data['failure_tree'] so R8 RAG L2 surfaces "this
+# hypothesis family has tried X mutations, all FAIL because Y" warnings.
+#
+# Helpers below are pure (no DB) for unit-testability; the public
+# `record_failure_tree(...)` orchestrator does the DB UPSERT under flag.
+
+
+def _aggregate_attributions(rows: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Count attribution outcomes across a set of r1b_retry_log rows.
+
+    Returns ``{hypothesis: N, implementation: N, both: N, unknown: N}``
+    with zero defaults so the dict is always well-formed.
+    """
+    counts = {"hypothesis": 0, "implementation": 0, "both": 0, "unknown": 0}
+    for r in rows or []:
+        attr = (r or {}).get("triggering_attribution")
+        if attr in counts:
+            counts[attr] += 1
+        else:
+            counts["unknown"] += 1
+    return counts
+
+
+def _build_tree_from_chain(
+    chain: List[Dict[str, Any]],
+    *,
+    max_depth: int = 4,
+) -> Optional[Dict[str, Any]]:
+    """Construct a nested failure-tree from an ordered hypothesis chain.
+
+    ``chain`` is root → ... → leaf (each element a dict at minimum with
+    ``id`` and ``statement``; optional ``mutation_depth``,
+    ``diff_from_parent``). Truncates to ``max_depth + 1`` nodes (depth 0
+    being the root).
+    """
+    if not chain:
+        return None
+    truncated = chain[: max_depth + 1]
+
+    leaf = truncated[-1]
+    node: Dict[str, Any] = {
+        "hypothesis_id": leaf.get("id"),
+        "statement": leaf.get("statement", ""),
+        "mutation_depth": int(leaf.get("mutation_depth", len(truncated) - 1) or 0),
+        "diff_from_parent": leaf.get("diff_from_parent", ""),
+        "children": [],
+    }
+    for parent in reversed(truncated[:-1]):
+        node = {
+            "hypothesis_id": parent.get("id"),
+            "statement": parent.get("statement", ""),
+            "mutation_depth": int(parent.get("mutation_depth", 0) or 0),
+            "diff_from_parent": parent.get("diff_from_parent", ""),
+            "children": [node],
+        }
+    node["total_alphas_tried"] = 0
+    node["total_pass"] = 0
+    return node
+
+
+def _walk_tree(tree: Dict[str, Any]):
+    """Generator yielding every node in DFS order. Empty/None → no yields."""
+    if not tree or not isinstance(tree, dict):
+        return
+    yield tree
+    for child in tree.get("children", []) or []:
+        yield from _walk_tree(child)
+
+
+def _extract_root_skeleton(tree: Dict[str, Any]) -> str:
+    """Stable pattern_text for KnowledgeEntry UPSERT — root statement."""
+    if not tree or not isinstance(tree, dict):
+        return "R1B_FAILURE_TREE: <empty>"
+    statement = str(tree.get("statement", "") or "")[:200].strip()
+    return f"R1B_FAILURE_TREE: {statement or '<no statement>'}"
+
+
+async def record_failure_tree(
+    *,
+    hypothesis_chain: List[Dict[str, Any]],
+    retry_log_rows: List[Dict[str, Any]],
+    db: Any,
+    max_depth: Optional[int] = None,
+) -> bool:
+    """UPSERT a failure_tree to KnowledgeEntry.meta_data. Returns True on write.
+
+    Flag-gated by ``settings.ENABLE_R1B_FAILURE_TREE`` per plan §6.1.
+    Soft-fail: any DB / import error → log + return False (round unaffected).
+    """
+    try:
+        from backend.config import settings as _stg
+    except Exception as ex:
+        logger.debug(f"[r1b_failure_tree] settings unavailable ({ex}); skip")
+        return False
+
+    if not getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False):
+        return False
+    if not hypothesis_chain:
+        return False
+
+    depth_cap = int(
+        max_depth if max_depth is not None
+        else getattr(_stg, "R1B_FAILURE_TREE_MAX_DEPTH", 4)
+    )
+
+    tree = _build_tree_from_chain(hypothesis_chain, max_depth=depth_cap)
+    if tree is None:
+        return False
+
+    for node in _walk_tree(tree):
+        node_id = node.get("hypothesis_id")
+        node_rows = [
+            r for r in (retry_log_rows or [])
+            if r and r.get("original_hypothesis_id") == node_id
+        ]
+        node["fail_attributions"] = _aggregate_attributions(node_rows)
+
+    try:
+        from sqlalchemy import select
+        from sqlalchemy.orm.attributes import flag_modified
+        from backend.models import KnowledgeEntry
+    except Exception as ex:
+        logger.warning(f"[r1b_failure_tree] model imports failed: {ex}")
+        return False
+
+    skeleton = _extract_root_skeleton(tree)
+    try:
+        stmt = select(KnowledgeEntry).where(
+            KnowledgeEntry.pattern == skeleton,
+            KnowledgeEntry.entry_type == "FAILURE_PITFALL",
+        )
+        existing = (await db.execute(stmt)).scalars().first()
+        if existing is not None:
+            md = dict(existing.meta_data or {})
+            md["failure_tree"] = tree
+            md["regenerated_at"] = datetime.utcnow().isoformat()
+            existing.meta_data = md
+            try:
+                flag_modified(existing, "meta_data")
+            except Exception:
+                # Defensive — flag_modified raises if `existing` isn't a real
+                # SQLAlchemy mapped instance (mocks, raw objects). JSONB
+                # reassignment above is enough for INSERT-on-UPSERT paths.
+                pass
+        else:
+            new_entry = KnowledgeEntry(
+                pattern=skeleton,
+                entry_type="FAILURE_PITFALL",
+                meta_data={
+                    "failure_tree": tree,
+                    "source": "r1b_loop",
+                    "regenerated_at": datetime.utcnow().isoformat(),
+                },
+                created_by="R1B_LOOP",
+            )
+            db.add(new_entry)
+        await db.commit()
+        return True
+    except Exception as ex:
+        logger.warning(f"[r1b_failure_tree] DB write failed: {ex}")
+        try:
+            await db.rollback()
+        except Exception:
+            pass
+        return False
