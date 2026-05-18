@@ -6,7 +6,7 @@ Contains KnowledgeEntry, OperatorPreference, and related models.
 
 import hashlib
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, Index
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, Index, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.sql import func
 
@@ -35,6 +35,17 @@ class KnowledgeEntry(SQLAlchemyBase):
     __tablename__ = "knowledge_entries"
     __table_args__ = (
         Index("ix_kb_pattern_hash", "pattern_hash", unique=True),
+        # P3-R1b.3 review LOW (2026-05-18): partial index on `pattern`
+        # filtered to FAILURE_PITFALL rows. Speeds up
+        # `record_failure_tree` dedupe SELECT in
+        # backend/knowledge_extraction.py at production scale (KB ~3k
+        # rows, growing). Mirrors Alembic f4a8b2c1d6e3 so
+        # metadata.create_all() in dev creates the same index.
+        Index(
+            "ix_kb_failure_pattern",
+            "pattern",
+            postgresql_where=text("entry_type = 'FAILURE_PITFALL'"),
+        ),
         {'extend_existing': True},
     )
 
