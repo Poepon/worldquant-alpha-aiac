@@ -334,6 +334,8 @@ class RAGService:
         max_patterns: int = 5,
         max_pitfalls: int = 10,
         hypothesis_id: int = None,
+        current_expression: str = None,
+        hypothesis_pillar: str = None,
     ) -> RAGResult:
         """
         Query knowledge base for relevant patterns and pitfalls.
@@ -342,6 +344,14 @@ class RAGService:
         1. First try dataset-specific patterns
         2. Then category-specific patterns
         3. Finally fall back to generic patterns
+
+        Phase 3 R8 (2026-05-18): when ``ENABLE_HIERARCHICAL_RAG`` flag ON
+        AND ``current_expression`` (or ``hypothesis_pillar``) provided,
+        dispatch to ``query_hierarchical`` (4-layer fall-through with Q9
+        decayed strict filter + R10 family_capped exclude + dedupe).
+        Legacy callers (no current_expression) get the unchanged path
+        regardless of flag. Soft-fall: any error in hierarchical path
+        falls back to legacy.
 
         Args:
             dataset_id: Optional dataset to filter by
@@ -357,10 +367,62 @@ class RAGService:
                 ignored the tag entirely. This is a soft preference, not a
                 hard filter — passing it does not collapse the retrieval
                 pool to same-family-only.
+            current_expression: R8 (Phase 3) — opt-in alpha expression for
+                hierarchical RAG dispatch. None → legacy retrieval path.
+            hypothesis_pillar: R8 (Phase 3) — opt-in pillar hint (alternative
+                to expression-based infer). None → infer from expression.
 
         Returns:
             RAGResult with patterns, pitfalls, and dataset info
         """
+        # Phase 3 R8 (2026-05-18): hierarchical RAG dispatch — opt-in via
+        # current_expression or hypothesis_pillar. Soft-fall to legacy.
+        from backend.config import settings as _stg
+        if (
+            getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)
+            and (current_expression or hypothesis_pillar)
+        ):
+            try:
+                from backend.agents.hierarchical_rag import query_hierarchical
+                hier = await query_hierarchical(
+                    self.db,
+                    current_expression=current_expression,
+                    hypothesis_pillar=hypothesis_pillar,
+                    region=region,
+                    dataset_id=dataset_id,
+                    max_patterns=max_patterns,
+                    max_pitfalls=max_pitfalls,
+                )
+                # Convert RAGEntry list → legacy List[Dict] shape so
+                # existing RAGService.RAGResult callers see no change.
+                _to_dict = lambda e: {
+                    "pattern": e.pattern,
+                    "description": e.description,
+                    "metadata": {**e.meta_data, "source_layer": e.source_layer,
+                                  "relevance_score": e.relevance_score},
+                    "entry_type": e.entry_type,
+                }
+                category_inf = infer_dataset_category(dataset_id) if dataset_id else "other"
+                logger.info(
+                    f"[RAGService] R8 hierarchical | patterns={len(hier.patterns)} "
+                    f"pitfalls={len(hier.pitfalls)} hits={hier.layer_hits} "
+                    f"queries={hier.total_queries}"
+                )
+                dataset_info_h = await self._get_dataset_info(dataset_id) if dataset_id else None
+                return RAGResult(
+                    patterns=[_to_dict(e) for e in hier.patterns],
+                    pitfalls=[_to_dict(e) for e in hier.pitfalls],
+                    dataset_info=dataset_info_h,
+                    category=category_inf,
+                    region=region,
+                )
+            except Exception as _r8_e:
+                logger.warning(
+                    f"[RAGService] R8 hierarchical failed "
+                    f"(falling back to legacy): {_r8_e}"
+                )
+                # Fall through to legacy path
+
         # Infer category from dataset_id
         category = infer_dataset_category(dataset_id) if dataset_id else "other"
 
