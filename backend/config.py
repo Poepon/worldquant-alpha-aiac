@@ -282,6 +282,26 @@ class Settings(BaseSettings):
     SIMULATION_CACHE_TTL_DAYS: int = 14
     SIMULATION_CACHE_ONLY_SUCCESS: bool = True   # only cache success results by default
 
+    # ----- R8 Hierarchical RAG (Phase 3, 2026-05-18) -----
+    # 4-layer fall-through retriever (RAG#0 exact pattern_hash → RAG#1
+    # pillar/theme → RAG#2 family_signature → RAG#3 field-level). Each
+    # layer fills remaining_budget; cap stops orchestrator. Layer impls
+    # in backend/agents/services/rag_service.py (additive overlay,
+    # legacy query() preserved when flag OFF).
+    # Default OFF — flag ON dispatch query_hierarchical (新入口), OFF
+    # byte-equivalent legacy。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: ~/.claude/plans/phase3-r8-hierarchical-rag-2026-05-18.md v1.0
+    # Alembic head: b3c8d9e2f4a1 (KB meta_data GIN index)
+    ENABLE_HIERARCHICAL_RAG: bool = False
+    RAG_HIER_LAYER0_BUDGET: int = 5   # exact pattern_hash matches
+    RAG_HIER_LAYER1_BUDGET: int = 5   # pillar/theme matches
+    RAG_HIER_LAYER2_BUDGET: int = 5   # family_signature matches
+    RAG_HIER_LAYER3_BUDGET: int = 5   # field-level matches
+    RAG_HIER_TOTAL_CAP: int = 20      # orchestrator hard cap
+    RAG_HIER_CACHE_TTL_SEC: int = 300 # Redis cache TTL per layer query
+    RAG_HIER_CROSS_REGION_DECAY: float = 0.7  # 跨 region 命中 score 折扣
+
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
     # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression

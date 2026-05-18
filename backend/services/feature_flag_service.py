@@ -160,6 +160,25 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase1-R3Q8",
         description="启用 DiversityScore 第 6 维 ast_diversity (1 − Jaccard subtree overlap)。Light wiring 仅记录到 ast_distance_log,不 gate 生成。Phase 2+ R10 family-cap 复用此信号。",
     ),
+    # --- R8 Hierarchical RAG ---
+    "ENABLE_HIERARCHICAL_RAG": FlagSpec(
+        name="ENABLE_HIERARCHICAL_RAG",
+        flag_type="bool",
+        group="Phase3-R8",
+        description=(
+            "Phase 3 R8 (Alpha-GPT v1.0 v2): 4-layer fall-through hierarchical "
+            "RAG retriever — RAG#0 exact pattern_hash + Q9 decayed filter → "
+            "RAG#1 pillar/theme via infer_pillar JOIN → RAG#2 family_signature "
+            "via family_classifier + R5 composite_score 排序 + R10 family_capped "
+            "filter → RAG#3 field-level current expr × dataset/region availability。"
+            "Orchestrator sequential fall-through (NOT parallel union) per plan "
+            "§4.1 — cost/determinism/cache-friendly。Total cap RAG_HIER_TOTAL_CAP=20。"
+            "Redis cache TTL RAG_HIER_CACHE_TTL_SEC=300。Additive overlay — "
+            "legacy query() preserved; flag dispatch routes to query_hierarchical。"
+            "Rollback < 1 min via flag flip OFF。前置 Alembic b3c8d9e2f4a1 KB "
+            "meta_data GIN index + backfill_kb_pillar_family_signature.py 3K+ entries。"
+        ),
+    ),
     # --- R9 simulation cache ---
     "ENABLE_SIMULATION_CACHE": FlagSpec(
         name="ENABLE_SIMULATION_CACHE",
