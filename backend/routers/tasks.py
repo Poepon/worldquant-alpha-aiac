@@ -73,12 +73,11 @@ class TaskResponse(BaseModel):
     schedule: Optional[str] = None
     starting_tier: Optional[int] = None
     mining_mode: Optional[str] = None
-    cascade_phase: Optional[str] = None
-    cascade_round_idx: Optional[int] = None
-    # Phase 1.5-C frontend cutover (2026-05-18): runtime current_tier derived
-    # from cascade_phase dual-write (T1→1, T2→2, T3→3, else None). Lets the
-    # /tasks listing display live tier without an extra /mining-session call
-    # per row. Mirrors MiningSessionResponse.current_tier semantics.
+    # phase15-D PR3b/c (2026-05-18): cascade_phase + cascade_round_idx
+    # removed from MiningTask ORM + DB. cleanup pass (this PR) drops the
+    # leftover Optional[None] response fields. current_tier stays for
+    # forward compat — defaults None until a future enhancement reads
+    # run.runtime_state["current_tier"] via async repo call.
     current_tier: Optional[int] = None
 
     class Config:
@@ -130,22 +129,10 @@ class InterventionRequest(BaseModel):
 # =============================================================================
 
 
-_CASCADE_PHASE_TO_TIER = {"T1": 1, "T2": 2, "T3": 3}
-
-
-def _derive_current_tier(t: object) -> Optional[int]:
-    """Phase 1.5-C frontend cutover (2026-05-18): derive runtime tier from
-    cascade_phase dual-write so list/detail responses can populate
-    ``current_tier`` without an extra ExperimentRun.runtime_state fetch.
-
-    Per phase15-C [V1.2-C5] cascade_phase is dual-written with
-    runtime_state["current_tier"] — the mapping is the canonical 1:1.
-    Returns None for flat/discrete tasks (cascade_phase None).
-    """
-    phase = getattr(t, "cascade_phase", None)
-    if not phase:
-        return None
-    return _CASCADE_PHASE_TO_TIER.get(str(phase).upper())
+# phase15-D PR3b (2026-05-18): cascade_phase column dropped → derivation
+# helper _derive_current_tier removed. current_tier defaults None for
+# now;future enhancement can read run.runtime_state["current_tier"]
+# via async repo call when display priority warrants it.
 
 
 # =============================================================================
@@ -181,9 +168,7 @@ async def list_tasks(
             schedule=getattr(t, "schedule", None),
             starting_tier=getattr(t, "starting_tier", None),
             mining_mode=getattr(t, "mining_mode", None),
-            cascade_phase=getattr(t, "cascade_phase", None),
-            cascade_round_idx=getattr(t, "cascade_round_idx", None),
-            current_tier=_derive_current_tier(t),
+            current_tier=None,  # phase15-D PR3b: cascade_phase derivation removed
         )
         for t in tasks
     ]
@@ -234,9 +219,7 @@ async def create_task(
         schedule=getattr(task, "schedule", None),
         starting_tier=getattr(task, "starting_tier", None),
         mining_mode=getattr(task, "mining_mode", None),
-        cascade_phase=getattr(task, "cascade_phase", None),
-        cascade_round_idx=getattr(task, "cascade_round_idx", None),
-        current_tier=_derive_current_tier(task),
+        current_tier=None,  # phase15-D PR3b: cascade_phase derivation removed
     )
 
 
@@ -271,9 +254,7 @@ async def get_task(
         schedule=getattr(detail, "schedule", None),
         starting_tier=getattr(detail, "starting_tier", None),
         mining_mode=getattr(detail, "mining_mode", None),
-        cascade_phase=getattr(detail, "cascade_phase", None),
-        cascade_round_idx=getattr(detail, "cascade_round_idx", None),
-        current_tier=_derive_current_tier(detail),
+        current_tier=None,  # phase15-D PR3b: cascade_phase derivation removed
         trace_steps=[
             TraceStepResponse(
                 id=s.id,

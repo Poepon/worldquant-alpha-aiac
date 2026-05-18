@@ -1,74 +1,36 @@
-"""Phase 1.5-C frontend cutover — TaskResponse + TaskDetailResponse v15c fields
-(2026-05-18).
+"""Phase 1.5-C TaskResponse v15c schema tests (2026-05-18).
 
-Verifies the legacy /tasks/* router now surfaces the V1.2-C5 scheduling
-fields + the derived current_tier so the frontend cutover sites
-(TaskManagement.jsx / Dashboard.jsx / TaskDetail.jsx) can read them
-without falling back to agent_mode.
-
-Covers:
-  - _derive_current_tier maps T1/T2/T3 → 1/2/3
-  - None cascade_phase → None tier (flat/discrete)
-  - lowercase phase accepted (defensive)
-  - unknown phase token → None (no exception)
-  - TaskResponse / TaskDetailResponse schema include current_tier
+phase15-D PR3b/cleanup (2026-05-18): cascade_phase + cascade_round_idx
+fields removed from MiningTask ORM + DB schema. The PR1 _derive_current_tier
+helper was the source-of-truth for these fields; it's now gone too. This
+test module covers what remains: TaskResponse + TaskDetailResponse
+v15c fields present + cascade_phase absent.
 """
 from __future__ import annotations
-
-from types import SimpleNamespace
 
 import pytest
 
 
-# ---------------------------------------------------------------------------
-# _derive_current_tier helper
-# ---------------------------------------------------------------------------
-
-def test_derive_current_tier_maps_phases():
-    from backend.routers.tasks import _derive_current_tier
-
-    assert _derive_current_tier(SimpleNamespace(cascade_phase="T1")) == 1
-    assert _derive_current_tier(SimpleNamespace(cascade_phase="T2")) == 2
-    assert _derive_current_tier(SimpleNamespace(cascade_phase="T3")) == 3
-
-
-def test_derive_current_tier_accepts_lowercase():
-    """Defensive lowercase normalization — Phase 1.5-B backfill cases."""
-    from backend.routers.tasks import _derive_current_tier
-    assert _derive_current_tier(SimpleNamespace(cascade_phase="t2")) == 2
-
-
-def test_derive_current_tier_returns_none_for_flat_discrete():
-    from backend.routers.tasks import _derive_current_tier
-    assert _derive_current_tier(SimpleNamespace(cascade_phase=None)) is None
-    assert _derive_current_tier(SimpleNamespace(cascade_phase="")) is None
-
-
-def test_derive_current_tier_unknown_phase_returns_none():
-    """Defensive: a malformed phase string must not raise."""
-    from backend.routers.tasks import _derive_current_tier
-    assert _derive_current_tier(SimpleNamespace(cascade_phase="T9")) is None
-    assert _derive_current_tier(SimpleNamespace(cascade_phase="garbage")) is None
-
-
-def test_derive_current_tier_handles_missing_attribute():
-    """Object without cascade_phase attribute → None (Pydantic / SimpleNamespace)."""
-    from backend.routers.tasks import _derive_current_tier
-    assert _derive_current_tier(SimpleNamespace()) is None
-
-
-# ---------------------------------------------------------------------------
-# Schema shape — current_tier + all V1.2-C5 fields present
-# ---------------------------------------------------------------------------
-
 def test_task_response_schema_includes_v15c_fields():
+    """schedule + starting_tier + mining_mode + current_tier present."""
     from backend.routers.tasks import TaskResponse
     fields = TaskResponse.model_fields
     for name in (
-        "schedule", "starting_tier", "mining_mode",
-        "cascade_phase", "cascade_round_idx", "current_tier",
+        "schedule", "starting_tier", "mining_mode", "current_tier",
     ):
         assert name in fields, f"missing V1.2-C5 field: {name}"
+
+
+def test_task_response_schema_no_cascade_phase_post_pr3b():
+    """phase15-D PR3b/cleanup: cascade_phase + cascade_round_idx dropped."""
+    from backend.routers.tasks import TaskResponse
+    fields = TaskResponse.model_fields
+    assert "cascade_phase" not in fields, (
+        "cascade_phase should be dropped by phase15-D cleanup pass"
+    )
+    assert "cascade_round_idx" not in fields, (
+        "cascade_round_idx should be dropped by phase15-D cleanup pass"
+    )
 
 
 def test_task_detail_response_inherits_v15c_fields():
@@ -81,9 +43,15 @@ def test_task_detail_response_inherits_v15c_fields():
         assert name in fields
 
 
-# ---------------------------------------------------------------------------
-# TaskResponse construction with new fields
-# ---------------------------------------------------------------------------
+def test_derive_current_tier_helper_removed():
+    """phase15-D PR3b/cleanup: _derive_current_tier helper deleted —
+    cascade_phase column gone so no derivation source. current_tier
+    defaults None until a future enhancement reads run.runtime_state."""
+    import backend.routers.tasks as tasks_router
+    assert not hasattr(tasks_router, "_derive_current_tier"), (
+        "_derive_current_tier should be removed by phase15-D cleanup pass"
+    )
+
 
 def test_task_response_constructs_with_current_tier():
     from datetime import datetime
@@ -103,12 +71,10 @@ def test_task_response_constructs_with_current_tier():
         created_at=datetime.utcnow(),
         schedule="CASCADE",
         starting_tier=1,
-        cascade_phase="T2",
         current_tier=2,
     )
     assert resp.current_tier == 2
     assert resp.schedule == "CASCADE"
-    assert resp.cascade_phase == "T2"
 
 
 def test_task_response_defaults_v15c_fields_to_none():
@@ -125,4 +91,3 @@ def test_task_response_defaults_v15c_fields_to_none():
     assert resp.schedule is None
     assert resp.starting_tier is None
     assert resp.current_tier is None
-    assert resp.cascade_phase is None

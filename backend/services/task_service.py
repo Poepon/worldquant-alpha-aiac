@@ -63,13 +63,13 @@ class TaskSummary:
     max_iterations: int
     created_at: datetime
     updated_at: Optional[datetime]
-    # Phase 1.5-C [V1.2-C5] (2026-05-18): new authoritative scheduling fields
-    # + cascade observability fields. All Optional for backward compat.
+    # Phase 1.5-C [V1.2-C5] (2026-05-18): authoritative scheduling fields.
+    # All Optional for backward compat.
+    # phase15-D PR3b/cleanup (2026-05-18): cascade_phase + cascade_round_idx
+    # dropped — ORM cols + DB cols already gone.
     schedule: Optional[str] = None
     starting_tier: Optional[int] = None
     mining_mode: Optional[str] = None
-    cascade_phase: Optional[str] = None
-    cascade_round_idx: Optional[int] = None
 
 
 @dataclass
@@ -217,8 +217,6 @@ class TaskService(BaseService):
             schedule=getattr(task, "schedule", None),
             starting_tier=getattr(task, "starting_tier", None),
             mining_mode=getattr(task, "mining_mode", None),
-            cascade_phase=getattr(task, "cascade_phase", None),
-            cascade_round_idx=getattr(task, "cascade_round_idx", None),
         )
     
     # =========================================================================
