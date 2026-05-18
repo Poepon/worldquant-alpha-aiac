@@ -76,42 +76,72 @@ def upgrade() -> None:
     op.create_index("ix_r1b_outcome", "r1b_retry_log", ["outcome"])
 
     # === 2. hypothesis.parent_hypothesis_id + r1b_mutation_depth ===
-    # NULL allowed → existing rows get NULL (original hypotheses with no
-    # parent). r1b_mutation_depth defaults 0 = original.
-    op.add_column(
-        "hypothesis",
-        sa.Column("parent_hypothesis_id", sa.Integer(), nullable=True),
-    )
-    op.add_column(
-        "hypothesis",
-        sa.Column(
-            "r1b_mutation_depth",
-            sa.Integer(),
-            nullable=True,
-            server_default=sa.text("0"),
-        ),
-    )
-    # FK self-reference for audit chain — ON DELETE SET NULL so deleting
-    # a root hypothesis doesn't cascade-destroy its descendant chain.
-    op.create_foreign_key(
-        "fk_hypothesis_parent_id",
-        "hypothesis", "hypothesis",
-        ["parent_hypothesis_id"], ["id"],
-        ondelete="SET NULL",
-    )
-    op.create_index(
-        "ix_hypothesis_parent_id", "hypothesis", ["parent_hypothesis_id"],
+    # 2026-05-18 retrofit: the original add_column calls targeted table
+    # "hypothesis" (singular) — but the real ORM __tablename__ is
+    # "hypotheses" (plural, created by c7f9e21b3a47). Against a real PG
+    # this block crashed with `relation "hypothesis" does not exist`,
+    # blocking the entire migration chain. The forward fix
+    # (a7d2f9e4b8c3, R1b-D hotfix) adds the columns to the correct
+    # `hypotheses` table with IF NOT EXISTS guards. To unblock the
+    # chain and let alembic actually REACH a7d2f9e4b8c3, this revision
+    # is now a Postgres-side IF EXISTS no-op against the wrong table.
+    # All cleanup + correct DDL lives in a7d2f9e4b8c3.
+    op.execute(
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'hypothesis'
+          ) THEN
+            ALTER TABLE hypothesis
+              ADD COLUMN IF NOT EXISTS parent_hypothesis_id INTEGER NULL;
+            ALTER TABLE hypothesis
+              ADD COLUMN IF NOT EXISTS r1b_mutation_depth INTEGER NULL DEFAULT 0;
+            -- FK + index added below only when the columns landed
+            IF NOT EXISTS (
+              SELECT 1 FROM pg_constraint WHERE conname = 'fk_hypothesis_parent_id'
+            ) THEN
+              ALTER TABLE hypothesis
+                ADD CONSTRAINT fk_hypothesis_parent_id
+                FOREIGN KEY (parent_hypothesis_id)
+                REFERENCES hypothesis (id)
+                ON DELETE SET NULL;
+            END IF;
+            CREATE INDEX IF NOT EXISTS ix_hypothesis_parent_id
+              ON hypothesis (parent_hypothesis_id);
+          END IF;
+          -- If table "hypothesis" doesn't exist (the typical case),
+          -- silently skip; a7d2f9e4b8c3 will add the columns to the
+          -- correct plural table.
+        END $$;
+        """
     )
 
 
 def downgrade() -> None:
-    # Hypothesis columns first
-    op.drop_index("ix_hypothesis_parent_id", table_name="hypothesis")
-    op.drop_constraint(
-        "fk_hypothesis_parent_id", "hypothesis", type_="foreignkey",
+    # Hypothesis columns first — defensive IF EXISTS to match the
+    # idempotent upgrade pattern (the wrong-table block was a no-op on
+    # missing `hypothesis`; nothing to undo there).
+    op.execute(
+        """
+        DO $$
+        BEGIN
+          IF EXISTS (
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'hypothesis'
+          ) THEN
+            DROP INDEX IF EXISTS ix_hypothesis_parent_id;
+            ALTER TABLE hypothesis
+              DROP CONSTRAINT IF EXISTS fk_hypothesis_parent_id;
+            ALTER TABLE hypothesis
+              DROP COLUMN IF EXISTS r1b_mutation_depth;
+            ALTER TABLE hypothesis
+              DROP COLUMN IF EXISTS parent_hypothesis_id;
+          END IF;
+        END $$;
+        """
     )
-    op.drop_column("hypothesis", "r1b_mutation_depth")
-    op.drop_column("hypothesis", "parent_hypothesis_id")
     # r1b_retry_log table + indexes
     op.drop_index("ix_r1b_outcome", table_name="r1b_retry_log")
     op.drop_index("ix_r1b_attempt_type", table_name="r1b_retry_log")
