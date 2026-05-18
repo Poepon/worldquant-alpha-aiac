@@ -69,7 +69,7 @@ async def _run(dry_run: bool) -> int:
             await s.execute(text(
                 "UPDATE knowledge_entries "
                 "SET meta_data = COALESCE(meta_data, '{}'::jsonb) "
-                "              || jsonb_build_object('hypothesis_pillar', :pillar) "
+                "              || jsonb_build_object('hypothesis_pillar', CAST(:pillar AS text)) "
                 "WHERE id = :id"
             ), {"id": row_id, "pillar": pillar})
             updates += 1
