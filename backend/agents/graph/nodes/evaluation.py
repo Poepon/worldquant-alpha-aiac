@@ -1077,10 +1077,32 @@ async def node_simulate(
             bucket_results = None
             for _attempt in range(2):
                 try:
-                    bucket_results = await brain.simulate_batch(
-                        expressions=bucket_exprs,
-                        **bucket_kwargs,
-                    )
+                    # R9 (Phase 3, 2026-05-18): cached BRAIN sim wrapper when
+                    # ENABLE_SIMULATION_CACHE ON; OFF or import error → direct
+                    # brain.simulate_batch (byte-equivalent legacy). Soft-fall.
+                    if getattr(settings, "ENABLE_SIMULATION_CACHE", False):
+                        try:
+                            from backend.agents.sim_cache import cached_simulate_batch
+                            from backend.database import AsyncSessionLocal as _R9_SessionLocal
+                            async with _R9_SessionLocal() as _r9_db:
+                                bucket_results = await cached_simulate_batch(
+                                    _r9_db, brain,
+                                    expressions=bucket_exprs,
+                                    **bucket_kwargs,
+                                )
+                        except Exception as _r9_e:
+                            logger.warning(
+                                f"[{node_name}] R9 cached_simulate_batch failed "
+                                f"(falling back to direct BRAIN): {_r9_e}"
+                            )
+                            bucket_results = await brain.simulate_batch(
+                                expressions=bucket_exprs, **bucket_kwargs,
+                            )
+                    else:
+                        bucket_results = await brain.simulate_batch(
+                            expressions=bucket_exprs,
+                            **bucket_kwargs,
+                        )
                     break
                 except Exception as e:
                     if _attempt == 0:
@@ -1117,7 +1139,8 @@ async def node_simulate(
     else:
         try:
             # V-26.65 (2026-05-13): sim defaults pulled from settings.
-            results = await brain.simulate_batch(
+            # R9 (Phase 3, 2026-05-18): cached wrapper when flag ON; soft-fall.
+            _sim_kwargs = dict(
                 expressions=expressions,
                 region=state.region,
                 universe=state.universe,
@@ -1125,6 +1148,22 @@ async def node_simulate(
                 decay=_v16_settings.SIM_DEFAULT_DECAY,
                 neutralization=_v16_settings.SIM_DEFAULT_NEUTRALIZATION,
             )
+            if getattr(settings, "ENABLE_SIMULATION_CACHE", False):
+                try:
+                    from backend.agents.sim_cache import cached_simulate_batch
+                    from backend.database import AsyncSessionLocal as _R9_SessionLocal
+                    async with _R9_SessionLocal() as _r9_db:
+                        results = await cached_simulate_batch(
+                            _r9_db, brain, **_sim_kwargs,
+                        )
+                except Exception as _r9_e:
+                    logger.warning(
+                        f"[{node_name}] R9 cached_simulate_batch failed "
+                        f"(falling back to direct BRAIN): {_r9_e}"
+                    )
+                    results = await brain.simulate_batch(**_sim_kwargs)
+            else:
+                results = await brain.simulate_batch(**_sim_kwargs)
         except Exception as e:
             logger.error(f"[{node_name}] Batch Simulate Loop Error: {e}")
             results = [{"success": False, "error": str(e)} for _ in expressions]
