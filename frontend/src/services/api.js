@@ -618,6 +618,10 @@ const api = {
     const { data } = await client.get('/ops/r8/kb-shape')
     return data
   },
+  getOpsR8QueryStats: async (days = 7) => {
+    const { data } = await client.get('/ops/r8/query-stats', { params: { days } })
+    return data
+  },
   getOpsCoSTEERDeployRecommendation: async (days = 7) => {
     const { data } = await client.get('/ops/costeer/deploy-recommendation', {
       params: { days },

@@ -48,6 +48,7 @@ export default function CoSTEERMonitor() {
   const r1b = useOpsData(() => api.getOpsR1bTelemetry(days, 5), [days])
   const chainDepth = useOpsData(() => api.getOpsR1bChainDepth(), [])
   const r8 = useOpsData(() => api.getOpsR8KbShape(), [])
+  const r8Query = useOpsData(() => api.getOpsR8QueryStats(days), [days])
   const deployRec = useOpsData(
     () => api.getOpsCoSTEERDeployRecommendation(days),
     [days],
@@ -57,6 +58,7 @@ export default function CoSTEERMonitor() {
   const r1bPayload = r1b.data || {}
   const chainPayload = chainDepth.data || {}
   const r8Payload = r8.data || {}
+  const r8QueryPayload = r8Query.data || {}
   const recPayload = deployRec.data || {}
 
   // ---- R1a attribution pie ------------------------------------------------
@@ -142,13 +144,14 @@ export default function CoSTEERMonitor() {
         source="live"
         loading={
           r1a.loading || r1b.loading || chainDepth.loading || r8.loading ||
-          deployRec.loading
+          r8Query.loading || deployRec.loading
         }
         onRefresh={() => {
           r1a.refetch()
           r1b.refetch()
           chainDepth.refetch()
           r8.refetch()
+          r8Query.refetch()
           deployRec.refetch()
         }}
       >
@@ -210,6 +213,10 @@ export default function CoSTEERMonitor() {
               {Object.entries(r1aPayload.flags || {}).map(([k, v]) => flagTag(k, v))}
               {Object.entries(r1bPayload.flags || {}).map(([k, v]) => flagTag(k, v))}
               {Object.entries(r8Payload.flags || {}).map(([k, v]) => flagTag(k, v))}
+              {/* R8 query-log adds ENABLE_R8_QUERY_LOG + cache flag dedup */}
+              {Object.entries(r8QueryPayload.flags || {})
+                .filter(([k]) => k === 'ENABLE_R8_QUERY_LOG' || k === 'ENABLE_HIERARCHICAL_RAG_CACHE')
+                .map(([k, v]) => flagTag(k, v))}
             </Space>
           }
           type="info"
@@ -436,6 +443,79 @@ export default function CoSTEERMonitor() {
                   <Tooltip />
                   <Legend />
                 </PieChart>
+              </ResponsiveContainer>
+            )}
+          </OpsSectionCard>
+        </Col>
+      </Row>
+
+      {/* R8 query-log runtime telemetry — per-layer hit rates + cache + region
+          Populated only when ENABLE_R8_QUERY_LOG is ON; total_queries=0 banner
+          otherwise. Layer rates are independent (a query may touch multiple
+          layers) so cumulative > 1.0 is valid. */}
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={14}>
+          <OpsSectionCard title="R8 Runtime Layer Hit Rates">
+            {(r8QueryPayload.total_queries ?? 0) === 0 ? (
+              <Empty
+                description={
+                  r8QueryPayload.flags?.ENABLE_R8_QUERY_LOG
+                    ? 'No queries in window'
+                    : 'ENABLE_R8_QUERY_LOG OFF — enable to capture runtime layer fall-through'
+                }
+              />
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart
+                  data={Object.entries(r8QueryPayload.layer_hit_rates || {}).map(
+                    ([layer, rate]) => ({
+                      layer,
+                      rate: Math.round(rate * 10000) / 100,
+                    }),
+                  )}
+                >
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="layer" />
+                  <YAxis
+                    allowDecimals
+                    label={{ value: '%', angle: -90, position: 'insideLeft' }}
+                  />
+                  <Tooltip formatter={(v) => `${v.toFixed(2)}%`} />
+                  <Bar dataKey="rate" fill="#13c2c2" />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+            <Space wrap style={{ marginTop: 12 }}>
+              <Tag>Total queries: {r8QueryPayload.total_queries ?? 0}</Tag>
+              <Tag color={r8QueryPayload.cache_hit_rate > 0 ? 'success' : 'default'}>
+                Cache hit:{' '}
+                {((r8QueryPayload.cache_hit_rate ?? 0) * 100).toFixed(2)}%
+              </Tag>
+              <Tag color="purple">
+                Failure-tree elev:{' '}
+                {((r8QueryPayload.failure_tree_elevation_rate ?? 0) * 100).toFixed(2)}%
+              </Tag>
+            </Space>
+          </OpsSectionCard>
+        </Col>
+
+        <Col xs={24} lg={10}>
+          <OpsSectionCard title="R8 Queries by Region">
+            {Object.keys(r8QueryPayload.by_region || {}).length === 0 ? (
+              <Empty description="No regional data" />
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart
+                  data={Object.entries(r8QueryPayload.by_region || {}).map(
+                    ([region, count]) => ({ region, count }),
+                  )}
+                >
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="region" />
+                  <YAxis allowDecimals={false} />
+                  <Tooltip />
+                  <Bar dataKey="count" fill="#722ed1" />
+                </BarChart>
               </ResponsiveContainer>
             )}
           </OpsSectionCard>
