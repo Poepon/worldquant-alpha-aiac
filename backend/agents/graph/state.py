@@ -291,6 +291,14 @@ class MiningState(BaseModel):
     r1b_mutated_hypothesis_ids: List[int] = Field(default_factory=list)
     r1b_pending_new_hypothesis: Optional[Dict] = None
 
+    # R1b.2-v2 (2026-05-18): consumed-side mirror of r1b_pending_new_hypothesis.
+    # Populated by workflow.run from configurable when _run_one_round_inline's
+    # consume_pending_hypothesis returned non-None. node_hypothesis checks this
+    # at entry — if set AND ENABLE_R1B_HYPOTHESIS_MUTATE flag ON, skips the
+    # exploration LLM call and uses the mutated hypothesis directly so the
+    # CoSTEER loop directive flows into next round's alpha generation.
+    r1b_consumed_pending_hypothesis: Optional[Dict] = None
+
     # -------------------------------------------------------------------------
     # Control Flags
     # -------------------------------------------------------------------------

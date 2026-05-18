@@ -433,6 +433,28 @@ class MiningWorkflow:
         # 在 task 启动时写入。round 内读这里的快照而非 settings,保证
         # Consultant 切换不影响 running task(R2-M3/M4 + 方向 C)。
         _role_snapshot = (task.config or {}).get("brain_role_snapshot") or {} if isinstance(task.config, dict) else {}
+
+        # R1b.2-v2 (2026-05-18): consume the one-shot "__r1b_consumed_pending_hypothesis"
+        # slot that _run_one_round_inline stashed on task.config so node_hypothesis
+        # can inject it. Clears the slot atomically so it's a single round directive.
+        _r1b_consumed: Optional[Dict] = None
+        try:
+            if isinstance(task.config, dict) and task.config.get("__r1b_consumed_pending_hypothesis"):
+                _r1b_consumed = task.config.get("__r1b_consumed_pending_hypothesis")
+                _cleared = dict(task.config)
+                _cleared.pop("__r1b_consumed_pending_hypothesis", None)
+                task.config = _cleared
+                try:
+                    from sqlalchemy.orm.attributes import flag_modified as _flag_modified
+                    _flag_modified(task, "config")
+                except Exception:
+                    pass
+        except Exception as _ex:
+            logger.warning(
+                f"[MiningWorkflow] R1b.2-v2 consumed-slot read failed (no inject): {_ex}"
+            )
+            _r1b_consumed = None
+
         initial_state = MiningState(
             task_id=task.id,
             region=task.region,
@@ -447,6 +469,7 @@ class MiningWorkflow:
             effective_default_test_period=_role_snapshot.get("effective_default_test_period"),
             effective_sharpe_submit_min=_role_snapshot.get("effective_sharpe_submit_min"),
             effective_region_universes_at_start=_role_snapshot.get("effective_region_universes"),
+            r1b_consumed_pending_hypothesis=_r1b_consumed,
         )
         
         # Compile and run

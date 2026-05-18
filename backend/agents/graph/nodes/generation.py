@@ -293,6 +293,87 @@ async def node_distill_context(
 # NODE: Hypothesis Generation
 # =============================================================================
 
+async def _node_hypothesis_inject_consumed(
+    *,
+    state: MiningState,
+    consumed: Dict,
+    config: RunnableConfig,
+    trace_service: Any,
+    start_time: float,
+    node_name: str,
+) -> Dict:
+    """R1b.2-v2 (2026-05-18): construct a 1-element hypotheses list from the
+    mutated hypothesis dict consumed at round entry, skipping the LLM call.
+
+    Mirrors node_hypothesis's return shape so the workflow continues
+    unchanged. Falls back to LLM via caller's try/except if anything raises.
+
+    The consumed dict may carry partial fields (statement + rationale
+    minimally); we fill the rest with conservative defaults that keep
+    downstream code_gen / persistence sane.
+    """
+    statement = str(consumed.get("statement", "")).strip()
+    if not statement:
+        raise ValueError("consumed hypothesis missing statement")
+
+    legacy_anchor = state.dataset_id
+    selected = consumed.get("selected_datasets") or [legacy_anchor]
+    if not isinstance(selected, list) or not selected:
+        selected = [legacy_anchor]
+
+    hypothesis_dict = {
+        "statement": statement,
+        "rationale": str(consumed.get("rationale", "")),
+        "selected_datasets": selected,
+        "key_fields": consumed.get("key_fields") or [],
+        "suggested_operators": consumed.get("suggested_operators") or [],
+        "pillar": consumed.get("pillar") or "unknown",
+        # Marker so attribution / KB writes can tell this round was
+        # CoSTEER-mutate-driven rather than fresh exploration.
+        "_r1b_origin": "mutate_v2",
+    }
+    hypotheses = [hypothesis_dict]
+
+    logger.info(
+        f"[{node_name}] R1b.2-v2 inject ACTIVE | task={state.task_id} "
+        f"skipping LLM | statement={statement[:80]}"
+    )
+
+    duration_ms = int((time.time() - start_time) * 1000)
+    trace_update = await record_trace(
+        state, trace_service, node_name,
+        {
+            "dataset_id": state.dataset_id,
+            "mode": "r1b_mutate_inject_v2",
+            "consumed_origin": consumed.get("_r1b_origin", "hypothesis_mutate"),
+        },
+        {
+            "hypotheses_count": 1,
+            "hypotheses": hypotheses,
+            "knowledge_transfer": {},
+            "analysis": {"inject_path": True},
+        },
+        duration_ms,
+        "SUCCESS",
+        None,
+    )
+
+    return {
+        "hypotheses": hypotheses,
+        "knowledge_transfer": {},
+        "current_hypothesis_datasets": selected,
+        "current_hypothesis_fields": [],
+        # Phase 2 typed Hypothesis persistence happens lazily on next round
+        # via the legacy path; v2 inject treats the consumed hypothesis as
+        # already-persisted-parent (the mutate node wrote it under
+        # parent_hypothesis_id). current_hypothesis_id stays None here —
+        # downstream nodes already handle None gracefully.
+        "current_hypothesis_id": None,
+        "current_hypothesis_ids": [],
+        **trace_update,
+    }
+
+
 async def node_hypothesis(
     state: MiningState,
     llm_service: LLMService,
@@ -318,16 +399,42 @@ async def node_hypothesis(
     """
     start_time = time.time()
     node_name = "HYPOTHESIS"
-    
+
     trace_service = config.get("configurable", {}).get("trace_service") if config else None
     strategy_dict = config.get("configurable", {}).get("strategy", {}) if config else {}
-    
+
     # Get experiment trace for learning (if available)
     experiment_trace = strategy_dict.get("experiment_trace", [])
     exploration_weight = strategy_dict.get("exploration_weight", 0.5)
-    
+
     logger.info(f"[{node_name}] Starting | task={state.task_id} trace_len={len(experiment_trace)}")
-    
+
+    # ------------------------------------------------------------------
+    # R1b.2-v2 (2026-05-18): inject path — when the prior round's
+    # hypothesis_mutate emitted a pending hypothesis (consumed by
+    # _run_one_round_inline + plumbed via workflow.run), use it directly
+    # as the round's primary hypothesis and SKIP the exploration LLM call.
+    # Flag-gated by ENABLE_R1B_HYPOTHESIS_MUTATE so consumed-but-flag-OFF is
+    # a no-op (legacy LLM-driven path runs).
+    # ------------------------------------------------------------------
+    _consumed = getattr(state, "r1b_consumed_pending_hypothesis", None)
+    if _consumed and isinstance(_consumed, dict) and _consumed.get("statement"):
+        try:
+            if bool(getattr(_gen_settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)):
+                return await _node_hypothesis_inject_consumed(
+                    state=state,
+                    consumed=_consumed,
+                    config=config,
+                    trace_service=trace_service,
+                    start_time=start_time,
+                    node_name=node_name,
+                )
+        except Exception as _inject_ex:
+            logger.warning(
+                f"[{node_name}] R1b.2-v2 inject path failed, falling back to "
+                f"LLM exploration: {_inject_ex}"
+            )
+
     target_fields = state.focused_fields if state.focused_fields else state.fields[:20]
 
     # P2-B (2026-05-15): Five Pillars balance nudge — opt-in via

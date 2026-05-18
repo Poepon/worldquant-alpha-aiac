@@ -1033,10 +1033,17 @@ async def _run_one_round_inline(
 ) -> dict:
     """Run one round on the foreground session. Returns mining_agent result
     dict (or empty dict on failure)."""
-    # R1b.2c wire (2026-05-18): drain any cross-round pending hypothesis from
-    # the prior round's hypothesis_mutate. v1: log + clear only (the actual
-    # injection into MiningState for next-round hypothesis_propose lands in
-    # R1b.2-v2 via a new state field). Flag-gated; soft-fail.
+    # R1b.2c+v2 wire (2026-05-18): drain any cross-round pending hypothesis
+    # from the prior round's hypothesis_mutate, then INJECT it into MiningState
+    # via the workflow's configurable so node_hypothesis can use it directly
+    # (R1b.2-v2). Flag-gated; soft-fail.
+    #
+    # R1b.2-v2 plumbing: stash the consumed dict on task.config under a private
+    # "__r1b_consumed_pending_hypothesis" slot. workflow.run reads it at
+    # initial_state init time and clears the slot (so it's a one-shot per
+    # round). This avoids extending 3 layers of kwargs (_run_one_round_inline
+    # → run_evolution_loop → run_mining_iteration → workflow.run) while still
+    # keeping the consume → inject path round-scoped.
     try:
         from backend.config import settings as _r1b_settings
         if bool(getattr(_r1b_settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)):
@@ -1047,9 +1054,23 @@ async def _run_one_round_inline(
             if _consumed:
                 logger.info(
                     f"[r1b_wire] task={task.id} round-entry consumed pending hypothesis "
-                    f"(v1 log-only, injection in R1b.2-v2): "
-                    f"{_consumed.get('statement', '')[:80]}"
+                    f"(R1b.2-v2 inject ON): {_consumed.get('statement', '')[:80]}"
                 )
+                # Stash for workflow.run to pick up + clear (one-shot).
+                try:
+                    _cfg = dict(getattr(task, "config", None) or {})
+                    _cfg["__r1b_consumed_pending_hypothesis"] = _consumed
+                    task.config = _cfg
+                    try:
+                        from sqlalchemy.orm.attributes import flag_modified
+                        flag_modified(task, "config")
+                    except Exception:
+                        pass
+                    await db.commit()
+                except Exception as _stash_ex:
+                    logger.warning(
+                        f"[r1b_wire] task={task.id} stash consumed failed (will skip inject): {_stash_ex}"
+                    )
     except Exception as _r1b_ex:
         logger.warning(
             f"[r1b_wire] task={task.id} consume_pending_hypothesis failed (round unaffected): {_r1b_ex}"
