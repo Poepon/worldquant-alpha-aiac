@@ -186,3 +186,19 @@ def test_workflow_imports_cleanly_with_r1b_retry_flag_on(monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_R1B_RETRY_LOOP", True, raising=False)
     monkeypatch.setattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False, raising=False)
     from backend.agents.graph.workflow import MiningWorkflow  # noqa: F401
+
+
+def test_workflow_imports_cleanly_with_r1b_mutate_flag_on(monkeypatch):
+    """R1b.2b — ENABLE_R1B_HYPOTHESIS_MUTATE=True wires the mutate node."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "ENABLE_R1B_RETRY_LOOP", False, raising=False)
+    monkeypatch.setattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", True, raising=False)
+    from backend.agents.graph.workflow import MiningWorkflow  # noqa: F401
+
+
+def test_workflow_imports_cleanly_with_both_r1b_flags_on(monkeypatch):
+    """R1b.2b — both flags on, retry + mutate nodes both wired."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "ENABLE_R1B_RETRY_LOOP", True, raising=False)
+    monkeypatch.setattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", True, raising=False)
+    from backend.agents.graph.workflow import MiningWorkflow  # noqa: F401

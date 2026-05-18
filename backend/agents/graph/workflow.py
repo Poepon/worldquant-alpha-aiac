@@ -315,10 +315,25 @@ class MiningWorkflow:
             or bool(getattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False))
         )
         if _r1b_active:
-            from backend.agents.graph.nodes.r1b_loop import node_code_gen_retry
+            from backend.agents.graph.nodes.r1b_loop import (
+                node_code_gen_retry,
+                node_hypothesis_mutate,
+            )
             workflow.add_node(
                 "code_gen_retry",
                 partial(node_code_gen_retry, llm_service=self.llm_service),
+            )
+            # R1b.2b (2026-05-18): register hypothesis_mutate node (real,
+            # replacing R1b.1c placeholder route). Per plan §4.2 — mutate
+            # is dataset-cycle-scoped: produces pending_new_hypothesis in
+            # state for the OUTER mining loop's next round to consume, drops
+            # current FAIL alphas, then routes to save_results (no in-graph
+            # cycle back to validate — the new hypothesis needs the full
+            # rag_query → hypothesis_propose → code_gen pipeline which only
+            # the outer round entry runs).
+            workflow.add_node(
+                "hypothesis_mutate",
+                partial(node_hypothesis_mutate, llm_service=self.llm_service),
             )
             # Pure-routing node: no LLM, no DB. Stays a dummy fn so the
             # router can use it as a switch (LangGraph requires every named
@@ -338,15 +353,19 @@ class MiningWorkflow:
                 {
                     "save_results": "save_results",
                     "code_gen_retry": "code_gen_retry",
-                    # R1b.2 will register a real 'hypothesis_mutate' node;
-                    # until then route to save_results so the build is legal.
-                    "hypothesis_mutate": "save_results",
+                    "hypothesis_mutate": "hypothesis_mutate",
                 },
             )
             # Cycle closure: retry rewrites the alpha then we re-validate +
             # re-simulate + re-evaluate. Per plan §2.1 the cycle is
             # validate → simulate → evaluate so we hand back to validate.
             workflow.add_edge("code_gen_retry", "validate")
+            # Per plan §4.2 mutate does NOT loop back to validate within the
+            # graph — the new hypothesis needs a fresh rag_query +
+            # hypothesis_propose round, which the OUTER mining loop drives.
+            # So mutate → save_results (alphas dropped, state carries
+            # pending_new_hypothesis which the next outer iteration reads).
+            workflow.add_edge("hypothesis_mutate", "save_results")
             logger.info(
                 "[Workflow] R1b CoSTEER cycle wired (retry_loop=%s mutate=%s)",
                 getattr(settings, "ENABLE_R1B_RETRY_LOOP", False),
