@@ -59,11 +59,6 @@ class KnowledgeEntry(SQLAlchemyBase):
     pattern_hash = Column(String(32))
     description = Column(Text)
     meta_data = Column(JSONB, default={})
-    # Tier system: 1/2/3 or NULL (not in tier hierarchy / pre-tiering rows).
-    # Top-level column with partial index — RAG queries filter by tier on hot path.
-    # NOTE: tier is a derived attribute of pattern; classify_tier(pattern) must agree
-    # with this value (enforced in KnowledgeRepository.upsert_pattern via raise-on-mismatch).
-    factor_tier = Column(Integer, nullable=True, index=True)
     usage_count = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
     created_by = Column(String(50), default="SYSTEM")

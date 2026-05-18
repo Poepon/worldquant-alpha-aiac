@@ -237,25 +237,6 @@ class MiningState(BaseModel):
     multi_fidelity_enabled: bool = False  # W4 nice-to-have
 
     # -------------------------------------------------------------------------
-    # Tier system (T1/T2/T3 factor library) — populated by router from agent_mode
-    # -------------------------------------------------------------------------
-    # factor_tier: 1 = T1 (LLM-guided field/op selection),
-    #              2 = T2 (wrap T1 PASS seeds with cross-sectional / smoothing),
-    #              3 = T3 (wrap T2 PASS seeds with trade_when filters).
-    # Default 1 keeps the legacy AUTONOMOUS path classified as T1 when
-    # ENABLE_FACTOR_TIERING is on.
-    factor_tier: int = 1
-    # current_strategy: Pydantic model serialized via .model_dump(); T1 stores
-    # T1Strategy, T2/T3 store T{2,3}Strategy. Consumers reconstitute the typed
-    # object before passing to expand_*_strategy.
-    current_strategy: Optional[Dict] = None
-    # T2/T3 only: seeds loaded once at task start by node_tier_seed_load.
-    # Each entry: {alpha_id, expression, region, dataset_id, metrics, snapshot_at}
-    tier_seeds: List[Dict] = Field(default_factory=list)
-    current_seed_index: int = 0
-    current_seed: Optional[Dict] = None
-
-    # -------------------------------------------------------------------------
     # BRAIN Consultant mode snapshot (P3-Brain, 2026-05-16)
     # -------------------------------------------------------------------------
     # 从 MiningTask.config["brain_role_snapshot"] 透传 — task 启动时冻结当下

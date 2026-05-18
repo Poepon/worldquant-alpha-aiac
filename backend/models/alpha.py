@@ -91,8 +91,9 @@ class Alpha(SQLAlchemyBase):
     fields_used = Column(JSONB, default=[])
     operators_used = Column(JSONB, default=[])
 
-    # Tier system (T1/T2/T3 factor library)
-    factor_tier = Column(Integer, nullable=True, index=True)  # 1/2/3 or NULL (not in tier hierarchy)
+    # parent_alpha_id keeps flat hypothesis lineage (post tier-system removal,
+    # 2026-05-18). The old ``factor_tier`` column was dropped — all alpha
+    # quality classification now flows through the flat EVAL_* threshold band.
     parent_alpha_id = Column(Integer, ForeignKey("alphas.id"), nullable=True, index=True)
     metrics_snapshot_at = Column(DateTime(timezone=True), nullable=True)  # Last refresh from BRAIN
     # TODO #1 (2026-05-14): rolling OS-metric snapshots for decay/half-life

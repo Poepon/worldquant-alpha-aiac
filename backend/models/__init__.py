@@ -13,7 +13,6 @@ Usage:
 from backend.models.base import (
     MiningStatus,
     DatasetStrategy,
-    AgentMode,
     TraceStepType,
     QualityStatus,
     HumanFeedback,
@@ -107,7 +106,6 @@ __all__ = [
     # Enums
     "MiningStatus",
     "DatasetStrategy",
-    "AgentMode",
     "TraceStepType",
     "QualityStatus",
     "HumanFeedback",

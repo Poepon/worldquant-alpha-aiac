@@ -89,10 +89,6 @@ class Hypothesis(SQLAlchemyBase):
     # Stored as String not Postgres ENUM so future kinds don't need migration.
     kind = Column(String(30), default="INVESTMENT_THESIS", index=True)
 
-    # Which tier this hypothesis targets (1=T1, 2=T2, 3=T3). Aligned with
-    # task.agent_mode → factor_tier mapping.
-    target_tier = Column(Integer, default=1, index=True)
-
     # Classification (LLM-emitted)
     expected_signal = Column(String(50), default="unknown")
     confidence = Column(String(20), default="medium")     # high|medium|low
@@ -250,7 +246,7 @@ class Hypothesis(SQLAlchemyBase):
 
     def __repr__(self) -> str:
         return (
-            f"<Hypothesis id={self.id} kind={self.kind} tier=T{self.target_tier} "
+            f"<Hypothesis id={self.id} kind={self.kind} "
             f"status={self.status} alphas={self.alpha_count}/{self.pass_count}>"
         )
 

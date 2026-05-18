@@ -32,15 +32,6 @@ class DatasetStrategy(str, enum.Enum):
     SPECIFIC = "SPECIFIC"   # User-specified datasets
 
 
-class AgentMode(str, enum.Enum):
-    """Mode of agent operation."""
-    AUTONOMOUS = "AUTONOMOUS"   # Fully automatic (default; behaves as T1 when ENABLE_FACTOR_TIERING)
-    INTERACTIVE = "INTERACTIVE"  # Pause at each step
-    AUTONOMOUS_TIER1 = "AUTONOMOUS_TIER1"  # T1 LLM-guided programmatic field/op selection
-    AUTONOMOUS_TIER2 = "AUTONOMOUS_TIER2"  # T2 wrap T1 PASS seeds with cross-sectional / smoothing wrappers
-    AUTONOMOUS_TIER3 = "AUTONOMOUS_TIER3"  # T3 wrap T2 PASS seeds with trade_when entry filters
-
-
 class TraceStepType(str, enum.Enum):
     """Type of trace step in mining workflow."""
     RAG_QUERY = "RAG_QUERY"
@@ -50,9 +41,6 @@ class TraceStepType(str, enum.Enum):
     SIMULATE = "SIMULATE"
     SELF_CORRECT = "SELF_CORRECT"
     EVALUATE = "EVALUATE"
-    TIER_SEED_LOAD = "TIER_SEED_LOAD"  # T2/T3: load + refresh seed pool from prior tier's PASS alphas
-    STRATEGY_SELECT = "STRATEGY_SELECT"  # All tiers: LLM strategy decision (T1 fields/ops, T2/T3 wrappers)
-    TIER_WRAP = "TIER_WRAP"  # All tiers: programmatic expansion (T1 enumerate, T2/T3 wrap)
     # Plan v5+ §Phase 2 B1 — typed Hypothesis lifecycle steps (HYPOTHESIS_CENTRIC_LEVEL≥2)
     HYPOTHESIS_PROPOSE = "HYPOTHESIS_PROPOSE"   # B3: persist Hypothesis row, emit hypothesis_id
     HYPOTHESIS_FEEDBACK = "HYPOTHESIS_FEEDBACK"  # B5: round-end attribution + lifecycle transition

@@ -28,58 +28,31 @@ class MiningTask(SQLAlchemyBase):
     
     dataset_strategy = Column(String(50), default="AUTO")
     target_datasets = Column(JSONB, default=[])
-    agent_mode = Column(String(50), default="AUTONOMOUS")
-    
+
     status = Column(String(50), default="PENDING")
     daily_goal = Column(Integer, default=4)
     progress_current = Column(Integer, default=0)
-    
+
     # Evolution tracking
     current_iteration = Column(Integer, default=0)
     max_iterations = Column(Integer, default=10)
-    
+
     config = Column(JSONB, default={})
 
-    # V-19 Persistent Mining Service mode (2026-05-10)
-    # mining_mode: 'DISCRETE' (legacy task — finishes when daily_goal met)
-    #              'CONTINUOUS_CASCADE' (cascade — kill-switched via
-    #                                    ENABLE_CASCADE_LEGACY since phase15-D PR1)
-    #              'FLAT_CONTINUOUS' (flat-F1 path — active)
-    mining_mode = Column(String(30), default="DISCRETE", nullable=False)
-    # Phase 15-D PR3b (2026-05-18): cascade_phase + cascade_round_idx
-    # REMOVED. Authoritative source is now run.runtime_state["current_tier"]
-    # + run.runtime_state["round_idx"]. Apply migration c3f9a7d2e4b8 to drop
-    # the underlying DB columns. Defensive `getattr(task, "cascade_phase",
-    # None)` reads in 8 sites now return None safely. The cascade legacy code
-    # paths (_run_continuous_cascade etc) that wrote to these columns are
-    # dead under ENABLE_CASCADE_LEGACY=False and tracked for full removal
-    # in a PR3c follow-up.
     # Watchdog liveness signal — updated each time _incremental_save_alphas commits.
     last_alpha_persisted_at = Column(DateTime(timezone=True), nullable=True)
 
-    # === Phase 1.5-A (Revision A 7a3f9e1c2b8d, plan v1.3 §1) ===
-    # Dual-default per V1.2-B4:
-    #   default=        → Python-side, fires for any ORM-INSERT (MiningTask(...)
-    #                     constructor) — covers 21 test fixture files without
-    #                     editing each one.
-    #   server_default= → DB-side, fires for raw SQL INSERT + historical row
-    #                     SELECT (column was added with backfill default).
-    # MUST have BOTH — SQLAlchemy ORM-INSERT does NOT consult server_default
-    # at INSERT time, only at refresh post-INSERT.
+    # Phase 1.5-A scheduling field. Post tier-removal, ``schedule`` is the sole
+    # authoritative driver for cascade vs flat (legacy ``agent_mode`` /
+    # ``starting_tier`` / ``mining_mode`` columns dropped). Dual-default per
+    # V1.2-B4 (Python default fires for ORM constructor INSERTs; server_default
+    # fires for raw SQL INSERT + historical-row SELECT).
     schedule = Column(
         String(20),
         default="ONESHOT",
         server_default="ONESHOT",
         nullable=False,
     )
-    starting_tier = Column(
-        Integer,
-        default=1,
-        server_default="1",
-        nullable=False,
-    )
-    # JSONB server_default uses sa.text("'X'::jsonb") form per MF-V1.4-1/2 —
-    # asyncpg requires explicit ::jsonb cast or the column inherits text type.
     generation_strategy = Column(
         JSONB,
         default=lambda: ["llm"],

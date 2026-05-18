@@ -475,70 +475,34 @@ class Settings(BaseSettings):
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     ENABLE_TASK_SCHEMA_V2: bool = False
 
-    # ----- Tier-specific PASS thresholds (T1/T2/T3 factor library) -----
-    # T1: 裸 ts_op 信号；2026-05-07 P0 收紧到 BRAIN 提交 gate
-    # 旧值 0.8/0.5 是 探索 bar — batch 276-283 产生 8 条 PASS 全部 can_submit=False
-    # (BRAIN bar: sharpe ≥ 1.25, fitness ≥ ~1.0). T1 PASS 现在 = BRAIN-submittable
-    # 候选, 探索路径走 PROVISIONAL → optimization queue (Fix C 2026-05-07).
-    TIER1_SHARPE_MIN: float = 1.25
-    TIER1_FITNESS_MIN: float = 0.95
-    TIER1_TURNOVER_MIN: float = 0.01
-    TIER1_TURNOVER_MAX: float = 0.70
-    TIER1_SUBUNIV_MIN: float = 0.1
-    # T2: 包装后成型 — group/pure-xs/smoothing wrapper 套 T1 信号
-    TIER2_SHARPE_MIN: float = 1.0
-    TIER2_FITNESS_MIN: float = 0.8
-    TIER2_TURNOVER_MIN: float = 0.01
-    TIER2_TURNOVER_MAX: float = 0.55  # 与 T3 trade_when 协同：T3 entry-filter 把 T2 0.55 降到 0.20-0.30
-    TIER2_SUBUNIV_MIN: float = 0.2
-    # T3: 接近可提交 — trade_when 择时；保 BRAIN /check buffer
-    TIER3_SHARPE_MIN: float = 1.5
-    TIER3_FITNESS_MIN: float = 1.0
-    TIER3_TURNOVER_MIN: float = 0.01
-    TIER3_TURNOVER_MAX: float = 0.70
-    TIER3_SELF_CORR_MAX: float = 0.7  # T3 严格判 self_corr
+    # ----- Flat evaluation thresholds (post tier-system removal, 2026-05-18) -----
+    # Single threshold band replaces the old TIER1/TIER2/TIER3 ladder. Values
+    # chosen at the strict end of the old ladder (≈ old T3) per master plan
+    # decision: "alpha 产出变少但质量高". The PROVISIONAL gap to PASS is 0.25
+    # sharpe, matching the old T2→T3 gap.
+    #
+    # brain_role_snapshot.effective_sharpe_submit_min still overrides
+    # EVAL_SHARPE_MIN at runtime via the _eval_thresholds helper in
+    # backend/agents/graph/nodes/evaluation.py, so Consultant-mode tasks keep
+    # their elevated bar.
+    EVAL_SHARPE_MIN: float = 1.5
+    EVAL_FITNESS_MIN: float = 1.2
+    EVAL_TURNOVER_MIN: float = 0.01
+    EVAL_TURNOVER_MAX: float = 0.4
+    EVAL_SUBUNIV_MIN: float = 0.2
+    EVAL_SELF_CORR_MAX: float = 0.7
 
-    # V-22.5 (2026-05-11): T2 self_corr PASS gate. Default ON with same 0.7
-    # threshold as T3. Before V-22.5, T2 skipped self_corr (rationale "within-
-    # batch wrapper variants correlate, would FAIL whole batch") — but
-    # BRAIN /correlations/SELF is vs already-submitted OS cache not within
-    # batch, so this rationale was wrong. IQC audit showed 13/13 net-positive
-    # Δscore T2 alphas all had self_corr 0.85-0.99 vs portfolio — all BRAIN
-    # submit-rejected. Mining-time gate puts these PROV instead of PASS so
-    # KB / submission queue stay clean. Disable by setting threshold to 1.0
-    # or ENABLE_T2_SELF_CORR_CHECK=False to revert.
-    TIER2_SELF_CORR_MAX: float = 0.7
-    ENABLE_T2_SELF_CORR_CHECK: bool = True
+    EVAL_PROVISIONAL_SHARPE_MIN: float = 1.25
+    EVAL_PROVISIONAL_FITNESS_MIN: float = 1.0
+    EVAL_PROVISIONAL_TURNOVER_MAX: float = 0.55
+    EVAL_PROVISIONAL_SUBUNIV_MIN: float = 0.15
 
-    # PASS_PROVISIONAL 阈值（同梯度，各项放宽 30-40%）
-    # 2026-05-07 P0 同步上调 — 与 T1 PASS 1.25/0.95 配合作 探索 bar
-    # 旧 0.5/0.3 在新 PASS gate 下意义不再（远低于 PASS）
-    TIER1_PROVISIONAL_SHARPE_MIN: float = 0.8
-    TIER1_PROVISIONAL_FITNESS_MIN: float = 0.6
-    TIER1_PROVISIONAL_TURNOVER_MAX: float = 0.85
-    TIER1_PROVISIONAL_SUBUNIV_MIN: float = 0.0  # 仍要为正
-    TIER2_PROVISIONAL_SHARPE_MIN: float = 0.8
-    TIER2_PROVISIONAL_FITNESS_MIN: float = 0.6
-    TIER2_PROVISIONAL_TURNOVER_MAX: float = 0.65
-    TIER2_PROVISIONAL_SUBUNIV_MIN: float = 0.1
-    TIER3_PROVISIONAL_SHARPE_MIN: float = 1.3
-    TIER3_PROVISIONAL_FITNESS_MIN: float = 0.8
-    TIER3_PROVISIONAL_TURNOVER_MAX: float = 0.70
-    # T3 sub-universe min 用 BRAIN 动态 limit；PROVISIONAL 用 limit×0.7
+    EVAL_SCORE_PASS: float = 0.8
+    EVAL_SCORE_OPTIMIZE: float = 0.3
 
-    # Tier system feature flags & 启动门槛
-    ENABLE_FACTOR_TIERING: bool = True  # 总开关；False 时 router 拒收 AUTONOMOUS_TIER* mode
-    T1_USE_LLM_GUIDED_STRATEGY: bool = True  # False 时 T1 task 回退 W0 ALPHA_GENERATION_SYSTEM
-    MIN_TIER_SEED_COUNT: int = 5  # T2/T3 task 启动门槛 + node_tier_seed_load 早停门槛共用
-
-    # V-19 Persistent Mining Service mode (2026-05-10) — cascade settings.
-    # Round-driven phase switching (per IX-2 decision): each phase runs a fixed
-    # round budget then transitions, regardless of PASS count. Phase skip when
-    # local + global seed pool both < MIN_TIER_SEED_COUNT (IX-1 fallback).
-    CASCADE_T1_ROUNDS: int = 10            # T1 phase 跑这么多 round 切 T2
-    CASCADE_T2_ROUNDS: int = 10
-    CASCADE_T3_ROUNDS: int = 5
-    CASCADE_ENABLE_T3: bool = False        # IX-4: T3 PASS rate=0% (V-16 拦) → 默认禁
+    # V-19 Persistent Mining Service mode (2026-05-10) — session-loop pacing.
+    # CASCADE_PAUSE_POLL_SEC is shared with FLAT_CONTINUOUS sessions (the
+    # round-end PAUSED check) post tier-removal.
     CASCADE_PAUSE_POLL_SEC: float = 1.0    # 主循环每 round 末检查 PAUSED 间隔
 
     # V-19.7 watchdog + BRAIN quota guard.
@@ -566,59 +530,6 @@ class Settings(BaseSettings):
     # (redis) blocks round N+1's SIMULATE until N releases — natural overlap.
     # Set False to revert to fully-serial cascade phases.
     CASCADE_PIPELINE_ENABLED: bool = True
-
-    # P1 (2026-05-07): auto ts_decay_linear(., 4) wrapper for T1 candidates.
-    # 实测验证 (docs/decay_verify_pk6606.json): decay=4 把 sh=1.58 fit=0.85
-    # to=0.81 (HIGH_TURNOVER+LOW_FITNESS) 转成 sh=1.45 fit=1.47 to=0.51
-    # (BRAIN can_submit=true,首次 PASS).启用此 flag 让 expand_t1_strategy
-    # 在每个 T1 候选旁边加一个 decay=4 包装的 T2 twin,加倍候选数但显著
-    # 提升每轮出 PASS 概率。decay=2/8/16 sweep 显示 4 是 sweet spot。
-    T1_AUTO_DECAY_WRAPPER: bool = True
-    T1_AUTO_DECAY_VALUE: int = 4  # the d in ts_decay_linear(expr, d)
-
-    # V-22.6 (2026-05-12) — Composite-field T1 enumeration. BRAIN ts_op accepts
-    # only one primary input series, so multi-field signals (PE = close/eps,
-    # accrual = cfo/ni, intraday range = (high-low)/close ...) must be
-    # synthesized arithmetically BEFORE ts_op. Source: spike showed every
-    # PROV/PASS alpha in rounds 16-20 was single-field; 38 V-22.5-safe
-    # candidates had Δscore<0 because Δscore>0 ones got self-corr blocked
-    # against the OS portfolio (also single-field returns variants).
-    #   - COMPOSITE_T1_ENABLED: master switch (False reverts to single-field).
-    #   - COMPOSITE_T1_MAX_PER_COMPOSITE: cap ts_op×window combos per composite
-    #     so 1 composite doesn't crowd stratified-sample.
-    #   - COMPOSITE_T1_BACKFILL_WINDOW: ts_backfill window for sparse
-    #     fundamentals (quarterly EPS / EBIT carry NaN between reports).
-    #   - COMPOSITE_T1_WINSORIZE_STD: winsorize σ bound to trim ratios with
-    #     near-zero denominators.
-    COMPOSITE_T1_ENABLED: bool = True
-    COMPOSITE_T1_MAX_PER_COMPOSITE: int = 2
-    # V-22.6.1 (2026-05-12): default OFF after spike showed BRAIN's 8-operator
-    # complexity limit rejects the full preprocess wrap on multi-leg composites
-    # (e.g. overnight_gap counts as 13 ops). The bare form `ts_op(<composite>, w)`
-    # still classifies as T2 via _peel_composite_preprocess in the classifier,
-    # so wrap-less composites still flow through the T1 pipeline correctly.
-    # Re-enable per-family or globally once BRAIN raises the limit OR for
-    # sparse-fundamental composites where backfill is strictly needed.
-    COMPOSITE_T1_APPLY_PREPROCESS: bool = False
-    COMPOSITE_T1_BACKFILL_WINDOW: int = 120
-    COMPOSITE_T1_WINSORIZE_STD: int = 4
-    # V-22.6.3 (2026-05-12): auto-emit ts_decay_linear(<composite>, 4) variant
-    # per composite. Spike showed 4 PROV composite alphas (sharpe 1.8-2.35) all
-    # blocked by turnover 0.81-0.82 > BRAIN's 0.7 can_submit gate. ts_decay_linear
-    # 4-day smoothing typically halves turnover with minimal sharpe loss (per
-    # T1_AUTO_DECAY_WRAPPER verification 2026-05-07). The decay variant is an
-    # additional candidate alongside the LLM-driven ts_op × window combos,
-    # NOT a replacement — both shapes flow to BRAIN simulate.
-    COMPOSITE_T1_AUTO_DECAY_WRAPPER: bool = True
-    COMPOSITE_T1_AUTO_DECAY_VALUE: int = 4
-    # V-22.6.5 (2026-05-12) — reserve a fraction of the final candidate pool
-    # for composite alphas after stratified_sample. Spike on V-22.6.4
-    # verification rounds saw fund composites averaged out by the 42-bucket
-    # stratification (composite ratio ~21% of final pool, fund composite ~6%).
-    # Reserving 33% for composites lifts fund-composite expected count from
-    # ~0.6/round to ~2/round, giving reliable yield of fund composite saves.
-    # 0.0 = disabled (legacy single-stratified-sample behavior).
-    COMPOSITE_T1_FINAL_POOL_QUOTA_PCT: float = 0.33
 
     # Plan v5+ §Phase 1 — Hypothesis-Guided Exploration (HGE) staging flag.
     # 0 = current dataset-centric (pre-Phase 1, default until Phase 1 verified)
@@ -848,13 +759,7 @@ class Settings(BaseSettings):
     # 2026-Q3 — retire vs build retrieve vs defer. See
     # `docs/v26_38_39_field_insight_deprecation.md` for the three options.
     WRITE_FIELD_HYPOTHESIS_INSIGHTS: bool = False
-    # PR4 — P0 实验结论：BRAIN GET /alphas/{id} 返回冻结的 sim 时 snapshot，不是
-    # rolling 重算。所以 node_tier_seed_load 调 BRAIN refresh metrics 是 no-op，
-    # 浪费配额。默认关闭；只有当 BRAIN 行为改变（比如未来开放 rolling endpoint）
-    # 或想 detect "alpha 被删除"等副作用时才开启。OS-active alpha 的 metrics
-    # 累加是另一回事，不在这个 flag 控制范围。
-    TIER_SEED_LOAD_REFRESH_VIA_BRAIN: bool = False
-    # 同理 — 历史 KB-referenced alpha 的 metrics 不会随时间变化（IS 冻结），
+    # 历史 KB-referenced alpha 的 metrics 不会随时间变化（IS 冻结），
     # daily refresh 仅在你想监测 alpha-deletion 等边界行为时才开。
     REFRESH_KB_VIA_BRAIN: bool = False
 
@@ -872,15 +777,6 @@ class Settings(BaseSettings):
     SCORE_PASS_THRESHOLD: float = 0.8      # Composite score to pass (legacy fallback)
     SCORE_OPTIMIZE_THRESHOLD: float = 0.3  # Score threshold for optimization queue (legacy fallback)
 
-    # Tier-aware score thresholds (P0 #3). Defaults = global values above → zero behaviour change.
-    # Per-tier tuning is a follow-up; setting TIER{N}_SCORE_PASS in .env activates it.
-    TIER1_SCORE_PASS: float = 0.8
-    TIER1_SCORE_OPTIMIZE: float = 0.3
-    TIER2_SCORE_PASS: float = 0.8
-    TIER2_SCORE_OPTIMIZE: float = 0.3
-    TIER3_SCORE_PASS: float = 0.8
-    TIER3_SCORE_OPTIMIZE: float = 0.3
-    
     # P0-3: Two-Stage Correlation Check
     CORR_CHECK_THRESHOLD: float = 0.5      # Preliminary score threshold to trigger correlation check
     
