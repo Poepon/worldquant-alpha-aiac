@@ -308,22 +308,12 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "soft-fall direct call。Rollback < 1min via flag flip OFF。"
         ),
     ),
-    # --- phase15-D cascade retirement kill-switch ---
-    "ENABLE_CASCADE_LEGACY": FlagSpec(
-        name="ENABLE_CASCADE_LEGACY",
-        flag_type="bool",
-        group="Phase15-D",
-        description=(
-            "phase15-D (2026-05-18): kill-switch for legacy CONTINUOUS_CASCADE. "
-            "Default True = backward-compat. When False: run_mining_task refuses "
-            "cascade dispatch (FAILED), routers/mining_session.py returns 410, "
-            "session_watchdog cascade probe short-circuits. Operator deploy: "
-            "first run POST /ops/cascade-deprecation/drain to convert PAUSED "
-            "cascade rows to STOPPED, then flip OFF. Rollback < 1 min via "
-            "flag flip ON. Pre-PR3 (column drop) requires this flag OFF "
-            "+ ≥7d clean obs."
-        ),
-    ),
+    # phase15-D PR3c (2026-05-18): ENABLE_CASCADE_LEGACY flag retired —
+    # cascade dispatch + router + watchdog probe now refuse
+    # unconditionally. Removed from SUPPORTED_FLAGS so the override UI
+    # stops showing it. Existing FeatureFlagOverride rows for this name
+    # silently no-op (orphan flag warned at load time by
+    # _load_overrides_into_cache).
     # --- R8 query-level telemetry (per-call layer_hits + cache_hit row) ---
     "ENABLE_R8_QUERY_LOG": FlagSpec(
         name="ENABLE_R8_QUERY_LOG",

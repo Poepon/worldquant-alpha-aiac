@@ -11,7 +11,7 @@ from backend.config import settings
 from backend.database import init_db
 
 # Import all routers
-from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, factor_library, mining_session, correlation, ops
+from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, factor_library, correlation, ops
 
 
 @asynccontextmanager
@@ -98,8 +98,8 @@ app.include_router(datasets.router, prefix=settings.API_V1_STR)
 app.include_router(operators.router, prefix=settings.API_V1_STR)
 # PR3: tier-aware analytics for the FactorLibrary frontend
 app.include_router(factor_library.router, prefix=settings.API_V1_STR)
-# V-19: persistent mining service singleton (start/stop/resume button)
-app.include_router(mining_session.router, prefix=settings.API_V1_STR)
+# V-19 persistent mining service router removed phase15-D PR3c (2026-05-18)
+# — cascade retired; use POST /api/v1/ops/start-flat-session for new sessions.
 # Crisis-window correlation stress test (portfolio matrix + per-window summary)
 app.include_router(correlation.router, prefix=settings.API_V1_STR)
 # P3 (2026-05-16): ops console — feature flags + manual task triggers + monitoring dashboards

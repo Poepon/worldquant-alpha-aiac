@@ -31,11 +31,13 @@ def _isolate_ops_token():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_cascade_flag():
+def _isolate_default_flat_flag():
+    """phase15-D PR3c (2026-05-18): ENABLE_CASCADE_LEGACY retired (cascade
+    always-refused). Only ENABLE_DEFAULT_FLAT_SESSION still needs isolation."""
     from backend.config import settings as _stg
-    saved = getattr(_stg, "ENABLE_CASCADE_LEGACY", True)
+    saved = getattr(_stg, "ENABLE_DEFAULT_FLAT_SESSION", False)
     yield
-    setattr(_stg, "ENABLE_CASCADE_LEGACY", saved)
+    setattr(_stg, "ENABLE_DEFAULT_FLAT_SESSION", saved)
 
 
 # ---------------------------------------------------------------------------
@@ -175,37 +177,33 @@ async def test_readiness_response_includes_cascade_legacy_flag_on(readiness_clie
 
 
 @pytest.mark.asyncio
-async def test_readiness_drained_default_flat_on_but_kill_switch_on_says_flip(
+async def test_readiness_cascade_legacy_flag_always_false_post_pr3c(
     readiness_client, monkeypatch,
 ):
-    """0 cascade RUNNING/PAUSED + flat running + DEFAULT_FLAT_SESSION on
-    + CASCADE_LEGACY still on → next_action says "flip ENABLE_CASCADE_LEGACY"."""
+    """phase15-D PR3c: ENABLE_CASCADE_LEGACY retired — cascade_legacy_flag_on
+    in response is hardcoded False (cascade always-refused)."""
     from backend.config import settings
     monkeypatch.setattr(settings, "ENABLE_DEFAULT_FLAT_SESSION", True, raising=False)
-    monkeypatch.setattr(settings, "ENABLE_CASCADE_LEGACY", True, raising=False)
-    # 1 flat RUNNING row, no cascade
     c = await readiness_client([("FLAT_CONTINUOUS", "RUNNING", "USA", 1)])
     async with c as ac:
         r = await ac.get("/api/v1/ops/cascade-deprecation/readiness")
     body = r.json()
-    assert body["ready_to_delete"] is False
-    assert "ENABLE_CASCADE_LEGACY" in body["next_action"]
-    assert body["cascade_legacy_flag_on"] is True
+    assert body["cascade_legacy_flag_on"] is False
 
 
 @pytest.mark.asyncio
-async def test_readiness_all_green_after_kill_switch_off(readiness_client, monkeypatch):
-    """0 cascade + flat running + default_flat ON + kill-switch OFF
-    → ready_to_delete=True + next_action mentions PR3."""
+async def test_readiness_all_green_post_pr3c(readiness_client, monkeypatch):
+    """phase15-D PR3c: 0 cascade RUNNING/PAUSED + flat active +
+    default_flat ON → ready_to_delete=True + next_action describes
+    PR3d + PR4b remaining cleanup."""
     from backend.config import settings
     monkeypatch.setattr(settings, "ENABLE_DEFAULT_FLAT_SESSION", True, raising=False)
-    monkeypatch.setattr(settings, "ENABLE_CASCADE_LEGACY", False, raising=False)
     c = await readiness_client([("FLAT_CONTINUOUS", "RUNNING", "USA", 1)])
     async with c as ac:
         r = await ac.get("/api/v1/ops/cascade-deprecation/readiness")
     body = r.json()
     assert body["ready_to_delete"] is True
-    assert "PR3" in body["next_action"] or "column drop" in body["next_action"]
+    assert "PR3d" in body["next_action"] or "PR4b" in body["next_action"]
 
 
 @pytest.mark.asyncio

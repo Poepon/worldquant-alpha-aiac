@@ -71,29 +71,14 @@ async def _watchdog_revive_async() -> dict:
 
     revived = []
     async with AsyncSessionLocal() as db:
-        # phase15-D (2026-05-18): kill-switch short-circuits cascade probe
-        # entirely when ENABLE_CASCADE_LEGACY=False. The discrete-task
-        # probe below still runs because it handles DISCRETE-historical
-        # rows independent of cascade retirement.
-        cascade_legacy_on = bool(
-            getattr(settings, "ENABLE_CASCADE_LEGACY", True)
-        )
-
-        # --- (a) V-19 CONTINUOUS_CASCADE sessions ---
-        # Phase 1.5-C (2026-05-18): SQL prefilter still uses mining_mode for
-        # index efficiency (operates on the dual-written column either way);
-        # Python-side guard via _is_cascade_schedule(task) makes the flag-flip
-        # semantic correct when schedule and mining_mode diverge (won't happen
-        # under dual-write but defensive for hand-edited DB rows).
-        if not cascade_legacy_on:
-            cascade_rows = []
-        else:
-            stmt = (
-                select(MiningTask)
-                .where(MiningTask.mining_mode == "CONTINUOUS_CASCADE")
-                .where(MiningTask.status == "RUNNING")
-            )
-            cascade_rows = (await db.execute(stmt)).scalars().all()
+        # phase15-D PR3c (2026-05-18): cascade probe retired
+        # unconditionally. Cascade tasks can no longer be created
+        # post-PR3c (mining_session router deleted + run_mining_task
+        # dispatch refuses cascade with FAILED). Any historical
+        # CONTINUOUS_CASCADE row that survives in RUNNING state is
+        # a stale artifact + cannot be revived. Discrete probe (block b)
+        # below still runs for DISCRETE-historical sessions.
+        cascade_rows: list = []
         for task in cascade_rows:
             if not _is_cascade_schedule(task):
                 # flag ON + schedule mismatch → defer to discrete loop below

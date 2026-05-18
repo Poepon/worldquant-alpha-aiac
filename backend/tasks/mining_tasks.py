@@ -38,6 +38,10 @@ def _is_cascade_schedule(task) -> bool:
     Both populated during Phase 1.5-B dual-write window (Revision B backfilled
     227 mining_tasks + 227 latest runs), so flag-flip should be byte-equivalent
     for tasks created after backfill.
+
+    Phase 15-D PR3 (2026-05-18): mining_mode KEPT (only cascade_phase +
+    cascade_round_idx dropped). The dual-source helper stays as-is until
+    PR3b migrates FLAT-detection off mining_mode.
     """
     if getattr(settings, "ENABLE_TASK_SCHEMA_V2", False):
         sched = getattr(task, "schedule", None) or ""
@@ -381,32 +385,39 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             # Discrete tasks (mining_mode='DISCRETE', the default) keep
             # original behavior 100%.
             if _is_cascade_schedule(task):
-                # phase15-D (2026-05-18): kill-switch refuses cascade dispatch
-                # when ENABLE_CASCADE_LEGACY=False. Mark task FAILED with a
-                # clear reason so operators see the cutover. Rollback < 1 min
-                # via flag flip ON.
-                if not bool(getattr(settings, "ENABLE_CASCADE_LEGACY", True)):
-                    logger.warning(
-                        f"[phase15-D] cascade dispatch refused for task {task_id} "
-                        f"— ENABLE_CASCADE_LEGACY=False; use /ops/start-flat-session"
+                # phase15-D PR3c (2026-05-18): cascade dispatch retired
+                # unconditionally. The ENABLE_CASCADE_LEGACY kill-switch
+                # (PR1) has been removed alongside this dispatch and the
+                # entire mining_session router — cascade tasks can no
+                # longer be created via API. Pre-PR3c historical cascade
+                # rows that somehow get dispatched (e.g. via direct DB
+                # status='PENDING' set) are marked FAILED with cutover
+                # guidance. Rollback path: git revert PR3c + restore the
+                # deleted router + revert this branch.
+                logger.warning(
+                    f"[phase15-D PR3c] cascade dispatch refused for task {task_id} "
+                    f"— legacy retired; use POST /api/v1/ops/start-flat-session"
+                )
+                try:
+                    await db.execute(
+                        update(MiningTask)
+                        .where(MiningTask.id == task_id)
+                        .values(status="FAILED")
                     )
-                    try:
-                        await db.execute(
-                            update(MiningTask)
-                            .where(MiningTask.id == task_id)
-                            .values(status="FAILED")
-                        )
-                        if run is not None:
-                            run.status = "FAILED"
-                            run.finished_at = datetime.utcnow()
-                            run.error_message = (
-                                "cascade legacy retired (ENABLE_CASCADE_LEGACY=False); "
-                                "use POST /api/v1/ops/start-flat-session"
-                            )[:500]
-                        await db.commit()
-                    except Exception as db_err:
-                        logger.error(f"[phase15-D] failed to mark task FAILED: {db_err}")
-                    return None
+                    if run is not None:
+                        run.status = "FAILED"
+                        run.finished_at = datetime.utcnow()
+                        run.error_message = (
+                            "cascade legacy retired (phase15-D PR3c); "
+                            "use POST /api/v1/ops/start-flat-session"
+                        )[:500]
+                    await db.commit()
+                except Exception as db_err:
+                    logger.error(f"[phase15-D PR3c] failed to mark task FAILED: {db_err}")
+                return None
+                # Dead code below — kept inside the if-block for diff
+                # clarity. _run_continuous_cascade et al will be deleted
+                # in a follow-up cleanup PR (PR3d).
                 try:
                     return await _run_continuous_cascade(
                         db, task, run, self.request.id,

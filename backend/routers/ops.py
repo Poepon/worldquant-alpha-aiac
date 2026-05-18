@@ -1175,7 +1175,11 @@ async def cascade_deprecation_readiness(
 
     default_flat = bool(getattr(_stg, "ENABLE_DEFAULT_FLAT_SESSION", False))
     flat_on = bool(getattr(_stg, "ENABLE_FLAT_CONTINUOUS", False))
-    cascade_legacy_on = bool(getattr(_stg, "ENABLE_CASCADE_LEGACY", True))
+    # phase15-D PR3c (2026-05-18): ENABLE_CASCADE_LEGACY flag retired —
+    # cascade dispatch + router + watchdog probe refuse unconditionally.
+    # cascade_legacy_on is always False post-PR3c; kept in response for
+    # API compat (downstream CoSTEERMonitor frontend reads this field).
+    cascade_legacy_on = False
 
     if cascade_running > 0:
         next_action = (
@@ -1204,24 +1208,17 @@ async def cascade_deprecation_readiness(
             "and confirm at least one round LIVE before proceeding."
         )
         ready = False
-    elif cascade_legacy_on:
-        # Phase 15-D PR2 upgrade: ready_to_delete now requires the
-        # kill-switch flag to have been flipped OFF. PR3 (column drop)
-        # gates on this signal.
-        next_action = (
-            "Cascade fully drained + flat active. Flip "
-            "ENABLE_CASCADE_LEGACY OFF via PATCH /ops/flags/"
-            "ENABLE_CASCADE_LEGACY to quarantine cascade entry points. "
-            "Observe ≥7d clean (no 410 surprises) before phase15-D PR3 "
-            "(column drop)."
-        )
-        ready = False
     else:
-        # All gates green: cascade drained + flat active + kill-switch OFF
+        # phase15-D PR3c (2026-05-18): kill-switch retired (cascade now
+        # always-refused). All gates green: cascade drained + flat active.
+        # PR3b ORM column drop already applied. Remaining cleanup tracked
+        # as PR3d (delete ~700 LoC cascade dead code) + PR4b (frontend
+        # cascade UI panels).
         next_action = (
-            "Cascade fully drained, flat active, kill-switch OFF. "
-            "Phase 15-D PR3 (column drop + code delete) safe to ship "
-            "after ≥7d obs of kill-switch OFF in production."
+            "Cascade fully retired (drained + flat active + PR3c "
+            "router+dispatch removed). Remaining cleanup is PR3d "
+            "dead-code delete + PR4b frontend panel removal — pure "
+            "code-tree hygiene, no operator action required."
         )
         ready = True
 
