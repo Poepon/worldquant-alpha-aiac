@@ -718,6 +718,9 @@ class TaskService(BaseService):
             if prev_run is not None and isinstance(prev_run.runtime_state, dict):
                 prev_state = dict(prev_run.runtime_state)
 
+        # phase15-D PR3b: cascade_phase + cascade_round_idx ORM cols are
+        # dropped. Use defensive getattr so any straggler row (or future
+        # re-introduction) does not AttributeError.
         run = ExperimentRun(
             task_id=task_id,
             status="RUNNING",
@@ -728,8 +731,8 @@ class TaskService(BaseService):
                     "region": task.region,
                     "universe": task.universe,
                     "mining_mode": task.mining_mode,
-                    "cascade_phase": task.cascade_phase,
-                    "cascade_round_idx": task.cascade_round_idx,
+                    "cascade_phase": getattr(task, "cascade_phase", None),
+                    "cascade_round_idx": getattr(task, "cascade_round_idx", 0),
                 },
             },
             strategy_snapshot={},
@@ -743,6 +746,89 @@ class TaskService(BaseService):
         created_run.celery_task_id = celery_task.id
         await self.commit()
         return celery_task.id
+
+    # =========================================================================
+    # FLAT_CONTINUOUS session lifecycle (flat-F1 v1.5)
+    # =========================================================================
+    # Restored 2026-05-18 — PR3e accidentally deleted these along with the
+    # cascade-only methods (start_session / stop_session / resume_session etc).
+    # The ops router (POST /api/v1/ops/start-flat-session and
+    # POST /api/v1/ops/flat-sessions/{id}/resume) still calls them. Without
+    # these the only production mining mode (FLAT_CONTINUOUS) is dead.
+    # NOTE: do NOT pass cascade_phase / cascade_round_idx to MiningTask(...) —
+    # those columns were dropped in PR3b (migration c3f9a7d2e4b8).
+
+    async def start_flat_session(
+        self,
+        region: str = "USA",
+        universe: str = "TOP3000",
+        datasets: Optional[List[str]] = None,
+    ) -> "MiningSessionInfo":
+        """Create a new FLAT_CONTINUOUS task and dispatch its worker.
+
+        Unlike the retired CONTINUOUS_CASCADE.start_session this is NOT
+        singleton-per-region: multiple FLAT tasks may co-exist (different
+        dataset / hypothesis sets). Caller (ops endpoint) is expected to
+        gate on ``settings.ENABLE_FLAT_CONTINUOUS``.
+        """
+        if region not in self.SUPPORTED_REGIONS:
+            raise ValueError(
+                f"region={region!r} not supported; choose one of {self.SUPPORTED_REGIONS}"
+            )
+
+        task = MiningTask(
+            task_name=f"flat-session-{region}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
+            region=region,
+            universe=universe,
+            dataset_strategy="MANUAL" if datasets else "AUTO",
+            target_datasets=list(datasets or []),
+            agent_mode="AUTONOMOUS",
+            daily_goal=0,                # 0 = unlimited within FLAT_CONTINUOUS_MAX_ITERATIONS
+            max_iterations=999999,
+            config={"flat_cursor": 0},   # v1.5 Q1 V2 initial cursor
+            mining_mode="FLAT_CONTINUOUS",
+            status="RUNNING",
+            schedule="ONESHOT",          # flat is single-pass, no CASCADE schedule
+            starting_tier=1,
+        )
+        created = await self.task_repo.create(task)
+        await self.commit()
+        await self._dispatch_session_worker(created.id, inherit_runtime_state=False)
+        logger.info(
+            f"[start_flat_session] region={region} task_id={created.id} "
+            f"datasets={len(datasets or [])} dispatched"
+        )
+        return self._to_session_info(await self.task_repo.get_by_id(created.id))
+
+    async def resume_flat_session(self, task_id: int) -> "MiningSessionInfo":
+        """Resume a paused FLAT_CONTINUOUS session, preserving runtime_state.
+
+        v1.5 Q1 Variant V2: calls ``_dispatch_session_worker`` with
+        ``inherit_runtime_state=True`` so ``flat_cursor`` (and any other
+        per-session keys) carries over to the new ExperimentRun.
+        """
+        task = await self.task_repo.get_by_id(task_id)
+        if not task:
+            raise ValueError(f"task_id={task_id} not found")
+        if task.mining_mode != "FLAT_CONTINUOUS":
+            raise ValueError(
+                f"task_id={task_id} is not FLAT_CONTINUOUS "
+                f"(mining_mode={task.mining_mode})"
+            )
+        if task.status == "RUNNING":
+            return self._to_session_info(task)
+        if task.status != "PAUSED":
+            raise ValueError(
+                f"task_id={task_id} cannot resume from status={task.status}"
+            )
+        await self.task_repo.update_status(task_id, "RUNNING")
+        await self.commit()
+        await self._dispatch_session_worker(task_id, inherit_runtime_state=True)
+        logger.info(
+            f"[resume_flat_session] task_id={task_id} region={task.region} "
+            f"PAUSED→RUNNING (runtime_state inherited)"
+        )
+        return self._to_session_info(await self.task_repo.get_by_id(task_id))
 
     def _to_session_info(self, task: MiningTask) -> MiningSessionInfo:
         """phase15-D PR3e (2026-05-18): cascade_phase + cascade_round_idx
