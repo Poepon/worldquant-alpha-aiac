@@ -179,6 +179,19 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "meta_data GIN index + backfill_kb_pillar_family_signature.py 3K+ entries。"
         ),
     ),
+    # --- R8-v2 #3 R5 L2 ranking ---
+    "ENABLE_R5_L2_RANKING": FlagSpec(
+        name="ENABLE_R5_L2_RANKING",
+        flag_type="bool",
+        group="Phase3-R8",
+        description=(
+            "Phase 3 R8-v2 #3 (2026-05-18): layer2_family SUCCESS 候选按 R5 "
+            "composite_score 历史 AVG 重排。SQL 单次 GROUP BY expression_hash "
+            "JOIN r1a_attribution_log,relevance_score = 0.45 + 0.4·avg(R5)。"
+            "前置 ENABLE_HIERARCHICAL_RAG ON + ENABLE_LLM_JUDGE ON 累计 r5 "
+            "score 非 NULL。Soft-fail SQL error → 原顺序。Rollback < 1min。"
+        ),
+    ),
     # --- R9 simulation cache ---
     "ENABLE_SIMULATION_CACHE": FlagSpec(
         name="ENABLE_SIMULATION_CACHE",

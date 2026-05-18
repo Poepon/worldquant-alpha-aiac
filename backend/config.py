@@ -302,6 +302,19 @@ class Settings(BaseSettings):
     RAG_HIER_CACHE_TTL_SEC: int = 300 # Redis cache TTL per layer query
     RAG_HIER_CROSS_REGION_DECAY: float = 0.7  # 跨 region 命中 score 折扣
 
+    # R8-v2 #3 (2026-05-18): R5 composite_score ranking for L2 SUCCESS。
+    # ENABLE_R5_L2_RANKING=True 时,layer2_family fetched 候选会 JOIN
+    # r1a_attribution_log.r5_composite_score AVG GROUP BY expression_hash
+    # (sha256[:64] of KB pattern,匹配 evaluation.py:2631 R1a hook 写入
+    # 约定),按 R5 mean score 降序重排;有样本 row 用 0.45+0.4*avg 折算
+    # relevance_score (range [0.45,0.85] 高 R5 sort 在前)。零样本 row 保
+    # 原 0.65 默认。Soft-fail SQL error → 原顺序。前置 R5 ENABLE_LLM_JUDGE
+    # ON 累积 r1a_attribution_log r5_composite_score 非 NULL。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_R5_L2_RANKING: bool = False
+    R5_L2_RANKING_MIN_SAMPLES: int = 1   # 至少 N r1a sample 才参与重排
+    R5_L2_RANKING_LOOKBACK_DAYS: int = 30  # AVG 窗口
+
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
     # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression

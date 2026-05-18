@@ -25,10 +25,79 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, cast, not_, or_, select, text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.knowledge import KnowledgeEntry, compute_pattern_hash
+
+
+def _expr_hash_64(expression: str) -> str:
+    """sha256[:64] hex of an expression — matches the R1a-hook convention
+    in ``backend/agents/graph/nodes/evaluation.py:2631`` so that R8-v2 #3
+    L2 ranking can JOIN ``r1a_attribution_log.expression_hash``.
+
+    Note: this is *different* from :func:`compute_pattern_hash` (which is
+    sha256[:32] of ``pattern|region|dataset``). The R1a log doesn't carry
+    region/dataset on its hash, so we mirror its raw-expression form.
+    """
+    if not expression:
+        return ""
+    return hashlib.sha256(expression.encode("utf-8")).hexdigest()[:64]
+
+
+async def fetch_r5_avg_scores(
+    db: AsyncSession,
+    expressions: List[str],
+    *,
+    min_samples: int = 1,
+    lookback_days: int = 30,
+) -> Dict[str, tuple]:
+    """R8-v2 #3 helper: pull mean R5 composite_score per expression_hash.
+
+    Returns ``{expression_hash: (avg_score, sample_count)}`` for the input
+    expressions that have any non-NULL ``r5_composite_score`` within the
+    lookback window and meet ``min_samples``.
+
+    Soft-fail: SQL or import errors → ``{}`` (caller treats as no signal).
+    """
+    if not expressions:
+        return {}
+    try:
+        hash_map: Dict[str, str] = {}
+        for expr in expressions:
+            h = _expr_hash_64(expr or "")
+            if h:
+                hash_map[h] = expr
+        if not hash_map:
+            return {}
+        hashes = list(hash_map.keys())
+        # asyncpg expanding bind via SQLAlchemy ``in_`` requires a
+        # textual stmt or a select() — go textual to avoid touching
+        # the R1aAttributionLog model import cycle.
+        stmt = text(
+            "SELECT expression_hash, AVG(r5_composite_score) AS avg_score, "
+            "COUNT(*) AS n "
+            "FROM r1a_attribution_log "
+            "WHERE expression_hash = ANY(:hashes) "
+            "  AND r5_composite_score IS NOT NULL "
+            "  AND created_at > now() - (:days || ' days')::interval "
+            "GROUP BY expression_hash"
+        )
+        rows = (await db.execute(
+            stmt, {"hashes": hashes, "days": str(int(lookback_days))}
+        )).all()
+        out: Dict[str, tuple] = {}
+        for r in rows:
+            avg = float(r[1]) if r[1] is not None else None
+            n = int(r[2]) if r[2] is not None else 0
+            if avg is None or n < min_samples:
+                continue
+            out[r[0]] = (avg, n)
+        return out
+    except Exception as ex:
+        logger.warning(f"[hier_rag L2 r5-rank] fetch failed (return empty): {ex}")
+        return {}
 
 logger = logging.getLogger(__name__)
 
@@ -257,6 +326,7 @@ async def layer3_field_level(
 __all__ = [
     "DECAYED_KEY",
     "extract_fields_for_rag",
+    "fetch_r5_avg_scores",
     "RAGEntry",
     "RAGResult",
     "layer0_exact_match",
@@ -352,6 +422,9 @@ async def layer2_family(
     current_expression: Optional[str],
     region: Optional[str] = None,
     budget: int = 5,
+    enable_r5_ranking: bool = False,
+    r5_min_samples: int = 1,
+    r5_lookback_days: int = 30,
 ) -> tuple[List[RAGEntry], List[RAGEntry]]:
     """RAG#2: family JOIN via backfilled meta_data['family_signature'].
 
@@ -365,8 +438,11 @@ async def layer2_family(
     truthy or coming from r1a R10 marker). Otherwise R10 family-cap purpose
     undermined.
 
-    R5 composite_score ranking deferred to PR3 (orchestrator does final
-    ranking once layers are merged; here we just return KB matches).
+    R8-v2 #3 (2026-05-18): when ``enable_r5_ranking`` is True, over-fetch
+    SUCCESS candidates, JOIN ``r1a_attribution_log.r5_composite_score`` AVG
+    by ``expression_hash`` (sha256[:64] of pattern) and re-rank SUCCESS by
+    historical R5 mean. Zero-sample rows keep default 0.65 relevance.
+    Soft-fail: if the R5 JOIN errors out, original order preserved.
 
     Soft-fail: SQL error → ([], []).
     """
@@ -382,11 +458,15 @@ async def layer2_family(
         return [], []
 
     try:
+        # When R5 ranking is ON we want all candidates first so the re-rank
+        # has a chance to surface high-R5 rows beyond the first `budget`
+        # raw matches; otherwise keep the original short-circuit behaviour.
+        fetch_limit = budget * (8 if enable_r5_ranking else 4)
         rows = (await db.execute(
             select(KnowledgeEntry)
             .where(KnowledgeEntry.is_active == True)  # noqa: E712
             .where(KnowledgeEntry.meta_data.op("@>")({"family_signature": sig}))
-            .limit(budget * 4)
+            .limit(fetch_limit)
         )).scalars().all()
 
         succ: List[RAGEntry] = []
@@ -413,10 +493,37 @@ async def layer2_family(
             if r.entry_type == "SUCCESS_PATTERN":
                 if not is_decayed:
                     succ.append(entry)
-                    if len(succ) >= budget:
+                    # When NOT R5-ranking, short-circuit at budget; with
+                    # ranking we over-fetch then trim after re-sort.
+                    if not enable_r5_ranking and len(succ) >= budget:
                         break
             elif r.entry_type == "FAILURE_PITFALL":
                 fail.append(entry)
+
+        # R8-v2 #3 R5 re-ranking (only when enabled and we have multiple
+        # SUCCESS candidates worth sorting).
+        if enable_r5_ranking and len(succ) > 1:
+            score_map = await fetch_r5_avg_scores(
+                db, [e.pattern for e in succ],
+                min_samples=r5_min_samples,
+                lookback_days=r5_lookback_days,
+            )
+            if score_map:
+                for e in succ:
+                    h = _expr_hash_64(e.pattern)
+                    rec = score_map.get(h)
+                    if rec:
+                        avg, n = rec
+                        # Map avg ∈ [0,1] → relevance ∈ [0.45, 0.85].
+                        # Zero-sample rows keep default 0.65 (neutral).
+                        e.relevance_score = 0.45 + 0.4 * max(0.0, min(1.0, avg))
+                        e.meta_data = {
+                            **e.meta_data,
+                            "_r5_composite_avg": round(avg, 4),
+                            "_r5_sample_count": n,
+                        }
+                succ.sort(key=lambda x: x.relevance_score, reverse=True)
+
         return succ[:budget], fail[:budget]
     except Exception as ex:
         logger.warning(f"[hier_rag L2] family query failed (return empty): {ex}")
@@ -511,11 +618,24 @@ async def query_hierarchical(
         result.total_queries += 1
         _consume(s, f, "L1")
 
-    # L2 — family_signature
+    # L2 — family_signature (R8-v2 #3 R5 ranking forwarded from settings)
     if current_expression and (remaining_pat > 0 or remaining_fail > 0):
+        _r5_rank_on = False
+        _r5_min_samples = 1
+        _r5_lookback_days = 30
+        try:
+            from backend.config import settings as _stg
+            _r5_rank_on = bool(getattr(_stg, "ENABLE_R5_L2_RANKING", False))
+            _r5_min_samples = int(getattr(_stg, "R5_L2_RANKING_MIN_SAMPLES", 1))
+            _r5_lookback_days = int(getattr(_stg, "R5_L2_RANKING_LOOKBACK_DAYS", 30))
+        except Exception:
+            pass
         s, f = await layer2_family(
             db, current_expression=current_expression, region=region,
             budget=layer_budgets.get("L2", 5),
+            enable_r5_ranking=_r5_rank_on,
+            r5_min_samples=_r5_min_samples,
+            r5_lookback_days=_r5_lookback_days,
         )
         result.total_queries += 1
         _consume(s, f, "L2")
