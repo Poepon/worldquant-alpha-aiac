@@ -1,3 +1,13 @@
+> 📍 **Ship state 2026-05-18 (plan v1.82, post-v1.3 capstone)**
+>
+> **所有 29/29 task code-complete**。Phase 0/1/1.5/2/3 全 ship。本 doc 写作日期是 2026-05-17,§§ 3-4 的 "task 表" 和 "phase 描述" 是当时的 TODO 视角 — 现已全部完成。每行 ship 状态见 §3.1 表的 `Status` 列(新增,含 commit hash)。
+>
+> **What's still open** = operational observation gates(plan §9 各 phase KPI 要求生产数据 ≥ 1-4 周观察期),**不是** implementation 缺口。Canary 基础设施已 LIVE — `docs/production_canary_sop_2026_05_18.md` + `scripts/canary_redflag_check.py` + Celery beat `*/6:15 SH` 自动跑 + 5 个 red-flag check ERROR-log 到 `.celery.err`。
+>
+> 该 doc 的 v1.x 章节(v1.0→v1.81)是 micro-ship bumps;**v1.82 是首个 consolidation update**(per plan §10 自己承诺的 "Phase 0 ship 后 doc-only PR")。详 §14 v1.82 entry + memory `[[project_2026_05_18_post_v13_capstone]]`。
+>
+> ---
+
 # AIAC Master Implementation Plan — P3 整合路线图
 
 > **文档日期**:2026-05-17
@@ -88,21 +98,49 @@ $ grep -rn "from backend.agents.core" backend/agents/graph/ \
 
 ---
 
-## § 2 已完成事项(Phase 0 partial done)
+## § 2 已完成事项(v1.82 update 2026-05-18:Phase 0/1/1.5/2/3 全 29/29 code-ship complete)
 
-整合 4 文档的"已落地"信息:
+**v1.82 重写**(原 "Phase 0 partial done" 状态作废 — 14 天内全 29 phase shipped)。详细 commit 链 + ship sequence 见 §3.1 任务表 `Status` 列 + memory `[[project_2026_05_18_session_capstone]]` + `[[project_2026_05_18_post_v13_capstone]]`。
 
-| 项 | 完成时间 | 来源 | 验证 |
-|---|---|---|---|
-| **Bug B fix**(T1 sign-flip retry 路由经 `_evaluate_single_alpha`)| 2026-05-16,commit `a425937` | phase15 v2 §11.1 | 111 evaluate 测试 PASS + 生产 task 1330/652 13 alpha 100% 命中 `_regime_at_eval` stamp |
-| **`ENABLE_NEGATIVE_KNOWLEDGE_NUDGE=True` flip** | 2026-05-16 | memory:[[project_aiac_flags_on_2026_05_16]] | typed path 全启用,`HYPOTHESIS_CENTRIC_LEVEL=2` |
-| **9 P0/P1/P2 flag override ON** | 2026-05-16 | memory:[[project_aiac_flags_on_2026_05_16]] | DB FeatureFlagOverride |
-| **P3 ops dashboard ship**(9 页 / 28 endpoint / 143 测试)| 2026-05-16 之前 | memory:[[reference_ops_dashboard_p3]] | 鉴权 X-Ops-Token、双源 OpsReportReader、Settings.__getattribute__ flag hook |
-| **`HYPOTHESIS_CENTRIC_LEVEL=2`**(typed path 全启用)| 2026-05-16 | memory | mining_agent P2-C 注入实测跑了(task 1325 LLM 含 "balanced regime" 等字眼) |
-| **P2-D negative_knowledge active injection**(`prompts/hypothesis.py` 668-680)| 2026-05-15 commit `6cae5f5` | rd_agent_research § 4 R4 已 done | `nudge_lines` 计数 trace |
-| **P2-B Five Pillars 分类**(`pillar_classifier.py`)| 已 ship | rd_agent_research § 8.3 / qlib_research § 2.4 | 分类有数据 |
+**Pre-plan 已落地**(v1.0 writing time 2026-05-17 已 done):
 
-**Phase 0 剩余**:R1a 启用(2 人日)+ 2 周观察期 — 见 § 4.1。
+| 项 | 完成时间 | 验证 |
+|---|---|---|
+| **Bug B fix**(T1 sign-flip retry 路由经 `_evaluate_single_alpha`)| 2026-05-16 `a425937` | 111 evaluate 测试 PASS + 生产 task 1330/652 stamp 命中 |
+| **9 P0/P1/P2 flag override ON** + `HYPOTHESIS_CENTRIC_LEVEL=2` | 2026-05-16 | DB `FeatureFlagOverride` |
+| **P3 ops dashboard ship**(9 page / 28 endpoint / 143 test) | 2026-05-16 之前 | `[[reference_ops_dashboard_p3]]` |
+| **P2-D negative_knowledge active injection** | 2026-05-15 `6cae5f5` | `nudge_lines` 计数 trace |
+| **P2-B Five Pillars 分类** | pre-plan | classifier 数据有 |
+
+**Plan-scope shipped 2026-05-17 → 2026-05-18**(本 v1.82 covers):
+
+| Phase | Tasks | Ship 信号 |
+|---|---|---|
+| **Phase 0** (3) | R1a / Q1 / Q3 | `[[project_phase0_shipped_2026_05_17]]` |
+| **Phase 1** (7) | R2/Q7 / R3/Q8 / R4' / Q2 / Q4 / Q5 / Q6 | `[[project_phase1_complete_2026_05_17]]` |
+| **Phase 1.5** (5) | A / B / C / Pydantic Schema / Fields merge | `[[project_phase15_block1_shipped]]` + `[[project_phase15_c_shipped_2026_05_18]]` |
+| **Phase 2** (5) | R5 / R6 / R7 / R10 / Q9 | 5 个 ship memory entries |
+| **Phase 3** (9) | flat-F1/F2/F3 / R1b(5 sub-phases) / R8(3 PRs+v2) / R9(2 PRs) / Q10 / **flat-F4 + phase15-D 合并** | 多 ship memory entries — phase15-D 9 PRs 同 session |
+
+**Post-ship 基础设施**(v1.82 新增,plan §4 没列因为是 post-ship hygiene):
+
+| 项 | Commit | 备注 |
+|---|---|---|
+| Test baseline rebase | `90b4830` | `baseline.json` kb 59 → 3357 + island-model test fix |
+| Production canary SOP | `4826c54` | `docs/production_canary_sop_2026_05_18.md` 201 lines / 5 red-flag checks |
+| Canary CLI scripts | `22d3636` + `bdad737` | `scripts/canary_{baseline_capture,redflag_check}.py` |
+| Canary Celery beat wire | `fb3c999` | `*/6:15 SH` 自动跑 + ERROR-log 含 rollback target |
+| JSONB-on-SQLite fixture | `5d36a01` + `3665b68` | 3 个 `@compiles` hooks + 2 async-fixture fix → 49 errors closed |
+| Canary signal-to-noise | `497565a` + `8f23ce8` | SQL `NOT LIKE TEST` filter + autouse cleanup fixture (双层) |
+
+**v1.82 final pytest state**:**1999 PASS / 6 skipped / 0 errors / 0 fails**。
+
+**What's NOT done**(都不是 implementation,是 operational observation):
+- Phase 1 → 1.5 GO gate:R2/Q7 bandit arm reward 收敛 ≥ 30/arm — pending ≥ 1 week 生产数据
+- Phase 2 → 3 GO gate:R5 judge ≥ 100 alpha + attribution 分布移动 ≥ 10% — same
+- Phase 3 ship 终态:flat PASS ≥ cascade,R8 命中 ≥ 50%,R9 缓存 ≥ 30% — pending 2-4 weeks
+
+Operator跑 canary `scripts/canary_redflag_check.py --t0 <T-0 ISO>` 或等 `*/6:15` 自动 fire,grep `RED .celery.err` 看告警。Rollback playbook 见 `docs/production_canary_sop_2026_05_18.md` §5。
 
 ---
 
@@ -143,6 +181,39 @@ $ grep -rn "from backend.agents.core" backend/agents/graph/ \
 | **Q10** | `pyqlib` pre-screen as multi-fidelity 新层(BRAIN 前的免费筛)| qlib §5 P3-Q10 | 5 人日 | ★★ 多保真新层 | **Phase 3** | 无(独立)|
 
 **统计**:**29 项任务,Phase 0 = 3 项 / Phase 1 = 7 项 / Phase 1.5 = 5 项 / Phase 2 = 5 项 / Phase 3 = 9 项**。
+
+### 3.1.1 Ship Status (v1.82 2026-05-18) — 29/29 code-complete
+
+每 task 一行,含 ship memory ID + 表征性 commit。原表是"writing-time TODO";本节是"as-shipped"。Operational GO gates(见 §9)pending 生产数据,不在此表。
+
+| Task | Ship memory | 表征 commits |
+|---|---|---|
+| R1a | `project_phase0_shipped_2026_05_17` | `520a0d9` flag dual-register fix |
+| Q1 | `project_phase0_shipped_2026_05_17` | (Kakushadze 101 import) |
+| Q3 | `project_phase0_shipped_2026_05_17` | (Alpha158 + qlib_translator) |
+| Q2 | `project_phase1_complete_2026_05_17` + `project_q2_openassetpricing_outcome` | OAP 193 signals 61.7% |
+| R2/Q7 | `project_phase1_complete_2026_05_17` | bandit ENABLE_DIRECTION_BANDIT ON |
+| R3/Q8 | `project_phase1_complete_2026_05_17` | AST diversity 6th dim |
+| R4' | `project_phase1_complete_2026_05_17` | dual-channel RAG |
+| Q4 / Q5 / Q6 | `project_phase1_complete_2026_05_17` | pillar + theoretical_anchor + Alpha191 CHN |
+| phase15-A | `project_phase15_block1_shipped_2026_05_17` | alembic 3b1c4e5d6a78 |
+| phase15-B | same | Revision B dual-write |
+| phase15-C | `project_phase15_c_shipped_2026_05_18` + `project_phase15_c_frontend_cutover_2026_05_18` | `b6a04b7` backend + frontend cutover |
+| Pydantic Schema | Block 1 ship | TaskConfig strict |
+| Fields merge | Block 1 ship | 三字段合并 |
+| R5 | `project_phase2_r5_shipped_2026_05_18` | `762888b` + ENABLE_LLM_JUDGE ON |
+| R6 | `project_phase2_r6_complete_2026_05_18` | `72d5945` + `f06145d` + `5804e22` ENABLE_DAG_TRACE ON |
+| R7 | `project_p2_r7_decisions_2026_05_18` | `c281831` |
+| R10 | `project_p2_r10_r5fix_shipped_2026_05_18` | `939e12b` family-cap |
+| Q9 | `project_p2_q9_shipped_2026_05_18` | `9b56b08` Decayed Alpha seed 53 entries |
+| flat-F1 | `project_flat_f1_shipped_2026_05_18` | `5a1634c` |
+| flat-F2 | `project_phase3_flatf2_shipped_2026_05_18` | `6972e3b` double-flag guard |
+| flat-F3 | `project_phase3_flatf3_shipped_2026_05_18` | `cf273d8` LLM mutate alpha |
+| R1b | `project_phase3_r1b_complete_2026_05_18` | 5 sub-phases / 14 PRs / 143 cumulative tests |
+| R8 | `project_phase3_r8_v2_complete_2026_05_18` + 3 PR memories | 3 PRs + 6 v2 follow-ups |
+| R9 | (in capstone) | `e432585` PR1 + `34c7a6b` PR2 |
+| Q10 | `project_phase3_q10_shipped_2026_05_18` | 12 files / 5-stage rollout |
+| **phase15-D** | (this session capstone) | **9 PRs `aa49a6b` → `d259c19` + 4 hygiene + `fba9035` getattr follow-up**;同 PR 块 absorbed **flat-F4 删 cascade legacy** scope(原 plan §4.5 顺序拆分,本 session 合并) |
 
 ### 3.2 工程量与 Phase 总结
 
@@ -680,6 +751,7 @@ $ grep -rn "from backend.agents.core" backend/agents/graph/ \
 
 | 日期 | 版本 | 变更 |
 |---|---|---|
+| **2026-05-18** | **v1.82** | **📍 Consolidation update — 29/29 plan task code-complete + post-ship hygiene + canary infra**(per plan §10 自己 24h 内 doc-only PR 的承诺)。v1.0→v1.81 是 micro-ship bumps;v1.82 是首个 substantive 整理。**Doc-only,no code changes**。**变更**:(a) 文件顶部新增 ship-state callout block(replace "TODO doc" → "shipped doc with operational observation pending"); (b) §2 从 "Phase 0 partial done" 全重写为 5-phase ship table 含 ship memory IDs; (c) §3.1 任务表后新增 §3.1.1 "Ship Status v1.82" sub-section,每 task 一行,含 ship memory ID + 表征 commits; (d) 本 §14 entry。**Post-ship 基础设施**(plan §4 未列因 v1.0 写作时不知道需要):test baseline rebase `90b4830` + Production canary SOP `4826c54` + canary CLI scripts `22d3636`+`bdad737` + canary Celery beat wire `fb3c999` + JSONB-on-SQLite fixture `5d36a01`+`3665b68` + canary signal-to-noise SQL filter `497565a` + autouse test cleanup fixture `8f23ce8` + plan doc v1.82(本 entry)= **8 commits post-v1.81**。**Final pytest sweep**:1999 PASS / 6 skipped / 0 errors / 0 fails(`backend/tests/{unit,integration,migration,test_static_alpha_checks,test_optimization_modules}`)。**18/18 curated regression PASS**(`backend/tests/test_suite.py --all`,kb_total_entries=3357 stable,baseline rebased `fba9035`)。**What's still open**:operational observation gates(plan §9 各 phase KPI 要求生产数据 ≥ 1-4 周观察)+ master plan §6 13 项 Phase 0 文档修正项(此 PR 不含,可作 v1.83 follow-up,但实际影响已被 v1.82 顶部 callout block + §2 ship table 覆盖)。**Linked memory**:`[[project_2026_05_18_post_v13_capstone]]` |
 | 2026-05-17 | v1.0 | 初版 — 整合 4 文档(competitive_analysis / phase15 v2.1 / rd_agent_research / qlib_research)为统一战略路线图 |
 | 2026-05-18 | v1.30 | **flat-F4 Step 1 ship — cascade deprecation visibility**(user 明确"CONTINUOUS_CASCADE 要删除"前置准备;avoid 89-ref 一次性大爆破)。**Scope**:`GET /api/v1/ops/cascade-deprecation/readiness` (auth via `X-Ops-Token`) 单 SQL GROUP BY mining_mode/status/region 报 `cascade_running_count`/`cascade_paused_count`/`cascade_running_regions`/`flat_running_count`/`flat_paused_count`/`flat_default_flag_on`/`flat_continuous_flag_on`/`ready_to_delete: bool`/`next_action: str` 决策建议(5 verdict branches:cascade RUNNING → "Drain N tasks in [regions]"/cascade only PAUSED → "finalize via intervene"/drained+default_flat ON+flat RUNNING → "Proceed to flat-F4 after 4-week window"/drained 但 default flat OFF → "Flip ENABLE_DEFAULT_FLAT_SESSION first"/drained+flag ON 但 0 flat RUNNING → "Start one via /ops/start-flat-session")。`_run_continuous_cascade` 入口加单行 `logger.warning("[cascade-deprecated] task=N started in CONTINUOUS_CASCADE — flat-F4 removal path")` 每 task 仅 1 行 minimal noise。**6 new tests** (auth 401 with X-Ops-Token / 3 cascade RUNNING in 2 regions advises drain / 2 PAUSED only advises finalize / 0 cascade + 3 flat + default ON → ready_to_delete=True + "flat-F4" in next_action / 0 cascade + default OFF → "ENABLE_DEFAULT_FLAT_SESSION" in next / 0 flat RUNNING → "start-flat-session")。Mock `AsyncSession.execute().all()` 返 [(mode, status, region, n)] tuples — endpoint 走 raw text SQL 无 ORM/JSONB 复杂度。**Backward-compat**:zero behavior change — endpoint 完全 read-only + warning 单行;_run_continuous_cascade 现有 dispatch + heartbeat + tier 逻辑 100% 不动。**flat-F4 sequencing 6-step roadmap**:**Step 1 ✓**(本 plan visibility ship)→ Step 2 operator flip ENABLE_DEFAULT_FLAT_SESSION via /ops/flags → Step 3 drain in-flight cascade(/mining-session/stop)→ Step 4 4-week stability window 等(plan §4.7 gate)→ Step 5 删 `_run_continuous_cascade` + /routers/mining_session.py + Celery beat revival + 89-ref cleanup → Step 6 phase15-D 删 6 cascade-specific schema cols。Step 1 给 operator 决策视角 + 给 future Claude session 明确 cascade 的 deprecation status。**Why 不一次全删**:89 ref grep verified + Celery beat watchdog + /mining-session router + flat default OFF default + 历史 in-flight cascade task — 一次大爆破破坏 user 生产 mining。**Production opt-in**:readiness endpoint 立可用 + warning log 任 cascade task start 即出现;无 flag,无回滚需要(read-only + log-only)。**6/6 cascade-deprecation tests PASS**;mining_tasks.py 改动 < 6 行 + 现有 test_run_continuous_cascade 不受影响(log line addition non-behavioral)。**flat-F4 progress 1/6 steps**;Phase 3 5/8 ship + R8-v2 3/6 follow-ups + **flat-F4 Step 1 ✓** = master plan v1.30 路线 ~87% 推进 |
 | 2026-05-18 | v1.81 | **phase15-D PR4b ship — delete frontend cascade UI panels + api wrappers · net -281 LoC across 3 files · vite build PASS · phase15-D 9 PRs COMPLETE**(cascade retirement 真正端到端完成)。**`api.js` -42 LoC**:删 5 mining-session wrappers(listMiningSessions / getMiningSession / startMiningSession / stopMiningSession / resumeMiningSession)+ DEPRECATED 注释 block。**`TaskManagement.jsx` -239 LoC**:删 V-19 cascade Card panel(L402-L519,118 LoC start/resume/pause button + multi-region session pills + phase/round_idx display + primarySession derivation)+ cascade useQuery + 3 useMutations 含 410-Gone onError handlers + sessionByRegion useMemo + sessionRegion state + SESSION_REGIONS + SESSION_REGION_UNIVERSE constants + handlePrimaryStart/Stop callbacks + 删 unused RocketOutlined import。**`Dashboard.jsx` -38 LoC**:删 miningSessions useQuery + page header live-feed Tag block(per-region cascade status pills with current_tier/starting_tier/cascade_phase fallback chain)— operators 现 via `/ops/costeer` CoSTEERMonitor 看 flat session state。**Build verified**:vite production PASS — 1.92 MB JS / gzip 575 KB(-4 KB net delete)。**Pre-existing TS warnings**(statsLoading / kpiLoading / navigate unused)非本 PR 引入,non-blocking。`d259c19` on master。**phase15-D 9 PRs ship-complete in single session(cascade retirement 端到端 path)**:PR1 kill-switch(`aa49a6b`)+ PR2 drain endpoint(`a24537d`)+ PR3 migration file(`a2d258d`)+ PR3b ORM column drop + apply(`5b469d9`)+ PR4 frontend 410 handling(`d539d81`)+ PR3c router + flag retire(`82a411a` -404 LoC)+ PR3d mining_tasks 5 helper delete(`399dd5b` -1028 LoC)+ PR3e task_service cascade methods delete(`14d8fa4` -279 LoC)+ **PR4b frontend UI panels delete**(`d259c19` -281 LoC)= **~-1882 net LoC total cascade retirement**。**Cascade dead code surface now empty**:backend ORM clean ✓ router gone ✓ methods deleted ✓ flag retired ✓ frontend wrappers + UI panels gone ✓。 |
