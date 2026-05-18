@@ -300,3 +300,201 @@ async def test_layer3_budget_caps_returns(pg_session):
         pg_session, current_expression=f"rank({field})", budget=2,
     )
     assert len(succ) <= 2
+
+
+# ===========================================================================
+# PR2 — Layer 1 (pillar) + Layer 2 (family) tests
+# ===========================================================================
+
+from backend.agents.hierarchical_rag import layer1_pillar, layer2_family
+from backend.family_classifier import family_signature
+
+
+# --- Layer 1: pillar ---
+
+@pytest.mark.asyncio
+async def test_layer1_empty_expression_and_no_pillar_returns_empty(pg_session):
+    """No expression + no hypothesis_pillar → can't resolve pillar."""
+    succ, fail = await layer1_pillar(pg_session, current_expression=None, hypothesis_pillar=None)
+    assert succ == [] and fail == []
+
+
+@pytest.mark.asyncio
+async def test_layer1_other_pillar_short_circuits(pg_session):
+    """pillar='other' too broad → returns empty per [V1.0-A2-1]."""
+    succ, fail = await layer1_pillar(pg_session, hypothesis_pillar="other")
+    assert succ == [] and fail == []
+
+
+@pytest.mark.asyncio
+async def test_layer1_explicit_pillar_finds_match(pg_session):
+    """Seed entry with meta_data.pillar_classified=momentum → L1 returns it."""
+    pattern = f"rank({_TAG}_mom_field)"
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN",
+        pattern=pattern,
+        pattern_hash=compute_pattern_hash(pattern, None, None),
+        description="momentum entry",
+        meta_data={"pillar_classified": "momentum", "source": "test"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    succ, fail = await layer1_pillar(
+        pg_session, hypothesis_pillar="momentum", budget=10,
+    )
+    assert any(e.pattern == pattern for e in succ)
+    assert all(e.source_layer == "L1_pillar" for e in succ)
+    assert all(e.relevance_score == 0.75 for e in succ)
+
+
+@pytest.mark.asyncio
+async def test_layer1_excludes_decayed_success(pg_session):
+    pattern = f"rank({_TAG}_decayed_mom)"
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN",
+        pattern=pattern,
+        pattern_hash=compute_pattern_hash(pattern, None, None),
+        description="decayed momentum",
+        meta_data={"pillar_classified": "momentum", DECAYED_KEY: "true"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    succ, fail = await layer1_pillar(
+        pg_session, hypothesis_pillar="momentum", budget=10,
+    )
+    # Should not include this decayed entry
+    assert all(e.pattern != pattern for e in succ)
+
+
+@pytest.mark.asyncio
+async def test_layer1_includes_decayed_failure(pg_session):
+    """FAILURE_PITFALL with decayed → INCLUDED (avoid set)."""
+    pattern = f"rank({_TAG}_pitfall_mom)"
+    pg_session.add(KnowledgeEntry(
+        entry_type="FAILURE_PITFALL",
+        pattern=pattern,
+        pattern_hash=compute_pattern_hash(pattern, None, None),
+        description="decayed pitfall",
+        meta_data={"pillar_classified": "momentum", DECAYED_KEY: "true"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    succ, fail = await layer1_pillar(
+        pg_session, hypothesis_pillar="momentum", budget=10,
+    )
+    assert any(e.pattern == pattern for e in fail)
+
+
+@pytest.mark.asyncio
+async def test_layer1_infers_pillar_from_expression(pg_session):
+    """No explicit hypothesis_pillar → infer from current_expression."""
+    pattern = f"rank({_TAG}_infer_mom)"
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN",
+        pattern=pattern,
+        pattern_hash=compute_pattern_hash(pattern, None, None),
+        description="inferred momentum",
+        meta_data={"pillar_classified": "momentum"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    # ts_mean is momentum operator per pillar_classifier
+    succ, fail = await layer1_pillar(
+        pg_session,
+        current_expression="rank(ts_mean(close, 252) - ts_mean(close, 20))",
+        budget=10,
+    )
+    # Should at least find our seeded momentum entry
+    assert any(e.pattern == pattern for e in succ)
+
+
+# --- Layer 2: family ---
+
+@pytest.mark.asyncio
+async def test_layer2_empty_expression_returns_empty(pg_session):
+    succ, fail = await layer2_family(pg_session, current_expression=None)
+    assert succ == [] and fail == []
+
+
+@pytest.mark.asyncio
+async def test_layer2_no_operators_returns_empty(pg_session):
+    """Bare field, no ops → family signature is '<empty>' → skip."""
+    succ, fail = await layer2_family(pg_session, current_expression="close")
+    assert succ == [] and fail == []
+
+
+@pytest.mark.asyncio
+async def test_layer2_same_family_finds_match(pg_session):
+    """Two expressions with same op pipeline → same family_signature."""
+    pattern_kb = f"rank(ts_mean({_TAG}_fam_a, 20))"
+    sig = family_signature(pattern_kb)
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN",
+        pattern=pattern_kb,
+        pattern_hash=compute_pattern_hash(pattern_kb, None, None),
+        description="family member A",
+        meta_data={"family_signature": sig, "source": "test"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    # Query with DIFFERENT expression but SAME op pipeline (rank+ts_mean)
+    succ, fail = await layer2_family(
+        pg_session,
+        current_expression=f"rank(ts_mean({_TAG}_fam_b, 60))",
+        budget=10,
+    )
+    assert any(e.pattern == pattern_kb for e in succ)
+    assert all(e.source_layer == "L2_family" for e in succ)
+
+
+@pytest.mark.asyncio
+async def test_layer2_excludes_family_capped(pg_session):
+    """[V1.0-S5] family_capped entries excluded — R10 purpose."""
+    pattern = f"rank(ts_mean({_TAG}_capped, 20))"
+    sig = family_signature(pattern)
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN",
+        pattern=pattern,
+        pattern_hash=compute_pattern_hash(pattern, None, None),
+        description="family capped",
+        meta_data={"family_signature": sig, "family_capped": "true"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    succ, fail = await layer2_family(
+        pg_session, current_expression=pattern, budget=10,
+    )
+    # The capped entry must NOT appear
+    assert all(e.pattern != pattern for e in succ)
+
+
+@pytest.mark.asyncio
+async def test_layer2_excludes_decayed_success_includes_decayed_failure(pg_session):
+    """Same as L0/L1/L3 dual-filter pattern."""
+    pattern_succ = f"rank(ts_mean({_TAG}_dec_s, 20))"
+    pattern_fail = f"rank(ts_mean({_TAG}_dec_f, 20))"
+    sig = family_signature(pattern_succ)  # both share same family
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN",
+        pattern=pattern_succ,
+        pattern_hash=compute_pattern_hash(pattern_succ, None, None),
+        description="decayed success", meta_data={"family_signature": sig, DECAYED_KEY: "true"},
+        is_active=True, created_by="TEST",
+    ))
+    pg_session.add(KnowledgeEntry(
+        entry_type="FAILURE_PITFALL",
+        pattern=pattern_fail,
+        pattern_hash=compute_pattern_hash(pattern_fail, None, None),
+        description="decayed failure", meta_data={"family_signature": sig, DECAYED_KEY: "true"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    succ, fail = await layer2_family(
+        pg_session,
+        current_expression=f"rank(ts_mean({_TAG}_dec_q, 20))",
+        budget=10,
+    )
+    # SUCCESS decayed excluded
+    assert all(e.pattern != pattern_succ for e in succ)
+    # FAILURE decayed included
+    assert any(e.pattern == pattern_fail for e in fail)

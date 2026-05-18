@@ -260,5 +260,163 @@ __all__ = [
     "RAGEntry",
     "RAGResult",
     "layer0_exact_match",
+    "layer1_pillar",
+    "layer2_family",
     "layer3_field_level",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Layer 1: pillar/theme (uses backfilled meta_data['pillar_classified'])
+# ---------------------------------------------------------------------------
+
+async def layer1_pillar(
+    db: AsyncSession,
+    *,
+    current_expression: Optional[str] = None,
+    hypothesis_pillar: Optional[str] = None,
+    region: Optional[str] = None,
+    budget: int = 5,
+) -> tuple[List[RAGEntry], List[RAGEntry]]:
+    """RAG#1: pillar/theme JOIN via backfilled meta_data['pillar_classified'].
+
+    Pillar resolution priority (per plan §2.3):
+      1. Explicit hypothesis_pillar arg (from LLM hypothesis dict)
+      2. infer_pillar(current_expression) fallback
+
+    Returns (success_patterns, failure_pitfalls). Q9 decayed dual-filter
+    (SUCCESS excludes, FAILURE includes per plan §2.5). Pillar="other"
+    short-circuits to empty (per [V1.0-A2-1]:"other" too broad for L1).
+    """
+    # Resolve pillar
+    pillar = None
+    if hypothesis_pillar and isinstance(hypothesis_pillar, str):
+        pillar = hypothesis_pillar.strip().lower()
+    elif current_expression:
+        try:
+            from backend.pillar_classifier import infer_pillar
+            pillar = infer_pillar(expression=current_expression)
+        except Exception as ex:
+            logger.debug(f"[hier_rag L1] infer_pillar failed: {ex}")
+            return [], []
+
+    if not pillar or pillar == "other":
+        # "other" pillar too broad — short-circuit per [V1.0-A2-1]
+        return [], []
+
+    try:
+        # JOIN on backfilled meta_data->>'pillar_classified' = pillar
+        # GIN(jsonb_path_ops) supports @> containment — use that.
+        rows = (await db.execute(
+            select(KnowledgeEntry)
+            .where(KnowledgeEntry.is_active == True)  # noqa: E712
+            .where(KnowledgeEntry.meta_data.op("@>")({"pillar_classified": pillar}))
+            .limit(budget * 4)  # over-fetch then filter by decayed/region in Python
+        )).scalars().all()
+
+        succ: List[RAGEntry] = []
+        fail: List[RAGEntry] = []
+        for r in rows:
+            md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
+            is_decayed = str(md.get(DECAYED_KEY, "")).lower() == "true"
+            entry = RAGEntry(
+                pattern_hash=r.pattern_hash or "",
+                pattern=r.pattern or "",
+                entry_type=r.entry_type or "",
+                description=r.description or "",
+                meta_data=md,
+                source_layer="L1_pillar",
+                relevance_score=0.75,  # mid-high specificity
+            )
+            if r.entry_type == "SUCCESS_PATTERN":
+                if not is_decayed:
+                    succ.append(entry)
+                    if len(succ) >= budget:
+                        break
+            elif r.entry_type == "FAILURE_PITFALL":
+                fail.append(entry)
+        return succ[:budget], fail[:budget]
+    except Exception as ex:
+        logger.warning(f"[hier_rag L1] pillar query failed (return empty): {ex}")
+        return [], []
+
+
+# ---------------------------------------------------------------------------
+# Layer 2: family_signature (uses backfilled meta_data['family_signature'])
+# ---------------------------------------------------------------------------
+
+async def layer2_family(
+    db: AsyncSession,
+    *,
+    current_expression: Optional[str],
+    region: Optional[str] = None,
+    budget: int = 5,
+) -> tuple[List[RAGEntry], List[RAGEntry]]:
+    """RAG#2: family JOIN via backfilled meta_data['family_signature'].
+
+    family_signature = sha256[:16] of operator-sequence (per R10
+    family_classifier). Two expressions sharing same op pipeline
+    (regardless of fields/windows) → same family. R8 L2 JOIN finds
+    KB entries with same family_signature → returns SUCCESS_PATTERN
+    examples + FAILURE_PITFALL warnings.
+
+    Per [V1.0-S5]: exclude family_capped entries (meta_data['family_capped']
+    truthy or coming from r1a R10 marker). Otherwise R10 family-cap purpose
+    undermined.
+
+    R5 composite_score ranking deferred to PR3 (orchestrator does final
+    ranking once layers are merged; here we just return KB matches).
+
+    Soft-fail: SQL error → ([], []).
+    """
+    if not current_expression:
+        return [], []
+    try:
+        from backend.family_classifier import family_signature
+        sig = family_signature(current_expression)
+    except Exception:
+        return [], []
+
+    if not sig or sig == "<empty>":
+        return [], []
+
+    try:
+        rows = (await db.execute(
+            select(KnowledgeEntry)
+            .where(KnowledgeEntry.is_active == True)  # noqa: E712
+            .where(KnowledgeEntry.meta_data.op("@>")({"family_signature": sig}))
+            .limit(budget * 4)
+        )).scalars().all()
+
+        succ: List[RAGEntry] = []
+        fail: List[RAGEntry] = []
+        for r in rows:
+            md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
+            is_decayed = str(md.get(DECAYED_KEY, "")).lower() == "true"
+            # [V1.0-S5] exclude family_capped — undermines R10 purpose
+            is_capped = (
+                str(md.get("family_capped", "")).lower() == "true"
+                or str(md.get("_r10_family_cap_dropped", "")).lower() == "true"
+            )
+            if is_capped:
+                continue
+            entry = RAGEntry(
+                pattern_hash=r.pattern_hash or "",
+                pattern=r.pattern or "",
+                entry_type=r.entry_type or "",
+                description=r.description or "",
+                meta_data=md,
+                source_layer="L2_family",
+                relevance_score=0.65,  # mid specificity
+            )
+            if r.entry_type == "SUCCESS_PATTERN":
+                if not is_decayed:
+                    succ.append(entry)
+                    if len(succ) >= budget:
+                        break
+            elif r.entry_type == "FAILURE_PITFALL":
+                fail.append(entry)
+        return succ[:budget], fail[:budget]
+    except Exception as ex:
+        logger.warning(f"[hier_rag L2] family query failed (return empty): {ex}")
+        return [], []
