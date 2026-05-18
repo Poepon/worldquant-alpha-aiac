@@ -2278,7 +2278,7 @@ async def r6_dag_stats(
     (DAG actually multi-level not just root + flat children), and depth
     distribution showing some spread (mining diverse expression families).
 
-    ``window_days`` filters by ExperimentRun.created_at. Top-level JSONB
+    ``window_days`` filters by ExperimentRun.started_at. Top-level JSONB
     keys (``node_count``, ``max_depth_seen``) are populated/maintained by
     backend/agents/graph/dag_state.py — empty/legacy runs (pre-R6 or
     ENABLE_DAG_TRACE=False) have no ``dag`` sub-key and are filtered out.
@@ -2297,7 +2297,7 @@ async def r6_dag_stats(
         "  COALESCE(MAX((runtime_state->'dag'->>'node_count')::int), 0) AS max_nodes, "
         "  COALESCE(MAX((runtime_state->'dag'->>'max_depth_seen')::int), 0) AS max_depth "
         "FROM experiment_runs "
-        "WHERE created_at > now() - (:days || ' day')::interval "
+        "WHERE started_at > now() - (:days || ' day')::interval "
         "  AND runtime_state ? 'dag' "
         "  AND runtime_state->'dag' ? 'node_count'"
     ), {"days": str(int(days))})).one()
@@ -2311,7 +2311,7 @@ async def r6_dag_stats(
         "SELECT (runtime_state->'dag'->>'max_depth_seen')::int AS d, "
         "       COUNT(*) AS n "
         "FROM experiment_runs "
-        "WHERE created_at > now() - (:days || ' day')::interval "
+        "WHERE started_at > now() - (:days || ' day')::interval "
         "  AND runtime_state ? 'dag' "
         "  AND runtime_state->'dag' ? 'max_depth_seen' "
         "GROUP BY d "
@@ -2328,12 +2328,12 @@ async def r6_dag_stats(
         "  COALESCE((runtime_state->'dag'->>'max_depth_seen')::int, 0) AS md, "
         "  runtime_state->'dag'->>'root_id' AS root, "
         "  runtime_state->'dag'->>'current_selection' AS sel, "
-        "  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS ts "
+        "  to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS ts "
         "FROM experiment_runs "
-        "WHERE created_at > now() - (:days || ' day')::interval "
+        "WHERE started_at > now() - (:days || ' day')::interval "
         "  AND runtime_state ? 'dag' "
         "  AND runtime_state->'dag' ? 'node_count' "
-        "ORDER BY created_at DESC "
+        "ORDER BY started_at DESC "
         "LIMIT 20"
     ), {"days": str(int(days))})).all()
     recent = [
