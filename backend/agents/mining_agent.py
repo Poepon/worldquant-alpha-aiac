@@ -371,6 +371,7 @@ class MiningAgent:
         available_dataset_pool: Optional[List[str]] = None,
         hypothesis_centric_level: int = 0,
         experiment_variant: Optional[str] = None,
+        iteration_offset: int = 0,
     ) -> Dict[str, Any]:
         """
         Run multi-round evolution loop for alpha mining.
@@ -405,7 +406,13 @@ class MiningAgent:
         # #endregion
         
         # Initialize state
-        iteration = 0
+        # iteration_offset (2026-05-19): for flat sessions the outer dispatcher
+        # loops dataset cycles, calling this with max_iterations=1 each time.
+        # Without an offset, every call would re-emit trace_steps.iteration=1,
+        # causing the UI to fold all rounds into "第 1 轮". The dispatcher
+        # passes the cumulative prior round count so the inner counter
+        # advances monotonically across dataset cycles + pause-resume.
+        iteration = iteration_offset
         total_success = 0
         all_alphas: List[Alpha] = []
         all_failures: List[Dict] = []
@@ -418,11 +425,14 @@ class MiningAgent:
         
         # Ensure Brain session is active and authenticated
         async with self.brain:
-            while iteration < max_iterations:
+            # NB: when iteration_offset>0, terminate after max_iterations
+            # ROUNDS done in THIS call (not after a fixed absolute index).
+            iteration_terminal = iteration_offset + max_iterations
+            while iteration < iteration_terminal:
                 iteration += 1
             
                 logger.info(
-                    f"[MiningAgent] === Round {iteration}/{max_iterations} === "
+                    f"[MiningAgent] === Round {iteration}/{iteration_terminal} === "
                     f"Strategy: {current_strategy.action_summary}"
                 )
                 # #region agent log

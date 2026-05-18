@@ -953,7 +953,7 @@ async def _maybe_run_typed_pipeline_round(
 
 async def _run_one_round_inline(
     db, task, run, brain, mining_agent, operators,
-    *, dataset_id: str,
+    *, dataset_id: str, iteration_offset: int = 0,
 ) -> dict:
     """Run one round on the foreground session. Returns mining_agent result
     dict (or empty dict on failure)."""
@@ -1026,6 +1026,7 @@ async def _run_one_round_inline(
             experiment_variant=str(
                 (task.config or {}).get("hypothesis_centric_variant", active_level)
             ),
+            iteration_offset=iteration_offset,
         )
     except Exception as e:
         logger.error(f"[flat round {dataset_id}] inline round failed: {e}")
@@ -1128,7 +1129,13 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
         flat_cursor = int(run.runtime_state.get("flat_cursor", 0) or 0)
 
     total_alphas = 0
+    # Seed iterations from runtime_state.flat_iterations (inherited on
+    # resume via TaskService._dispatch_session_worker(inherit_runtime_state=
+    # True)) so trace_steps.iteration advances monotonically across pause-
+    # resume boundaries — see 2026-05-19 fix-A in agents/mining_agent.py.
     iterations = 0
+    if isinstance(run.runtime_state, dict):
+        iterations = int(run.runtime_state.get("flat_iterations", 0) or 0)
 
     async with BrainAdapter() as brain:
         mining_agent = MiningAgent(db, brain)
@@ -1200,6 +1207,10 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
             result = await _run_one_round_inline(
                 db, task, run, brain, mining_agent, operators,
                 dataset_id=dataset_id,
+                # Pass cumulative round count as offset so the inner
+                # workflow advances trace_steps.iteration past flat-mode
+                # dataset cycles (and pause-resume boundaries).
+                iteration_offset=iterations,
             )
             round_alphas = len(result.get("all_alphas") or [])
             total_alphas += round_alphas
