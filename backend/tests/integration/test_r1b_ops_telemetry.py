@@ -174,7 +174,7 @@ async def test_chain_depth_distribution_aggregates_buckets(client_factory):
         (2, 8),
         (3, 2),
     ]
-    client = await client_factory([chain_rows])
+    client = await client_factory([chain_rows], settings_overrides={"R1B_MAX_MUTATION_DEPTH": 3})
     async with client as ac:
         r = await ac.get("/api/v1/ops/r1b/chain-depth-distribution")
     assert r.status_code == 200, r.text
@@ -201,6 +201,43 @@ async def test_chain_depth_empty_returns_zeros(client_factory):
     assert body["total_mutated_hypotheses"] == 0
     assert body["total_root_hypotheses"] == 0
     assert body["chain_depth_avg"] == 0.0
+    # Cap-firing surface still present on empty KB
+    assert body["tasks_at_or_above_cap_count"] == 0
+    assert body["r1b_max_mutation_depth_setting"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_chain_depth_surfaces_cap_firing_count(client_factory):
+    """Review LOW 3: response surfaces N tasks at depth >= configured cap.
+
+    Setting R1B_MAX_MUTATION_DEPTH=2 over distribution {0:100, 1:30, 2:8, 3:2}
+    → tasks_at_or_above_cap_count = 8 + 2 = 10, setting = 2.
+    """
+    chain_rows = [(0, 100), (1, 30), (2, 8), (3, 2)]
+    client = await client_factory(
+        [chain_rows], settings_overrides={"R1B_MAX_MUTATION_DEPTH": 2}
+    )
+    async with client as ac:
+        r = await ac.get("/api/v1/ops/r1b/chain-depth-distribution")
+    body = r.json()
+    assert body["r1b_max_mutation_depth_setting"] == 2
+    assert body["tasks_at_or_above_cap_count"] == 10
+    # max_depth_observed still surfaces depth 3 (above the cap)
+    assert body["max_depth_observed"] == 3
+
+
+@pytest.mark.asyncio
+async def test_chain_depth_cap_above_max_depth_returns_zero(client_factory):
+    """Cap=5 over distribution that maxes at 3 → cap-firing count = 0."""
+    chain_rows = [(0, 100), (1, 30), (2, 8), (3, 2)]
+    client = await client_factory(
+        [chain_rows], settings_overrides={"R1B_MAX_MUTATION_DEPTH": 5}
+    )
+    async with client as ac:
+        r = await ac.get("/api/v1/ops/r1b/chain-depth-distribution")
+    body = r.json()
+    assert body["r1b_max_mutation_depth_setting"] == 5
+    assert body["tasks_at_or_above_cap_count"] == 0
 
 
 @pytest.mark.asyncio
