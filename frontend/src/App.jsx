@@ -5,6 +5,7 @@ import AppHeader from './components/AppHeader'
 import Dashboard from './pages/Dashboard'
 import TaskManagement from './pages/TaskManagement'
 import TaskDetail from './pages/TaskDetail'
+import AlphaList from './pages/AlphaList'
 import AlphaDetail from './pages/AlphaDetail'
 import CrisisStressTest from './pages/CrisisStressTest'
 import ConfigCenter from './pages/ConfigCenter'
@@ -26,8 +27,9 @@ function App() {
             <Route path="/tasks" element={<TaskManagement />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
             {/* /factor-library retired post tier-system removal (2026-05-18).
-                /alphas list redirects to /tasks; detail page stays. */}
-            <Route path="/alphas" element={<Navigate to="/tasks" replace />} />
+                /alphas is now a flat list view (no tier filter); detail page
+                stays at /alphas/:id. */}
+            <Route path="/alphas" element={<AlphaList />} />
             <Route path="/alphas/:id" element={<AlphaDetail />} />
             <Route path="/correlation" element={<CrisisStressTest />} />
             <Route path="/data" element={<DataManagement />} />

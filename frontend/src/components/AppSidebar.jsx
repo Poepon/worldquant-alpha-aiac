@@ -12,6 +12,7 @@ import {
   SwapOutlined,
   ExperimentOutlined,
   BranchesOutlined,
+  FunctionOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -29,6 +30,11 @@ const menuItems = [
     key: '/tasks',
     icon: <ThunderboltOutlined />,
     label: '任务管理',
+  },
+  {
+    key: '/alphas',
+    icon: <FunctionOutlined />,
+    label: 'Alpha 列表',
   },
   {
     key: '/correlation',
