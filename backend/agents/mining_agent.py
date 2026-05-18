@@ -859,6 +859,13 @@ class MiningAgent:
             except Exception as e:
                 # Bandit failure must never block strategy evolution
                 logger.warning(f"[Bandit] non-fatal bandit decision failure: {e}")
+                # M12 (2026-05-18): clear persisted last_select so next round
+                # does NOT attribute its reward to a stale arm. The local
+                # ``bandit`` object inside _bandit_update_and_select may have
+                # already advanced (or partially advanced) past update_last_round
+                # before raising — in either case the safe sentinel is None
+                # (update_last_round treats None as "skip update + warn").
+                await self._clear_bandit_last_select(task)
 
         # CRITICAL FIX: If we have optimization candidates, FORCE exploit/optimize mode
         # to ensure we don't skip the opportunity to refine them.
@@ -981,6 +988,29 @@ class MiningAgent:
             f"reward_for_prev={reward:.3f} cold={cold_at_ctx}"
         )
         return arm
+
+    async def _clear_bandit_last_select(self, task: MiningTask) -> None:
+        """M12 swallow-path helper: null out ``last_select`` inside the
+        persisted bandit blob without touching arm posteriors. Safe no-op
+        when the bandit was never initialized.
+        """
+        from sqlalchemy.orm.attributes import flag_modified
+        try:
+            if not isinstance(task.config, dict):
+                return
+            state = task.config.get(self._BANDIT_CONFIG_KEY)
+            if not isinstance(state, dict):
+                return
+            if state.get("last_select") is None:
+                return  # already clean — nothing to flush
+            state["last_select"] = None
+            task.config[self._BANDIT_CONFIG_KEY] = state
+            flag_modified(task, "config")
+            await self.db.flush()
+        except Exception as e:
+            logger.warning(
+                f"[Bandit] clear last_select on exception path failed (non-fatal): {e}"
+            )
 
     async def _persist_bandit_state(
         self,

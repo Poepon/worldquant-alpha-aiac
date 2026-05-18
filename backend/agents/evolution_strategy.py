@@ -433,10 +433,14 @@ def merge_strategies(
 # table (dedicated INSERT, R1a v1.6 lesson — don't piggyback on alpha
 # persistence routing).
 
+import logging
 import random
 from collections import Counter
-from dataclasses import asdict
-from typing import Tuple
+
+# NOTE: ``asdict`` and ``Tuple`` were previously re-imported here (LOW from
+# G3 review — M12 cleanup); already imported at module top (lines 15-16).
+
+logger = logging.getLogger(__name__)
 
 
 # Default arm set reflects R1a 18:3 hypothesis-dominant signal at Phase 0
@@ -578,8 +582,23 @@ class ContextualDirectionBandit:
 
         Returns the (ctx, arm) tuple that was updated, or None if no prior
         select. Clears ``self.last_select`` so a double-update is a no-op.
+
+        M12 (2026-05-18): when ``last_select`` is None we SKIP the update
+        entirely — never attribute this round's reward to a stale/unknown
+        arm. Logs a ``warning`` if non-trivial reward signal is being dropped
+        so the operator can investigate (typically this means the previous
+        round's ``select_arm`` was wiped after an exception in
+        ``_bandit_update_and_select``).
         """
         if self.last_select is None:
+            if reward and reward > 0:
+                logger.warning(
+                    "[Bandit] update_last_round called with reward=%.3f but "
+                    "last_select=None — skipping update (no arm to credit). "
+                    "This usually means the prior round's bandit cycle raised "
+                    "and last_select was cleared on the exception path.",
+                    reward,
+                )
             return None
         ctx, arm = self.last_select
         self.update(ctx, arm, reward)
