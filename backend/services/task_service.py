@@ -729,8 +729,8 @@ class TaskService(BaseService):
                     "region": task.region,
                     "universe": task.universe,
                     "mining_mode": task.mining_mode,
-                    "cascade_phase": getattr(task, "cascade_phase", None),
-                    "cascade_round_idx": getattr(task, "cascade_round_idx", 0),
+                    # phase15-D PR3b: cascade_phase / cascade_round_idx ORM
+                    # cols dropped; config_snapshot no longer carries them.
                 },
             },
             strategy_snapshot={},
