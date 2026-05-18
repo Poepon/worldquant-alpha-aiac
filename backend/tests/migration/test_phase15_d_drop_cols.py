@@ -44,14 +44,13 @@ def test_migration_docstring_warns_against_premature_apply():
     assert "8 production files" in doc or "8 readers" in doc or "8 reader" in doc
 
 
-def test_orm_still_declares_columns():
-    """PR3 ships migration FILE only — ORM still declares cascade_phase +
-    cascade_round_idx so readers in 8 prod files don't break. PR3b will
-    remove these in lockstep with reader migration."""
+def test_orm_columns_dropped_in_pr3b():
+    """PR3b (2026-05-18): cascade_phase + cascade_round_idx removed from ORM
+    in lockstep with migration apply. mining_mode kept for FLAT path."""
     from backend.models import MiningTask
     cols = {c.name for c in MiningTask.__table__.columns}
-    # ORM still has them (PR3b removes)
-    assert "cascade_phase" in cols
-    assert "cascade_round_idx" in cols
+    # PR3b dropped from ORM
+    assert "cascade_phase" not in cols
+    assert "cascade_round_idx" not in cols
     # mining_mode kept indefinitely for FLAT path
     assert "mining_mode" in cols
