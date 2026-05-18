@@ -1700,26 +1700,25 @@ async def r8_kb_shape(
         for p, n in pillar_rows
     ]
 
-    # R5-rankable SUCCESS subset — JOIN on expression_hash (the link key
-    # used by R8-v2 #2 fetch_r5_avg_scores). DISTINCT because a hash may
-    # have many r1a rows.
-    # NOTE: r1a_attribution_log.expression_hash is sha256[:64] while
-    # knowledge_entries.pattern_hash is sha256[:32]. Postgres string
-    # equality still matches because both columns are derived by hashing
-    # the same canonicalized expression — the 32-char column is exactly
-    # the 32-char prefix of the 64-char column. The JOIN works only when
-    # the writer pipelines stay aligned on this convention; if you change
-    # either hash length, update both writers + this JOIN together.
+    # R5-rankable distinct expressions — Review HIGH #4 fix (2026-05-18):
+    # the prior JOIN of r1a_attribution_log.expression_hash =
+    # knowledge_entries.pattern_hash was silently broken — the two hashes
+    # are derived from DIFFERENT inputs (expression alone vs
+    # pattern+region+dataset_id concat) AND truncated to different lengths
+    # (sha256[:64] vs sha256[:32]). They never matched in production →
+    # r5_rankable_success_count was permanently 0.
+    #
+    # Replacement signal: count distinct expressions that R5 judged in
+    # r1a_attribution_log. Semantic shift from "KB SUCCESS with R5 data"
+    # to "expressions with R5 data" — but it directly answers the operator
+    # question "is R5 producing enough data for L2 ranking?" without
+    # needing the broken cross-table join. The R8-v2 #2 L2 ranking lookup
+    # in fetch_r5_avg_scores uses the same r1a-side groupby anyway.
     r5_count_row = (await db.execute(_text(
-        "SELECT COUNT(DISTINCT k.pattern_hash) "
-        "FROM knowledge_entries k "
-        "JOIN r1a_attribution_log r "
-        # expression_hash(64) vs pattern_hash(32) — see comment above
-        "  ON r.expression_hash = k.pattern_hash "
-        "WHERE k.is_active = true "
-        "  AND k.entry_type = 'SUCCESS_PATTERN' "
-        "  AND NOT (k.meta_data @> '{\"decayed\":\"true\"}'::jsonb) "
-        "  AND r.r5_composite_score IS NOT NULL"
+        "SELECT COUNT(DISTINCT expression_hash) "
+        "FROM r1a_attribution_log "
+        "WHERE r5_composite_score IS NOT NULL "
+        "  AND expression_hash IS NOT NULL"
     ))).scalar()
 
     return R8KbShapeOut(
@@ -1833,18 +1832,16 @@ async def costeer_deploy_recommendation(
     r8_succ_active = int(r8_kb_row[0] or 0)
     r8_pillars = int(r8_kb_row[1] or 0)
 
-    # JOIN: r1a_attribution_log.expression_hash is sha256[:64] while
-    # knowledge_entries.pattern_hash is sha256[:32]. String equality
-    # works because the 32-char column is the 32-char prefix of the
-    # 64-char column (both hash the same canonical expression). See
-    # r8_kb_shape() above for the full convention note.
+    # Review HIGH #4 fix (2026-05-18) — see r8_kb_shape for full rationale.
+    # Old JOIN was silently broken (different hash algos + truncation).
+    # Replacement: count distinct expressions with R5 data in r1a side
+    # only — directly answers "is R5 producing enough data for L2
+    # ranking?" without the cross-table mismatch.
     r5_rankable_row = (await db.execute(_text(
-        "SELECT COUNT(DISTINCT k.pattern_hash) "
-        "FROM knowledge_entries k "
-        "JOIN r1a_attribution_log r ON r.expression_hash = k.pattern_hash "
-        "WHERE k.is_active=true AND k.entry_type='SUCCESS_PATTERN' "
-        "  AND NOT (k.meta_data @> '{\"decayed\":\"true\"}'::jsonb) "
-        "  AND r.r5_composite_score IS NOT NULL"
+        "SELECT COUNT(DISTINCT expression_hash) "
+        "FROM r1a_attribution_log "
+        "WHERE r5_composite_score IS NOT NULL "
+        "  AND expression_hash IS NOT NULL"
     ))).scalar()
     r5_rankable = int(r5_rankable_row or 0)
 
@@ -1999,9 +1996,11 @@ async def r8_query_stats(
     higher layers).
 
     Returns zero rates when ENABLE_R8_QUERY_LOG flag was OFF in the
-    window (no rows written). Cache hit rate stays 0.0 today because
-    cache hits short-circuit before the log INSERT — a future
-    revision can move the log into the cache helper to capture that.
+    window (no rows written). Cache hit rate semantic = "any layer in
+    the query served from Redis cache" (closure counter in
+    query_hierarchical._layer_call, commit d8ed47f). Extend to per-
+    layer breakdown via a layer_hits_from_cache JSONB column if
+    operator demand arises.
     """
     from sqlalchemy import text as _text
     from backend.config import settings as _stg

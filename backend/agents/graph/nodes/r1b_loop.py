@@ -600,6 +600,11 @@ async def node_hypothesis_mutate(
 
     await _write_r1b_retry_log_rows(log_rows)
 
+    # Review HIGH #2 fix accumulator — populated by the R1b.3-v2 INSERT block
+    # below. Surfaces in the returned reducer dict so LangGraph propagates
+    # the new ids into the next node's state.
+    _new_mutated_ids: List[int] = []
+
     # R1b.3-v2 (2026-05-18): persist the new mutated hypothesis as a
     # Hypothesis row with parent_hypothesis_id FK + r1b_mutation_depth so
     # the chain can be DB-walked next round + failure_tree skeletons span
@@ -619,9 +624,13 @@ async def node_hypothesis_mutate(
                 )
                 if new_id is not None:
                     pending_new_hypothesis["hypothesis_id"] = new_id
-                    state.r1b_mutated_hypothesis_ids = list(
-                        state.r1b_mutated_hypothesis_ids or []
-                    ) + [new_id]
+                    # Review HIGH #2 fix (2026-05-18): track the new id in a
+                    # local accumulator so we can append to the reducer-
+                    # returned ``out`` dict below. Previously this mutated
+                    # ``state.r1b_mutated_hypothesis_ids`` directly, which
+                    # LangGraph drops on the next node hop (state snapshots
+                    # only consume the dict returned by the node).
+                    _new_mutated_ids.append(new_id)
         except Exception as _ins_ex:
             logger.warning(
                 f"[r1b_loop mutate] R1b.3-v2 INSERT failed (round unaffected): {_ins_ex}"
@@ -646,6 +655,13 @@ async def node_hypothesis_mutate(
         "r1b_mutations_attempted_this_cycle": state.r1b_mutations_attempted_this_cycle + 1,
         "r1b_token_cost_this_alpha": state.r1b_token_cost_this_alpha + cost_delta_usd,
     }
+    # Review HIGH #2 fix: surface the INSERTed Hypothesis id(s) through the
+    # reducer so the next node sees them. Direct state mutation in the
+    # INSERT block was dropped by LangGraph (state snapshot is per-node).
+    if _new_mutated_ids:
+        out["r1b_mutated_hypothesis_ids"] = list(
+            state.r1b_mutated_hypothesis_ids or []
+        ) + _new_mutated_ids
     if pending_new_hypothesis is not None:
         out["r1b_pending_new_hypothesis"] = pending_new_hypothesis
     return out
