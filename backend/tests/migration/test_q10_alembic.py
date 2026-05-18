@@ -87,17 +87,22 @@ def test_migration_references_expected_table_and_indexes():
         assert ix in down_src, f"downgrade() missing index {ix!r}"
 
 
-def test_alembic_head_resolves_to_q10_revision():
-    """The current Alembic head IS the Q10 revision."""
+def test_alembic_q10_revision_in_chain():
+    """The Q10 revision exists in the Alembic revision chain.
+
+    Originally this checked head IS Q10 revision, but later migrations
+    (R1b-A etc.) legitimately push the head forward. Updated to verify the
+    Q10 revision is reachable from the current head — i.e., still in chain.
+    """
     from alembic.config import Config
     from alembic.script import ScriptDirectory
     root = Path(__file__).resolve().parent.parent.parent.parent
     cfg = Config(str(root / "backend" / "alembic.ini"))
     sd = ScriptDirectory.from_config(cfg)
-    heads = sd.get_heads()
-    assert REVISION in heads, (
-        f"Q10 revision {REVISION} not in Alembic heads {heads} — "
-        "did a later migration get added that didn't chain?"
+    all_rev_ids = {r.revision for r in sd.walk_revisions()}
+    assert REVISION in all_rev_ids, (
+        f"Q10 revision {REVISION} missing from chain {all_rev_ids} — "
+        "was the migration deleted?"
     )
 
 

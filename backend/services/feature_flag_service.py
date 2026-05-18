@@ -207,6 +207,64 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "~5d shadow → 3d soft → hard per plan §10 stage gates."
         ),
     ),
+    # --- Phase 3 R1b CoSTEER loop activation ---
+    "ENABLE_R1B_RETRY_LOOP": FlagSpec(
+        name="ENABLE_R1B_RETRY_LOOP",
+        flag_type="bool",
+        group="Phase3-R1b",
+        description=(
+            "Phase 3 R1b.1 (2026-05-18): LangGraph cycle EVAL → "
+            "CODE_GEN_RETRY for IMPLEMENTATION attribution. Budget "
+            "R1B_MAX_RETRIES_PER_ALPHA=3 + token ceiling "
+            "R1B_TOKEN_COST_CEILING_USD_PER_ALPHA=$0.05. Soft-fall: LLM "
+            "error → drop-fail legacy. Prereq R1a (attribution source) + "
+            "R5 LLM judge (typed attribution; without R5 ~91% UNKNOWN)."
+        ),
+    ),
+    "ENABLE_R1B_HYPOTHESIS_MUTATE": FlagSpec(
+        name="ENABLE_R1B_HYPOTHESIS_MUTATE",
+        flag_type="bool",
+        group="Phase3-R1b",
+        description=(
+            "Phase 3 R1b.2 (2026-05-18): LangGraph cycle EVAL → "
+            "HYPOTHESIS_MUTATE for HYPOTHESIS attribution. Budget "
+            "R1B_MAX_MUTATIONS_PER_DATASET_CYCLE=2. BOTH attribution → "
+            "mutate dominates retry per plan [V1.0-A2-3]. Creates "
+            "parent_hypothesis_id chain on Hypothesis."
+        ),
+    ),
+    "ENABLE_R1B_FAILURE_TREE": FlagSpec(
+        name="ENABLE_R1B_FAILURE_TREE",
+        flag_type="bool",
+        group="Phase3-R1b",
+        description=(
+            "Phase 3 R1b.3 (2026-05-18): knowledge_extraction writes "
+            "failure_tree JSONB to KnowledgeEntry.meta_data; surfaced by "
+            "R8 RAG L2 for related hypothesis families. Soft-fail: KB "
+            "write error never blocks round."
+        ),
+    ),
+    "ENABLE_R1B_TYPED_PIPELINE": FlagSpec(
+        name="ENABLE_R1B_TYPED_PIPELINE",
+        flag_type="bool",
+        group="Phase3-R1b",
+        description=(
+            "Phase 3 R1b.4 (2026-05-18): activates 3223-line DORMANT "
+            "agents/core/AlphaMiningPipeline for hypothesis_centric_variant=3 "
+            "tasks. Bypasses LangGraph cycle; retry/mutate embedded in "
+            "Experiment2Feedback. Coexists with R1b.1+R1b.2 — opt-in per task."
+        ),
+    ),
+    "ENABLE_R1B_DAG_RETRY_REWARD": FlagSpec(
+        name="ENABLE_R1B_DAG_RETRY_REWARD",
+        flag_type="bool",
+        group="Phase3-R1b",
+        description=(
+            "Phase 3 R1b.5 (2026-05-18): R6 DAG UCB1 includes retry "
+            "rewards in node selection. Pre-req R1b.1+R1b.2 GO gates "
+            "PASS + ≥14d production observation per [V1.2-A2-3]."
+        ),
+    ),
     # --- R8-v2 #2 Hierarchical RAG Redis cache ---
     "ENABLE_HIERARCHICAL_RAG_CACHE": FlagSpec(
         name="ENABLE_HIERARCHICAL_RAG_CACHE",

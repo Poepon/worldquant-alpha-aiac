@@ -334,6 +334,32 @@ class Settings(BaseSettings):
     QLIB_SNAPSHOT_DIR: str = os.getenv("QLIB_SNAPSHOT_DIR", "backend/data/qlib_ohlcv_snapshot")
     QLIB_ENGINE_PREFER_PANDAS: bool = False  # force tier-3 for testing
 
+    # ===== Phase 3 R1b CoSTEER loop activation (2026-05-18) =====
+    # Plan: ~/.claude/plans/phase3-r1b-costeer-loop-2026-05-18.md v1.3
+    # Each sub-phase has its own flag for independent rollout per
+    # [[feedback_light_wiring_deferred_gate]]. Default OFF — every flag
+    # registered in backend/services/feature_flag_service.py SUPPORTED_FLAGS.
+    # ----- R1b.1 — implementation retry loop -----
+    ENABLE_R1B_RETRY_LOOP: bool = False
+    R1B_MAX_RETRIES_PER_ALPHA: int = 3
+    R1B_RETRY_MODEL: str = "claude-haiku-4-5-20251001"
+    # ----- R1b.2 — hypothesis mutation loop -----
+    # BOTH attribution → mutate dominates retry per plan [V1.0-A2-3].
+    ENABLE_R1B_HYPOTHESIS_MUTATE: bool = False
+    R1B_MAX_MUTATIONS_PER_DATASET_CYCLE: int = 2
+    R1B_MUTATE_MODEL: str = "claude-haiku-4-5-20251001"
+    # ----- R1b.3 — cross-round failure trees -----
+    ENABLE_R1B_FAILURE_TREE: bool = False
+    R1B_FAILURE_TREE_MAX_DEPTH: int = 4
+    # ----- R1b.4 — typed AlphaMiningPipeline route -----
+    # hypothesis_centric_variant=3 task opt-in;coexists with R1b.1/R1b.2.
+    ENABLE_R1B_TYPED_PIPELINE: bool = False
+    # ----- R1b.5 — R6 DAG retry-aware reward -----
+    # Pre-req R1b.1+R1b.2 GO gates + ≥14d observation.
+    ENABLE_R1B_DAG_RETRY_REWARD: bool = False
+    # ----- Shared budget guard -----
+    R1B_TOKEN_COST_CEILING_USD_PER_ALPHA: float = 0.05
+
     # R8-v2 #2 (2026-05-18): per-layer Redis cache for hierarchical RAG。
     # cache_key = sha256[:16](layer + sorted params),TTL = RAG_HIER_CACHE_TTL_SEC
     # (default 300s)。无显式 invalidation — KB 写入频率 3-50/h,5-min stale window
