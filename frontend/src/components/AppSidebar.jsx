@@ -59,6 +59,7 @@ const menuItems = [
       { key: '/ops/regime', label: '市场体制' },
       { key: '/ops/llm-op-monitor', label: 'LLM 算子监控' },
       { key: '/ops/costeer', label: 'CoSTEER 循环监控 (R1a/R1b)' },
+      { key: '/ops/r9-cache', icon: <DatabaseOutlined />, label: 'R9 模拟缓存' },
       { key: '/ops/brain-role', icon: <SwapOutlined />, label: 'BRAIN 模式' },
     ],
   },

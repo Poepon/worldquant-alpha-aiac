@@ -2076,6 +2076,126 @@ async def r8_query_stats(
 
 
 # =============================================================================
+# Phase 3 R9 — simulation cache telemetry (2026-05-18)
+# =============================================================================
+# Reads simulation_cache table aggregates. hit/miss has no dedicated counter;
+# we infer from access_count distribution (first write = miss, every +1 = hit
+# that saved one BRAIN call). saved_brain_calls = SUM(access_count) - COUNT(*).
+
+
+class R9CacheRegionStat(BaseModel):
+    region: str
+    universe: str
+    entries: int
+    accesses: int
+    saved_brain_calls: int
+
+
+class R9CacheStatsOut(BaseModel):
+    flags: Dict[str, bool]
+    total_cached_rows: int
+    rows_in_window: int
+    total_accesses_lifetime: int
+    saved_brain_calls: int
+    hit_rate_approx: float
+    avg_accesses_per_entry: float
+    success_rate: float
+    ttl_days: int
+    expired_rows: int
+    by_region: List[R9CacheRegionStat]
+    window_days: int
+
+
+@router.get("/r9/cache-stats", response_model=R9CacheStatsOut)
+async def r9_cache_stats(
+    days: int = 7,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> R9CacheStatsOut:
+    """R9 simulation cache telemetry — hit-rate + savings approximation.
+
+    No dedicated hit/miss counter exists in R9 — we infer from the
+    ``access_count`` distribution on ``simulation_cache``:
+
+    - ``access_count = 1`` rows: a write that has never been re-hit
+    - ``access_count > 1`` rows: re-hit at least once
+    - **saved_brain_calls = SUM(access_count) - COUNT(*)** (each +1 over
+      the initial write is a hit that bypassed BRAIN)
+
+    Healthy R9 deploy: ``hit_rate_approx >= 0.3`` (expressions re-simulated
+    within TTL window) and ``avg_accesses_per_entry >= 1.5`` (cache reuse
+    across tasks/rounds). ``expired_rows > 0`` is normal — entries past
+    ``SIMULATION_CACHE_TTL_DAYS`` are filtered out by ``get_cached`` but
+    physically retained until a future eviction sweep.
+
+    ``window_days`` only affects ``rows_in_window`` (recently-added rows)
+    — lifetime stats span the full table since TTL filtering happens at
+    read time, not on writes.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_SIMULATION_CACHE": bool(getattr(_stg, "ENABLE_SIMULATION_CACHE", False)),
+    }
+    ttl_days = int(getattr(_stg, "SIMULATION_CACHE_TTL_DAYS", 14))
+
+    overall = (await db.execute(_text(
+        "SELECT "
+        "  COUNT(*) AS total_rows, "
+        "  COALESCE(SUM(access_count), 0) AS total_acc, "
+        "  COUNT(*) FILTER (WHERE access_count > 1) AS hit_multi, "
+        "  COUNT(*) FILTER (WHERE success = true) AS success_count, "
+        "  COUNT(*) FILTER (WHERE cached_at > now() - (:days || ' day')::interval) AS rows_in_win, "
+        "  COUNT(*) FILTER (WHERE cached_at < now() - (:ttl || ' day')::interval) AS expired "
+        "FROM simulation_cache"
+    ), {"days": str(int(days)), "ttl": str(ttl_days)})).one()
+
+    total_rows, total_acc, hit_multi, success_count, rows_in_win, expired = overall
+    total_int = int(total_rows or 0)
+    total_acc_int = int(total_acc or 0)
+    saved = max(total_acc_int - total_int, 0)
+    hit_rate = round(int(hit_multi or 0) / total_int, 4) if total_int > 0 else 0.0
+    avg_acc = round(total_acc_int / total_int, 4) if total_int > 0 else 0.0
+    success_rate = round(int(success_count or 0) / total_int, 4) if total_int > 0 else 0.0
+
+    region_rows = (await db.execute(_text(
+        "SELECT region, universe, "
+        "  COUNT(*) AS entries, "
+        "  COALESCE(SUM(access_count), 0) AS accesses "
+        "FROM simulation_cache "
+        "GROUP BY region, universe "
+        "ORDER BY accesses DESC "
+        "LIMIT 20"
+    ))).all()
+    by_region = [
+        R9CacheRegionStat(
+            region=r or "?",
+            universe=u or "?",
+            entries=int(e or 0),
+            accesses=int(a or 0),
+            saved_brain_calls=max(int(a or 0) - int(e or 0), 0),
+        )
+        for r, u, e, a in region_rows
+    ]
+
+    return R9CacheStatsOut(
+        flags=flags,
+        total_cached_rows=total_int,
+        rows_in_window=int(rows_in_win or 0),
+        total_accesses_lifetime=total_acc_int,
+        saved_brain_calls=saved,
+        hit_rate_approx=hit_rate,
+        avg_accesses_per_entry=avg_acc,
+        success_rate=success_rate,
+        ttl_days=ttl_days,
+        expired_rows=int(expired or 0),
+        by_region=by_region,
+        window_days=int(days),
+    )
+
+
+# =============================================================================
 # Phase 15-D PR2 — operator cascade drain (2026-05-18)
 # =============================================================================
 # Idempotent drain action: convert PAUSED CONTINUOUS_CASCADE rows to

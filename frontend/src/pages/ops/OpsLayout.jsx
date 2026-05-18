@@ -12,6 +12,7 @@ import Regime from './Regime'
 import LLMOpMonitor from './LLMOpMonitor'
 import CoSTEERMonitor from './CoSTEERMonitor'
 import BrainRoleSwitch from './BrainRoleSwitch'
+import SimulationCacheMonitor from './SimulationCacheMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -64,6 +65,8 @@ export default function OpsLayout() {
         <Route path="costeer" element={<CoSTEERMonitor />} />
         {/* P3-Brain — BRAIN Consultant mode dedicated page (2026-05-18) */}
         <Route path="brain-role" element={<BrainRoleSwitch />} />
+        {/* Phase 3 R9 — simulation cache telemetry (2026-05-18) */}
+        <Route path="r9-cache" element={<SimulationCacheMonitor />} />
       </Routes>
     </div>
   )

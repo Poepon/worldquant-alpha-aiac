@@ -597,6 +597,12 @@ const api = {
     return data
   },
 
+  // R9 simulation cache telemetry (2026-05-18)
+  getOpsR9CacheStats: async (days = 7) => {
+    const { data } = await client.get('/ops/r9/cache-stats', { params: { days } })
+    return data
+  },
+
   // flat-F1 advanced kickoff (2026-05-18). Gated server-side by
   // ENABLE_FLAT_CONTINUOUS — flag OFF returns HTTP 400 with detail string.
   startFlatSession: async ({ region, universe, datasets = [] }) => {
