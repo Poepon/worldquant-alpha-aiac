@@ -257,12 +257,36 @@ export default function TaskManagement() {
       title: '模式',
       dataIndex: 'agent_mode',
       key: 'agent_mode',
-      width: 120,
-      render: (mode) => (
-        <Tag color={mode === 'AUTONOMOUS' ? 'blue' : 'purple'}>
-          {mode}
-        </Tag>
-      ),
+      width: 160,
+      // Phase 1.5-C frontend cutover (2026-05-18): prefer the new
+      // schedule + starting_tier authoritative fields; fall back to
+      // agent_mode for old clients. current_tier (when CASCADE +
+      // RUNNING) shows live phase next to the static schedule label.
+      render: (mode, record) => {
+        const schedule = record?.schedule
+        const startingTier = record?.starting_tier
+        const currentTier = record?.current_tier
+        if (schedule) {
+          const tierLabel = startingTier ? `T${startingTier}` : ''
+          const liveLabel =
+            currentTier && currentTier !== startingTier ? ` → T${currentTier}` : ''
+          const color =
+            schedule === 'CASCADE'
+              ? 'blue'
+              : schedule === 'FLAT'
+              ? 'green'
+              : 'purple'
+          return (
+            <Tag color={color}>
+              {schedule}
+              {tierLabel ? ` ${tierLabel}${liveLabel}` : ''}
+            </Tag>
+          )
+        }
+        return (
+          <Tag color={mode === 'AUTONOMOUS' ? 'blue' : 'purple'}>{mode}</Tag>
+        )
+      },
     },
     {
       title: '状态',

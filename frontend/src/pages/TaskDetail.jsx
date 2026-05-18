@@ -362,7 +362,17 @@ export default function TaskDetail() {
                 </Tag>
               </Descriptions.Item>
               <Descriptions.Item label="模式">
-                {task.agent_mode}
+                {/* Phase 1.5-C frontend cutover (2026-05-18):
+                    prefer schedule + starting_tier authoritative fields. */}
+                {task.schedule
+                  ? `${task.schedule}${
+                      task.starting_tier ? ` T${task.starting_tier}` : ''
+                    }${
+                      task.current_tier && task.current_tier !== task.starting_tier
+                        ? ` → T${task.current_tier}`
+                        : ''
+                    }`
+                  : task.agent_mode}
               </Descriptions.Item>
               <Descriptions.Item label="进度">
                 <Text strong style={{ color: '#00d4ff' }}>

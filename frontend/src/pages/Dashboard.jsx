@@ -133,7 +133,15 @@ export default function Dashboard() {
                     style={{ cursor: 'pointer', fontSize: 13, padding: '4px 10px' }}
                     onClick={() => navigate('/tasks')}
                   >
-                    {s.region} · {s.status} · {s.cascade_phase || '—'} · #{s.cascade_round_idx}
+                    {/* Phase 1.5-C frontend cutover (2026-05-18):
+                        prefer current_tier (runtime) → starting_tier → cascade_phase. */}
+                    {s.region} · {s.status} · {
+                      s.current_tier
+                        ? `T${s.current_tier}`
+                        : s.starting_tier
+                        ? `T${s.starting_tier}`
+                        : (s.cascade_phase || '—')
+                    } · #{s.cascade_round_idx}
                   </Tag>
                 )
               })

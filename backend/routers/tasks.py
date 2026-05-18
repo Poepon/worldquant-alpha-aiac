@@ -75,6 +75,11 @@ class TaskResponse(BaseModel):
     mining_mode: Optional[str] = None
     cascade_phase: Optional[str] = None
     cascade_round_idx: Optional[int] = None
+    # Phase 1.5-C frontend cutover (2026-05-18): runtime current_tier derived
+    # from cascade_phase dual-write (T1→1, T2→2, T3→3, else None). Lets the
+    # /tasks listing display live tier without an extra /mining-session call
+    # per row. Mirrors MiningSessionResponse.current_tier semantics.
+    current_tier: Optional[int] = None
 
     class Config:
         from_attributes = True
@@ -121,6 +126,29 @@ class InterventionRequest(BaseModel):
 
 
 # =============================================================================
+# Helpers
+# =============================================================================
+
+
+_CASCADE_PHASE_TO_TIER = {"T1": 1, "T2": 2, "T3": 3}
+
+
+def _derive_current_tier(t: object) -> Optional[int]:
+    """Phase 1.5-C frontend cutover (2026-05-18): derive runtime tier from
+    cascade_phase dual-write so list/detail responses can populate
+    ``current_tier`` without an extra ExperimentRun.runtime_state fetch.
+
+    Per phase15-C [V1.2-C5] cascade_phase is dual-written with
+    runtime_state["current_tier"] — the mapping is the canonical 1:1.
+    Returns None for flat/discrete tasks (cascade_phase None).
+    """
+    phase = getattr(t, "cascade_phase", None)
+    if not phase:
+        return None
+    return _CASCADE_PHASE_TO_TIER.get(str(phase).upper())
+
+
+# =============================================================================
 # ENDPOINTS
 # =============================================================================
 
@@ -155,6 +183,7 @@ async def list_tasks(
             mining_mode=getattr(t, "mining_mode", None),
             cascade_phase=getattr(t, "cascade_phase", None),
             cascade_round_idx=getattr(t, "cascade_round_idx", None),
+            current_tier=_derive_current_tier(t),
         )
         for t in tasks
     ]
@@ -207,6 +236,7 @@ async def create_task(
         mining_mode=getattr(task, "mining_mode", None),
         cascade_phase=getattr(task, "cascade_phase", None),
         cascade_round_idx=getattr(task, "cascade_round_idx", None),
+        current_tier=_derive_current_tier(task),
     )
 
 
@@ -235,6 +265,15 @@ async def get_task(
         max_iterations=detail.max_iterations,
         created_at=detail.created_at,
         updated_at=detail.updated_at,
+        # Phase 1.5-C V1.2-C5 cutover (2026-05-18): TaskDetailResponse
+        # previously missed all new scheduling fields — populated now so
+        # the /tasks/{id} detail view matches /tasks listing shape.
+        schedule=getattr(detail, "schedule", None),
+        starting_tier=getattr(detail, "starting_tier", None),
+        mining_mode=getattr(detail, "mining_mode", None),
+        cascade_phase=getattr(detail, "cascade_phase", None),
+        cascade_round_idx=getattr(detail, "cascade_round_idx", None),
+        current_tier=_derive_current_tier(detail),
         trace_steps=[
             TraceStepResponse(
                 id=s.id,
