@@ -490,6 +490,20 @@ async def node_hypothesis_mutate(
 
     await _write_r1b_retry_log_rows(log_rows)
 
+    # R1b.3c (2026-05-18): on successful mutate, persist failure_tree to KB
+    # so R8 RAG L2 surfaces it next round. Plan §7.1 — fires only when the
+    # mutate succeeded (pending_new_hypothesis non-None) AND the flag is
+    # ON. Chain is the 2-node {parent → new}; DB-walking the full
+    # parent_hypothesis_id chain is R1b.3-v2 work.
+    if pending_new_hypothesis is not None:
+        await _maybe_record_failure_tree(
+            primary_hyp=primary_hyp,
+            pending=pending_new_hypothesis,
+            log_rows=log_rows,
+            primary_alpha=primary_alpha,
+            primary_metrics=primary_metrics,
+        )
+
     out: Dict[str, Any] = {
         "r1b_mutations_attempted_this_cycle": state.r1b_mutations_attempted_this_cycle + 1,
         "r1b_token_cost_this_alpha": state.r1b_token_cost_this_alpha + cost_delta_usd,
@@ -497,6 +511,64 @@ async def node_hypothesis_mutate(
     if pending_new_hypothesis is not None:
         out["r1b_pending_new_hypothesis"] = pending_new_hypothesis
     return out
+
+
+async def _maybe_record_failure_tree(
+    *,
+    primary_hyp: str,
+    pending: Dict[str, Any],
+    log_rows: List[Dict[str, Any]],
+    primary_alpha: Any,
+    primary_metrics: Dict[str, Any],
+) -> None:
+    """R1b.3c — soft-fail UPSERT failure_tree to KB via dedicated session.
+
+    Chain: ``[{parent_statement} → {new_statement}]``. ``original_hypothesis_id``
+    is read from primary_metrics if set; the new hypothesis has no DB id
+    yet (R1b.3-v2 will link to a fresh Hypothesis row).
+
+    NEVER raises — DB / import errors logged + swallowed so the mutate
+    node's main path is unaffected.
+    """
+    try:
+        from backend.config import settings as _stg
+    except Exception:
+        return
+    if not getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False):
+        return
+    try:
+        from backend.knowledge_extraction import record_failure_tree
+        from backend.database import AsyncSessionLocal as _R1B_SessionLocal
+    except Exception as ex:
+        logger.debug(f"[r1b_loop mutate] failure_tree deps unavailable ({ex})")
+        return
+    parent_id = primary_metrics.get("hypothesis_id") if isinstance(primary_metrics, dict) else None
+    chain = [
+        {"id": parent_id, "statement": primary_hyp, "mutation_depth": 0},
+        {
+            "id": None,
+            "statement": pending.get("statement", ""),
+            "mutation_depth": 1,
+            "diff_from_parent": pending.get("diff_from_original", ""),
+        },
+    ]
+    try:
+        async with _R1B_SessionLocal() as _r1b_db:
+            ok = await record_failure_tree(
+                hypothesis_chain=chain,
+                retry_log_rows=log_rows,
+                db=_r1b_db,
+            )
+        if ok:
+            logger.info(
+                f"[r1b_loop mutate] failure_tree persisted "
+                f"(parent={primary_hyp[:60]!r} → new={pending.get('statement', '')[:60]!r})"
+            )
+    except Exception as ex:
+        logger.warning(
+            f"[r1b_loop mutate] failure_tree persist failed "
+            f"(round unaffected): {ex}"
+        )
 
 
 def _make_mutate_log_row(
