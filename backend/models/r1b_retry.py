@@ -17,6 +17,7 @@ Outcome reconciliation:
 """
 from sqlalchemy import (
     BigInteger, Column, DateTime, Float, Index, Integer, String, Text,
+    UniqueConstraint,
 )
 from sqlalchemy.sql import func
 
@@ -32,6 +33,20 @@ class R1bRetryLog(SQLAlchemyBase):
         Index("ix_r1b_created_at", "created_at"),
         Index("ix_r1b_attempt_type", "attempt_type"),
         Index("ix_r1b_outcome", "outcome"),
+        # R1b.1 review LOW (2026-05-18): defensive UNIQUE against concurrent
+        # dup rows when same alpha enters retry node twice (workflow restart
+        # on stuck cycle, or future multi-worker LangGraph mode). Tuple uses
+        # original_expression_hash (always populated via SHA256, unlike the
+        # often-NULL pre-sim original_alpha_id_brain) and round_idx as the
+        # retry attempt counter. attempt_type is included so retry_impl +
+        # mutate_hyp can coexist on same alpha+round for BOTH attribution.
+        UniqueConstraint(
+            "task_id",
+            "round_idx",
+            "original_expression_hash",
+            "attempt_type",
+            name="uq_r1b_retry_log_task_alpha_attempt_type",
+        ),
     )
 
     id = Column(BigInteger, primary_key=True)
