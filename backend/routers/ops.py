@@ -1008,11 +1008,12 @@ async def brain_deactivate_consultant(
 
 
 # ---------------------------------------------------------------------------
-# flat-F1 Advanced Kickoff (Phase 3, plan v1.5 SHIP-READY, 2026-05-18)
+# Flat session admin endpoints (post tier-system removal, 2026-05-18)
 # ---------------------------------------------------------------------------
-# FLAT_CONTINUOUS mining_mode parallel to legacy CONTINUOUS_CASCADE per master
-# plan §6 D3 "保留 legacy(渐进切换)". Two admin endpoints — both gated on
-# settings.ENABLE_FLAT_CONTINUOUS (default OFF, flat-F2 PR flips default).
+# Post tier-system removal cascade is permanently retired — the prior
+# cascade_deprecation_readiness + cascade_drain endpoints (read/wrote the
+# dropped task.mining_mode column) are deleted along with the parallel
+# CONTINUOUS_CASCADE concept. Flat sessions are the only continuous path.
 
 from backend.services.task_service import TaskService  # noqa: E402  (intentional late import)
 
@@ -1027,7 +1028,7 @@ class StartFlatSessionIn(BaseModel):
     universe: str = Field(default="TOP3000", description="Region universe")
     datasets: List[str] = Field(
         default_factory=list,
-        description="Explicit dataset list; empty = AUTO-pick same as cascade",
+        description="Explicit dataset list; empty = AUTO-pick",
     )
 
 
@@ -1036,7 +1037,6 @@ class FlatSessionOut(BaseModel):
     region: str
     universe: str
     status: str
-    mining_mode: str
     runtime_state_inherited: bool = False
 
 
@@ -1047,10 +1047,10 @@ async def start_flat_session(
     svc: TaskService = Depends(get_task_service_ops),
     actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
 ) -> FlatSessionOut:
-    """Create a new FLAT_CONTINUOUS mining task and dispatch its worker.
+    """Create a new flat mining session and dispatch its worker.
 
-    flat-F1 v1.5 §3.4. Gated by ``settings.ENABLE_FLAT_CONTINUOUS`` — returns
-    400 when flag is OFF so the caller knows to flip the flag first.
+    Gated by ``settings.ENABLE_FLAT_CONTINUOUS`` — returns 400 when flag is
+    OFF so the caller knows to flip the flag first.
     """
     from backend.config import settings  # local import — settings hot-reads flag overrides
     if not getattr(settings, "ENABLE_FLAT_CONTINUOUS", False):
@@ -1071,7 +1071,6 @@ async def start_flat_session(
         region=info.region,
         universe=info.universe,
         status=info.status,
-        mining_mode=info.mining_mode,
         runtime_state_inherited=False,
     )
 
@@ -1083,13 +1082,7 @@ async def resume_flat_session(
     svc: TaskService = Depends(get_task_service_ops),
     actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
 ) -> FlatSessionOut:
-    """Resume a paused FLAT_CONTINUOUS session (preserves flat_cursor).
-
-    flat-F1 v1.5 §3.5 + Q1 V2: internally calls
-    ``TaskService._dispatch_session_worker(task_id, inherit_runtime_state=True)``
-    so ``runtime_state["flat_cursor"]`` (and any other per-session keys)
-    survives the pause-resume cycle into the new ExperimentRun.
-    """
+    """Resume a paused flat session (preserves runtime_state['flat_cursor'])."""
     try:
         info = await svc.resume_flat_session(task_id)
     except ValueError as ex:
@@ -1099,140 +1092,7 @@ async def resume_flat_session(
         region=info.region,
         universe=info.universe,
         status=info.status,
-        mining_mode=info.mining_mode,
         runtime_state_inherited=True,
-    )
-
-
-# ---------------------------------------------------------------------------
-# flat-F4 prep (Phase 3, 2026-05-18): cascade-deprecation readiness
-# ---------------------------------------------------------------------------
-# Read-only visibility endpoint reporting cascade-vs-flat adoption so the
-# operator can decide when to safely delete _run_continuous_cascade. The
-# actual cascade removal (flat-F4) is gated on:
-#   (a) ENABLE_DEFAULT_FLAT_SESSION ON in production
-#   (b) Zero RUNNING/PAUSED CONTINUOUS_CASCADE tasks
-#   (c) ≥1 flat task LIVE per region for ≥4 weeks
-# This endpoint surfaces (a)+(b) at a glance; (c) needs trend analysis.
-
-class CascadeDeprecationReadinessOut(BaseModel):
-    cascade_running_count: int
-    cascade_paused_count: int
-    cascade_running_regions: List[str]
-    flat_running_count: int
-    flat_paused_count: int
-    flat_default_flag_on: bool
-    flat_continuous_flag_on: bool
-    cascade_legacy_flag_on: bool   # phase15-D PR2 (2026-05-18)
-    ready_to_delete: bool
-    next_action: str
-
-
-@router.get(
-    "/cascade-deprecation/readiness",
-    response_model=CascadeDeprecationReadinessOut,
-)
-async def cascade_deprecation_readiness(
-    _token: str = Depends(_require_ops_token),
-    db: AsyncSession = Depends(get_db),
-) -> CascadeDeprecationReadinessOut:
-    """Reports cascade-vs-flat adoption + recommends the next flat-F4 step.
-
-    ``ready_to_delete=True`` is a sufficient signal — not a green light. The
-    operator must additionally confirm the 4-week stability window per
-    plan §4.7 flat-F4 gating, which is not tracked in this query.
-    """
-    from sqlalchemy import text as _text
-    from backend.config import settings as _stg
-
-    rows = (await db.execute(_text(
-        "SELECT mining_mode, status, region, COUNT(*) AS n "
-        "FROM mining_tasks "
-        "WHERE status IN ('RUNNING', 'PAUSED') "
-        "  AND mining_mode IN ('CONTINUOUS_CASCADE', 'FLAT_CONTINUOUS') "
-        "GROUP BY mining_mode, status, region"
-    ))).all()
-
-    cascade_running = 0
-    cascade_paused = 0
-    cascade_regions: List[str] = []
-    flat_running = 0
-    flat_paused = 0
-    for mode, st, region, n in rows:
-        n = int(n or 0)
-        if mode == "CONTINUOUS_CASCADE":
-            if st == "RUNNING":
-                cascade_running += n
-                if region:
-                    cascade_regions.append(region)
-            elif st == "PAUSED":
-                cascade_paused += n
-        elif mode == "FLAT_CONTINUOUS":
-            if st == "RUNNING":
-                flat_running += n
-            elif st == "PAUSED":
-                flat_paused += n
-
-    default_flat = bool(getattr(_stg, "ENABLE_DEFAULT_FLAT_SESSION", False))
-    flat_on = bool(getattr(_stg, "ENABLE_FLAT_CONTINUOUS", False))
-    # phase15-D PR3c (2026-05-18): ENABLE_CASCADE_LEGACY flag retired —
-    # cascade dispatch + router + watchdog probe refuse unconditionally.
-    # cascade_legacy_on is always False post-PR3c; kept in response for
-    # API compat (downstream CoSTEERMonitor frontend reads this field).
-    cascade_legacy_on = False
-
-    if cascade_running > 0:
-        next_action = (
-            f"Drain {cascade_running} RUNNING cascade task(s) in "
-            f"{sorted(set(cascade_regions))} before flat-F4. Pause them via "
-            "/mining-session/stop and start matching flat sessions."
-        )
-        ready = False
-    elif cascade_paused > 0:
-        next_action = (
-            f"{cascade_paused} cascade task(s) PAUSED — call "
-            "POST /api/v1/ops/cascade-deprecation/drain to convert to "
-            "STOPPED with audit trail (phase15-D PR2)."
-        )
-        ready = False
-    elif not default_flat:
-        next_action = (
-            "Cascade drained. Flip ENABLE_DEFAULT_FLAT_SESSION ON via "
-            "PATCH /ops/flags/ENABLE_DEFAULT_FLAT_SESSION so new tasks "
-            "default to flat, then start at least one flat session."
-        )
-        ready = False
-    elif flat_running == 0:
-        next_action = (
-            "No flat tasks RUNNING. Start one via POST /ops/start-flat-session "
-            "and confirm at least one round LIVE before proceeding."
-        )
-        ready = False
-    else:
-        # phase15-D PR3c (2026-05-18): kill-switch retired (cascade now
-        # always-refused). All gates green: cascade drained + flat active.
-        # PR3b ORM column drop already applied. Remaining cleanup tracked
-        # as PR3d (delete ~700 LoC cascade dead code) + PR4b (frontend
-        # cascade UI panels).
-        next_action = (
-            "Cascade fully retired (drained + flat active + PR3c "
-            "router+dispatch removed). Remaining cleanup is PR3d "
-            "dead-code delete + PR4b frontend panel removal — pure "
-            "code-tree hygiene, no operator action required."
-        )
-        ready = True
-
-    return CascadeDeprecationReadinessOut(
-        cascade_running_count=cascade_running,
-        cascade_paused_count=cascade_paused,
-        cascade_running_regions=sorted(set(cascade_regions)),
-        flat_running_count=flat_running,
-        flat_paused_count=flat_paused,
-        flat_default_flag_on=default_flat,
-        flat_continuous_flag_on=flat_on,
-        cascade_legacy_flag_on=cascade_legacy_on,
-        ready_to_delete=ready,
-        next_action=next_action,
     )
 
 
@@ -2487,90 +2347,8 @@ async def r6_dag_stats(
 
 
 # =============================================================================
-# Phase 15-D PR2 — operator cascade drain (2026-05-18)
+# Phase 15-D PR2 cascade drain — DELETED post tier-system removal (2026-05-18)
 # =============================================================================
-# Idempotent drain action: convert PAUSED CONTINUOUS_CASCADE rows to
-# STOPPED + write audit metadata so phase15-D PR3 (column drop) doesn't
-# lose state. Refuses RUNNING cascade rows — operator must first call
-# /mining-session/stop to flush in-flight rounds cleanly.
-
-
-class CascadeDrainResult(BaseModel):
-    task_id: int
-    prior_status: str
-    new_status: str
-
-
-class CascadeDrainOut(BaseModel):
-    drained: List[CascadeDrainResult]
-    skipped_running: List[int]      # task_ids still RUNNING — must stop first
-    already_drained: List[int]      # task_ids that already had cascade_drained audit
-    total_paused_before: int
-    total_paused_after: int
-
-
-@router.post("/cascade-deprecation/drain", response_model=CascadeDrainOut)
-async def cascade_deprecation_drain(
-    _token: str = Depends(_require_ops_token),
-    db: AsyncSession = Depends(get_db),
-) -> CascadeDrainOut:
-    """Drain all PAUSED CONTINUOUS_CASCADE rows → STOPPED + audit.
-
-    Idempotent: re-running on already-drained tasks is a no-op (they
-    show in already_drained). RUNNING cascade rows are refused (operator
-    must first POST /api/v1/mining-session/stop).
-
-    Phase 15-D PR3 (column drop) requires this drain to have run so no
-    state is lost when mining_mode / cascade_phase are removed.
-    """
-    import json as _json
-    from datetime import datetime as _dt, timezone as _tz
-    from sqlalchemy import text as _text
-
-    # 1. RUNNING cascade rows refused
-    running_rows = (await db.execute(_text(
-        "SELECT id FROM mining_tasks "
-        "WHERE mining_mode = 'CONTINUOUS_CASCADE' AND status = 'RUNNING'"
-    ))).all()
-    skipped_running = [int(r[0]) for r in running_rows]
-
-    # 2. Iterate PAUSED rows, drain idempotently
-    paused_rows = (await db.execute(_text(
-        "SELECT id, COALESCE(config, '{}'::jsonb) AS config, status "
-        "FROM mining_tasks "
-        "WHERE mining_mode = 'CONTINUOUS_CASCADE' AND status = 'PAUSED'"
-    ))).all()
-    total_paused_before = len(paused_rows)
-
-    drained: List[CascadeDrainResult] = []
-    already_drained: List[int] = []
-    now_utc = _dt.now(_tz.utc).isoformat()
-
-    for tid, cfg_raw, prior_status in paused_rows:
-        cfg = dict(cfg_raw) if isinstance(cfg_raw, dict) else {}
-        if "cascade_drained" in cfg:
-            already_drained.append(int(tid))
-            continue
-        cfg["cascade_drained"] = {
-            "at": now_utc,
-            "by": "ops_drain",
-            "prior_status": prior_status,
-        }
-        await db.execute(_text(
-            "UPDATE mining_tasks SET status = 'STOPPED', config = :cfg::jsonb "
-            "WHERE id = :i"
-        ), {"i": int(tid), "cfg": _json.dumps(cfg)})
-        drained.append(CascadeDrainResult(
-            task_id=int(tid), prior_status=prior_status, new_status="STOPPED",
-        ))
-
-    await db.commit()
-    total_paused_after = total_paused_before - len(drained)
-
-    return CascadeDrainOut(
-        drained=drained,
-        skipped_running=skipped_running,
-        already_drained=already_drained,
-        total_paused_before=total_paused_before,
-        total_paused_after=total_paused_after,
-    )
+# The /cascade-deprecation/drain endpoint (and its sibling /readiness above)
+# read/wrote the dropped task.mining_mode column. With cascade permanently
+# retired and the column gone, both endpoints are deleted entirely.

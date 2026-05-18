@@ -402,24 +402,13 @@ async def get_alpha_trace(
 
 
 # =============================================================================
-# PR3 — Tier system: lineage tree + transition history
+# Status transition history
 # =============================================================================
-
-class LineageNode(BaseModel):
-    id: int
-    alpha_id: Optional[str] = None
-    expression: str
-    factor_tier: Optional[int] = None
-    quality_status: str
-    is_sharpe: Optional[float] = None
-
-
-class LineageResponse(BaseModel):
-    self: LineageNode
-    ancestors: List[LineageNode] = []      # parent → grandparent → ... up to root
-    descendants: List[LineageNode] = []    # direct children only (one level)
-    note: Optional[str] = None             # e.g. "not in tier hierarchy"
-
+# Post tier-system removal (2026-05-18) the tier-aware lineage endpoint
+# (/alphas/{id}/lineage) was deleted along with its LineageNode + LineageResponse
+# Pydantic models. parent_alpha_id stays on the Alpha row for flat hypothesis
+# lineage tracking; if a flat lineage view is needed later, build a fresh
+# tier-agnostic endpoint.
 
 class TransitionEntry(BaseModel):
     id: int
@@ -434,75 +423,6 @@ class TransitionEntry(BaseModel):
 class TransitionsResponse(BaseModel):
     alpha_id: int
     transitions: List[TransitionEntry] = []
-
-
-@router.get("/{alpha_id}/lineage", response_model=LineageResponse)
-async def get_alpha_lineage(
-    alpha_id: int,
-    db: AsyncSession = Depends(get_db),
-):
-    """Tier-aware lineage tree for an alpha.
-
-    - alpha.factor_tier in {1,2,3}: returns ancestors (parent_alpha_id chain)
-      and direct descendants (rows where parent_alpha_id == this id).
-    - alpha.factor_tier IS NULL: returns empty lists with a note. Frontend
-      shows an info banner instead of the tree.
-    """
-    from sqlalchemy import select as _select
-    from backend.models import Alpha as _Alpha
-
-    target = await db.get(_Alpha, alpha_id)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Alpha not found")
-
-    def _to_node(a: _Alpha) -> LineageNode:
-        return LineageNode(
-            id=a.id,
-            alpha_id=a.alpha_id,
-            expression=(a.expression or "")[:300],
-            factor_tier=a.factor_tier,
-            quality_status=a.quality_status or "PENDING",
-            is_sharpe=a.is_sharpe,
-        )
-
-    self_node = _to_node(target)
-    if target.factor_tier is None:
-        return LineageResponse(
-            self=self_node,
-            ancestors=[],
-            descendants=[],
-            note="not in tier hierarchy",
-        )
-
-    # Ancestors — walk parent_alpha_id up to root, capping at 5 to prevent
-    # accidental loops (shouldn't happen but defensive).
-    ancestors: List[LineageNode] = []
-    current = target
-    for _ in range(5):
-        if not current.parent_alpha_id:
-            break
-        parent = await db.get(_Alpha, current.parent_alpha_id)
-        if parent is None or parent.id == current.id:
-            break
-        ancestors.append(_to_node(parent))
-        current = parent
-
-    # Direct descendants — one-level fanout for now (recursive could be added
-    # but UI renders only one level cleanly).
-    desc_q = (
-        _select(_Alpha)
-        .where(_Alpha.parent_alpha_id == alpha_id)
-        .order_by(_Alpha.is_sharpe.desc().nullslast())
-        .limit(50)
-    )
-    desc_rows = (await db.execute(desc_q)).scalars().all()
-    descendants = [_to_node(d) for d in desc_rows]
-
-    return LineageResponse(
-        self=self_node,
-        ancestors=ancestors,
-        descendants=descendants,
-    )
 
 
 @router.get("/{alpha_id}/transitions", response_model=TransitionsResponse)
@@ -574,4 +494,145 @@ async def get_alpha_by_brain_id(
         created_at=alpha.created_at,
         date_submitted=alpha.date_submitted,
         can_submit=alpha.can_submit,
+    )
+
+
+# =============================================================================
+# Bulk maintenance endpoints (absorbed from retired factor_library router)
+# =============================================================================
+
+class CanSubmitRefreshBatchResponse(BaseModel):
+    scanned: int
+    refreshed: int
+    pass_count: int
+    fail_count: int
+    skipped: int
+    sampled_failures: List[dict] = []
+
+
+@router.post(
+    "/refresh-can-submit",
+    response_model=CanSubmitRefreshBatchResponse,
+)
+async def refresh_can_submit_batch(
+    quality_status: str = Query(
+        "PASS",
+        description="Filter by quality_status. Default 'PASS' to spare BRAIN quota.",
+    ),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk re-check can_submit for a tranche of alphas. Sequential 1 req/sec
+    pacing inside; do not call concurrently with another batch refresh.
+
+    Use this to backfill historical alphas after they were first ingested
+    without BRAIN-checks resolution.
+    """
+    import asyncio
+    from sqlalchemy import select as _select
+    from backend.adapters.brain_adapter import BrainAdapter
+    from backend.models import Alpha
+
+    q = (
+        _select(Alpha.id)
+        .where(Alpha.quality_status == quality_status)
+        .where(Alpha.alpha_id.isnot(None))
+        .order_by(Alpha.id.desc())
+        .limit(limit)
+    )
+    ids = [r[0] for r in (await db.execute(q)).all()]
+
+    svc = AlphaService(db)
+    refreshed = pass_n = fail_n = skipped = 0
+    sampled_failures = []
+    async with BrainAdapter() as ba:
+        for aid in ids:
+            await asyncio.sleep(1.0)
+            res = await svc.refresh_can_submit(aid, brain_adapter=ba)
+            if res is None:
+                skipped += 1
+                continue
+            refreshed += 1
+            if res["can_submit"]:
+                pass_n += 1
+            else:
+                fail_n += 1
+                if len(sampled_failures) < 5:
+                    sampled_failures.append({
+                        "alpha_pk": aid,
+                        "failed": res["failed_checks"],
+                        "pending": res["pending_checks"],
+                    })
+    return CanSubmitRefreshBatchResponse(
+        scanned=len(ids),
+        refreshed=refreshed,
+        pass_count=pass_n,
+        fail_count=fail_n,
+        skipped=skipped,
+        sampled_failures=sampled_failures,
+    )
+
+
+class IqcRefreshResponse(BaseModel):
+    enqueued: int
+    competition: str
+    message: str
+
+
+@router.post("/refresh-iqc", response_model=IqcRefreshResponse)
+async def refresh_iqc_batch(
+    scope: str = Query("submittable", pattern="^(submittable|all_can_submit)$"),
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+):
+    """Enqueue IQC marginal-contribution re-audits for the 可提交 tab.
+
+    IQC Δscore is dynamic — it shifts every time the team submits another
+    alpha — so the 可提交 tab surfaces it as a (red-when-negative) column
+    rather than a hard filter. Each audit runs as a fire-and-forget Celery
+    task that writes back to alpha.metrics._iqc_marginal; this call returns
+    immediately with the enqueued count.
+
+    scope:
+      - submittable (default): can_submit=True + unsubmitted + self_corr<0.7|null
+      - all_can_submit: every can_submit=True + unsubmitted alpha
+    """
+    from sqlalchemy import select as _select, or_, Float
+    from loguru import logger
+    from backend.config import settings
+    from backend.models import Alpha
+    from backend.tasks.refresh_tasks import audit_iqc_marginal_for_alpha
+
+    competition = settings.IQC_AUTO_AUDIT_COMPETITION or "IQC2026S1"
+
+    q = _select(Alpha.id).where(
+        Alpha.can_submit.is_(True),
+        Alpha.date_submitted.is_(None),
+    )
+    if scope == "submittable":
+        _self_corr = Alpha.metrics["_self_corr"].astext.cast(Float)
+        q = q.where(or_(_self_corr < 0.7, _self_corr.is_(None)))
+    q = q.order_by(Alpha.is_sharpe.desc().nullslast()).limit(limit)
+    ids = [r[0] for r in (await db.execute(q)).all()]
+
+    enqueued = 0
+    last_countdown = 0
+    for i, aid in enumerate(ids):
+        try:
+            audit_iqc_marginal_for_alpha.apply_async(
+                args=[aid, competition], countdown=i * 2,
+            )
+            enqueued += 1
+            last_countdown = i * 2
+        except Exception as e:
+            logger.warning(f"[refresh-iqc] enqueue failed for alpha_pk={aid}: {e}")
+
+    eta = last_countdown
+    return IqcRefreshResponse(
+        enqueued=enqueued,
+        competition=competition,
+        message=(
+            f"已触发 {enqueued} 个 IQC 审计（错开排队，约 {eta}s 内完成）；"
+            f"稍后刷新表格查看更新后的 Δscore"
+        ),
     )

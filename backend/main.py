@@ -11,7 +11,7 @@ from backend.config import settings
 from backend.database import init_db
 
 # Import all routers
-from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, factor_library, correlation, ops
+from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, correlation, ops
 
 
 @asynccontextmanager
@@ -96,8 +96,10 @@ app.include_router(knowledge.router, prefix=settings.API_V1_STR)
 app.include_router(config.router, prefix=settings.API_V1_STR)
 app.include_router(datasets.router, prefix=settings.API_V1_STR)
 app.include_router(operators.router, prefix=settings.API_V1_STR)
-# PR3: tier-aware analytics for the FactorLibrary frontend
-app.include_router(factor_library.router, prefix=settings.API_V1_STR)
+# factor_library router deleted post tier-system removal (2026-05-18).
+# Its tier-agnostic /refresh-can-submit + /refresh-iqc endpoints were
+# absorbed into the alphas router (POST /api/v1/alphas/refresh-can-submit
+# + POST /api/v1/alphas/refresh-iqc).
 # V-19 persistent mining service router removed phase15-D PR3c (2026-05-18)
 # — cascade retired; use POST /api/v1/ops/start-flat-session for new sessions.
 # Crisis-window correlation stress test (portfolio matrix + per-window summary)
