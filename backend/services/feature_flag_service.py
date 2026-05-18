@@ -160,6 +160,22 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase1-R3Q8",
         description="启用 DiversityScore 第 6 维 ast_diversity (1 − Jaccard subtree overlap)。Light wiring 仅记录到 ast_distance_log,不 gate 生成。Phase 2+ R10 family-cap 复用此信号。",
     ),
+    # --- R9 simulation cache ---
+    "ENABLE_SIMULATION_CACHE": FlagSpec(
+        name="ENABLE_SIMULATION_CACHE",
+        flag_type="bool",
+        group="Phase3-R9",
+        description=(
+            "Phase 3 R9 (master plan §4.5): cache BRAIN sim results keyed on "
+            "(region, universe, expression, settings_json) sha256[:64]。"
+            "Hit → skip BRAIN call return cached; miss → BRAIN sim + write cache。"
+            "Est. 40-60% BRAIN cost reduction (cascade T2/T3 wrapper dup + flat "
+            "dataset cycling)。TTL SIMULATION_CACHE_TTL_DAYS default 14d;beyond TTL "
+            "treated as miss but row kept for analytics。"
+            "默认 OFF — flag ON 后 cached_simulate_batch wraps brain.simulate_batch。"
+            "Soft-fail: cache DB error → fall back to direct BRAIN call (never blocks)。"
+        ),
+    ),
     # --- flat-F3: LLM-driven wrapper mutation ---
     "ENABLE_LLM_MUTATE_ALPHA": FlagSpec(
         name="ENABLE_LLM_MUTATE_ALPHA",

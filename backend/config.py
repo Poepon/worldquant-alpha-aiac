@@ -269,6 +269,19 @@ class Settings(BaseSettings):
     LLM_MUTATE_TOP_K: int = 3                    # cap variants per seed
     LLM_MUTATE_MODEL: str = "claude-haiku-4-5-20251001"  # cost-effective default
 
+    # ----- R9 simulation cache (Phase 3, 2026-05-18) -----
+    # Cache BRAIN sim results keyed on (region, universe, expression, settings).
+    # Hit → skip BRAIN call, return cached result; miss → BRAIN sim + write cache。
+    # Est. 40-60% BRAIN cost reduction on duplicate-heavy workloads (cascade
+    # T2/T3 wrappers, flat dataset cycling)。
+    # TTL: SIMULATION_CACHE_TTL_DAYS (default 14) — beyond TTL row treated as
+    # miss but kept (analytics; manual SQL purge if needed)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # Alembic head: 9a4f7e8c1d6b。
+    ENABLE_SIMULATION_CACHE: bool = False
+    SIMULATION_CACHE_TTL_DAYS: int = 14
+    SIMULATION_CACHE_ONLY_SUCCESS: bool = True   # only cache success results by default
+
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
     # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression
