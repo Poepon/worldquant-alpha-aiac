@@ -315,3 +315,161 @@ async def test_e2e_pillar_only_dispatch_active(pg_session, monkeypatch):
     )
     assert isinstance(r.patterns, list)
     assert isinstance(r.pitfalls, list)
+
+
+# ---------------------------------------------------------------------------
+# R8-v2 #5 review MEDIUM — shape assertions beyond `isinstance(list)`
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_e2e_decayed_partition_shape_in_pitfalls(pg_session, monkeypatch):
+    """Q9 dual-filter: FAILURE_PITFALL INCLUDES decayed entries. Seed both
+    decayed=true and decayed=false pitfalls matching the same pillar →
+    both surface AND each pitfall dict carries the original
+    meta_data['decayed'] field so callers can partition.
+    """
+    from backend.config import settings
+    from backend.models import KnowledgeEntry
+    from backend.models.knowledge import compute_pattern_hash
+    from backend.agents.services.rag_service import RAGService
+
+    monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG", True, raising=False)
+    monkeypatch.setattr(settings, "ENABLE_R5_L2_RANKING", False, raising=False)
+
+    decayed_pattern = f"ts_rank({_TAG}_dec_true_mom, 5)"
+    fresh_pattern = f"ts_rank({_TAG}_dec_false_mom, 5)"
+    pg_session.add(KnowledgeEntry(
+        entry_type="FAILURE_PITFALL",
+        pattern=decayed_pattern,
+        pattern_hash=compute_pattern_hash(decayed_pattern, None, None),
+        description=f"E2E {_TAG} decayed pitfall",
+        is_active=True,
+        meta_data={"pillar_classified": "momentum",
+                   "import_batch": _TAG, "decayed": "true"},
+    ))
+    pg_session.add(KnowledgeEntry(
+        entry_type="FAILURE_PITFALL",
+        pattern=fresh_pattern,
+        pattern_hash=compute_pattern_hash(fresh_pattern, None, None),
+        description=f"E2E {_TAG} fresh pitfall",
+        is_active=True,
+        meta_data={"pillar_classified": "momentum",
+                   "import_batch": _TAG, "decayed": "false"},
+    ))
+    await pg_session.commit()
+
+    svc = RAGService(pg_session)
+    r = await svc.query(
+        region="USA",
+        dataset_id="fnd6",
+        hypothesis_pillar="momentum",
+        current_expression="rank(close)",
+        max_patterns=2,
+        max_pitfalls=10,
+    )
+
+    # Filter to seeded pitfalls only (other concurrent KB rows may exist)
+    seeded = [p for p in r.pitfalls if _TAG in p.get("pattern", "")]
+    assert len(seeded) == 2, (
+        f"Q9 dual-filter expected both decayed + fresh pitfalls; got "
+        f"{[p.get('pattern') for p in seeded]}"
+    )
+    # Each carries decayed marker through the RAGEntry→dict conversion
+    decayed_vals = sorted(
+        str(p["metadata"].get("decayed", "")).lower() for p in seeded
+    )
+    assert decayed_vals == ["false", "true"], (
+        f"Expected partition keys ['false','true']; got {decayed_vals}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_e2e_max_pitfalls_bound_enforced(pg_session, monkeypatch):
+    """Seed > max_pitfalls FAILURE rows; assert returned list is capped."""
+    from backend.config import settings
+    from backend.models import KnowledgeEntry
+    from backend.models.knowledge import compute_pattern_hash
+    from backend.agents.services.rag_service import RAGService
+
+    monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG", True, raising=False)
+    monkeypatch.setattr(settings, "ENABLE_R5_L2_RANKING", False, raising=False)
+
+    # Seed 10 FAILURE_PITFALL rows matching pillar=momentum
+    for i in range(10):
+        pat = f"ts_rank({_TAG}_bound_{i}, 5)"
+        pg_session.add(KnowledgeEntry(
+            entry_type="FAILURE_PITFALL",
+            pattern=pat,
+            pattern_hash=compute_pattern_hash(pat, None, None),
+            description=f"E2E {_TAG} bound pitfall {i}",
+            is_active=True,
+            meta_data={"pillar_classified": "momentum",
+                       "import_batch": _TAG},
+        ))
+    await pg_session.commit()
+
+    svc = RAGService(pg_session)
+    r = await svc.query(
+        region="USA",
+        dataset_id="fnd6",
+        hypothesis_pillar="momentum",
+        current_expression="rank(close)",
+        max_patterns=2,
+        max_pitfalls=3,
+    )
+    # Hard cap honored end-to-end (orchestrator decrements remaining_fail
+    # across layers and stops appending past max_pitfalls).
+    assert len(r.pitfalls) <= 3, (
+        f"max_pitfalls=3 violated; got {len(r.pitfalls)} pitfalls"
+    )
+
+
+@pytest.mark.asyncio
+async def test_e2e_empty_context_no_failure_pitfall(pg_session, monkeypatch):
+    """No FAILURE_PITFALL rows seeded for the query → pitfalls is an empty
+    list (not None, no exception).
+    """
+    from backend.config import settings
+    from backend.models import KnowledgeEntry
+    from backend.models.knowledge import compute_pattern_hash
+    from backend.agents.services.rag_service import RAGService
+    from sqlalchemy import text as _text
+
+    monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG", True, raising=False)
+    monkeypatch.setattr(settings, "ENABLE_R5_L2_RANKING", False, raising=False)
+
+    # Use a unique pillar so no other KB FAILURE_PITFALL rows can match
+    # (production KB has ~1660 pitfalls under standard pillars). The
+    # SUCCESS-only seed lives under this synthetic pillar.
+    uniq_pillar = f"empty_{_TAG}"
+    succ_pattern = f"rank({_TAG}_empty_pillar_seed)"
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN",
+        pattern=succ_pattern,
+        pattern_hash=compute_pattern_hash(succ_pattern, None, None),
+        description=f"E2E {_TAG} success-only seed",
+        is_active=True,
+        meta_data={"pillar_classified": uniq_pillar,
+                   "import_batch": _TAG},
+    ))
+    await pg_session.commit()
+
+    # Omit current_expression — L0/L2/L3 are expression-gated, so this
+    # restricts the query to L1 only. L1 filters by pillar_classified,
+    # and our unique uniq_pillar guarantees no production KB row matches
+    # → real empty-context shape.
+
+    svc = RAGService(pg_session)
+    r = await svc.query(
+        region="USA",
+        dataset_id="fnd6",
+        hypothesis_pillar=uniq_pillar,
+        max_patterns=5,
+        max_pitfalls=5,
+    )
+    assert r.pitfalls is not None, "pitfalls must be a list, not None"
+    assert isinstance(r.pitfalls, list)
+    assert r.pitfalls == [], (
+        f"Expected empty pitfalls for unique pillar; got "
+        f"{[p.get('pattern') for p in r.pitfalls]}"
+    )
