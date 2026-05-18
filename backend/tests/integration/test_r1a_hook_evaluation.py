@@ -319,3 +319,253 @@ async def test_r1a_log_table_captures_all_evaluated_alphas():
             "('log_pass_a', 'log_fail_a', 'log_impl_a')"
         ))
         await s.commit()
+
+
+# --------------------------------------------------------------------------- #
+# MEDIUM-N4 (FixDE 02adb0b re-review): R1a × R5 flag matrix coverage
+# --------------------------------------------------------------------------- #
+# Before FixDE bug-#6, R5 was NESTED under `if ENABLE_R1A_HOOK:` so flipping
+# R1a OFF silently killed R5. The fix decoupled the guards. The 4-cell
+# matrix is now:
+#   (R1a OFF, R5 OFF) — covered by test_r1a_hook_disabled_no_metrics_written
+#   (R1a ON,  R5 OFF) — covered by tests 2/3/4 above
+#   (R1a OFF, R5 ON ) — covered by test_r5_on_r1a_off_writes_r5_metrics_only
+#                       (literal bug-#6 regression guard)
+#   (R1a ON,  R5 ON ) — covered by test_r5_on_r1a_on_both_write_independently
+#                       (interaction / no-crosstalk guard)
+# --------------------------------------------------------------------------- #
+
+def _mock_run_r5_judge_factory(
+    *,
+    r5_attribution=None,
+    composite=0.9,
+    c1_aligned="true",
+    c2_aligned="true",
+):
+    """Return an async callable matching run_r5_judge's signature/contract.
+
+    Default: both c₁+c₂ aligned → r5_attribution=None (no override),
+    which keeps the R1a-on path's `_r1a_attribution` clean for crosstalk
+    assertions.
+    """
+    async def _fake(
+        *,
+        hypothesis_statement,
+        description,
+        expression,
+        llm_service,
+        r1a_attribution=None,
+        operators_used=None,
+    ):
+        agrees = None
+        if r5_attribution is not None and r1a_attribution is not None:
+            agrees = "true" if r5_attribution == r1a_attribution else "false"
+        return {
+            "r5_c1_aligned": c1_aligned,
+            "r5_c1_confidence": 0.9,
+            "r5_c1_reason": "mock c1 ok",
+            "r5_c2_aligned": c2_aligned,
+            "r5_c2_confidence": 0.88,
+            "r5_c2_reason": "mock c2 ok",
+            "r5_composite_score": composite,
+            "r5_agrees_r1a": agrees,
+            "r5_hook_error": None,
+            "r5_cost_usd": 0.0042,
+            "r5_attribution": r5_attribution,  # popped by caller before merge
+        }
+
+    return _fake
+
+
+@pytest.mark.asyncio
+async def test_r5_on_r1a_off_writes_r5_metrics_only(monkeypatch):
+    """[FixDE bug-#6 regression guard]
+
+    R1a=OFF + R5=ON — before FixDE, R5 was nested under ENABLE_R1A_HOOK
+    so this cell did nothing. After the fix:
+      * r1a_attribution_log row MUST be written with r5_* columns filled
+      * alpha.metrics MUST NOT contain `_r1a_attribution`,
+        `_r1a_hook_version`, etc. (R1a guard never fired)
+    """
+    from sqlalchemy import text
+    from backend.database import AsyncSessionLocal
+
+    # Provide hypothesis + non-empty expression so the (mocked) R5 path
+    # is "exercised" semantically; the real LLM never gets called.
+    state = _mk_state([
+        _mk_alpha(
+            sharpe=1.5,
+            alpha_id="r5only_a",
+            hypothesis="momentum reverses on high-volume names",
+        )
+    ])
+    # Set explanation so R5 description isn't empty (R5 inner guard skips
+    # c₁/c₂ on empty desc, but our mock bypasses that — still set it to
+    # exercise the real evaluation.py call path inputs).
+    state.pending_alphas[0].explanation = "rolling z-score of close over 20d"
+
+    # Inject fakes BEFORE running node_evaluate so the lazy imports inside
+    # the R1a+R5 block pick up the patches.
+    monkeypatch.setattr(
+        "backend.agents.graph.r5_judge.run_r5_judge",
+        _mock_run_r5_judge_factory(r5_attribution=None),  # no override
+    )
+    # Stub get_llm_service — its return value is forwarded to the mocked
+    # run_r5_judge which ignores it. Avoids needing real API creds.
+    monkeypatch.setattr(
+        "backend.agents.services.llm_service.get_llm_service",
+        lambda: object(),
+    )
+
+    # Pre-snapshot the log table for this alpha_id
+    async with AsyncSessionLocal() as s:
+        r = await s.execute(text(
+            "SELECT COUNT(*) FROM r1a_attribution_log WHERE alpha_id_brain = 'r5only_a'"
+        ))
+        pre_count = r.scalar() or 0
+
+    orig_r1a = settings.ENABLE_R1A_HOOK
+    orig_r5 = settings.ENABLE_LLM_JUDGE
+    settings.ENABLE_R1A_HOOK = False
+    settings.ENABLE_LLM_JUDGE = True
+    try:
+        out = await node_evaluate(state, brain=None, config={})
+    finally:
+        settings.ENABLE_R1A_HOOK = orig_r1a
+        settings.ENABLE_LLM_JUDGE = orig_r5
+
+    # 1) alpha.metrics MUST NOT carry any _r1a_* keys (R1a guard was OFF)
+    alpha = out["pending_alphas"][0]
+    m = alpha.metrics or {}
+    r1a_keys = [k for k in m.keys() if k.startswith("_r1a_")]
+    assert r1a_keys == [], (
+        f"R1a=OFF must not write _r1a_* keys to metrics, even with R5=ON; "
+        f"got {r1a_keys}"
+    )
+
+    # 2) r1a_attribution_log row WAS written with r5_* columns filled
+    async with AsyncSessionLocal() as s:
+        r = await s.execute(text("""
+            SELECT attribution, hook_version,
+                   r5_c1_aligned, r5_c2_aligned,
+                   r5_composite_score, r5_cost_usd, r5_hook_error
+            FROM r1a_attribution_log
+            WHERE alpha_id_brain = 'r5only_a'
+            ORDER BY id DESC
+            LIMIT 1
+        """))
+        row = r.first()
+        # Cleanup before any assertion failures
+        await s.execute(text(
+            "DELETE FROM r1a_attribution_log WHERE alpha_id_brain = 'r5only_a'"
+        ))
+        await s.commit()
+
+    assert row is not None, (
+        "R5-only path must still INSERT into r1a_attribution_log so "
+        "r5_* metrics have a place to land"
+    )
+    # attribution is None (R1a guard didn't fire, R5 mock returned None override)
+    assert row[0] is None, f"R5 None-override + R1a OFF must keep attribution=None; got {row[0]!r}"
+    assert row[1] == "v1", f"hook_version must be v1, got {row[1]!r}"
+    # r5_* columns populated by the mock
+    assert row[2] == "true", f"r5_c1_aligned must be populated by R5 hook; got {row[2]!r}"
+    assert row[3] == "true", f"r5_c2_aligned must be populated by R5 hook; got {row[3]!r}"
+    assert row[4] == pytest.approx(0.9), f"r5_composite_score must be populated; got {row[4]!r}"
+    assert row[5] == pytest.approx(0.0042), f"r5_cost_usd must be populated; got {row[5]!r}"
+    assert row[6] is None, f"r5_hook_error must be None on happy path; got {row[6]!r}"
+
+    # Sanity: only 1 new row
+    async with AsyncSessionLocal() as s:
+        r = await s.execute(text(
+            "SELECT COUNT(*) FROM r1a_attribution_log WHERE alpha_id_brain = 'r5only_a'"
+        ))
+        post_after_cleanup = r.scalar() or 0
+    assert post_after_cleanup == pre_count, "cleanup must restore baseline count"
+
+
+@pytest.mark.asyncio
+async def test_r5_on_r1a_on_both_write_independently(monkeypatch):
+    """[Interaction guard]
+
+    Both R1a + R5 ON — verifies decoupled guards both fire AND R5's
+    None-verdict does NOT clobber R1a's heuristic verdict (no crosstalk).
+    Uses R5 mock returning r5_attribution=None (both PASS) so the
+    [V1.0-A2-3] override rule is intentionally NOT triggered; R1a verdict
+    must survive intact in both metrics and the log row.
+    """
+    from sqlalchemy import text
+    from backend.database import AsyncSessionLocal
+
+    # sharpe=1.5 + empty hypothesis → R1a heuristic → 'unknown'
+    state = _mk_state([
+        _mk_alpha(
+            sharpe=1.5,
+            alpha_id="both_on_a",
+            hypothesis="reversal on stretched price",
+        )
+    ])
+    state.pending_alphas[0].explanation = "ts_rank close 20d"
+
+    monkeypatch.setattr(
+        "backend.agents.graph.r5_judge.run_r5_judge",
+        _mock_run_r5_judge_factory(r5_attribution=None),
+    )
+    monkeypatch.setattr(
+        "backend.agents.services.llm_service.get_llm_service",
+        lambda: object(),
+    )
+
+    orig_r1a = settings.ENABLE_R1A_HOOK
+    orig_r5 = settings.ENABLE_LLM_JUDGE
+    settings.ENABLE_R1A_HOOK = True
+    settings.ENABLE_LLM_JUDGE = True
+    try:
+        out = await node_evaluate(state, brain=None, config={})
+    finally:
+        settings.ENABLE_R1A_HOOK = orig_r1a
+        settings.ENABLE_LLM_JUDGE = orig_r5
+
+    # 1) alpha.metrics MUST carry R1a verdict (decoupled guard fired)
+    alpha = out["pending_alphas"][0]
+    m = alpha.metrics or {}
+    assert m.get("_r1a_hook_version") == "v1", \
+        f"R1a guard must fire when flag ON; got version={m.get('_r1a_hook_version')!r}"
+    r1a_attr = m.get("_r1a_attribution")
+    assert r1a_attr in {"hypothesis", "implementation", "both", "unknown"}, \
+        f"R1a attribution must be enum value; got {r1a_attr!r}"
+    # 2) no-crosstalk: R5 returned None override → R1a value preserved
+    # (We pin r1a_attr above; mock injects r5_attribution=None so override
+    # block in evaluation.py L2710 must NOT run.)
+    assert m.get("_r1a_hook_error") is None or "_r1a_hook_error" not in m
+
+    # 3) DB log row MUST contain BOTH R1a fields AND R5 fields filled
+    async with AsyncSessionLocal() as s:
+        r = await s.execute(text("""
+            SELECT attribution, hook_version,
+                   r5_c1_aligned, r5_c2_aligned,
+                   r5_composite_score, r5_cost_usd, r5_hook_error
+            FROM r1a_attribution_log
+            WHERE alpha_id_brain = 'both_on_a'
+            ORDER BY id DESC
+            LIMIT 1
+        """))
+        row = r.first()
+        await s.execute(text(
+            "DELETE FROM r1a_attribution_log WHERE alpha_id_brain = 'both_on_a'"
+        ))
+        await s.commit()
+
+    assert row is not None, "R1a+R5 ON must INSERT log row"
+    # R1a attribution survived — R5 None did NOT clobber it
+    assert row[0] == r1a_attr, (
+        f"DB attribution must match metrics attribution (R5 None must NOT "
+        f"overwrite R1a verdict); db={row[0]!r} vs metrics={r1a_attr!r}"
+    )
+    assert row[1] == "v1"
+    # R5 columns ALSO populated alongside R1a — independent guards
+    assert row[2] == "true", f"r5_c1_aligned must be populated; got {row[2]!r}"
+    assert row[3] == "true", f"r5_c2_aligned must be populated; got {row[3]!r}"
+    assert row[4] == pytest.approx(0.9), f"r5_composite_score must be populated; got {row[4]!r}"
+    assert row[5] == pytest.approx(0.0042), f"r5_cost_usd must be populated; got {row[5]!r}"
+    assert row[6] is None, f"r5_hook_error must be None on happy path; got {row[6]!r}"
