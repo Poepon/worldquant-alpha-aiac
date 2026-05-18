@@ -12,6 +12,7 @@ import {
   MonitorOutlined,
   SwapOutlined,
   ExperimentOutlined,
+  BranchesOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -61,6 +62,7 @@ const menuItems = [
       { key: '/ops/llm-op-monitor', label: 'LLM 算子监控' },
       { key: '/ops/costeer', label: 'CoSTEER 循环监控 (R1a/R1b)' },
       { key: '/ops/r5-judge', icon: <ExperimentOutlined />, label: 'R5 LLM Judge' },
+      { key: '/ops/r6-dag', icon: <BranchesOutlined />, label: 'R6 DAG Trace' },
       { key: '/ops/r9-cache', icon: <DatabaseOutlined />, label: 'R9 模拟缓存' },
       { key: '/ops/brain-role', icon: <SwapOutlined />, label: 'BRAIN 模式' },
     ],

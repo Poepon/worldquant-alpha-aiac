@@ -610,6 +610,13 @@ const api = {
     return data
   },
 
+  // R6 DAG trace telemetry (2026-05-18) — node count / depth distribution
+  // across experiment_runs.runtime_state->'dag' JSONB
+  getOpsR6DagStats: async (days = 7) => {
+    const { data } = await client.get('/ops/r6/dag-stats', { params: { days } })
+    return data
+  },
+
   // flat-F1 advanced kickoff (2026-05-18). Gated server-side by
   // ENABLE_FLAT_CONTINUOUS — flag OFF returns HTTP 400 with detail string.
   startFlatSession: async ({ region, universe, datasets = [] }) => {
