@@ -452,3 +452,55 @@ async def test_mutate_pending_payload_structure():
     assert payload["suggested_operators"] == ["ts_rank", "ts_mean"]
     assert payload["parent_hypothesis_statement"] == "parent thesis"
     assert payload["diff_from_original"] == "restricted to subindustry-relative"
+
+
+# ---------------------------------------------------------------------------
+# Review HIGH #2 (commit 1470c6e) reducer propagation regression guard
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_mutate_returns_r1b_mutated_hypothesis_ids_in_dict(monkeypatch):
+    """Regression guard for 1470c6e HIGH #2 — LangGraph node MUST return
+    new Hypothesis ids in the dict so the reducer merges them. Direct
+    state mutation gets dropped on the next node hop.
+
+    Mocks _insert_mutated_hypothesis to return a deterministic id and
+    asserts the id appears in out["r1b_mutated_hypothesis_ids"] alongside
+    pre-existing ids carried from prior round.
+    """
+    from backend.config import settings
+    monkeypatch.setattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", True)
+    alpha = _mk_alpha_with_hyp_id("0", "rank(close)", hypothesis_id=42)
+    state = _mk_state([alpha])
+    state.r1b_mutated_hypothesis_ids = [101, 102]
+    llm = _mk_llm_mutate_resp("X")
+    with _patch_depth_lookup(parent_depth=1), patch(
+        "backend.agents.graph.nodes.r1b_loop._insert_mutated_hypothesis",
+        new=AsyncMock(return_value=999),
+    ):
+        out = await node_hypothesis_mutate(state, llm)
+    assert "r1b_mutated_hypothesis_ids" in out, (
+        "node_hypothesis_mutate must surface r1b_mutated_hypothesis_ids "
+        "via return dict (direct state.x= mutations dropped by LangGraph)"
+    )
+    assert out["r1b_mutated_hypothesis_ids"] == [101, 102, 999], (
+        f"expected [101, 102, 999], got {out['r1b_mutated_hypothesis_ids']}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mutate_omits_r1b_mutated_hypothesis_ids_when_no_insert(monkeypatch):
+    """If INSERT branch didn't fire (flag OFF / no parent), the key MUST
+    NOT appear in out — LangGraph would otherwise wipe prior ids."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)
+    alpha = _mk_alpha_with_hyp_id("0", "rank(close)", hypothesis_id=42)
+    state = _mk_state([alpha])
+    state.r1b_mutated_hypothesis_ids = [101, 102]
+    llm = _mk_llm_mutate_resp("X")
+    with _patch_depth_lookup(parent_depth=1):
+        out = await node_hypothesis_mutate(state, llm)
+    assert "r1b_mutated_hypothesis_ids" not in out, (
+        "When no new id inserted, key must be absent so the reducer "
+        "preserves existing state.r1b_mutated_hypothesis_ids"
+    )
