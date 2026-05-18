@@ -43,11 +43,33 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | 
 
 DATA_FILE = Path(__file__).resolve().parents[1] / "backend" / "data" / "decayed_alphas_seed.json"
 IMPORT_BATCH = "phase2_q9_decayed_2026_05_18"
+# McLean-Pontiff 2016 + Hou-Xue-Zhang 2020 reference set is academically US-focused
+# (CRSP/Compustat). Default region "USA" unless an entry overrides via "region"/"regions".
+DEFAULT_REGION = "USA"
 
 
 def _load_seed_data() -> dict:
     with DATA_FILE.open("r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _resolve_regions(entry: dict) -> list[str]:
+    """Resolve region list for an entry.
+
+    Priority:
+      1. entry["regions"]: List[str]  (explicit list)
+      2. entry["region"]: str          (single region)
+      3. DEFAULT_REGION                (USA — academic decayed reference set)
+
+    Returns a non-empty List[str] of uppercased region codes.
+    """
+    raw_regions = entry.get("regions")
+    if isinstance(raw_regions, list) and raw_regions:
+        return [str(r).upper() for r in raw_regions]
+    raw_region = entry.get("region")
+    if isinstance(raw_region, str) and raw_region.strip():
+        return [raw_region.strip().upper()]
+    return [DEFAULT_REGION]
 
 
 async def seed(dry_run: bool = False) -> dict:
@@ -65,9 +87,14 @@ async def seed(dry_run: bool = False) -> dict:
     async with maker() as db:
         for entry in entries:
             pattern = entry["pattern"]
-            phash = compute_pattern_hash(pattern, None, None)
+            regions = _resolve_regions(entry)
+            # Per-region row: pattern_hash includes region so cross-region
+            # re-seed INSERTs new rows instead of UPDATE-overwriting the
+            # USA row's meta_data (fix HIGH-#1 from code review a425937..HEAD).
+            primary_region = regions[0]
+            phash = compute_pattern_hash(pattern, primary_region, None)
 
-            # Idempotent check via pattern_hash
+            # Idempotent check via pattern_hash (now per-region scoped)
             existing = (await db.execute(
                 select(KnowledgeEntry).where(KnowledgeEntry.pattern_hash == phash)
             )).scalar_one_or_none()
@@ -80,7 +107,17 @@ async def seed(dry_run: bool = False) -> dict:
                 "failure_mode": entry["failure_mode"],
                 "theoretical_anchor": entry["theoretical_anchor"],
                 "t_stat_orig": entry["t_stat_orig"],
-                "decayed": True,
+                # String "true" to match the convention used by
+                # backend.agents.hierarchical_rag DECAYED_KEY check
+                # (`str(md.get(DECAYED_KEY, "")).lower() == "true"`) and
+                # all existing test fixtures in test_rag_hierarchical_pr1.py.
+                "decayed": "true",
+                # Region tagging so R8 hierarchical RAG L3 region filter
+                # (backend/agents/hierarchical_rag.py:228) treats these
+                # entries as region-scoped instead of region-agnostic.
+                # Convention from backend/agents/knowledge_seed.py — list form.
+                "region": primary_region,
+                "regions": regions,
                 # Forward-compat metadata hook (per [[feedback_forward_compat_metadata_hook]])
                 # pattern_operators populated lazily by future re-classify pass
                 "pattern_operators_pending": True,
