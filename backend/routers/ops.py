@@ -1224,3 +1224,205 @@ async def cascade_deprecation_readiness(
         ready_to_delete=ready,
         next_action=next_action,
     )
+
+
+# =============================================================================
+# R1b CoSTEER loop telemetry (2026-05-18) — operator decision support
+# =============================================================================
+# Surfaces r1b_retry_log aggregations + Hypothesis chain depth distribution
+# so operators flipping ENABLE_R1B_* flags have data — not raw SQL — to
+# observe retry/mutate success rates, per-task budget consumption, and
+# CoSTEER chain growth before promoting flags to default-ON.
+
+
+class R1bAttemptStatsOut(BaseModel):
+    attempt_type: str  # 'retry_impl' | 'mutate_hyp'
+    outcome: str       # 'pending' | 'pass' | 'fail' | 'budget_exhausted' | ...
+    count: int
+    total_cost_usd: float
+    total_tokens_used: int
+
+
+class R1bBudgetLedgerOut(BaseModel):
+    task_id: int
+    retries_total: int
+    mutations_total: int
+    cost_usd_total: float
+
+
+class R1bTelemetryOut(BaseModel):
+    flags: Dict[str, bool]
+    attempt_stats: List[R1bAttemptStatsOut]
+    success_rate_retry_impl: float  # pass / (pass + fail) for attempt_type=retry_impl
+    success_rate_mutate_hyp: float
+    top_tasks_by_budget: List[R1bBudgetLedgerOut]
+    window_days: int
+    total_attempts_in_window: int
+
+
+@router.get("/r1b/telemetry", response_model=R1bTelemetryOut)
+async def r1b_telemetry(
+    days: int = 7,
+    top_n: int = 5,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> R1bTelemetryOut:
+    """R1b retry/mutate telemetry for operator decision support.
+
+    Aggregates ``r1b_retry_log`` over the last ``days`` window by
+    (attempt_type, outcome) + computes pass-rate per attempt_type. Also
+    pulls the top ``top_n`` tasks by accumulated R1b budget consumption
+    from ``MiningTask.config['r1b_loop_budget_consumed']``.
+
+    Use this BEFORE flipping any R1b flag to default-ON so the GO gate
+    decision is evidence-based (per plan §10 deploy sequence).
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_R1B_RETRY_LOOP": bool(getattr(_stg, "ENABLE_R1B_RETRY_LOOP", False)),
+        "ENABLE_R1B_HYPOTHESIS_MUTATE": bool(getattr(_stg, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)),
+        "ENABLE_R1B_FAILURE_TREE": bool(getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False)),
+        "ENABLE_R1B_TYPED_PIPELINE": bool(getattr(_stg, "ENABLE_R1B_TYPED_PIPELINE", False)),
+        "ENABLE_R1B_DAG_RETRY_REWARD": bool(getattr(_stg, "ENABLE_R1B_DAG_RETRY_REWARD", False)),
+    }
+
+    # Aggregation 1: per-attempt-type per-outcome counts + cost/token sums.
+    # COALESCE keeps NULL outcome rows (in-flight) visible as a distinct
+    # bucket — operators want to see pending volume too.
+    stat_rows = (await db.execute(_text(
+        "SELECT attempt_type, COALESCE(outcome, 'unknown') AS outcome, "
+        "       COUNT(*) AS n, "
+        "       COALESCE(SUM(llm_cost_usd), 0.0) AS cost, "
+        "       COALESCE(SUM(llm_tokens_used), 0) AS toks "
+        "FROM r1b_retry_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY attempt_type, outcome "
+        "ORDER BY attempt_type, n DESC"
+    ), {"days": str(int(days))})).all()
+
+    attempt_stats: List[R1bAttemptStatsOut] = []
+    pass_retry = fail_retry = 0
+    pass_mutate = fail_mutate = 0
+    total_in_window = 0
+    for at, oc, n, cost, toks in stat_rows:
+        n_int = int(n or 0)
+        attempt_stats.append(R1bAttemptStatsOut(
+            attempt_type=at or "unknown",
+            outcome=oc or "unknown",
+            count=n_int,
+            total_cost_usd=float(cost or 0.0),
+            total_tokens_used=int(toks or 0),
+        ))
+        total_in_window += n_int
+        if at == "retry_impl":
+            if oc == "pass":
+                pass_retry += n_int
+            elif oc == "fail":
+                fail_retry += n_int
+        elif at == "mutate_hyp":
+            if oc == "pass":
+                pass_mutate += n_int
+            elif oc == "fail":
+                fail_mutate += n_int
+
+    def _rate(p: int, f: int) -> float:
+        denom = p + f
+        return round(p / denom, 4) if denom > 0 else 0.0
+
+    # Aggregation 2: top N tasks by accumulated R1b budget ledger.
+    # JSONB extract is null-safe — tasks without an R1b ledger fall through
+    # the WHERE filter rather than landing as zero rows.
+    budget_rows = (await db.execute(_text(
+        "SELECT id, "
+        "       COALESCE((config->'r1b_loop_budget_consumed'->>'retries_total')::int, 0) AS retries, "
+        "       COALESCE((config->'r1b_loop_budget_consumed'->>'mutations_total')::int, 0) AS mutations, "
+        "       COALESCE((config->'r1b_loop_budget_consumed'->>'cost_usd_total')::float, 0.0) AS cost "
+        "FROM mining_tasks "
+        "WHERE config ? 'r1b_loop_budget_consumed' "
+        "ORDER BY cost DESC NULLS LAST "
+        "LIMIT :n"
+    ), {"n": int(top_n)})).all()
+
+    top_tasks = [
+        R1bBudgetLedgerOut(
+            task_id=int(tid),
+            retries_total=int(r or 0),
+            mutations_total=int(m or 0),
+            cost_usd_total=float(c or 0.0),
+        )
+        for tid, r, m, c in budget_rows
+    ]
+
+    return R1bTelemetryOut(
+        flags=flags,
+        attempt_stats=attempt_stats,
+        success_rate_retry_impl=_rate(pass_retry, fail_retry),
+        success_rate_mutate_hyp=_rate(pass_mutate, fail_mutate),
+        top_tasks_by_budget=top_tasks,
+        window_days=int(days),
+        total_attempts_in_window=total_in_window,
+    )
+
+
+class R1bChainDepthBucketOut(BaseModel):
+    mutation_depth: int
+    hypothesis_count: int
+
+
+class R1bChainDepthOut(BaseModel):
+    distribution: List[R1bChainDepthBucketOut]
+    max_depth_observed: int
+    total_mutated_hypotheses: int
+    total_root_hypotheses: int
+    chain_depth_avg: float
+
+
+@router.get("/r1b/chain-depth-distribution", response_model=R1bChainDepthOut)
+async def r1b_chain_depth_distribution(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> R1bChainDepthOut:
+    """R1b.3-v2 CoSTEER chain growth distribution.
+
+    Returns histogram of ``hypotheses.r1b_mutation_depth`` (0 = exploration
+    root from node_hypothesis LLM; >0 = mutated descendant from
+    node_hypothesis_mutate). Use to confirm the mutation chain is actually
+    growing past depth=1 after R1b.3-v2 flag promotion.
+
+    A healthy R1b deploy shows distribution {0: N, 1: M, 2: K, ...} with
+    geometric decay — depth=0 dominant, depths>0 declining but non-zero
+    confirming chain walk per plan §7.2.
+    """
+    from sqlalchemy import text as _text
+
+    rows = (await db.execute(_text(
+        "SELECT COALESCE(r1b_mutation_depth, 0) AS d, COUNT(*) AS n "
+        "FROM hypotheses "
+        "GROUP BY d "
+        "ORDER BY d ASC"
+    ))).all()
+
+    buckets = [
+        R1bChainDepthBucketOut(
+            mutation_depth=int(d or 0),
+            hypothesis_count=int(n or 0),
+        )
+        for d, n in rows
+    ]
+    total = sum(b.hypothesis_count for b in buckets)
+    roots = next((b.hypothesis_count for b in buckets if b.mutation_depth == 0), 0)
+    mutated = total - roots
+    max_depth = max((b.mutation_depth for b in buckets), default=0)
+    # Weighted avg depth across ALL hypotheses (roots count as 0)
+    weighted_sum = sum(b.mutation_depth * b.hypothesis_count for b in buckets)
+    avg = round(weighted_sum / total, 4) if total > 0 else 0.0
+
+    return R1bChainDepthOut(
+        distribution=buckets,
+        max_depth_observed=max_depth,
+        total_mutated_hypotheses=mutated,
+        total_root_hypotheses=roots,
+        chain_depth_avg=avg,
+    )
