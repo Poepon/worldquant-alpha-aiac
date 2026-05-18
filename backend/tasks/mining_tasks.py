@@ -118,6 +118,7 @@ async def _dag_update_after_round(
             pass
 
 
+@celery_app.task(bind=True, name="backend.tasks.run_mining_task")
 def run_mining_task(self, task_id: int, run_id: int | None = None):
     """
     Run a complete mining task.
