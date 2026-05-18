@@ -573,11 +573,38 @@ def compute_reward_for_node(node_or_alpha: Any) -> float:
 
     Accepts either an Alpha/AlphaCandidate (reads .metrics) OR a DAG node
     dict (reads node["expression_signature"] / fallback 0.5).
+
+    R1b.5 (2026-05-18): when ``ENABLE_R1B_DAG_RETRY_REWARD`` is True, alphas
+    whose retry chain succeeded get a small bonus per retry depth so R6
+    UCB1 surfaces parent-paths where R1b retry has historically rescued
+    failures. Plan §9.2:
+        bonus = +0.10 per retry chain element
+        only applied when base > 0.6 (PASS-ish) — bonus rewards SUCCESSFUL
+        retry chains, not failed ones
+        capped at 1.0
     """
     # If it's a node dict (no .metrics attr), fall back to 0.5
     if isinstance(node_or_alpha, dict):
         return float(node_or_alpha.get("reward", 0.5) or 0.5)
-    return _alpha_score(node_or_alpha)
+    base = _alpha_score(node_or_alpha)
+    # R1b.5 — retry-aware bonus, flag-gated. Defensive import so dag_state
+    # stays importable in test envs without backend.config.
+    try:
+        from backend.config import settings as _stg
+        if not bool(getattr(_stg, "ENABLE_R1B_DAG_RETRY_REWARD", False)):
+            return base
+    except Exception:
+        return base
+    if base <= 0.6:
+        return base
+    metrics = getattr(node_or_alpha, "metrics", None)
+    if not isinstance(metrics, dict):
+        return base
+    retry_chain = metrics.get("_r1b_retry_chain") or []
+    if not isinstance(retry_chain, list) or not retry_chain:
+        return base
+    bonus = 0.10 * len(retry_chain)
+    return min(1.0, base + bonus)
 
 
 def add_children_for_phase(
