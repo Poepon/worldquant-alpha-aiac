@@ -27,10 +27,10 @@ from typing import List
 from sqlalchemy import select, text
 
 from backend.database import AsyncSessionLocal
-from backend.factor_tier_classifier import classify_tier
 from backend.knowledge_extraction import expression_to_skeleton, extract_operator_chain
 from backend.models import Alpha, KnowledgeEntry
 from backend.models.knowledge import compute_pattern_hash
+from backend.pillar_classifier import infer_pillar
 
 
 SEED_FILTER = (
@@ -80,7 +80,7 @@ async def main(confirm: bool, wipe_first: bool) -> None:
             if not skeleton:
                 skipped_no_skeleton += 1
                 continue
-            tier = classify_tier(a.expression)
+            pillar = infer_pillar(expression=a.expression)
             try:
                 op_chain = extract_operator_chain(a.expression)
             except Exception:
@@ -89,7 +89,7 @@ async def main(confirm: bool, wipe_first: bool) -> None:
             description = (
                 f"BRAIN-verified gold alpha (can_submit=True). "
                 f"sharpe={a.is_sharpe:.2f} fitness={a.is_fitness:.2f}. "
-                f"Tier {tier or '?'} pattern."
+                f"Pillar {pillar} pattern."
             )
 
             # MEDIUM-N1 fix (re-review a425937..HEAD): normalize region
@@ -104,7 +104,6 @@ async def main(confirm: bool, wipe_first: bool) -> None:
                     skeleton, region=entry_region, dataset_id=a.dataset_id
                 ),
                 description=description,
-                factor_tier=tier,
                 meta_data={
                     "source": "cold_start_can_submit_gold",
                     "alpha_id_ref": a.alpha_id,
@@ -119,7 +118,7 @@ async def main(confirm: bool, wipe_first: bool) -> None:
                     "can_submit": True,
                     "operator_chain": (op_chain or [])[:8],
                     "example_expression": a.expression[:300],
-                    "factor_tier": tier,
+                    "hypothesis_pillar": pillar,
                 },
                 usage_count=0,
                 is_active=True,
@@ -130,11 +129,12 @@ async def main(confirm: bool, wipe_first: bool) -> None:
         print(f"  prepared: {len(plans)} SUCCESS_PATTERN entries")
         print(f"  skipped (no skeleton): {skipped_no_skeleton}")
 
-        # Tier breakdown
-        tier_count = {}
+        # Pillar breakdown
+        pillar_count = {}
         for p in plans:
-            tier_count[p.factor_tier] = tier_count.get(p.factor_tier, 0) + 1
-        print(f"  tier breakdown: {tier_count}")
+            pp = (p.meta_data or {}).get("hypothesis_pillar")
+            pillar_count[pp] = pillar_count.get(pp, 0) + 1
+        print(f"  pillar breakdown: {pillar_count}")
 
         # Sample first 5
         print("\n  sample (top-5 by sharpe):")
@@ -142,7 +142,7 @@ async def main(confirm: bool, wipe_first: bool) -> None:
             md = p.meta_data
             print(
                 f"    pk={md.get('alpha_pk')} brain={md.get('alpha_id_ref')} "
-                f"tier={p.factor_tier} sharpe={md.get('sharpe'):.2f} "
+                f"pillar={md.get('hypothesis_pillar')} sharpe={md.get('sharpe'):.2f} "
                 f"region={md.get('region')} "
                 f"skel={p.pattern[:80]}"
             )

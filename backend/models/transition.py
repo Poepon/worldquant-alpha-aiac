@@ -35,13 +35,12 @@ class AlphaStatusTransition(SQLAlchemyBase):
     # function over transitioned_at.
     sharpe_at_transition = Column(Float)
     # Human-readable reason (free text). Examples:
-    #   "sharpe drifted to 1.4 (below T3 threshold)"
+    #   "sharpe drifted to 1.4 (below threshold)"
     #   "user manual review"
-    #   "tier reclassified"
     reason = Column(String(200))
     # Machine-readable source (controlled enum). Values:
-    #   "node_evaluate" / "tier_seed_refresh" / "daily_beat_kb" /
-    #   "daily_beat_os" / "backfill" / "manual_api"
+    #   "node_evaluate" / "daily_beat_kb" / "daily_beat_os" / "backfill" /
+    #   "manual_api"
     source = Column(String(50))
     transitioned_at = Column(DateTime(timezone=True), server_default=func.now())
 
