@@ -419,59 +419,23 @@ export default function TaskManagement() {
             </Col>
           </Row>
 
-          {/* Phase 1.5-Fields (2026-05-18): explicit schedule + starting_tier
-              authoritative fields. Backend writes both regardless; when these
-              are set they take precedence over the legacy agent_mode-derived
-              defaults. ONESHOT + tier=1 covers the legacy create_task path. */}
+          {/* Phase 1.5-Fields (2026-05-18) — schedule field, ONESHOT only.
+              phase15-D PR4b cleanup (2026-05-18): CASCADE option deleted
+              along with the conditional starting_tier Form.Item. Cascade
+              schedule path is retired (backend now rejects CASCADE-mode
+              create_task with FAILED status). Tasks default starting_tier=1
+              via the create payload (TASK_CREATE_DEFAULTS below). */}
           <Row gutter={16}>
             <Col span={12}>
               <Form.Item
                 name="schedule"
                 label="Schedule (Phase 1.5)"
-                tooltip="ONESHOT = 单 cycle DISCRETE 任务;CASCADE = T1→T2→T3 cascade(走 /mining-session/start 路径,不是 /tasks POST)"
+                tooltip="ONESHOT = 单 cycle DISCRETE 任务(唯一支持的 schedule);CASCADE 已于 phase15-D 退役"
                 rules={[{ required: true, message: '请选择调度模式' }]}
               >
-                <Select
-                  onChange={(val) => {
-                    if (val !== 'CASCADE') {
-                      form.setFieldsValue({ starting_tier: 1 })
-                    }
-                  }}
-                >
-                  <Option value="ONESHOT">ONESHOT — 单 cycle (推荐)</Option>
-                  <Option value="CASCADE">CASCADE — T1→T2→T3 链路</Option>
+                <Select>
+                  <Option value="ONESHOT">ONESHOT — 单 cycle</Option>
                 </Select>
-              </Form.Item>
-            </Col>
-            <Col span={12}>
-              <Form.Item
-                shouldUpdate={(prev, cur) => prev.schedule !== cur.schedule}
-                noStyle
-              >
-                {({ getFieldValue }) =>
-                  getFieldValue('schedule') === 'CASCADE' && (
-                    <Form.Item
-                      name="starting_tier"
-                      label="Starting Tier"
-                      tooltip="1/2/3 — explicit override;若未设,从 agent_mode 派生(AUTONOMOUS_TIER2→2 等);CASCADE 专用"
-                      rules={[
-                        {
-                          required: true,
-                          type: 'number',
-                          min: 1,
-                          max: 3,
-                          message: '起始 tier 必须为 1-3',
-                        },
-                      ]}
-                    >
-                      <Select>
-                        <Option value={1}>T1 — 一阶</Option>
-                        <Option value={2}>T2 — 二阶</Option>
-                        <Option value={3}>T3 — 三阶</Option>
-                      </Select>
-                    </Form.Item>
-                  )
-                }
               </Form.Item>
             </Col>
           </Row>
