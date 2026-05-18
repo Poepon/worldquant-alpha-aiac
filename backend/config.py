@@ -262,6 +262,16 @@ class Settings(BaseSettings):
     R5_JUDGE_MODEL: str = "claude-haiku-4-5-20251001"   # cheaper than opus, med effort
     R5_JUDGE_LOW_CONF: float = 0.55                      # below this R5 abstains → R1a wins
 
+    # ----- Phase 2 R7 Co-STEER self-correct 半接受机制 (2026-05-18) -----
+    # 防 self_correct 把 alpha 改成另一个 broken expression — LLM 修正后用
+    # alpha_semantic_validator 快速 re-validate;新版本必须 VALID OR
+    # 严格少 hard findings 才 accept,否则保原 + 标 _r7_self_correct_rejected。
+    # 来源:rd_agent §6 R7 Co-STEER `should_use_new_evo`(原 spec 比 score,
+    # 这里 validation-time 比 finding count;score-based 需 simulation 数据
+    # 留 R7-v2 等 R6 DAG ship 后再做)。
+    # 默认 OFF — flag ON 后 retry_count 行为不变(LLM 仍 1-3 次,reject 占 1 次)。
+    ENABLE_SELF_CORRECT_SEMI_ACCEPT: bool = False
+
     # ----- Phase 2 R10 Family-cap (Hubble v2 Table 1, 2026-05-18) -----
     # 同 pillar 同 family(operator-sequence signature)只保留 top-K=2 by score。
     # 防止一个 op pipeline 在评估批次刷榜挤掉异质 alpha。

@@ -640,34 +640,81 @@ async def node_self_correct(
                     changes_made = fix_data.get("changes_made", "") if isinstance(fix_data, dict) else ""
                     if not changes_made:
                         changes_made = parsed.get("changes_made", "")
-                    
-                    corrections_made.append({
-                        "original": current.expression,
-                        "fixed": fixed,
-                        "error": error_message,
-                        "changes": changes_made
-                    })
-                    
-                    updated_alpha.expression = fixed
-                    updated_alpha.is_valid = None
-                    updated_alpha.validation_error = None
-                    fixed_count += 1
-                    
-                    # Record for future learning (P1-E S-5: stamp rule_id
-                    # so the new entry is rule-id-lookup-eligible).
-                    _record_correction(
-                        original_expression=current.expression,
-                        fixed_expression=fixed,
-                        error_message=error_message,
-                        error_type=error_type,
-                        fix_description=changes_made,
-                        rule_id=primary_rule_id,
-                    )
-                    
-                    # Extract transferable knowledge
-                    knowledge = parsed.get("knowledge_extracted")
-                    if knowledge:
-                        knowledge_extracted.append(knowledge)
+
+                    # === Phase 2 R7 semi-acceptance (2026-05-18) ===
+                    # rd_agent §6 R7 Co-STEER `should_use_new_evo`:
+                    # quick re-validate the LLM fix before overwriting; only
+                    # accept when new is VALID OR has strictly fewer hard
+                    # findings than original. Default OFF preserves legacy
+                    # "always overwrite + retry loop" behavior.
+                    _r7_accept = True
+                    _r7_reason = "legacy_always_accept"
+                    if getattr(_settings, "ENABLE_SELF_CORRECT_SEMI_ACCEPT", False):
+                        try:
+                            from backend.alpha_semantic_validator import validate_alpha_semantically  # noqa: E402
+                            _new_val = validate_alpha_semantically(
+                                expression=fixed,
+                                fields=state.fields[:50],
+                                operators=None,
+                                strict=False,
+                            )
+                            _new_err_count = len(_new_val.get("errors", []) or [])
+                            _orig_err_count = len([
+                                f for f in (current.metrics or {}).get("_validation_findings", [])
+                                if isinstance(f, dict) and f.get("severity") == "hard"
+                            ]) or 1  # original failed validation so ≥1
+                            if _new_val.get("valid"):
+                                _r7_reason = f"new_valid (orig_errs={_orig_err_count})"
+                            elif _new_err_count < _orig_err_count:
+                                _r7_reason = f"strict_fewer_errs ({_new_err_count}<{_orig_err_count})"
+                            else:
+                                _r7_accept = False
+                                _r7_reason = f"rejected ({_new_err_count}>={_orig_err_count})"
+                        except Exception as _r7_e:  # noqa: BLE001
+                            logger.debug(f"[{node_name}] R7 re-validate failed (non-fatal, defaulting accept): {_r7_e}")
+                            _r7_reason = f"r7_check_error:{str(_r7_e)[:60]}"
+
+                    if not _r7_accept:
+                        # R7 reject: keep original expression, mark + don't reset is_valid
+                        _new_metrics = dict(updated_alpha.metrics) if isinstance(updated_alpha.metrics, dict) else {}
+                        _new_metrics["_r7_self_correct_rejected"] = True
+                        _new_metrics["_r7_self_correct_reason"] = _r7_reason
+                        _new_metrics["_r7_rejected_candidate"] = fixed[:200]
+                        updated_alpha.metrics = _new_metrics
+                        logger.info(
+                            f"[{node_name}] R7 reject overwrite idx={idx}: {_r7_reason}"
+                        )
+                    else:
+                        # Accept: legacy path
+                        corrections_made.append({
+                            "original": current.expression,
+                            "fixed": fixed,
+                            "error": error_message,
+                            "changes": changes_made
+                        })
+
+                        updated_alpha.expression = fixed
+                        updated_alpha.is_valid = None
+                        updated_alpha.validation_error = None
+                        fixed_count += 1
+
+                        # Record for future learning (P1-E S-5: stamp rule_id
+                        # so the new entry is rule-id-lookup-eligible).
+                        # Phase 2 R7 (2026-05-18): moved inside accept branch
+                        # so rejected fixes don't pollute correction KB.
+                        _record_correction(
+                            original_expression=current.expression,
+                            fixed_expression=fixed,
+                            error_message=error_message,
+                            error_type=error_type,
+                            fix_description=changes_made,
+                            rule_id=primary_rule_id,
+                        )
+
+                        # Extract transferable knowledge — also only on accept
+                        knowledge = parsed.get("knowledge_extracted")
+                        if knowledge:
+                            knowledge_extracted.append(knowledge)
             
             updated_alphas[idx] = updated_alpha
             

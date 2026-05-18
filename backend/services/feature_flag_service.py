@@ -167,6 +167,20 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase3-flatF1",
         description="启用 FLAT_CONTINUOUS mining_mode (与 legacy CONTINUOUS_CASCADE 并行)。Hypothesis-driven flat session — dataset × hypothesis 迭代,无 T1→T2→T3 级联。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。默认 OFF,flat-F2 后续 PR 翻默认。",
     ),
+    # --- Phase 2 R7: Co-STEER self-correct 半接受 ---
+    "ENABLE_SELF_CORRECT_SEMI_ACCEPT": FlagSpec(
+        name="ENABLE_SELF_CORRECT_SEMI_ACCEPT",
+        flag_type="bool",
+        group="Phase2-R7",
+        description=(
+            "Phase 2 R7 (rd_agent Co-STEER): SELF_CORRECT 节点 LLM 修正后 "
+            "用 alpha_semantic_validator 快速 re-validate,新版本 VALID OR "
+            "严格少 hard findings 才 overwrite;否则保原 expression + "
+            "标 metrics['_r7_self_correct_rejected']=True。"
+            "防 LLM 把一个 broken expression 改成另一个 broken expression。"
+            "Reject 仍占 1 次 retry_count,LangGraph max_retries 行为不变。"
+        ),
+    ),
     # --- Phase 2 R10: Family-cap (Hubble v2) ---
     "ENABLE_FAMILY_CAP": FlagSpec(
         name="ENABLE_FAMILY_CAP",
