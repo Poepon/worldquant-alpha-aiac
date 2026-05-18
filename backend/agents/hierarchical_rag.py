@@ -246,18 +246,66 @@ DECAYED_KEY = "decayed"
 # extract_fields_for_rag helper). Identifiers that look like fields
 # (lowercase + alphanumeric + underscore, not pure numbers, not known op
 # names). Caller filters via operator set.
+#
+# TODO(M11): sync with AlphaSemanticValidator op registry. That registry
+# loads BRAIN operators from DB at startup (see
+# backend/alpha_semantic_validator.py OperatorRegistry), which is async +
+# requires a session, so we can't reuse it at module import. The
+# module-import sanity check below (_warn_on_op_drift) fires once after
+# the registry has been populated by a caller and warns if any op the
+# validator knows about is missing from _KNOWN_OPS — keeps drift visible
+# in logs without raising cold-start cost.
 _FIELD_TOKEN_RE = re.compile(r"\b([a-z][a-z0-9_]*)\b")
 _KNOWN_OPS: Set[str] = {
-    "rank", "ts_mean", "ts_std_dev", "ts_zscore", "ts_rank", "ts_decay_linear",
-    "ts_delay", "ts_arg_max", "ts_arg_min", "ts_max", "ts_min", "ts_av_diff",
-    "ts_sum", "ts_returns", "ts_change", "ts_skewness", "ts_corr",
-    "group_neutralize", "group_rank", "group_zscore", "group_mean", "group_scale",
-    "winsorize", "signed_power", "subtract", "multiply", "divide", "add",
-    "abs", "log", "sign", "power", "if_else", "trade_when", "where",
-    "scale", "rank_by_side", "vector_neut", "regression_neut", "indneutralize",
-    # Common false-positives to exclude
-    "true", "false", "none", "null", "and", "or", "not",
+    # ---- Real BRAIN operators (alphabetical for readability) ----
+    "abs", "add", "arg_max", "arg_min", "bucket", "correlation", "covariance",
+    "decay_exponential", "delta", "densify", "divide", "group_mean",
+    "group_neutralize", "group_rank", "group_scale", "group_zscore", "hump",
+    "if_else", "indneutralize", "last_diff_value", "log", "multiply", "power",
+    "quantile", "rank", "rank_by_side", "regression_neut", "scale",
+    "sign", "signed_power", "subtract", "trade_when", "ts_arg_max",
+    "ts_arg_min", "ts_av_diff", "ts_change", "ts_corr", "ts_decay_linear",
+    "ts_delay", "ts_max", "ts_mean", "ts_min", "ts_rank", "ts_returns",
+    "ts_skewness", "ts_std_dev", "ts_sum", "ts_zscore", "vector_neut",
+    "where", "winsorize",
+    # ---- Common false-positives to exclude ----
+    "and", "false", "none", "not", "null", "or", "true",
 }
+
+
+_OP_DRIFT_WARNED = False
+
+
+def _warn_on_op_drift() -> None:
+    """One-time sanity check: compare ``_KNOWN_OPS`` to the operators the
+    semantic validator has loaded from DB. Warns if validator knows ops
+    we'd treat as fields (which would leak BRAIN op names into L3 ILIKE
+    searches → spurious matches).
+
+    Cheap: only inspects the already-populated registry — does NOT trigger
+    a DB load. Silent no-op when the registry hasn't been loaded yet
+    (e.g. cold start in unit tests). Idempotent via ``_OP_DRIFT_WARNED``.
+    """
+    global _OP_DRIFT_WARNED
+    if _OP_DRIFT_WARNED:
+        return
+    try:
+        from backend.alpha_semantic_validator import _operator_registry
+        # Access _operators directly to avoid triggering the
+        # "no operators loaded" warning emitted by the .operators property.
+        registry_ops = set(_operator_registry._operators or set())
+        if not registry_ops:
+            return  # registry not loaded yet — try again next call
+        missing = registry_ops - _KNOWN_OPS
+        if missing:
+            logger.warning(
+                f"[hier_rag M11 drift] _KNOWN_OPS missing "
+                f"{len(missing)} validator op(s): {sorted(missing)[:20]}"
+            )
+        _OP_DRIFT_WARNED = True
+    except Exception as ex:
+        logger.debug(f"[hier_rag M11 drift] sanity check skipped: {ex}")
+        _OP_DRIFT_WARNED = True  # don't retry on import errors
 
 
 def extract_fields_for_rag(expression: str) -> List[str]:
@@ -269,6 +317,9 @@ def extract_fields_for_rag(expression: str) -> List[str]:
     """
     if not expression or not isinstance(expression, str):
         return []
+    # M11: one-time drift check against AlphaSemanticValidator registry.
+    # Cheap (no DB I/O) — see _warn_on_op_drift docstring.
+    _warn_on_op_drift()
     tokens = _FIELD_TOKEN_RE.findall(expression.lower())
     seen: Set[str] = set()
     out: List[str] = []
