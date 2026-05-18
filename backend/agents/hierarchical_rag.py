@@ -208,19 +208,34 @@ async def layer0_exact_match(
         return [], []
     try:
         phash = compute_pattern_hash(current_expression, region, dataset_id)
-        # Same pattern may have multiple entries (different regions) — take all
-        rows = (await db.execute(
+        # N2 SQL-pushdown: split SUCCESS / FAILURE into two queries so the
+        # decayed filter can be pushed into WHERE on the SUCCESS path only
+        # (FAILURE explicitly INCLUDES decayed per Q9 dual-filter).
+        succ_rows = (await db.execute(
             select(KnowledgeEntry)
             .where(KnowledgeEntry.pattern_hash == phash)
             .where(KnowledgeEntry.is_active == True)  # noqa: E712
-            .limit(budget * 2)  # split between success + failure
+            .where(KnowledgeEntry.entry_type == "SUCCESS_PATTERN")
+            .where(not_(
+                KnowledgeEntry.meta_data.op("@>")(
+                    cast({DECAYED_KEY: "true"}, JSONB)
+                )
+            ))
+            .order_by(KnowledgeEntry.id.desc())  # newest first — surfaces fresh evidence
+            .limit(budget)
         )).scalars().all()
-        succ: List[RAGEntry] = []
-        fail: List[RAGEntry] = []
-        for r in rows:
+        fail_rows = (await db.execute(
+            select(KnowledgeEntry)
+            .where(KnowledgeEntry.pattern_hash == phash)
+            .where(KnowledgeEntry.is_active == True)  # noqa: E712
+            .where(KnowledgeEntry.entry_type == "FAILURE_PITFALL")
+            .order_by(KnowledgeEntry.id.desc())  # newest first
+            .limit(budget)
+        )).scalars().all()
+
+        def _to_entry(r) -> RAGEntry:
             md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
-            is_decayed = str(md.get(DECAYED_KEY, "")).lower() == "true"
-            entry = RAGEntry(
+            return RAGEntry(
                 pattern_hash=r.pattern_hash or "",
                 pattern=r.pattern or "",
                 entry_type=r.entry_type or "",
@@ -229,12 +244,9 @@ async def layer0_exact_match(
                 source_layer="L0_exact",
                 relevance_score=1.0,  # exact match → highest
             )
-            if r.entry_type == "SUCCESS_PATTERN":
-                if not is_decayed:
-                    succ.append(entry)
-            elif r.entry_type == "FAILURE_PITFALL":
-                # Include decayed (they're the avoid list) + non-decayed
-                fail.append(entry)
+
+        succ = [_to_entry(r) for r in succ_rows]
+        fail = [_to_entry(r) for r in fail_rows]
         return succ[:budget], fail[:budget]
     except Exception as ex:
         logger.warning(f"[hier_rag L0] exact_match failed (return empty): {ex}")
@@ -275,31 +287,52 @@ async def layer3_field_level(
         return [], []
     try:
         # Build ILIKE OR clause for field tokens — bounded to top 3 fields
-        # to keep query cost predictable (one alpha typically uses 1-3 fields)
-        from sqlalchemy import column
+        # to keep query cost predictable (one alpha typically uses 1-3 fields).
+        # Note: ILIKE on `pattern` text column — no JSONB index helps here,
+        # but we still push decayed filter (JSONB) + entry_type into WHERE.
         like_clauses = [KnowledgeEntry.pattern.ilike(f"%{f}%") for f in fields[:3]]
 
-        rows = (await db.execute(
+        # N2 SQL-pushdown: split SUCCESS/FAILURE into two queries.
+        # SUCCESS path: push decayed filter into WHERE (leverages GIN index).
+        # Region filter stays in Python due to list/str ambiguity in meta_data.
+        succ_rows = (await db.execute(
             select(KnowledgeEntry)
             .where(KnowledgeEntry.is_active == True)  # noqa: E712
+            .where(KnowledgeEntry.entry_type == "SUCCESS_PATTERN")
             .where(or_(*like_clauses))
-            .limit(budget * 4)  # over-fetch then filter by region/decayed in Python
+            .where(not_(
+                KnowledgeEntry.meta_data.op("@>")(
+                    cast({DECAYED_KEY: "true"}, JSONB)
+                )
+            ))
+            .order_by(KnowledgeEntry.id.desc())  # newest first — surfaces fresh evidence
+            .limit(budget * 2)  # small over-fetch for region filter in Python
+        )).scalars().all()
+        fail_rows = (await db.execute(
+            select(KnowledgeEntry)
+            .where(KnowledgeEntry.is_active == True)  # noqa: E712
+            .where(KnowledgeEntry.entry_type == "FAILURE_PITFALL")
+            .where(or_(*like_clauses))
+            .order_by(KnowledgeEntry.id.desc())  # newest first
+            .limit(budget)
         )).scalars().all()
 
         succ: List[RAGEntry] = []
         fail: List[RAGEntry] = []
-        for r in rows:
+        for r in succ_rows:
             md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
-            is_decayed = str(md.get(DECAYED_KEY, "")).lower() == "true"
             # Region filter: meta_data['regions'] is List[str] (per
             # knowledge_seed.py convention) OR meta_data['region'] str.
-            # Missing → treat as ANY (per plan [V1.0-A1-3])
+            # Missing → treat as ANY (per plan [V1.0-A1-3]).
+            # Kept in Python due to list/str ambiguity.
             kb_regions = md.get("regions") or ([md["region"]] if md.get("region") else None)
             region_ok = True
             if kb_regions and region:
                 region_ok = (region.upper() in [str(x).upper() for x in kb_regions]
                              or "ANY" in [str(x).upper() for x in kb_regions])
-            entry = RAGEntry(
+            if not region_ok:
+                continue
+            succ.append(RAGEntry(
                 pattern_hash=r.pattern_hash or "",
                 pattern=r.pattern or "",
                 entry_type=r.entry_type or "",
@@ -307,16 +340,22 @@ async def layer3_field_level(
                 meta_data=md,
                 source_layer="L3_field",
                 relevance_score=0.5,  # lowest layer
-            )
-            if r.entry_type == "SUCCESS_PATTERN":
-                if not is_decayed and region_ok:
-                    succ.append(entry)
-                    if len(succ) >= budget:
-                        break  # short-circuit when full
-            elif r.entry_type == "FAILURE_PITFALL":
-                # FAILURE: ignore region constraint (failures are universal),
-                # include decayed
-                fail.append(entry)
+            ))
+            if len(succ) >= budget:
+                break
+        for r in fail_rows:
+            md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
+            # FAILURE: ignore region constraint (failures are universal),
+            # include decayed.
+            fail.append(RAGEntry(
+                pattern_hash=r.pattern_hash or "",
+                pattern=r.pattern or "",
+                entry_type=r.entry_type or "",
+                description=r.description or "",
+                meta_data=md,
+                source_layer="L3_field",
+                relevance_score=0.5,
+            ))
         return succ[:budget], fail[:budget]
     except Exception as ex:
         logger.warning(f"[hier_rag L3] field_level failed (return empty): {ex}")
@@ -378,19 +417,33 @@ async def layer1_pillar(
     try:
         # JOIN on backfilled meta_data->>'pillar_classified' = pillar
         # GIN(jsonb_path_ops) supports @> containment — use that.
-        rows = (await db.execute(
+        # N2 SQL-pushdown: split SUCCESS/FAILURE queries so decayed filter
+        # is in WHERE on the SUCCESS path only (FAILURE INCLUDES decayed
+        # per Q9 dual-filter — they're the "avoid this" hints).
+        pillar_match = cast({"pillar_classified": pillar}, JSONB)
+        decayed_match = cast({DECAYED_KEY: "true"}, JSONB)
+
+        succ_rows = (await db.execute(
             select(KnowledgeEntry)
             .where(KnowledgeEntry.is_active == True)  # noqa: E712
-            .where(KnowledgeEntry.meta_data.op("@>")({"pillar_classified": pillar}))
-            .limit(budget * 4)  # over-fetch then filter by decayed/region in Python
+            .where(KnowledgeEntry.entry_type == "SUCCESS_PATTERN")
+            .where(KnowledgeEntry.meta_data.op("@>")(pillar_match))
+            .where(not_(KnowledgeEntry.meta_data.op("@>")(decayed_match)))
+            .order_by(KnowledgeEntry.id.desc())  # newest first — surfaces fresh evidence
+            .limit(budget)
+        )).scalars().all()
+        fail_rows = (await db.execute(
+            select(KnowledgeEntry)
+            .where(KnowledgeEntry.is_active == True)  # noqa: E712
+            .where(KnowledgeEntry.entry_type == "FAILURE_PITFALL")
+            .where(KnowledgeEntry.meta_data.op("@>")(pillar_match))
+            .order_by(KnowledgeEntry.id.desc())  # newest first
+            .limit(budget)
         )).scalars().all()
 
-        succ: List[RAGEntry] = []
-        fail: List[RAGEntry] = []
-        for r in rows:
+        def _to_entry(r) -> RAGEntry:
             md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
-            is_decayed = str(md.get(DECAYED_KEY, "")).lower() == "true"
-            entry = RAGEntry(
+            return RAGEntry(
                 pattern_hash=r.pattern_hash or "",
                 pattern=r.pattern or "",
                 entry_type=r.entry_type or "",
@@ -399,13 +452,9 @@ async def layer1_pillar(
                 source_layer="L1_pillar",
                 relevance_score=0.75,  # mid-high specificity
             )
-            if r.entry_type == "SUCCESS_PATTERN":
-                if not is_decayed:
-                    succ.append(entry)
-                    if len(succ) >= budget:
-                        break
-            elif r.entry_type == "FAILURE_PITFALL":
-                fail.append(entry)
+
+        succ = [_to_entry(r) for r in succ_rows]
+        fail = [_to_entry(r) for r in fail_rows]
         return succ[:budget], fail[:budget]
     except Exception as ex:
         logger.warning(f"[hier_rag L1] pillar query failed (return empty): {ex}")
@@ -458,30 +507,42 @@ async def layer2_family(
         return [], []
 
     try:
-        # When R5 ranking is ON we want all candidates first so the re-rank
-        # has a chance to surface high-R5 rows beyond the first `budget`
-        # raw matches; otherwise keep the original short-circuit behaviour.
-        fetch_limit = budget * (8 if enable_r5_ranking else 4)
-        rows = (await db.execute(
+        # N2 SQL-pushdown: split SUCCESS/FAILURE and push family_signature,
+        # decayed (SUCCESS path), and family_capped exclusions into WHERE.
+        # GIN(jsonb_path_ops) on meta_data backs the @> containment fast.
+        # When R5 ranking is ON we over-fetch SUCCESS so the re-rank has a
+        # chance to surface high-R5 rows beyond the first `budget`.
+        family_match = cast({"family_signature": sig}, JSONB)
+        decayed_match = cast({DECAYED_KEY: "true"}, JSONB)
+        capped_match = cast({"family_capped": "true"}, JSONB)
+        r10_capped_match = cast({"_r10_family_cap_dropped": "true"}, JSONB)
+
+        succ_limit = budget * 2 if enable_r5_ranking else budget
+        succ_rows = (await db.execute(
             select(KnowledgeEntry)
             .where(KnowledgeEntry.is_active == True)  # noqa: E712
-            .where(KnowledgeEntry.meta_data.op("@>")({"family_signature": sig}))
-            .limit(fetch_limit)
+            .where(KnowledgeEntry.entry_type == "SUCCESS_PATTERN")
+            .where(KnowledgeEntry.meta_data.op("@>")(family_match))
+            .where(not_(KnowledgeEntry.meta_data.op("@>")(decayed_match)))
+            .where(not_(KnowledgeEntry.meta_data.op("@>")(capped_match)))
+            .where(not_(KnowledgeEntry.meta_data.op("@>")(r10_capped_match)))
+            .order_by(KnowledgeEntry.id.desc())  # newest first — surfaces fresh evidence
+            .limit(succ_limit)
+        )).scalars().all()
+        fail_rows = (await db.execute(
+            select(KnowledgeEntry)
+            .where(KnowledgeEntry.is_active == True)  # noqa: E712
+            .where(KnowledgeEntry.entry_type == "FAILURE_PITFALL")
+            .where(KnowledgeEntry.meta_data.op("@>")(family_match))
+            .where(not_(KnowledgeEntry.meta_data.op("@>")(capped_match)))
+            .where(not_(KnowledgeEntry.meta_data.op("@>")(r10_capped_match)))
+            .order_by(KnowledgeEntry.id.desc())  # newest first
+            .limit(budget)
         )).scalars().all()
 
-        succ: List[RAGEntry] = []
-        fail: List[RAGEntry] = []
-        for r in rows:
+        def _to_entry(r) -> RAGEntry:
             md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
-            is_decayed = str(md.get(DECAYED_KEY, "")).lower() == "true"
-            # [V1.0-S5] exclude family_capped — undermines R10 purpose
-            is_capped = (
-                str(md.get("family_capped", "")).lower() == "true"
-                or str(md.get("_r10_family_cap_dropped", "")).lower() == "true"
-            )
-            if is_capped:
-                continue
-            entry = RAGEntry(
+            return RAGEntry(
                 pattern_hash=r.pattern_hash or "",
                 pattern=r.pattern or "",
                 entry_type=r.entry_type or "",
@@ -490,15 +551,9 @@ async def layer2_family(
                 source_layer="L2_family",
                 relevance_score=0.65,  # mid specificity
             )
-            if r.entry_type == "SUCCESS_PATTERN":
-                if not is_decayed:
-                    succ.append(entry)
-                    # When NOT R5-ranking, short-circuit at budget; with
-                    # ranking we over-fetch then trim after re-sort.
-                    if not enable_r5_ranking and len(succ) >= budget:
-                        break
-            elif r.entry_type == "FAILURE_PITFALL":
-                fail.append(entry)
+
+        succ = [_to_entry(r) for r in succ_rows]
+        fail = [_to_entry(r) for r in fail_rows]
 
         # R8-v2 #3 R5 re-ranking (only when enabled and we have multiple
         # SUCCESS candidates worth sorting).
