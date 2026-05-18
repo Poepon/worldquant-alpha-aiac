@@ -347,6 +347,14 @@ class Settings(BaseSettings):
     # BOTH attribution → mutate dominates retry per plan [V1.0-A2-3].
     ENABLE_R1B_HYPOTHESIS_MUTATE: bool = False
     R1B_MAX_MUTATIONS_PER_DATASET_CYCLE: int = 2
+    # R1b.2 review MEDIUM (2026-05-18): per-round cap was inadequate against
+    # cross-round mutation chain spirals (round N mutate → round N+1 inject →
+    # fail (hyp attribution) → round N+1 mutate → round N+2 inject → ...).
+    # The Hypothesis row stores r1b_mutation_depth (bumped at INSERT in
+    # _insert_mutated_hypothesis); node_hypothesis_mutate now reads the
+    # parent's depth and refuses when >= this cap to prevent runaway BRAIN
+    # + LLM cost on shallow hypothesis spaces.
+    R1B_MAX_MUTATION_DEPTH: int = 3
     R1B_MUTATE_MODEL: str = "claude-haiku-4-5-20251001"
     # ----- R1b.3 — cross-round failure trees -----
     ENABLE_R1B_FAILURE_TREE: bool = False

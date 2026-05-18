@@ -430,6 +430,43 @@ async def node_hypothesis_mutate(
     primary_hyp = max(groups.items(), key=lambda kv: len(kv[1]))[0]
     primary_indices = groups[primary_hyp]
 
+    # R1b.2 review MEDIUM (2026-05-18): per-round R1B_MAX_MUTATIONS_PER_
+    # DATASET_CYCLE caps within a round, but pending → inject → mutate
+    # chains could spiral across rounds. Bail when parent Hypothesis row
+    # already at depth >= R1B_MAX_MUTATION_DEPTH. Soft-fail on DB lookup
+    # failure: proceed (don't block on observability glitches).
+    _primary_first_alpha = pending[primary_indices[0]]
+    _primary_metrics = dict(getattr(_primary_first_alpha, "metrics", None) or {})
+    _parent_hyp_id = _primary_metrics.get("hypothesis_id")
+    if _parent_hyp_id is not None:
+        try:
+            from backend.database import AsyncSessionLocal as _DepthSL
+            from backend.models import Hypothesis as _DepthHyp
+            from sqlalchemy import select as _depth_sel
+            _max_depth = int(getattr(settings, "R1B_MAX_MUTATION_DEPTH", 3))
+            async with _DepthSL() as _depth_db:
+                _row = (await _depth_db.execute(
+                    _depth_sel(_DepthHyp).where(_DepthHyp.id == _parent_hyp_id)
+                )).scalar_one_or_none()
+                _parent_depth = int(
+                    getattr(_row, "r1b_mutation_depth", 0) or 0
+                ) if _row is not None else 0
+            if _parent_depth >= _max_depth:
+                logger.info(
+                    f"[r1b_loop mutate] mutation chain depth cap reached "
+                    f"(parent_id={_parent_hyp_id} depth={_parent_depth} "
+                    f">= R1B_MAX_MUTATION_DEPTH={_max_depth}); no-op"
+                )
+                return {
+                    "r1b_mutations_attempted_this_cycle": (
+                        getattr(state, "r1b_mutations_attempted_this_cycle", 0)
+                    )
+                }
+        except Exception as _depth_ex:
+            logger.debug(
+                f"[r1b_loop mutate] depth-cap lookup soft-failed ({_depth_ex}); proceeding"
+            )
+
     # Build outcome bullets from the primary group
     outcomes = []
     primary_alpha = pending[primary_indices[0]]

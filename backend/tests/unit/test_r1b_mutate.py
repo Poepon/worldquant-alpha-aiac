@@ -253,6 +253,76 @@ async def test_mutate_token_cost_ceiling_returns_early():
 
 
 # ---------------------------------------------------------------------------
+# R1b.2 review MEDIUM: cross-round mutation chain depth cap
+# ---------------------------------------------------------------------------
+
+def _mk_alpha_with_hyp_id(idx_str, expression, *, hypothesis_id):
+    a = _mk_alpha(idx_str, expression)
+    a.metrics["hypothesis_id"] = hypothesis_id
+    return a
+
+
+def _patch_depth_lookup(parent_depth):
+    """Patch the AsyncSessionLocal + Hypothesis import to return a row with
+    the given r1b_mutation_depth (or None if parent_depth is None)."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _fake_session():
+        class _Result:
+            def scalar_one_or_none(self_inner):
+                if parent_depth is None:
+                    return None
+                return SimpleNamespace(r1b_mutation_depth=parent_depth)
+        class _DB:
+            async def execute(self_inner, _stmt):
+                return _Result()
+        yield _DB()
+
+    return patch(
+        "backend.database.AsyncSessionLocal",
+        new=_fake_session,
+    )
+
+
+@pytest.mark.asyncio
+async def test_mutate_depth_cap_returns_early_when_parent_at_max():
+    """Parent Hypothesis at depth=3 (== R1B_MAX_MUTATION_DEPTH default) → no-op."""
+    alpha = _mk_alpha_with_hyp_id("0", "rank(close)", hypothesis_id=99)
+    state = _mk_state([alpha])
+    llm = _mk_llm_mutate_resp("X")
+    with _patch_depth_lookup(parent_depth=3):
+        out = await node_hypothesis_mutate(state, llm)
+    assert "r1b_mutations_attempted_this_cycle" in out
+    llm.call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mutate_depth_cap_proceeds_when_parent_below_max():
+    """Parent at depth=1 (< 3) → mutate proceeds to LLM call."""
+    alpha = _mk_alpha_with_hyp_id("0", "rank(close)", hypothesis_id=99)
+    state = _mk_state([alpha])
+    llm = _mk_llm_mutate_resp("X")
+    with _patch_depth_lookup(parent_depth=1):
+        await node_hypothesis_mutate(state, llm)
+    llm.call.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mutate_depth_cap_soft_fails_when_db_lookup_raises():
+    """DB lookup raises → proceed (don't block on observability glitch)."""
+    alpha = _mk_alpha_with_hyp_id("0", "rank(close)", hypothesis_id=99)
+    state = _mk_state([alpha])
+    llm = _mk_llm_mutate_resp("X")
+    with patch(
+        "backend.database.AsyncSessionLocal",
+        side_effect=RuntimeError("db down"),
+    ):
+        await node_hypothesis_mutate(state, llm)
+    llm.call.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # Soft-fail + no-op outcomes
 # ---------------------------------------------------------------------------
 

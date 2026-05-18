@@ -233,6 +233,20 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "parent_hypothesis_id chain on Hypothesis."
         ),
     ),
+    "R1B_MAX_MUTATION_DEPTH": FlagSpec(
+        name="R1B_MAX_MUTATION_DEPTH",
+        flag_type="int",
+        group="Phase3-R1b",
+        description=(
+            "Phase 3 R1b.2 review MEDIUM (2026-05-18): caps cross-round "
+            "mutation chain depth. R1B_MAX_MUTATIONS_PER_DATASET_CYCLE "
+            "limits within a single round but pending → inject → mutate "
+            "could spiral across rounds. node_hypothesis_mutate now "
+            "reads parent Hypothesis.r1b_mutation_depth and refuses "
+            "when >= this cap. Default 3 = up to 3 levels of mutation "
+            "from the original RAG-seeded hypothesis."
+        ),
+    ),
     "ENABLE_R1B_FAILURE_TREE": FlagSpec(
         name="ENABLE_R1B_FAILURE_TREE",
         flag_type="bool",
