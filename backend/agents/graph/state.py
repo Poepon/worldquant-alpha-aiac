@@ -281,6 +281,12 @@ class MiningState(BaseModel):
     r1b_retries_attempted_this_alpha: int = 0
     r1b_mutations_attempted_this_cycle: int = 0   # R1b.2 sub-phase uses this
     r1b_token_cost_this_alpha: float = 0.0
+    # R1b.1 review LOW 2 (2026-05-18): cumulative R1b LLM cost across all
+    # alphas in current round. Soft cap = settings.R1B_MAX_COST_USD_PER_ROUND
+    # (default $5). Retry node checks BEFORE the LLM call; on hit it skips
+    # the call + logs info (alpha not failed). Resets per LangGraph
+    # invocation along with the other R1b counters above.
+    r1b_cost_this_round: float = 0.0
     r1b_loop_attribution_evidence: List[Dict] = Field(default_factory=list)
     r1b_mutated_hypothesis_ids: List[int] = Field(default_factory=list)
     r1b_pending_new_hypothesis: Optional[Dict] = None

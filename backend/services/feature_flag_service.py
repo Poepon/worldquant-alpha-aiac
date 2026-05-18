@@ -265,6 +265,21 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "PASS + ≥14d production observation per [V1.2-A2-3]."
         ),
     ),
+    "R1B_MAX_COST_USD_PER_ROUND": FlagSpec(
+        name="R1B_MAX_COST_USD_PER_ROUND",
+        flag_type="float",
+        group="Phase3-R1b",
+        description=(
+            "Phase 3 R1b.1 review LOW 2 (2026-05-18): soft cap on cumulative "
+            "R1b LLM cost (retry + mutate) within a single round. Per-alpha "
+            "ceiling alone allows $0.05 × 3 retries × 50 alphas = $7.50/round "
+            "worst case (×100 rounds/day = $750/day). Default 5.00 USD caps "
+            "round at $5; retry node skips LLM call + logs info when "
+            "state.r1b_cost_this_round + est_next_cost would exceed cap. Alpha "
+            "left as-is (NOT failed). Lower to tighten budget; raise to disable "
+            "(soft cap, no fail)."
+        ),
+    ),
     # --- R8-v2 #2 Hierarchical RAG Redis cache ---
     "ENABLE_HIERARCHICAL_RAG_CACHE": FlagSpec(
         name="ENABLE_HIERARCHICAL_RAG_CACHE",

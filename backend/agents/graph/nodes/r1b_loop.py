@@ -166,7 +166,24 @@ async def node_code_gen_retry(
         if fid:
             allowed_fields.append(str(fid))
 
+    # R1b.1 review LOW 2 — per-round soft cap. Estimate next-call cost via
+    # max_tokens worst-case (512) so we don't overshoot. When state cumulative
+    # + this estimate >= cap, skip retry (alpha stays as-is, NOT failed).
+    per_round_cap = float(getattr(settings, "R1B_MAX_COST_USD_PER_ROUND", 5.00))
+    round_cost_so_far = float(getattr(state, "r1b_cost_this_round", 0.0) or 0.0)
+    estimated_next_call_cost = _estimate_cost(model_name, 512)
+
     for idx in target_indices:
+        # Pre-call per-round cap check — soft-fall (skip LLM, alpha not failed)
+        if round_cost_so_far + cost_delta_usd + estimated_next_call_cost >= per_round_cap:
+            logger.info(
+                f"[r1b_loop] per-round cost cap ${per_round_cap:.2f} would be "
+                f"exceeded (so_far=${round_cost_so_far + cost_delta_usd:.4f} + "
+                f"est=${estimated_next_call_cost:.4f}); skipping retry for "
+                f"alpha idx={idx} (alpha left as FAIL)"
+            )
+            break
+
         original = pending[idx]
         original_metrics = dict(getattr(original, "metrics", None) or {})
         try:
@@ -274,6 +291,8 @@ async def node_code_gen_retry(
         "pending_alphas": updated_alphas,
         "r1b_retries_attempted_this_alpha": state.r1b_retries_attempted_this_alpha + 1,
         "r1b_token_cost_this_alpha": state.r1b_token_cost_this_alpha + cost_delta_usd,
+        # R1b.1 review LOW 2 — per-round cumulative cost accumulator
+        "r1b_cost_this_round": round_cost_so_far + cost_delta_usd,
     }
 
 

@@ -64,7 +64,7 @@ def _mk_alpha(idx_str: str, expression: str, *,
     )
 
 
-def _mk_state(alphas, *, retries=0, mutations=0, cost=0.0):
+def _mk_state(alphas, *, retries=0, mutations=0, cost=0.0, round_cost=0.0):
     return SimpleNamespace(
         pending_alphas=alphas,
         fields=[{"id": "close"}, {"id": "open"}, {"id": "volume"}],
@@ -74,6 +74,7 @@ def _mk_state(alphas, *, retries=0, mutations=0, cost=0.0):
         r1b_retries_attempted_this_alpha=retries,
         r1b_mutations_attempted_this_cycle=mutations,
         r1b_token_cost_this_alpha=cost,
+        r1b_cost_this_round=round_cost,
     )
 
 
@@ -273,3 +274,43 @@ def test_estimate_cost_unknown_model_uses_default():
     cost = _estimate_cost("unknown-model-x", 1000)
     # Defaults: 0.30·0.001 + 0.70·0.005 = 0.0038 (matches haiku coincidentally)
     assert cost > 0
+
+
+# ---------------------------------------------------------------------------
+# R1b.1 review LOW 2 — per-round cost cap
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_per_round_cost_cap_skips_retry(monkeypatch):
+    """State r1b_cost_this_round already past cap → LLM call NOT issued."""
+    from backend.config import settings
+    # Lower cap so the estimate is guaranteed to exceed it
+    monkeypatch.setattr(settings, "R1B_MAX_COST_USD_PER_ROUND", 0.001, raising=False)
+    alpha = _mk_alpha("0", "rank(close)")
+    # round_cost already above cap
+    state = _mk_state([alpha], round_cost=0.10)
+    llm = _mk_llm({"fixed_expression": "rank(close - open)", "changes_made": "x"})
+    out = await node_code_gen_retry(state, llm)
+    # LLM never called
+    llm.call.assert_not_awaited()
+    # Alpha not rewritten
+    assert out["pending_alphas"][0].expression == "rank(close)"
+    # Counter still bumped so router doesn't loop infinitely
+    assert out["r1b_retries_attempted_this_alpha"] == 1
+    # Per-round accumulator unchanged from input
+    assert out["r1b_cost_this_round"] == 0.10
+
+
+@pytest.mark.asyncio
+async def test_per_round_cost_cap_accumulator_advances(monkeypatch):
+    """Successful retry adds actual cost to r1b_cost_this_round."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "R1B_MAX_COST_USD_PER_ROUND", 5.00, raising=False)
+    alpha = _mk_alpha("0", "rank(close)")
+    state = _mk_state([alpha], round_cost=0.50)
+    llm = _mk_llm({"fixed_expression": "rank(close - open)", "changes_made": "x"})
+    out = await node_code_gen_retry(state, llm)
+    # Accumulator advanced past starting 0.50
+    assert out["r1b_cost_this_round"] > 0.50
+    assert out["pending_alphas"][0].expression == "rank(close - open)"

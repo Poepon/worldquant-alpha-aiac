@@ -360,6 +360,16 @@ class Settings(BaseSettings):
     ENABLE_R1B_DAG_RETRY_REWARD: bool = False
     # ----- Shared budget guard -----
     R1B_TOKEN_COST_CEILING_USD_PER_ALPHA: float = 0.05
+    # ----- R1b.1 review LOW 2 — per-round cost cap -----
+    # Soft cap on cumulative R1b LLM cost (retry + mutate) within a single
+    # LangGraph invocation (one round). When state.r1b_cost_this_round +
+    # estimated_next_call_cost would exceed this, the retry/mutate node
+    # skips the LLM call + logs info (alpha NOT failed — just left as-is).
+    # Worst-case envelope without cap: $0.05 × 3 retries × 50 alphas = $7.50
+    # /round × 100 rounds/day = $750/day. With 5.00 default a round soft-caps
+    # at $5; 100 rounds/day worst case $500/day — still bounded.
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    R1B_MAX_COST_USD_PER_ROUND: float = 5.00
 
     # R8-v2 #2 (2026-05-18): per-layer Redis cache for hierarchical RAG。
     # cache_key = sha256[:16](layer + sorted params),TTL = RAG_HIER_CACHE_TTL_SEC
