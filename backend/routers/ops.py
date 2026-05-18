@@ -1426,3 +1426,137 @@ async def r1b_chain_depth_distribution(
         total_root_hypotheses=roots,
         chain_depth_avg=avg,
     )
+
+
+# =============================================================================
+# R1a hook + R5 LLM-judge telemetry (2026-05-18) — operator decision support
+# =============================================================================
+# Replaces the standalone scripts/r1a_attribution_report.py with a live
+# endpoint. R1a has been production-ON for months but operators have only
+# raw SQL to see attribution distribution + R5 c1/c2 agreement rates.
+# Plan §1.7 + feedback_no_reflex_flag_cleanup memory: R1a flag stays ON
+# long-term — telemetry needs to be a permanent ops endpoint, not a
+# one-shot diagnostic script.
+
+
+class R1aAttributionBucketOut(BaseModel):
+    attribution: str          # 'hypothesis' | 'implementation' | 'both' | 'unknown' | 'null'
+    count: int
+    errs_count: int           # rows with hook_error set (telemetry of self-caught failures)
+    avg_confidence: float     # mean attribution_confidence within bucket
+
+
+class R1aTelemetryOut(BaseModel):
+    flags: Dict[str, bool]
+    distribution: List[R1aAttributionBucketOut]
+    total_in_window: int
+    # KPI per plan §1.7 (R1a Phase 0 GO gate definitions)
+    non_null_pct: float       # hook produced any attribution / total
+    non_unknown_pct: float    # actionable attribution / non-null
+    errs_count_total: int
+    # R5 LLM judge stats (NULL when ENABLE_LLM_JUDGE=False, populated otherwise)
+    r5_agrees_r1a_pct: Optional[float]   # rows where r5_agrees_r1a='true' / rows where field non-null
+    r5_avg_composite_score: Optional[float]
+    r5_total_cost_usd: float
+    r5_sample_size: int        # rows with non-null r5_composite_score
+    window_days: int
+
+
+@router.get("/r1a/telemetry", response_model=R1aTelemetryOut)
+async def r1a_telemetry(
+    days: int = 7,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> R1aTelemetryOut:
+    """R1a hook + R5 LLM judge telemetry — replaces r1a_attribution_report.py.
+
+    Aggregates ``r1a_attribution_log`` over the last ``days`` window:
+      - per-attribution distribution + counts + errs + avg confidence
+      - non_null_pct + non_unknown_pct per plan §1.7 GO gate
+      - R5 c1/c2 stats (agreement rate + avg composite + total cost)
+
+    Use to confirm R1a is healthy + R5 judge is producing actionable
+    attribution before promoting R1b retry/mutate flags.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_R1A_HOOK": bool(getattr(_stg, "ENABLE_R1A_HOOK", False)),
+        "ENABLE_LLM_JUDGE": bool(getattr(_stg, "ENABLE_LLM_JUDGE", False)),
+    }
+
+    # Per-attribution bucket — COALESCE NULL → 'null' string so the bucket
+    # shows in distribution even when hook fully fails. errs_count counts
+    # rows with hook_error set (hook self-caught exceptions, not crashes).
+    rows = (await db.execute(_text(
+        "SELECT COALESCE(attribution, 'null') AS attr, "
+        "       COUNT(*) AS n, "
+        "       COUNT(*) FILTER (WHERE hook_error IS NOT NULL) AS errs, "
+        "       COALESCE(AVG(attribution_confidence), 0.0) AS avg_conf "
+        "FROM r1a_attribution_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY attr "
+        "ORDER BY n DESC"
+    ), {"days": str(int(days))})).all()
+
+    distribution: List[R1aAttributionBucketOut] = []
+    total = 0
+    non_null = 0
+    actionable = 0  # hypothesis | implementation | both
+    errs_total = 0
+    for attr, n, errs, avg_conf in rows:
+        n_int = int(n or 0)
+        e_int = int(errs or 0)
+        distribution.append(R1aAttributionBucketOut(
+            attribution=attr or "null",
+            count=n_int,
+            errs_count=e_int,
+            avg_confidence=round(float(avg_conf or 0.0), 4),
+        ))
+        total += n_int
+        errs_total += e_int
+        if attr and attr != "null":
+            non_null += n_int
+        if attr in ("hypothesis", "implementation", "both"):
+            actionable += n_int
+
+    non_null_pct = round(non_null / total, 4) if total > 0 else 0.0
+    non_unknown_pct = round(actionable / non_null, 4) if non_null > 0 else 0.0
+
+    # R5 stats — populated when at least one row carries non-null
+    # r5_composite_score. Costs are total USD (not average) so operators
+    # see cumulative spend in the window.
+    r5_rows = (await db.execute(_text(
+        "SELECT "
+        "  COUNT(*) FILTER (WHERE r5_agrees_r1a = 'true') AS agree, "
+        "  COUNT(*) FILTER (WHERE r5_agrees_r1a IS NOT NULL) AS r5_total, "
+        "  COALESCE(AVG(r5_composite_score), 0.0) AS avg_score, "
+        "  COALESCE(SUM(r5_cost_usd), 0.0) AS cost, "
+        "  COUNT(*) FILTER (WHERE r5_composite_score IS NOT NULL) AS sample "
+        "FROM r1a_attribution_log "
+        "WHERE created_at > now() - (:days || ' day')::interval"
+    ), {"days": str(int(days))})).one()
+
+    agree_n, r5_total, avg_score, r5_cost, sample = r5_rows
+    sample_int = int(sample or 0)
+    r5_agrees_pct = None
+    r5_avg_score = None
+    if int(r5_total or 0) > 0:
+        r5_agrees_pct = round(int(agree_n or 0) / int(r5_total), 4)
+    if sample_int > 0:
+        r5_avg_score = round(float(avg_score or 0.0), 4)
+
+    return R1aTelemetryOut(
+        flags=flags,
+        distribution=distribution,
+        total_in_window=total,
+        non_null_pct=non_null_pct,
+        non_unknown_pct=non_unknown_pct,
+        errs_count_total=errs_total,
+        r5_agrees_r1a_pct=r5_agrees_pct,
+        r5_avg_composite_score=r5_avg_score,
+        r5_total_cost_usd=round(float(r5_cost or 0.0), 4),
+        r5_sample_size=sample_int,
+        window_days=int(days),
+    )
