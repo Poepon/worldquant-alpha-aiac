@@ -60,4 +60,9 @@ class QlibPrescreenLog(SQLAlchemyBase):
     brain_followup_sharpe = Column(Float, nullable=True)
     brain_disagreement = Column(String(8), nullable=True)        # 'true'/'false'
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)
+    # NOTE: no inline ``index=True`` here — the explicit
+    # ``Index("ix_q10_created_at", "created_at")`` in ``__table_args__`` above
+    # is the single source of truth. dev ``create_all()`` would otherwise
+    # create a second auto-named index ``ix_qlib_prescreen_log_created_at``
+    # that prod Alembic does not have.
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
