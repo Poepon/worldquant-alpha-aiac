@@ -7,7 +7,6 @@ import {
   SettingOutlined,
   RocketOutlined,
   DatabaseOutlined,
-  ApartmentOutlined,
   WarningOutlined,
   MonitorOutlined,
   SwapOutlined,
@@ -30,11 +29,6 @@ const menuItems = [
     key: '/tasks',
     icon: <ThunderboltOutlined />,
     label: '任务管理',
-  },
-  {
-    key: '/factor-library',
-    icon: <ApartmentOutlined />,
-    label: '因子库',
   },
   {
     key: '/correlation',

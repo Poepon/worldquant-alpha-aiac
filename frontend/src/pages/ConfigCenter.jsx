@@ -41,7 +41,6 @@ import api from '../services/api'
 const { Title, Text, Paragraph } = Typography
 
 export default function ConfigCenter() {
-  const queryClient = useQueryClient()
   const [brainForm] = Form.useForm()
   const [llmForm] = Form.useForm()
 
@@ -573,15 +572,13 @@ export default function ConfigCenter() {
 }
 
 
-// PR3: tier-aware Knowledge Library browser. Lists all SUCCESS_PATTERN
-// KB entries with filters (tier multi-select / source / region) and inline
-// edit (confidence + soft-delete via is_active toggle).
-const TIER_TAG_COLORS = { 1: 'blue', 2: 'purple', 3: 'volcano' }
+// Knowledge Library browser. Lists all SUCCESS_PATTERN KB entries with
+// filters (source / region) and inline edit (confidence + soft-delete via
+// is_active toggle). Tier filter retired post tier-system removal (2026-05-18).
 
 function KnowledgeLibraryTab() {
   const queryClient = useQueryClient()
   const [filters, setFilters] = useState({
-    tiers: [],          // multi-select; empty = all tiers + NULL
     source: undefined,
     region: undefined,
     only_active: true,
@@ -591,31 +588,15 @@ function KnowledgeLibraryTab() {
   const { data, isLoading } = useQuery({
     queryKey: ['knowledge-library', filters],
     queryFn: async () => {
-      // PR4 (followup): /knowledge now supports factor_tier / region /
-      // created_by query params. Tier multi-select still needs client-side
-      // OR semantics (the API only accepts a single tier value), so we make
-      // one request per selected tier and concatenate. Empty selection → one
-      // request with no tier filter.
-      const baseParams = {
+      const params = {
         entry_type: 'SUCCESS_PATTERN',
         limit: 200,
       }
-      if (filters.only_active) baseParams.is_active = true
-      if (filters.source) baseParams.created_by = filters.source
-      if (filters.region) baseParams.region = filters.region
-
-      const tierValues = filters.tiers.length > 0 ? filters.tiers : [undefined]
-      const responses = await Promise.all(
-        tierValues.map(async (t) => {
-          const params = { ...baseParams }
-          if (t !== undefined) {
-            params.factor_tier = t === 'null' ? 0 : t
-          }
-          const resp = await api.getKnowledgeEntries(params)
-          return Array.isArray(resp) ? resp : resp.items || []
-        })
-      )
-      return responses.flat()
+      if (filters.only_active) params.is_active = true
+      if (filters.source) params.created_by = filters.source
+      if (filters.region) params.region = filters.region
+      const resp = await api.getKnowledgeEntries(params)
+      return Array.isArray(resp) ? resp : resp.items || []
     },
   })
 
@@ -651,17 +632,6 @@ function KnowledgeLibraryTab() {
           </Text>
         </Tooltip>
       ),
-    },
-    {
-      title: 'Tier',
-      dataIndex: 'factor_tier',
-      width: 70,
-      render: (t) =>
-        t == null ? (
-          <Tag>—</Tag>
-        ) : (
-          <Tag color={TIER_TAG_COLORS[t]}>T{t}</Tag>
-        ),
     },
     {
       title: '来源',
@@ -750,21 +720,6 @@ function KnowledgeLibraryTab() {
   return (
     <Card className="glass-card">
       <Space style={{ marginBottom: 12 }} wrap>
-        <Text>Tier:</Text>
-        <Select
-          mode="multiple"
-          allowClear
-          placeholder="全部"
-          style={{ width: 180 }}
-          value={filters.tiers}
-          onChange={(v) => setFilters((f) => ({ ...f, tiers: v }))}
-          options={[
-            { value: 1, label: 'T1' },
-            { value: 2, label: 'T2' },
-            { value: 3, label: 'T3' },
-            { value: 'null', label: '不分层' },
-          ]}
-        />
         <Text>来源:</Text>
         <Select
           allowClear
@@ -847,9 +802,6 @@ function KnowledgeDetailModal({ entry, onClose, onSaveConfidence }) {
         </Descriptions.Item>
         <Descriptions.Item label="Description">
           {entry.description || '—'}
-        </Descriptions.Item>
-        <Descriptions.Item label="Tier">
-          {entry.factor_tier == null ? '—' : `T${entry.factor_tier}`}
         </Descriptions.Item>
         <Descriptions.Item label="Region / Dataset">
           {meta.region || '—'} / {meta.dataset_id || meta.dataset || '—'}

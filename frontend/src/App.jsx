@@ -6,7 +6,6 @@ import Dashboard from './pages/Dashboard'
 import TaskManagement from './pages/TaskManagement'
 import TaskDetail from './pages/TaskDetail'
 import AlphaDetail from './pages/AlphaDetail'
-import FactorLibrary from './pages/FactorLibrary'
 import CrisisStressTest from './pages/CrisisStressTest'
 import ConfigCenter from './pages/ConfigCenter'
 import DataManagement from './pages/DataManagement'
@@ -26,10 +25,10 @@ function App() {
             <Route path="/dashboard" element={<Dashboard />} />
             <Route path="/tasks" element={<TaskManagement />} />
             <Route path="/tasks/:id" element={<TaskDetail />} />
-            {/* 因子实验室已并入因子库；/alphas 列表页重定向，详情页保留 */}
-            <Route path="/alphas" element={<Navigate to="/factor-library" replace />} />
+            {/* /factor-library retired post tier-system removal (2026-05-18).
+                /alphas list redirects to /tasks; detail page stays. */}
+            <Route path="/alphas" element={<Navigate to="/tasks" replace />} />
             <Route path="/alphas/:id" element={<AlphaDetail />} />
-            <Route path="/factor-library" element={<FactorLibrary />} />
             <Route path="/correlation" element={<CrisisStressTest />} />
             <Route path="/data" element={<DataManagement />} />
             <Route path="/config" element={<ConfigCenter />} />

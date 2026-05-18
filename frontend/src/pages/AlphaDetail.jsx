@@ -546,72 +546,17 @@ export default function AlphaDetail() {
         </Col>
       </Row>
 
-      {/* PR3: Tier-aware lineage tree + transition history */}
       <LineageSection alphaId={id} />
     </div>
   )
 }
 
-const TIER_COLORS = { 1: '#1677ff', 2: '#722ed1', 3: '#fa541c' }
-const STATUS_COLORS = {
-  PASS: 'success',
-  PASS_PROVISIONAL: 'gold',
-  OPTIMIZE: 'processing',
-  FAIL: 'default',
-  PENDING: 'default',
-  REJECT: 'error',
-}
-
-
-function LineageNodeCard({ node, navigate, label }) {
-  if (!node) return null
-  const tier = node.factor_tier
-  return (
-    <Card
-      size="small"
-      style={{
-        marginBottom: 8,
-        borderLeft: tier ? `4px solid ${TIER_COLORS[tier]}` : undefined,
-        cursor: 'pointer',
-      }}
-      onClick={() => navigate(`/alphas/${node.id}`)}
-      hoverable
-    >
-      <Space>
-        {label && <Tag>{label}</Tag>}
-        <a>#{node.id}</a>
-        {tier && <Tag color={TIER_COLORS[tier]}>T{tier}</Tag>}
-        <Tag color={STATUS_COLORS[node.quality_status] || 'default'}>
-          {node.quality_status}
-        </Tag>
-        {node.is_sharpe != null && (
-          <Text type="secondary">sharpe={node.is_sharpe.toFixed(2)}</Text>
-        )}
-        <AntTooltip title={node.expression}>
-          <Text code style={{ fontSize: 11 }}>
-            {(node.expression || '').slice(0, 60)}
-            {node.expression?.length > 60 ? '...' : ''}
-          </Text>
-        </AntTooltip>
-      </Space>
-    </Card>
-  )
-}
-
 
 function LineageSection({ alphaId }) {
-  const navigate = useNavigate()
-
   // Same queryKey as parent — react-query dedupes, so this is free
   const { data: alpha } = useQuery({
     queryKey: ['alpha', alphaId],
     queryFn: () => api.getAlpha(alphaId),
-    enabled: !!alphaId,
-  })
-
-  const { data: lineage, isLoading: lineageLoading } = useQuery({
-    queryKey: ['alpha', alphaId, 'lineage'],
-    queryFn: () => api.getAlphaLineage(alphaId),
     enabled: !!alphaId,
   })
 
@@ -640,8 +585,6 @@ function LineageSection({ alphaId }) {
     staleTime: 5 * 60 * 1000,
   })
 
-  if (lineageLoading) return null
-
   const transitions = transitionsResp?.transitions || []
 
   return (
@@ -651,77 +594,13 @@ function LineageSection({ alphaId }) {
       title={
         <Space>
           <BranchesOutlined />
-          <span>谱系 & 状态变迁</span>
+          <span>状态变迁 & 边际贡献</span>
         </Space>
       }
     >
       <Tabs
-        defaultActiveKey="lineage"
+        defaultActiveKey="marginal"
         items={[
-          {
-            key: 'lineage',
-            label: <Space><BranchesOutlined />谱系</Space>,
-            children: lineage ? (
-              <>
-                {lineage.note && (
-                  <Alert
-                    type="info"
-                    message={
-                      lineage.note === 'not in tier hierarchy'
-                        ? '该 alpha 不在因子库 tier 体系内（multi-field 算术 / 单层 rank 等形态）'
-                        : lineage.note
-                    }
-                    style={{ marginBottom: 16 }}
-                    showIcon
-                  />
-                )}
-
-                <Row gutter={16}>
-                  <Col span={12}>
-                    <Title level={5}>祖先链（向上追溯到根）</Title>
-                    {lineage.ancestors && lineage.ancestors.length > 0 ? (
-                      lineage.ancestors.map((node, idx) => (
-                        <LineageNodeCard
-                          key={node.id}
-                          node={node}
-                          navigate={navigate}
-                          label={idx === 0 ? '父' : `祖辈 ${idx + 1}`}
-                        />
-                      ))
-                    ) : (
-                      <Empty
-                        description={
-                          lineage.self?.factor_tier === 1
-                            ? '已是 T1 根，无祖先'
-                            : '无祖先记录'
-                        }
-                      />
-                    )}
-                  </Col>
-                  <Col span={12}>
-                    <Title level={5}>派生（直接子代）</Title>
-                    {lineage.descendants && lineage.descendants.length > 0 ? (
-                      lineage.descendants.slice(0, 20).map((node) => (
-                        <LineageNodeCard
-                          key={node.id}
-                          node={node}
-                          navigate={navigate}
-                          label={`T${node.factor_tier} 子`}
-                        />
-                      ))
-                    ) : (
-                      <Empty description="尚无派生 alpha" />
-                    )}
-                    {lineage.descendants?.length > 20 && (
-                      <Text type="secondary">
-                        还有 {lineage.descendants.length - 20} 条未显示
-                      </Text>
-                    )}
-                  </Col>
-                </Row>
-              </>
-            ) : null,
-          },
           {
             key: 'marginal',
             label: (
