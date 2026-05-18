@@ -408,6 +408,29 @@ async def test_layer1_infers_pillar_from_expression(pg_session):
     assert any(e.pattern == pattern for e in succ)
 
 
+@pytest.mark.asyncio
+async def test_layer1_region_filter(pg_session):
+    """M10: SUCCESS entry with meta_data['region']!=ctx_region → excluded.
+
+    Mirror of test_layer3_region_filter for L1's Python-side region filter.
+    """
+    pattern = f"rank({_TAG}_regfld_l1)"
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN",
+        pattern=pattern,
+        pattern_hash=compute_pattern_hash(pattern, None, None),
+        description="region-scoped momentum",
+        meta_data={"pillar_classified": "momentum", "region": "CHN"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    succ, fail = await layer1_pillar(
+        pg_session, hypothesis_pillar="momentum", region="USA", budget=10,
+    )
+    # CHN-region entry, query USA → excluded from SUCCESS
+    assert all(e.meta_data.get("region") != "CHN" for e in succ)
+
+
 # --- Layer 2: family ---
 
 @pytest.mark.asyncio
