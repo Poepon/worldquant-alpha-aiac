@@ -33,20 +33,19 @@ from backend.tasks import run_async
 
 
 def _is_cascade_schedule(task) -> bool:
-    """Dual-source cascade detection — flag ON reads schedule, OFF reads mining_mode.
+    """Cascade detection via authoritative schedule column.
 
-    Both populated during Phase 1.5-B dual-write window (Revision B backfilled
-    227 mining_tasks + 227 latest runs), so flag-flip should be byte-equivalent
-    for tasks created after backfill.
-
-    Phase 15-D PR3 (2026-05-18): mining_mode KEPT (only cascade_phase +
-    cascade_round_idx dropped). The dual-source helper stays as-is until
-    PR3b migrates FLAT-detection off mining_mode.
+    phase15-D PR3d (2026-05-18): simplified to read only ``task.schedule``
+    post-cascade-retirement. Previous dual-source ENABLE_TASK_SCHEMA_V2
+    branch removed since cascade dispatch always-refuses now anyway —
+    return value only used by:
+      1. run_mining_task dispatcher to mark cascade-typed tasks FAILED
+         with cutover guidance (CONTINUOUS_CASCADE rows in DB still exist
+         as historical artifacts after PR3b column drop kept mining_mode)
+      2. session_watchdog discrete probe to defensively skip cascade rows
     """
-    if getattr(settings, "ENABLE_TASK_SCHEMA_V2", False):
-        sched = getattr(task, "schedule", None) or ""
-        return sched.upper() == "CASCADE"
-    return task.mining_mode == "CONTINUOUS_CASCADE"
+    sched = getattr(task, "schedule", None) or ""
+    return sched.upper() == "CASCADE"
 
 
 async def _dag_update_after_round(
@@ -119,48 +118,6 @@ async def _dag_update_after_round(
             pass
 
 
-def _resolve_cascade_phase(task, run) -> str:
-    """Phase 1.5-C + Phase 2 R6 (2026-05-18) 3-stage cascade resume fallback.
-
-    Priority chain (per plan v1.0 §5.3):
-      1. ENABLE_DAG_TRACE ON + ``run.runtime_state["dag"]["current_selection"]``
-         non-null + that node's tier resolvable → derive phase from node.tier
-      2. ENABLE_TASK_SCHEMA_V2 ON + ``run.runtime_state["current_tier"]`` ∈ {1,2,3}
-         → derive phase from current_tier
-      3. Legacy ``task.cascade_phase`` (default "T1" when null)
-
-    R6 fallback to phase15-C → legacy is automatic — if DAG OFF or selection
-    missing, falls through cleanly. Phase 1.5-C tests still pass byte-equivalent
-    when DAG OFF.
-
-    Returns the phase string ("T1" / "T2" / "T3").
-    """
-    rs = getattr(run, "runtime_state", None) if run is not None else None
-
-    # Stage 1: R6 DAG selection
-    if getattr(settings, "ENABLE_DAG_TRACE", False) and isinstance(rs, dict):
-        dag = rs.get("dag")
-        if isinstance(dag, dict):
-            sel_id = dag.get("current_selection")
-            nodes = dag.get("nodes") or {}
-            if sel_id and sel_id in nodes:
-                tier = nodes[sel_id].get("tier")
-                if tier in (1, 2, 3):
-                    return {1: "T1", 2: "T2", 3: "T3"}[tier]
-        # fall through if DAG missing / current_selection unresolvable
-
-    # Stage 2: Phase 1.5-C current_tier
-    if getattr(settings, "ENABLE_TASK_SCHEMA_V2", False) and isinstance(rs, dict):
-        current_tier = rs.get("current_tier")
-        if current_tier in (1, 2, 3):
-            return {1: "T1", 2: "T2", 3: "T3"}[current_tier]
-        # fall through to legacy
-
-    # Stage 3: legacy cascade_phase
-    return task.cascade_phase or "T1"
-
-
-@celery_app.task(bind=True, name="backend.tasks.run_mining_task")
 def run_mining_task(self, task_id: int, run_id: int | None = None):
     """
     Run a complete mining task.
@@ -415,35 +372,11 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                 except Exception as db_err:
                     logger.error(f"[phase15-D PR3c] failed to mark task FAILED: {db_err}")
                 return None
-                # Dead code below — kept inside the if-block for diff
-                # clarity. _run_continuous_cascade et al will be deleted
-                # in a follow-up cleanup PR (PR3d).
-                try:
-                    return await _run_continuous_cascade(
-                        db, task, run, self.request.id,
-                        lock_key=cascade_lock_key,
-                        lock_token=cascade_lock_token,
-                    )
-                except Exception as e:
-                    logger.error(f"[cascade] Task {task_id} failed: {e}")
-                    await db.rollback()
-                    try:
-                        await db.execute(
-                            update(MiningTask)
-                            .where(MiningTask.id == task_id)
-                            .values(status="FAILED")
-                        )
-                        if run is not None:
-                            run.status = "FAILED"
-                            run.finished_at = datetime.utcnow()
-                            run.error_message = str(e)[:500]
-                        await db.commit()
-                    except Exception as db_err:
-                        logger.error(f"[cascade] failed to mark task FAILED: {db_err}")
-                        await db.rollback()
-                    raise
-                finally:
-                    _release_lock()
+                # phase15-D PR3d (2026-05-18): _run_continuous_cascade body
+                # + helpers (_run_cascade_phase / _prefetch_round_isolated /
+                # _verify_cascade_ownership / _resolve_cascade_phase) DELETED
+                # together — net ~730 LoC trim. Cascade dispatch always-FAILS
+                # above; no further code path reaches the deleted helpers.
 
             # flat-F1 v1.5 (Phase 3, 2026-05-18): FLAT_CONTINUOUS dispatch.
             # Parallel to CONTINUOUS_CASCADE per master plan §6 D3 "保留 legacy
@@ -1151,76 +1084,24 @@ async def _run_one_round_inline(
         return {"all_alphas": [], "iterations_completed": 0, "error": str(e)}
 
 
-async def _prefetch_round_isolated(
-    task_id: int, run_id: int, dataset_id: str, tier: int,
-) -> dict:
-    """V-20 (2026-05-10): run one round in an isolated DB session and Brain
-    adapter. Used by cascade pipeline — while the foreground round is
-    mid-SIMULATE (BRAIN-bound, ~5 min), this prefetched round runs
-    LLM/CODE_GEN/VALIDATE concurrently and queues at SIMULATE on the redis
-    BRAIN slot semaphore. The slot wait gives near-perfect overlap of LLM-
-    CPU and BRAIN-IO, ~30% throughput boost when LLM stage <= SIMULATE.
-
-    Independent session avoids races on the foreground task's db.commit /
-    refresh; Brain adapter shares the redis slot counter so global account
-    limit (3 sims) is honored across foreground + prefetch.
-    """
-    from backend.database import AsyncSessionLocal
-
-    async with AsyncSessionLocal() as iso_db:
-        task = (
-            await iso_db.execute(select(MiningTask).where(MiningTask.id == task_id))
-        ).scalar_one_or_none()
-        if task is None:
-            return {"all_alphas": [], "iterations_completed": 0, "skipped": True}
-        # Quick pause check before opening BRAIN connection
-        if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-            return {"all_alphas": [], "iterations_completed": 0, "skipped": True}
-
-        fields = await _prepare_round_fields(iso_db, task, dataset_id)
-        if fields is None:
-            return {"all_alphas": [], "iterations_completed": 0, "skipped": True}
-
-        available_dataset_pool = await _build_dataset_pool(iso_db, task, dataset_id)
-        active_level = _get_active_level(task)
-
-        async with BrainAdapter() as iso_brain:
-            iso_agent = MiningAgent(iso_db, iso_brain)
-            iso_operators = await _get_operators(iso_db)
-            try:
-                return await iso_agent.run_evolution_loop(
-                    task=task, dataset_id=dataset_id, fields=fields,
-                    operators=iso_operators,
-                    max_iterations=1, target_alphas=999999,
-                    num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
-                    run_id=run_id,
-                    available_dataset_pool=available_dataset_pool,
-                    hypothesis_centric_level=active_level,
-                    experiment_variant=str(
-                        (task.config or {}).get("hypothesis_centric_variant", active_level)
-                    ),
-                    factor_tier_override=tier,
-                )
-            except Exception as e:
-                logger.error(f"[prefetch T{tier} {dataset_id}] failed: {e}")
-                return {"all_alphas": [], "iterations_completed": 0, "error": str(e)}
-
-
 def _verify_cascade_ownership(lock_key: str, token: str, *, where: str) -> bool:
-    """V-27.1: round-boundary cascade-lock ownership self-check. Returns True
-    if the worker should keep running, False if it should exit gracefully.
+    """V-27.1: round-boundary lock ownership self-check. Returns True if the
+    worker should keep running, False if it should exit gracefully.
 
       OWNED   → True  (we still hold the lock)
       UNKNOWN → True  (Redis blip — a transient error must NEVER make a live
-                       worker self-terminate; the RCA safety floor. If every
-                       cascade worker self-killed on a Redis hiccup that is
-                       strictly worse than the original double-run bug.)
+                       worker self-terminate; the RCA safety floor.)
       LOST    → False (watchdog took over; a replacement worker is running)
       MISSING → False (lock vanished — TTL expired / cleared; don't keep
                        running unprotected)
 
     Returns True unconditionally when CASCADE_LOCK_TAKEOVER_ENABLED is off,
-    so the flag is a full kill-switch for the new self-exit path.
+    so the flag is a full kill-switch for the self-exit path.
+
+    phase15-D PR3d (2026-05-18): name kept (legacy "cascade" prefix) but now
+    used SOLELY by _run_flat_iteration for FLAT session ownership self-check.
+    The CASCADE_* settings + redis_pool function names are similarly legacy
+    naming — full rename deferred to a future hygiene PR (no behavior change).
     """
     if not getattr(settings, "CASCADE_LOCK_TAKEOVER_ENABLED", True):
         return True
@@ -1228,325 +1109,24 @@ def _verify_cascade_ownership(lock_key: str, token: str, *, where: str) -> bool:
     state = verify_lock_ownership(lock_key, token)
     if state in ("OWNED", "UNKNOWN"):
         if state == "OWNED":
-            # V-27.1 followup: renew the TTL at every round boundary. The lock
-            # TTL (CASCADE_LOCK_TTL_SEC, default 3h) is shorter than a
-            # CONTINUOUS_CASCADE worker's lifetime — without renewal a healthy
-            # long-running worker lets the lock expire under it, then
-            # self-terminates (MISSING) on the next boundary, and the watchdog
-            # can take over the freed lock mid-round (a fresh double-run path).
             _ttl = getattr(settings, "CASCADE_LOCK_TTL_SEC", 10800)
             if not renew_cascade_lock(lock_key, token, _ttl):
                 logger.warning(
-                    f"[cascade-ownership] {where}: lock renew returned 0 "
+                    f"[lock-ownership] {where}: lock renew returned 0 "
                     f"(redis blip or token mismatch) — continuing; the next "
                     f"boundary check will catch a genuine loss"
                 )
         elif state == "UNKNOWN":
             logger.warning(
-                f"[cascade-ownership] {where}: redis UNKNOWN — continuing "
+                f"[lock-ownership] {where}: redis UNKNOWN — continuing "
                 f"(a transient error must not self-terminate a live worker)"
             )
         return True
     logger.warning(
-        f"[cascade-ownership] {where}: lock state={state} — this worker has "
+        f"[lock-ownership] {where}: lock state={state} — this worker has "
         f"been taken over, exiting gracefully"
     )
     return False
-
-
-async def _run_cascade_phase(
-    db,
-    task,
-    run,
-    brain,
-    mining_agent,
-    operators,
-    *,
-    tier: int,
-    max_rounds: int,
-    lock_key: str,
-    lock_token: str,
-    dag_state: Optional[dict] = None,
-) -> dict:
-    """Run a cascade phase for `tier` for `max_rounds` total rounds.
-
-    V-20 (2026-05-10) round-pipeline: when CASCADE_PIPELINE_ENABLED, round
-    N+1's LLM/CODE_GEN/VALIDATE runs in a background task with isolated DB
-    session while round N awaits BRAIN simulate. BRAIN slot semaphore (redis)
-    naturally serializes the SIMULATE step across foreground + prefetch.
-    Disable via CASCADE_PIPELINE_ENABLED=False to fall back to serial.
-
-    V-19.10 C1 fix: passes factor_tier_override into mining_agent instead
-    of mutating task.agent_mode (which would persist via auto-flush).
-
-    Returns: {alphas_added, rounds_run, paused}
-    """
-    from backend.config import settings
-
-    # V-26.30 (2026-05-13): cascade-stuck-T2 RCA file-marker downgraded to
-    # env-gated diagnostic. Pre-fix this wrote .cascade_phase_diag.log
-    # unconditionally — useful during the RCA but noisy in production and
-    # impossible to disable without code edits. Now opt-in via env
-    # CASCADE_PHASE_DIAG_FILE=1; default route goes through loguru.
-    import os as _os
-    _phase_diag_enabled = _os.environ.get("CASCADE_PHASE_DIAG_FILE") == "1"
-
-    def _phase_diag(msg: str) -> None:
-        if not _phase_diag_enabled:
-            return
-        try:
-            from datetime import datetime as _dt
-            with open(".cascade_phase_diag.log", "a", encoding="utf-8") as _fp:
-                _fp.write(f"{_dt.utcnow().isoformat()} task={task.id} {msg}\n")
-        except Exception:
-            pass
-
-    _phase_diag(f"_run_cascade_phase ENTER tier={tier} max_rounds={max_rounds}")
-
-    # Pick datasets fresh per phase (T1's main pool may differ from T2/T3
-    # which need predecessor PASS alphas as seeds — node_tier_seed_load
-    # handles seed plumbing internally given factor_tier > 1).
-    datasets = await _get_datasets_to_mine(db, task)
-    if not datasets:
-        logger.warning(f"[cascade T{tier}] no datasets, phase skipped")
-        _phase_diag(f"_run_cascade_phase EXIT_NO_DATASETS tier={tier}")
-        return {"alphas_added": 0, "rounds_run": 0, "paused": False}
-    _phase_diag(f"_run_cascade_phase tier={tier} datasets={len(datasets)} {datasets[:3]}...")
-
-    # Plan round sequence: distribute max_rounds across datasets, 1 round
-    # per call. With 10 datasets / 10 rounds: 1 round per dataset.
-    rounds_per_ds = max(1, max_rounds // len(datasets))
-    round_plan: list = []
-    for ds in datasets:
-        for _ in range(rounds_per_ds):
-            if len(round_plan) >= max_rounds:
-                break
-            round_plan.append(ds)
-        if len(round_plan) >= max_rounds:
-            break
-
-    pipeline_enabled = bool(getattr(settings, "CASCADE_PIPELINE_ENABLED", True))
-    logger.info(
-        f"[cascade T{tier}] phase begin: rounds_planned={len(round_plan)} "
-        f"datasets={len(datasets)} pipeline={pipeline_enabled}"
-    )
-
-    alphas_added = 0
-    rounds_run = 0
-    paused = False
-
-    async def _stamp_heartbeat(round_result: dict | None = None) -> None:
-        # V-19.10 H1: heartbeat at every round boundary regardless of PASS count.
-        # V-26.3 (2026-05-13): also accumulate progress_current on cascade path.
-        # Phase 1.5-B (2026-05-17) [V1.2-B2 fix]: switched from bulk SQL
-        # `update(MiningTask)...values()` to instance-level mutation so the
-        # in-memory `task` and `run` stay coherent post-commit. Previously
-        # bulk SQL bypassed the ORM identity map → split-brain reads of
-        # `task.last_alpha_persisted_at` returned stale-vs-fresh values.
-        # Cascade lock token guarantees exactly 1 writer per task (no
-        # concurrent prefetch race) so instance-level is race-safe at
-        # this layer. If Phase 2+ adds a concurrent writer to
-        # `progress_current` from outside the cascade worker, revisit this.
-        # Also dual-writes Phase 1.5-A runtime_state["last_persisted_at"]
-        # + ["round_idx"] + ["progress"] to ExperimentRun for Phase 1.5-C
-        # cut-over readers.
-        try:
-            from datetime import timezone as _tz
-            success_count = int((round_result or {}).get("total_success", 0) or 0)
-            now_utc = datetime.now(_tz.utc)
-
-            # --- Instance-level write to MiningTask (replaces bulk UPDATE) ---
-            task.last_alpha_persisted_at = now_utc
-            if success_count > 0:
-                task.progress_current = (task.progress_current or 0) + success_count
-
-            # --- Phase 1.5-B dual-write to ExperimentRun.runtime_state ---
-            if run is not None and isinstance(run.runtime_state, dict):
-                new_state = dict(run.runtime_state)
-                new_state["last_persisted_at"] = now_utc.isoformat()
-                new_state["round_idx"] = (new_state.get("round_idx") or 0) + 1
-                if success_count > 0:
-                    new_state["progress"] = (new_state.get("progress") or 0) + success_count
-                run.runtime_state = new_state
-                flag_modified(run, "runtime_state")
-
-            await db.commit()
-            # task and run instances reflect committed state — no refresh needed
-        except Exception as _e:
-            logger.warning(f"[cascade T{tier}] heartbeat update failed: {_e}")
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-
-    # V-20.1 (2026-05-10) FIX: V-20 originally scheduled the next-round
-    # prefetch AFTER awaiting the current round, which made the main loop
-    # block on the prefetch task (= effectively serial — confirmed via
-    # trace_steps showing zero overlap between round N's SAVE and round
-    # N+1's RAG). The pipeline only delivers throughput when at least
-    # 2 rounds are in-flight simultaneously. Scheduling pattern:
-    #   1. pre-schedule round 0 task before entering the loop
-    #   2. inside loop: schedule round i+1 task BEFORE awaiting round i
-    # That keeps `current` and `next` running in parallel — when current
-    # finishes (BRAIN sim done), next is already through LLM/CODE_GEN
-    # and queued at the BRAIN slot semaphore.
-    if not pipeline_enabled or len(round_plan) == 0:
-        # Serial fallback — kept for compatibility / debugging
-        for dataset_id in round_plan:
-            await db.refresh(task)
-            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-                paused = True
-                break
-            result = await _run_one_round_inline(
-                db, task, run, brain, mining_agent, operators,
-                dataset_id=dataset_id, tier=tier,
-            )
-            rounds_run += int(result.get("iterations_completed") or 0)
-            alphas_added += len(result.get("all_alphas", []))
-            # V-26.3: pass result so progress_current advances with PASS count.
-            await _stamp_heartbeat(result)
-            # R6 PR3 (2026-05-18): DAG update with this round's alphas.
-            # Soft-fail per `_dag_update_after_round`; never raises.
-            await _dag_update_after_round(
-                db, run, dag_state,
-                round_result=result, tier=tier, dataset_id=dataset_id,
-                round_idx=int(task.cascade_round_idx or 0),
-            )
-            # V-27.1: round-boundary ownership self-check. If the watchdog
-            # took over this task's lock, a replacement worker is running —
-            # exit gracefully rather than burn another round's BRAIN quota.
-            if not _verify_cascade_ownership(
-                lock_key, lock_token, where=f"T{tier} serial round boundary"
-            ):
-                return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": True}
-        return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
-
-    # V-20.1 pipeline path — two-deep lookahead.
-    def _spawn(idx: int) -> "asyncio.Task":
-        ds = round_plan[idx]
-        return asyncio.create_task(
-            _prefetch_round_isolated(task.id, run.id, ds, tier),
-            name=f"cascade-T{tier}-R{idx}-{ds}",
-        )
-
-    # Pre-schedule round 0
-    current: "asyncio.Task | None" = _spawn(0)
-    current_label = f"R0-{round_plan[0]}"
-    next_task: "asyncio.Task | None" = None
-    next_label = ""
-
-    async def _cancel_remaining():
-        """V-26.29 (2026-05-13): cancel + await any still-running pipeline
-        tasks. The for-loop's normal exit paths handle PAUSED already, but
-        an unhandled exception inside the loop body (db.refresh failure,
-        OOM, etc.) would leave `current`/`next_task` running in background
-        — they'd write rows to the DB after the orchestrator gave up,
-        producing orphan alphas / heartbeat noise. Wrapped around the
-        for-loop in a try/finally so all exits clean up.
-        """
-        for t, label in ((current, current_label), (next_task, next_label)):
-            if t is None or t.done():
-                continue
-            logger.warning(
-                f"[cascade T{tier}] V-26.29 cancelling leaked task {label}"
-            )
-            t.cancel()
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
-
-    try:
-        for i, dataset_id in enumerate(round_plan):
-            # PAUSE check before scheduling next
-            await db.refresh(task)
-            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-                paused = True
-                for t, label in ((current, current_label), (next_task, next_label)):
-                    if t and not t.done():
-                        logger.info(f"[cascade T{tier}] cancelling {label} (paused)")
-                        t.cancel()
-                        try:
-                            await t
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                break
-
-            # SCHEDULE NEXT ROUND BEFORE AWAITING CURRENT — V-20.1 key change.
-            # next_task starts running immediately; while we await current's
-            # SIMULATE step (BRAIN-IO bound), next_task progresses through
-            # LLM stage and queues at the BRAIN slot semaphore.
-            if i + 1 < len(round_plan) and next_task is None:
-                next_task = _spawn(i + 1)
-                next_label = f"R{i+1}-{round_plan[i+1]}"
-
-            # Await current round
-            try:
-                result = await current
-                logger.info(
-                    f"[cascade T{tier}] consumed {current_label} "
-                    f"alphas={len(result.get('all_alphas', []))} "
-                    f"iters={result.get('iterations_completed')}"
-                )
-            except asyncio.CancelledError:
-                result = {"all_alphas": [], "iterations_completed": 0}
-            except Exception as e:
-                logger.error(f"[cascade T{tier}] {current_label} failed: {e}")
-                result = {"all_alphas": [], "iterations_completed": 0}
-
-            rounds_run += int(result.get("iterations_completed") or 0)
-            alphas_added += len(result.get("all_alphas", []))
-            # V-26.3: pass round result so PASS count flows to progress_current.
-            await _stamp_heartbeat(result)
-            # R6 PR3 (2026-05-18): DAG update with this round's alphas.
-            # Pipeline path same as serial — soft-fail in helper.
-            # current_label format "R<idx>-<dataset_id>"; extract dataset_id.
-            _ds_from_label = current_label.split("-", 1)[1] if "-" in current_label else ""
-            await _dag_update_after_round(
-                db, run, dag_state,
-                round_result=result, tier=tier, dataset_id=_ds_from_label,
-                round_idx=int(task.cascade_round_idx or 0),
-            )
-
-            # V-27.1: round-boundary ownership self-check. If the watchdog
-            # took over this task's lock, a replacement worker is running —
-            # cancel any in-flight prefetch first (so it doesn't write orphan
-            # rows after we give up, cf. V-26.29) then exit gracefully.
-            if not _verify_cascade_ownership(
-                lock_key, lock_token, where=f"T{tier} pipeline round boundary"
-            ):
-                await _cancel_remaining()
-                return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": True}
-
-            # Promote next → current; schedule a fresh next if budget remaining
-            current = next_task
-            current_label = next_label
-            next_task = None
-            next_label = ""
-
-            # If pipeline still has work past i+1, immediately schedule i+2 so
-            # there are always 2 rounds in flight (until budget exhausts).
-            if i + 2 < len(round_plan):
-                await db.refresh(task)
-                if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-                    paused = True
-                    if current and not current.done():
-                        current.cancel()
-                        try:
-                            await current
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    break
-                next_task = _spawn(i + 2)
-                next_label = f"R{i+2}-{round_plan[i+2]}"
-    finally:
-        # V-26.29: belt-and-braces cleanup. If an unhandled exception
-        # propagates out of the for-loop body, kill any background tasks
-        # the pipeline scheduled so they don't keep writing rows after the
-        # orchestrator gave up.
-        await _cancel_remaining()
-
-    return {"alphas_added": alphas_added, "rounds_run": rounds_run, "paused": paused}
 
 
 async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_token):
@@ -1721,300 +1301,3 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
     }
 
 
-async def _run_continuous_cascade(db, task, run, celery_task_id, *, lock_key, lock_token):
-    """V-19 main loop — persistent mining service.
-
-    Repeats T1 → T2 → T3 cycles until the user pauses (status='PAUSED' via
-    POST /mining-session/stop) or the celery worker crashes (V-19.7 watchdog
-    restarts it; we resume from task.cascade_phase).
-
-    Phase skip rules (IX-1 hybrid C + IX-4):
-      T2: skip if local PASS T1 < MIN_TIER_SEED_COUNT AND global region T1 < MIN
-      T3: skip if CASCADE_ENABLE_T3 = False (default) OR same seed-shortage as T2
-    """
-    from backend.config import settings
-
-    logger.info(
-        f"[cascade] task={task.id} region={task.region} starting at "
-        f"phase={task.cascade_phase or 'T1'} round_idx={task.cascade_round_idx}"
-    )
-    # flat-F4 prep (2026-05-18): single deprecation warning per task start.
-    # CONTINUOUS_CASCADE will be removed once flat-F2/F3 hit the 4-week
-    # stability window per plan §4.7 flat-F4 gate. Check readiness via
-    # GET /ops/cascade-deprecation/readiness.
-    logger.warning(
-        f"[cascade-deprecated] task={task.id} started in CONTINUOUS_CASCADE "
-        "mode — this mining_mode is on the flat-F4 removal path. "
-        "Prefer POST /ops/start-flat-session for new sessions."
-    )
-
-    # V-26.30: env-gated diagnostic; default OFF in production.
-    import os as _os
-    _outer_diag_enabled = _os.environ.get("CASCADE_PHASE_DIAG_FILE") == "1"
-
-    def _outer_diag(msg: str) -> None:
-        if not _outer_diag_enabled:
-            return
-        try:
-            from datetime import datetime as _dt
-            with open(".cascade_phase_diag.log", "a", encoding="utf-8") as _fp:
-                _fp.write(f"{_dt.utcnow().isoformat()} task={task.id} OUTER {msg}\n")
-        except Exception:
-            pass
-
-    total_alphas = 0
-    async with BrainAdapter() as brain:
-        mining_agent = MiningAgent(db, brain)
-        operators = await _get_operators(db)
-
-        # R6 PR3 (2026-05-18): init DAG state once per session if flag ON.
-        # Soft-fail — never blocks cascade if DAG init has any issue.
-        dag_state = None
-        if getattr(settings, "ENABLE_DAG_TRACE", False) and run is not None:
-            try:
-                from backend.agents.graph.dag_state import load_or_init
-                dag_state = load_or_init(
-                    (run.runtime_state or {}).get("dag") if isinstance(run.runtime_state, dict) else None,
-                    run_id=int(run.id),
-                    root_tier=1,
-                )
-                logger.info(
-                    f"[R6 dag] task={task.id} run={run.id} init DAG: "
-                    f"node_count={dag_state['node_count']} root={dag_state['root_id']}"
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[R6 dag] init failed (non-fatal, dag disabled this session): {e}")
-                dag_state = None
-
-        while True:
-            # Refresh + check status before starting a new phase / round
-            await db.refresh(task)
-            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-                logger.info(
-                    f"[cascade] task={task.id} status={task.status}, exiting main loop"
-                )
-                _outer_diag(f"exit_status={task.status}")
-                break
-
-            # V-27.1: ownership self-check at the outer loop top. Catches the
-            # case where a phase is skipped (T2/T3 seed shortage) so the
-            # per-round checks inside _run_cascade_phase never run — without
-            # this a taken-over worker could spin the outer loop indefinitely.
-            if not _verify_cascade_ownership(
-                lock_key, lock_token, where="cascade outer loop top"
-            ):
-                _outer_diag("exit_taken_over")
-                break
-
-            # 2026-05-11: proactively refresh BRAIN session at every phase
-            # boundary. Token expires ~4h; a single cascade phase can run
-            # ~1h, so we'd hit token expiry mid-T1 or mid-T2 if cascade
-            # cycles 4+ times.
-            #
-            # V-26.2 (2026-05-13): the original ensure_session() short-
-            # circuited on Redis cache hit without checking actual /authentication
-            # expiry. That meant Redis-cached tokens 30min from expiry would
-            # be reused at the boundary and then expire mid-phase. Pass
-            # force_refresh=True so the Redis short-circuit is bypassed and
-            # _is_session_valid actually probes the BRAIN token expiry field.
-            try:
-                await brain.ensure_session(force_refresh=True)
-            except Exception as _es:
-                logger.warning(f"[cascade] ensure_session at phase boundary failed: {_es}")
-
-            # Resume: if cascade_phase is None or invalid, start at T1.
-            # V-26.28 (2026-05-13): if the column holds an unrecognized value
-            # (manual DB edit, future enum extension that this worker doesn't
-            # know about) all three phase branches below silently no-op and
-            # the `while True` becomes a busy loop. Normalize to T1 with a
-            # WARNING so the situation is observable.
-            # Phase 1.5-C (2026-05-18): dual-source — flag ON reads
-            # ``run.runtime_state["current_tier"]`` first, falls back to
-            # ``task.cascade_phase`` when runtime_state is empty (legacy /
-            # freshly-revived runs without §3.4.1 inheritance).
-            current_phase = _resolve_cascade_phase(task, run)
-            if current_phase not in {"T1", "T2", "T3"}:
-                logger.warning(
-                    f"[cascade] task={task.id} V-26.28 unrecognized cascade_phase="
-                    f"{task.cascade_phase!r}; resetting to T1"
-                )
-                current_phase = "T1"
-                task.cascade_phase = "T1"
-                await db.commit()
-
-            # R6 PR3 (2026-05-18): when DAG ON, select_next_parent overrides
-            # current_phase derivation (still falls through to _resolve cascade
-            # if select returns None — e.g. empty DAG or all leaves pruned).
-            if dag_state is not None:
-                try:
-                    from backend.agents.graph.dag_state import select_next_parent
-                    sel_id = select_next_parent(
-                        dag_state,
-                        cold_threshold=int(getattr(settings, "DAG_COLD_THRESHOLD", 3)),
-                        ucb_c=float(getattr(settings, "DAG_UCB_EXPLORATION_C", 1.4)),
-                    )
-                    if sel_id is not None:
-                        node = dag_state["nodes"][sel_id]
-                        new_phase = {1: "T1", 2: "T2", 3: "T3"}.get(int(node.get("tier", 1) or 1))
-                        if new_phase:
-                            if new_phase != current_phase:
-                                logger.info(
-                                    f"[R6 dag] task={task.id} select_next_parent={sel_id} "
-                                    f"phase override {current_phase} -> {new_phase}"
-                                )
-                            current_phase = new_phase
-                        dag_state["current_selection"] = sel_id
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"[R6 dag] select_next_parent failed (non-fatal): {e}")
-            _outer_diag(f"loop_top current_phase={current_phase} round_idx={task.cascade_round_idx}")
-
-            # ============================================================
-            # T1 phase
-            # ============================================================
-            if current_phase == "T1":
-                logger.info(
-                    f"[cascade] task={task.id} T1 phase begin "
-                    f"(round_idx={task.cascade_round_idx} budget={settings.CASCADE_T1_ROUNDS})"
-                )
-                _outer_diag(f"T1_phase_begin round_idx={task.cascade_round_idx}")
-                phase_result = await _run_cascade_phase(
-                    db, task, run, brain, mining_agent, operators,
-                    tier=1, max_rounds=settings.CASCADE_T1_ROUNDS,
-                    lock_key=lock_key, lock_token=lock_token,
-                    dag_state=dag_state,
-                )
-                _outer_diag(f"T1_phase_end result={phase_result}")
-                total_alphas += phase_result["alphas_added"]
-                if phase_result["paused"]:
-                    break
-                # Move to T2
-                task.cascade_phase = "T2"
-                # Phase 1.5-B dual-write current_tier on ExperimentRun.runtime_state
-                if run is not None and isinstance(run.runtime_state, dict):
-                    run.runtime_state = {**run.runtime_state, "current_tier": 2}
-                    flag_modified(run, "runtime_state")
-                await db.commit()
-                current_phase = "T2"
-
-            await db.refresh(task)
-            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-                break
-
-            # ============================================================
-            # T2 phase — IX-1 fallback hybrid C (local first, global fallback)
-            # ============================================================
-            if current_phase == "T2":
-                local_t1 = await _count_pass_in_task(db, task.id, tier=1)
-                global_t1 = await _count_pass_global_region(db, task.region, tier=1)
-                if local_t1 >= settings.MIN_TIER_SEED_COUNT or global_t1 >= settings.MIN_TIER_SEED_COUNT:
-                    logger.info(
-                        f"[cascade] task={task.id} T2 phase begin "
-                        f"(local_T1_PASS={local_t1} global_T1_PASS={global_t1})"
-                    )
-                    phase_result = await _run_cascade_phase(
-                        db, task, run, brain, mining_agent, operators,
-                        tier=2, max_rounds=settings.CASCADE_T2_ROUNDS,
-                        lock_key=lock_key, lock_token=lock_token,
-                        dag_state=dag_state,
-                    )
-                    total_alphas += phase_result["alphas_added"]
-                    if phase_result["paused"]:
-                        break
-                else:
-                    logger.info(
-                        f"[cascade] task={task.id} T2 phase SKIP: "
-                        f"local_T1_PASS={local_t1} global_T1_PASS={global_t1} both<{settings.MIN_TIER_SEED_COUNT}"
-                    )
-                # Move to T3
-                task.cascade_phase = "T3"
-                # Phase 1.5-B dual-write current_tier on ExperimentRun.runtime_state
-                if run is not None and isinstance(run.runtime_state, dict):
-                    run.runtime_state = {**run.runtime_state, "current_tier": 3}
-                    flag_modified(run, "runtime_state")
-                await db.commit()
-                current_phase = "T3"
-
-            await db.refresh(task)
-            if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
-                break
-
-            # ============================================================
-            # T3 phase — IX-4 default disabled
-            # ============================================================
-            if current_phase == "T3":
-                if not settings.CASCADE_ENABLE_T3:
-                    logger.info(
-                        f"[cascade] task={task.id} T3 phase SKIP: CASCADE_ENABLE_T3=False"
-                    )
-                else:
-                    local_t2 = await _count_pass_in_task(db, task.id, tier=2)
-                    global_t2 = await _count_pass_global_region(db, task.region, tier=2)
-                    if local_t2 >= settings.MIN_TIER_SEED_COUNT or global_t2 >= settings.MIN_TIER_SEED_COUNT:
-                        logger.info(
-                            f"[cascade] task={task.id} T3 phase begin "
-                            f"(local_T2_PASS={local_t2} global_T2_PASS={global_t2})"
-                        )
-                        phase_result = await _run_cascade_phase(
-                            db, task, run, brain, mining_agent, operators,
-                            tier=3, max_rounds=settings.CASCADE_T3_ROUNDS,
-                            lock_key=lock_key, lock_token=lock_token,
-                            dag_state=dag_state,
-                        )
-                        total_alphas += phase_result["alphas_added"]
-                        if phase_result["paused"]:
-                            break
-                    else:
-                        logger.info(
-                            f"[cascade] task={task.id} T3 phase SKIP: seed shortage"
-                        )
-
-                # V-27.1: ownership self-check before committing the round
-                # boundary. If taken over, exit before incrementing — the
-                # replacement worker owns round-index advancement now.
-                if not _verify_cascade_ownership(
-                    lock_key, lock_token, where="cascade round-complete boundary"
-                ):
-                    _outer_diag("exit_taken_over_at_round_complete")
-                    break
-
-                # Cascade round complete — increment + reset to T1
-                task.cascade_round_idx += 1
-                task.cascade_phase = "T1"
-                # Phase 1.5-B dual-write current_tier on ExperimentRun.runtime_state
-                # round_idx is already bumped by _stamp_heartbeat per-round;
-                # here we just reset the tier marker.
-                if run is not None and isinstance(run.runtime_state, dict):
-                    run.runtime_state = {**run.runtime_state, "current_tier": 1}
-                    flag_modified(run, "runtime_state")
-                await db.commit()
-                _outer_diag(f"T3_phase_end round_idx_new={task.cascade_round_idx} reset_to=T1")
-                logger.info(
-                    f"[cascade] task={task.id} round {task.cascade_round_idx} complete; "
-                    f"total alphas this session: {total_alphas}"
-                )
-
-    # Loop exited: PAUSED / STOPPED. Run is wrapped up but task stays in
-    # PAUSED state (V-19.4 resume_session can re-dispatch a new worker).
-    # V-19.10 H2 fix: don't mark the run COMPLETED if the worker exited
-    # because the task was paused/stopped — that misrepresents the run as
-    # finished work. Mirror task.status onto the run for accurate history.
-    if run is not None:
-        await db.refresh(task)
-        if task.status in ("PAUSED", "STOPPED"):
-            run.status = task.status
-        else:
-            run.status = "COMPLETED"
-        run.finished_at = datetime.utcnow()
-    await db.commit()
-
-    logger.info(
-        f"[cascade] task={task.id} worker exiting; final phase={task.cascade_phase} "
-        f"round_idx={task.cascade_round_idx} total_alphas={total_alphas}"
-    )
-    return {
-        "success": True,
-        "mode": "CONTINUOUS_CASCADE",
-        "alphas_mined": total_alphas,
-        "final_phase": task.cascade_phase,
-        "final_round_idx": task.cascade_round_idx,
-    }
