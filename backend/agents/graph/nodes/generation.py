@@ -1340,7 +1340,7 @@ async def node_code_gen(
     try:
         from backend.ast_distance_logger import log_round_ast_distances
         task_id = getattr(state, "task_id", None)
-        round_idx = getattr(state, "current_iteration", None) or getattr(state, "round_idx", None)
+        round_idx = getattr(state, "current_iteration", None) or getattr(state, "current_round", None)
         new_exprs = [a.expression for a in pending_alphas if getattr(a, "expression", None)]
         await log_round_ast_distances(task_id, round_idx, new_exprs)
     except Exception as e:

@@ -129,7 +129,13 @@ def enumerate_subtrees(node: Optional["OperatorNode"], max_depth: int = 3) -> se
     """
     if node is None or getattr(node, "depth", 0) > max_depth:
         return set()
-    out = {node.to_skeleton(max_depth=max_depth)}
+    # to_skeleton uses ABSOLUTE depth check (self.depth >= max_depth), so a
+    # subtree rooted at depth=2 with max_depth=3 would truncate all its
+    # descendants to "name(...)". Pass max_depth + node.depth so the cap is
+    # relative to the subtree root (preserves to_skeleton's absolute-depth
+    # semantics for other callers).
+    rel_max = max_depth + getattr(node, "depth", 0)
+    out = {node.to_skeleton(max_depth=rel_max)}
     for child in getattr(node, "children", []):
         out |= enumerate_subtrees(child, max_depth)
     return out
