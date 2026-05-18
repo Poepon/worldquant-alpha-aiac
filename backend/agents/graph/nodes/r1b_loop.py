@@ -749,11 +749,26 @@ async def _build_parent_chain(
         return fallback
     try:
         chain: List[Dict[str, Any]] = []
+        # R1b.3-v2 review LOW 2 (2026-05-18): defense-in-depth cycle detection.
+        # The ORM writer (_insert_mutated_hypothesis) only ever INSERTs new
+        # rows so cycles cannot form via the current code path, but no DB
+        # CHECK constraint prevents a future migration bug or manual SQL from
+        # creating A→B→A loops. Without a `seen_ids` guard the walk would
+        # terminate via max_depth but emit duplicate nodes (corrupting the
+        # failure_tree KB skeleton).
+        seen_ids: set = set()
         cur_id = parent_id
         async with _SL() as _db:
             for _ in range(max(1, max_depth)):
                 if cur_id is None:
                     break
+                if cur_id in seen_ids:
+                    logger.warning(
+                        f"[r1b_loop] cycle detected at id={cur_id}; "
+                        f"breaking chain walk"
+                    )
+                    break
+                seen_ids.add(cur_id)
                 row = (
                     await _db.execute(
                         _sel(Hypothesis).where(Hypothesis.id == cur_id)

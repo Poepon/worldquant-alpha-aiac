@@ -163,6 +163,54 @@ async def test_chain_walks_db_and_reverses_to_oldest_first(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_build_parent_chain_breaks_on_cycle(monkeypatch):
+    """R1b.3-v2 review LOW 2 (2026-05-18): defense-in-depth cycle detection.
+
+    Simulate a cycle A(id=1) → B(id=2) → A(id=1) via mocked DB SELECT. Without
+    the ``seen_ids`` guard the walk would terminate only via ``max_depth=4``
+    and emit duplicate nodes (id=1 twice). With the guard the walk MUST break
+    after seeing id=1 the second time, so the chain holds the unique pair
+    {1, 2} with length == 2.
+    """
+    from backend.agents.graph.nodes import r1b_loop
+
+    rows_by_id = {
+        1: SimpleNamespace(id=1, statement="A", r1b_mutation_depth=0, parent_hypothesis_id=2),
+        2: SimpleNamespace(id=2, statement="B", r1b_mutation_depth=1, parent_hypothesis_id=1),
+    }
+
+    class _Result:
+        def __init__(self, row):
+            self._row = row
+        def scalar_one_or_none(self):
+            return self._row
+
+    class _Sess:
+        async def execute(self, stmt):
+            return _Result(rows_by_id.get(_Sess.call_order.pop(0)))
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return None
+
+    # max_depth=4 would allow 4 SELECTs; cycle detection should break after
+    # the SECOND SELECT (id=1 → id=2 → would-be id=1 detected as cycle).
+    _Sess.call_order = [1, 2, 1, 2]
+    monkeypatch.setattr("backend.database.AsyncSessionLocal", lambda: _Sess())
+
+    chain = await r1b_loop._build_parent_chain(
+        parent_id=1, parent_statement_fallback="ignored", max_depth=4,
+    )
+
+    # Cycle breaks the walk before duplicates land — chain has unique nodes only.
+    assert len(chain) == 2, f"cycle guard failed: chain length={len(chain)} (expected 2)"
+    ids = [n["id"] for n in chain]
+    assert sorted(ids) == [1, 2], f"chain ids={ids} not the unique pair {{1, 2}}"
+    # No duplicate ids — defense-in-depth contract holds.
+    assert len(set(ids)) == len(ids), f"duplicate ids in chain: {ids}"
+
+
+@pytest.mark.asyncio
 async def test_chain_caps_at_max_depth(monkeypatch):
     """max_depth=2 stops the walk before exhausting the chain."""
     from backend.agents.graph.nodes import r1b_loop
