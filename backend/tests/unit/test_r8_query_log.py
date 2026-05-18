@@ -232,3 +232,19 @@ def test_elevation_detection_via_meta_marker_in_query_hierarchical():
     src = inspect.getsource(hierarchical_rag.query_hierarchical)
     assert "_r1b_failure_tree_bonus_applied" in src
     assert "had_failure_tree_elevation=_had_elevation" in src
+
+
+# ---------------------------------------------------------------------------
+# Cache-hit telemetry (2026-05-18) — closes the last R8 query log limitation
+# ---------------------------------------------------------------------------
+
+def test_query_hierarchical_tracks_per_query_cache_hits():
+    """Static-source sentinel: _cache_hits_in_query closure counter exists
+    + cache_hit= bool reflects whether ANY layer served from cache."""
+    import inspect
+    from backend.agents import hierarchical_rag
+    src = inspect.getsource(hierarchical_rag.query_hierarchical)
+    assert "_cache_hits_in_query" in src
+    assert "_cache_hits_in_query[0] > 0" in src
+    # The cache-hit signal must be wired into the R8 log row
+    assert "cache_hit=bool(_cache_hits_in_query[0] > 0)" in src

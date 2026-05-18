@@ -961,6 +961,14 @@ async def query_hierarchical(
     except Exception:
         pass
 
+    # R8 cache-hit telemetry (2026-05-18 follow-up): track per-layer cache
+    # hits so the r8_query_log row at end-of-query knows whether ANY layer
+    # served from cache. cache_hit=True semantic = "at least one layer
+    # short-circuited via Redis" (the schema is a single bool, not
+    # per-layer). Closure-captured counter avoids changing _layer_call
+    # signature.
+    _cache_hits_in_query: List[int] = [0]
+
     async def _layer_call(layer_name: str, cache_params: Dict[str, Any], fetcher):
         """Wrap a layer call with optional Redis cache. ``fetcher`` is an
         async no-arg callable returning ``(succ, fail)``. Cache miss / disabled
@@ -969,6 +977,7 @@ async def query_hierarchical(
             key = _make_layer_cache_key(layer_name, cache_params)
             cached = await _cache_get(key)
             if cached is not None:
+                _cache_hits_in_query[0] += 1
                 return cached
             s_, f_ = await fetcher()
             await _cache_set(key, s_, f_, _cache_ttl)
@@ -1103,7 +1112,7 @@ async def query_hierarchical(
                 current_expression=current_expression,
                 layer_hits=dict(result.layer_hits or {}),
                 total_queries=int(result.total_queries or 0),
-                cache_hit=False,  # cache hits short-circuit before this point
+                cache_hit=bool(_cache_hits_in_query[0] > 0),
                 had_failure_tree_elevation=_had_elevation,
             )
     except Exception as _r8q_ex:
