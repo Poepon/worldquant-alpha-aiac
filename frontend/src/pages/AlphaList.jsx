@@ -41,6 +41,9 @@ export default function AlphaList() {
     min_sharpe: undefined,
     expression: '',
   })
+  // Client-side filter: '' = all, 'submitted' = date_submitted not null,
+  // 'submittable' = can_submit=true + not yet submitted, 'rejected' = can_submit=false
+  const [submitFilter, setSubmitFilter] = useState('')
   const [sortBy, setSortBy] = useState('sharpe')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
@@ -62,7 +65,15 @@ export default function AlphaList() {
     refetchInterval: 30_000,
   })
 
-  const items = data?.items || []
+  const rawItems = data?.items || []
+  const items = submitFilter
+    ? rawItems.filter((a) => {
+        if (submitFilter === 'submitted') return !!a.date_submitted
+        if (submitFilter === 'submittable') return a.can_submit === true && !a.date_submitted
+        if (submitFilter === 'rejected') return a.can_submit === false
+        return true
+      })
+    : rawItems
   const total = data?.total || 0
 
   const columns = [
@@ -139,6 +150,23 @@ export default function AlphaList() {
         if (v == null) return '—'
         const color = v > 0.7 ? '#cf1322' : v > 0.5 ? '#d48806' : '#389e0d'
         return <Text style={{ color }}>{v.toFixed(2)}</Text>
+      },
+    },
+    {
+      title: '提交状态',
+      key: 'submit_state',
+      width: 110,
+      render: (_, row) => {
+        if (row.date_submitted) {
+          return (
+            <AntdTooltip title={`已提交 ${new Date(row.date_submitted).toLocaleString()}`}>
+              <Tag color="success">已提交</Tag>
+            </AntdTooltip>
+          )
+        }
+        if (row.can_submit === true) return <Tag color="processing">可提交</Tag>
+        if (row.can_submit === false) return <Tag color="default">不可提交</Tag>
+        return <Tag>未检</Tag>
       },
     },
     {
@@ -223,6 +251,21 @@ export default function AlphaList() {
               style={{ width: 100 }}
               value={filters.min_sharpe}
               onChange={(v) => { setFilters((f) => ({ ...f, min_sharpe: v })); setPage(1) }}
+            />
+          </Space>
+          <Space>
+            <Text>提交:</Text>
+            <Select
+              allowClear
+              placeholder="全部"
+              style={{ width: 130 }}
+              value={submitFilter || undefined}
+              onChange={(v) => setSubmitFilter(v || '')}
+              options={[
+                { value: 'submitted', label: '已提交' },
+                { value: 'submittable', label: '可提交 / 未提交' },
+                { value: 'rejected', label: '不可提交' },
+              ]}
             />
           </Space>
           <Space>
