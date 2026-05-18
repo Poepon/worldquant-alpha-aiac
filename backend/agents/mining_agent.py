@@ -110,7 +110,6 @@ class MiningAgent:
         available_dataset_pool: Optional[List[str]] = None,
         hypothesis_centric_level: int = 0,
         experiment_variant: Optional[str] = None,
-        factor_tier_override: Optional[int] = None,
     ) -> List[Alpha]:
         """
         Run a single mining iteration with strategy application.
@@ -197,27 +196,10 @@ class MiningAgent:
         
         # Initialize TraceService
         trace_service = TraceService(self.db, task.id, iteration=iteration, run_id=run_id)
-        
-        # PR2: derive factor_tier from task.agent_mode. AUTONOMOUS_TIER1/2/3
-        # → 1/2/3; everything else (legacy AUTONOMOUS, INTERACTIVE) → 1.
-        # V-19.10 (2026-05-10): factor_tier_override takes precedence — used by
-        # CONTINUOUS_CASCADE main loop to switch tier per phase without
-        # mutating task.agent_mode (which would persist via auto-flush, see C1
-        # in V-19 code review).
-        # Phase 1.5-Fields (2026-05-17): prefer task.starting_tier (Phase 1.5-A
-        # column, Phase 1.5-B backfilled) over legacy agent_mode mapping —
-        # ``tier_from_task`` encapsulates the priority + fallback.
-        if factor_tier_override is not None:
-            factor_tier = factor_tier_override
-        else:
-            from backend.services.task_service import TaskService
-            factor_tier = TaskService.tier_from_task(task)
 
-        # PR6 fix — inject DB session / brain adapter / alpha service into
-        # configurable. T2/T3's node_tier_seed_load reads these from config
-        # to query predecessor-tier seeds and persist demote transitions.
-        # Without this, tier_seed_load returns early with should_stop=True
-        # and the entire T2 workflow runs empty.
+        # alpha_service is injected into the workflow configurable so node
+        # implementations that need to persist quality transitions (e.g.
+        # apply_quality_status_change) can resolve it without re-importing.
         from backend.services.alpha_service import AlphaService
         alpha_service = AlphaService(self.db)
 
@@ -234,7 +216,6 @@ class MiningAgent:
                         "trace_service": trace_service,
                         "strategy": strategy.to_dict(),  # Pass strategy to all nodes
                         "run_id": run_id,
-                        # T2/T3 tier_seed_load deps
                         "db_session": self.db,
                         "brain_adapter": self.brain,
                         "alpha_service": alpha_service,
@@ -255,7 +236,6 @@ class MiningAgent:
                         "llm_service": self._workflow.llm_service if hasattr(self, "_workflow") else None,
                     }
                 },
-                factor_tier=factor_tier,
             )
             
             # Collect generated alphas from database
@@ -391,7 +371,6 @@ class MiningAgent:
         available_dataset_pool: Optional[List[str]] = None,
         hypothesis_centric_level: int = 0,
         experiment_variant: Optional[str] = None,
-        factor_tier_override: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Run multi-round evolution loop for alpha mining.
@@ -465,7 +444,6 @@ class MiningAgent:
                         available_dataset_pool=available_dataset_pool,
                         hypothesis_centric_level=hypothesis_centric_level,
                         experiment_variant=experiment_variant,
-                        factor_tier_override=factor_tier_override,
                     )
                     
                     # Analyze round results

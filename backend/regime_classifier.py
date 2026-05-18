@@ -33,8 +33,8 @@ from typing import Dict, List, Optional, Tuple
 class RegimePreset:
     """Static per-regime preset bundle.
 
-    * ``*_multiplier`` fields are applied to base tier thresholds inside
-      ``apply_regime_multipliers``.
+    * ``*_multiplier`` fields are applied to the base eval thresholds
+      inside ``apply_regime_multipliers``.
     * ``style_label`` / ``style_philosophy`` are LLM-facing strings rendered
       by ``build_style_preset_block``.
     * ``pillar_bias`` is a **soft** suggestion (prompt-level only); the
