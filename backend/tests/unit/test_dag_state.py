@@ -364,9 +364,14 @@ def test_prune_to_cap_preserves_root_always():
     """[V1.0-S6] root never pruned even if low reward / inactive marked."""
     d = init_dag(run_id=1)
     mark_status(d, d["root_id"], "inactive")
-    for i in range(20):
-        n = add_node(d, parent_id=d["root_id"], round_idx=i + 1, tier=1)
-        update_reward(d, n, 0.9)
+    # Spread 20 nodes across distinct subtrees to respect the MEDIUM-N3
+    # per-parent cap (MAX_CHILDREN_PER_PARENT=8). Build 4 chains of depth 5
+    # off the root → 20 nodes, no single parent exceeds 5 children.
+    for c in range(4):
+        cur = d["root_id"]
+        for i in range(5):
+            cur = add_node(d, parent_id=cur, round_idx=c * 5 + i + 1, tier=1)
+            update_reward(d, cur, 0.9)
     prune_to_cap(d, max_nodes=5)
     assert d["root_id"] in d["nodes"]
 
@@ -378,9 +383,17 @@ def test_prune_to_cap_preserves_current_selection_path():
     n2 = add_node(d, parent_id=n1, round_idx=2, tier=2)
     n3 = add_node(d, parent_id=n2, round_idx=3, tier=3)
     d["current_selection"] = n3
-    # Add many siblings to force prune
+    # Add many sibling subtrees off root to force prune. Per-parent cap
+    # (MEDIUM-N3, MAX_CHILDREN_PER_PARENT=8) constrains direct children of
+    # any one node, so spread across multiple second-level parents.
+    parents = [d["root_id"]]
     for i in range(20):
-        sib = add_node(d, parent_id=d["root_id"], round_idx=i + 10, tier=1)
+        try:
+            sib = add_node(d, parent_id=parents[-1], round_idx=i + 10, tier=1)
+        except ValueError:
+            # Per-parent cap reached: promote latest sib as new parent
+            parents.append(sib)
+            sib = add_node(d, parent_id=parents[-1], round_idx=i + 10, tier=1)
         mark_status(d, sib, "inactive")
     prune_to_cap(d, max_nodes=5)
     # path n3 → n2 → n1 → root all preserved
@@ -392,9 +405,18 @@ def test_prune_to_cap_parent_chain_invariant():
     """[V1.0-S6] every remaining node's parent_id either None or in nodes."""
     d = init_dag(run_id=1)
     n1 = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
+    # Per-parent cap (MEDIUM-N3 fix) limits n1 to 8 direct children; build a
+    # bushier 2-level structure to still produce ~15 inactive nodes for prune.
+    cur_parent = n1
+    count = 0
     for i in range(15):
-        sib = add_node(d, parent_id=n1, round_idx=i + 2, tier=1)
+        try:
+            sib = add_node(d, parent_id=cur_parent, round_idx=i + 2, tier=1)
+        except ValueError:
+            cur_parent = sib  # promote latest sib once cap hits
+            sib = add_node(d, parent_id=cur_parent, round_idx=i + 2, tier=1)
         mark_status(d, sib, "inactive")
+        count += 1
     prune_to_cap(d, max_nodes=8)
     for nid, node in d["nodes"].items():
         pid = node.get("parent_id")
@@ -611,3 +633,87 @@ def test_mark_family_capped_children_length_mismatch_safe():
     alphas = [_mk_alpha("a", family_capped=True), _mk_alpha("b", family_capped=True)]
     marked = mark_family_capped_children(d, ids, alphas)
     assert marked == 1  # only 1 id, 2 alphas → uses min
+
+
+# ===========================================================================
+# MEDIUM-N3 re-review fix (2026-05-18): reward propagation + per-parent cap
+# ===========================================================================
+
+from backend.agents.graph.dag_state import (
+    MAX_CHILDREN_PER_PARENT,
+    N_PULLS_RE_EXPAND_THRESHOLD,
+    REWARD_PROPAGATION_DECAY,
+)
+
+
+def test_update_reward_propagates_to_ancestors():
+    """MEDIUM-N3: update_reward(leaf, r) bumps n_pulls on every ancestor
+    and credits decayed reward r * DECAY**distance per level (root sees
+    smallest credit, parent biggest)."""
+    d = init_dag(run_id=1)
+    # Build chain A (root) → B → C
+    b = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
+    c = add_node(d, parent_id=b, round_idx=2, tier=2)
+    root_id = d["root_id"]
+
+    # Fire one reward at the leaf
+    update_reward(d, c, 1.0)
+
+    # Reward clipped to 0.99 by update_reward (not 1.0), so use that as base.
+    base = 0.99
+    # Leaf: n_pulls=1, reward=0.99
+    assert d["nodes"][c]["n_pulls"] == 1
+    assert d["nodes"][c]["reward"] == pytest.approx(base)
+    # B (distance=1): n_pulls=1, reward = (0.5*0 + base*0.5) / 1 = 0.495
+    assert d["nodes"][b]["n_pulls"] == 1
+    assert d["nodes"][b]["reward"] == pytest.approx(base * REWARD_PROPAGATION_DECAY)
+    # Root A (distance=2): n_pulls=1, reward = base * 0.25 = 0.2475
+    assert d["nodes"][root_id]["n_pulls"] == 1
+    assert d["nodes"][root_id]["reward"] == pytest.approx(base * REWARD_PROPAGATION_DECAY ** 2)
+
+
+def test_add_node_rejects_above_per_parent_cap():
+    """MEDIUM-N3: per-parent cap MAX_CHILDREN_PER_PARENT enforced; the
+    add_node call that would push a parent over the cap raises ValueError
+    (same exception class as the global DAG_MAX_NODES guard)."""
+    d = init_dag(run_id=1)
+    # Add exactly MAX_CHILDREN_PER_PARENT children — all should succeed.
+    for i in range(MAX_CHILDREN_PER_PARENT):
+        add_node(d, parent_id=d["root_id"], round_idx=i + 1, tier=1)
+    # Confirm parent is at cap.
+    assert len(d["nodes"][d["root_id"]]["children"]) == MAX_CHILDREN_PER_PARENT
+    # The next add must raise.
+    with pytest.raises(ValueError, match="parent at child cap"):
+        add_node(d, parent_id=d["root_id"], round_idx=99, tier=1)
+
+
+def test_select_next_parent_internal_becomes_ineligible_after_n_pulls_reaches_threshold():
+    """MEDIUM-N3: with reward propagation, firing enough rewards in the
+    subtree pushes the internal node's n_pulls to N_PULLS_RE_EXPAND_THRESHOLD,
+    making the FixF threshold actually gate re-expansion."""
+    d = init_dag(run_id=1)
+    # Build: root → mid → (leaf1, leaf2)
+    mid = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
+    leaf1 = add_node(d, parent_id=mid, round_idx=2, tier=2)
+    leaf2 = add_node(d, parent_id=mid, round_idx=2, tier=2)
+    # Mark root inactive so it can't be picked — focus the assertion on `mid`.
+    mark_status(d, d["root_id"], "inactive")
+
+    # Fire N_PULLS_RE_EXPAND_THRESHOLD rewards across leaves; propagation
+    # bumps mid.n_pulls each time.
+    assert N_PULLS_RE_EXPAND_THRESHOLD == 3
+    update_reward(d, leaf1, 0.6)
+    update_reward(d, leaf2, 0.4)
+    update_reward(d, leaf1, 0.5)
+    assert d["nodes"][mid]["n_pulls"] == 3  # threshold reached
+
+    # `mid` is now internal (has children) AND n_pulls >= threshold →
+    # eligible filter excludes it. Only leaf1/leaf2 should be candidates.
+    # Run select_next_parent many times with fresh RNG to enumerate the set.
+    seen: set = set()
+    rng = random.Random(0)
+    for _ in range(50):
+        sel = select_next_parent(d, cold_threshold=3, rng=rng)
+        seen.add(sel)
+    assert mid not in seen
+    assert seen.issubset({leaf1, leaf2})

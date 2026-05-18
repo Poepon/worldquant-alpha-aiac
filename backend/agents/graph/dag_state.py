@@ -49,6 +49,23 @@ VALID_STATUSES = ("active", "inactive", "family_capped", "error")
 # n_pulls on internal nodes was meaningless.
 N_PULLS_RE_EXPAND_THRESHOLD = 3
 
+# MEDIUM-N3 re-review fix (2026-05-18) — reward propagation + per-parent cap.
+# Without these two, N_PULLS_RE_EXPAND_THRESHOLD is vacuous in production
+# because update_reward only bumped the freshly-added child, so internal
+# nodes' n_pulls stayed at 0 forever → broadened filter always allowed them.
+#
+# REWARD_PROPAGATION_DECAY: MCTS-style backprop decay per ancestor level
+# (root sees reward * 0.5^depth so deep leaves don't dominate shallow ones).
+REWARD_PROPAGATION_DECAY = 0.5
+# Same defensive bound as `path_to_root` / `_depth_of` — stops a corrupt
+# parent chain from infinite-looping during reward backprop.
+REWARD_PROPAGATION_MAX_DEPTH = 10
+
+# MAX_CHILDREN_PER_PARENT: forces UCB1 to actually re-explore alternative
+# parents instead of letting one hot internal monopolize the DAG until the
+# global DAG_MAX_NODES prune kicks in.
+MAX_CHILDREN_PER_PARENT = 8
+
 
 def _now_iso() -> str:
     """ISO-8601 UTC timestamp for created_at fields."""
@@ -119,6 +136,17 @@ def add_node(
     if parent_id not in dag["nodes"]:
         raise ValueError(f"parent_id {parent_id!r} not in dag.nodes")
 
+    # MEDIUM-N3 fix (2026-05-18) — per-parent child cap. Prevents one hot
+    # internal from monopolizing the DAG until global DAG_MAX_NODES prune
+    # kicks in. Raised BEFORE the global cap so callers see the more
+    # specific failure first; `add_children_for_phase` soft-fails per alpha.
+    parent_children = dag["nodes"][parent_id].get("children") or []
+    if len(parent_children) >= MAX_CHILDREN_PER_PARENT:
+        raise ValueError(
+            f"parent at child cap: parent_id={parent_id!r} already has "
+            f"{len(parent_children)} children (max={MAX_CHILDREN_PER_PARENT})"
+        )
+
     # Enforce cap BEFORE insertion (per [V1.0-S4])
     if dag["node_count"] + 1 > max_nodes:
         prune_to_cap(dag, max_nodes=max_nodes - 1)  # leave room for new node
@@ -171,11 +199,23 @@ def add_node(
 # ---------------------------------------------------------------------------
 
 def update_reward(dag: Dict[str, Any], node_id: str, reward: float) -> None:
-    """Online running-average reward update + n_pulls increment.
+    """Online running-average reward update + n_pulls increment, with
+    MCTS-style backprop to ancestors (MEDIUM-N3 fix, 2026-05-18).
 
     Reward is clipped to [0.01, 0.99] to avoid Beta(0, *) or Beta(*, 0)
-    updates per plan §4.5. Mean-weighted:
+    updates per plan §4.5. Mean-weighted on the leaf:
         new_reward = (old_reward * n_pulls + r) / (n_pulls + 1)
+
+    Each ancestor (parent, grandparent, …) gets ``n_pulls += 1`` and a
+    decayed reward credit ``r * REWARD_PROPAGATION_DECAY ** distance``
+    (distance=1 for direct parent). This makes the
+    ``N_PULLS_RE_EXPAND_THRESHOLD`` gate in :func:`select_next_parent`
+    actually meaningful: internal nodes accumulate n_pulls as their
+    subtree is explored, so they eventually fall out of the re-expand
+    eligible pool and UCB1 picks new branches.
+
+    Bounded by ``REWARD_PROPAGATION_MAX_DEPTH`` to defend against cycles
+    (matches `path_to_root` / `_depth_of`).
     """
     if node_id not in dag["nodes"]:
         logger.warning(f"[dag_state] update_reward node_id {node_id!r} missing")
@@ -186,6 +226,27 @@ def update_reward(dag: Dict[str, Any], node_id: str, reward: float) -> None:
     prev = float(node.get("reward", 0.5) or 0.5)
     node["reward"] = (prev * n + r) / (n + 1)
     node["n_pulls"] = n + 1
+
+    # MEDIUM-N3: propagate up the parent chain with geometric decay.
+    cur_id: Optional[str] = node.get("parent_id")
+    distance = 1
+    visited: set = {node_id}
+    while cur_id is not None and distance <= REWARD_PROPAGATION_MAX_DEPTH:
+        if cur_id in visited:
+            logger.warning(f"[dag_state] update_reward cycle at {cur_id!r}, breaking")
+            break
+        visited.add(cur_id)
+        ancestor = dag["nodes"].get(cur_id)
+        if ancestor is None:
+            # Dangling parent_id (shouldn't happen post-prune invariant) — stop.
+            break
+        decayed = r * (REWARD_PROPAGATION_DECAY ** distance)
+        an = int(ancestor.get("n_pulls", 0) or 0)
+        aprev = float(ancestor.get("reward", 0.5) or 0.5)
+        ancestor["reward"] = (aprev * an + decayed) / (an + 1)
+        ancestor["n_pulls"] = an + 1
+        cur_id = ancestor.get("parent_id")
+        distance += 1
 
 
 def mark_status(dag: Dict[str, Any], node_id: str, status: str) -> None:
@@ -428,6 +489,9 @@ __all__ = [
     "DAG_SCHEMA_VERSION",
     "VALID_STATUSES",
     "N_PULLS_RE_EXPAND_THRESHOLD",
+    "REWARD_PROPAGATION_DECAY",
+    "REWARD_PROPAGATION_MAX_DEPTH",
+    "MAX_CHILDREN_PER_PARENT",
     "init_dag",
     "add_node",
     "update_reward",
