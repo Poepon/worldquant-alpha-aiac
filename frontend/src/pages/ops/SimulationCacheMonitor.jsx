@@ -61,7 +61,7 @@ export default function SimulationCacheMonitor() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           <DatabaseOutlined style={{ marginRight: 8 }} />
-          R9 Simulation Cache
+          模拟缓存监控（R9）
         </Title>
         <Space>
           <Text type="secondary">窗口(天):</Text>

@@ -71,7 +71,7 @@ export default function DagMonitor() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           <BranchesOutlined style={{ marginRight: 8 }} />
-          R6 DAG Trace
+          挖掘 DAG 追踪（R6）
         </Title>
         <Space>
           <Text type="secondary">窗口(天):</Text>

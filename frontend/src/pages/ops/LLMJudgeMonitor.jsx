@@ -96,7 +96,7 @@ export default function LLMJudgeMonitor() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           <ExperimentOutlined style={{ marginRight: 8 }} />
-          R5 LLM Judge
+          LLM 评判监控（R5）
         </Title>
         <Space>
           <Text type="secondary">窗口(天):</Text>

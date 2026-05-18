@@ -159,7 +159,7 @@ export default function CoSTEERMonitor() {
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <OpsSectionCard
-        title="CoSTEER 循环监控 (R1a + R1b + R8)"
+        title="归因与重试监控（聚合 R1a / R1b / R8 数据）"
         source="live"
         loading={
           r1a.loading || r1b.loading || chainDepth.loading || r8.loading ||
