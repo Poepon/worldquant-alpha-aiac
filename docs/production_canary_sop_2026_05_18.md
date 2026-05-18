@@ -41,40 +41,21 @@ R1b CoSTEER retry loop is gated by `ENABLE_R1A_HOOK` (downstream) — same obser
 
 Run **before** the 24h window starts. Captures the "what should look normal" baseline.
 
-```python
-# scripts/canary_baseline_capture.py-style one-shot via psql or Python shell
-import asyncio
-from sqlalchemy import text
-from backend.database import AsyncSessionLocal
+```bash
+# Capture T-0 snapshot
+python scripts/canary_baseline_capture.py --label T-0
+#   → docs/canary_T-0_<YYYY-MM-DD>.json (9 metrics + git HEAD + ISO timestamp)
 
-async def main():
-    async with AsyncSessionLocal() as s:
-        for label, sql in [
-            ("flag_count_on", "SELECT COUNT(*) FROM feature_flag_overrides WHERE flag_value='true'"),
-            ("tasks_failed_pct_T-7d",
-             "SELECT (COUNT(*) FILTER (WHERE status='FAILED'))::float / NULLIF(COUNT(*),0) "
-             "FROM mining_tasks WHERE created_at > now() - interval '7 day'"),
-            ("alphas_passed_24h",
-             "SELECT COUNT(*) FROM alphas WHERE created_at > now() - interval '24 hour' "
-             "AND (metrics->>'is_passed')::bool = true"),
-            ("kb_total_entries",
-             "SELECT COUNT(*) FROM knowledge_entries WHERE is_active"),
-            ("r1a_attribution_rows_24h",
-             "SELECT COUNT(*) FROM r1a_attribution_log WHERE created_at > now() - interval '24 hour'"),
-            ("r1b_retry_rows_24h",
-             "SELECT COUNT(*) FROM r1b_retry_log WHERE created_at > now() - interval '24 hour'"),
-            ("r8_query_rows_24h",
-             "SELECT COUNT(*) FROM r8_query_log WHERE created_at > now() - interval '24 hour'"),
-            ("brain_sim_count_24h",
-             "SELECT COUNT(DISTINCT alpha_id) FROM alphas WHERE created_at > now() - interval '24 hour'"),
-        ]:
-            r = await s.execute(text(sql))
-            print(f"{label:40s} = {r.scalar()}")
-
-asyncio.run(main())
+# At T+24h, capture again and diff
+python scripts/canary_baseline_capture.py --label T+24h
+python scripts/canary_baseline_capture.py --diff docs/canary_T-0_<YYYY-MM-DD>.json
+#   → side-by-side delta table, no save
 ```
 
-Save output to `docs/canary_T0_<date>.txt` for delta comparison at T+24h.
+The script reads 9 metrics: `flag_count_on / tasks_failed_pct_7d /
+alphas_passed_24h / kb_total_entries / r1a_attribution_rows_24h /
+r1b_retry_rows_24h / r8_query_rows_24h / brain_sim_count_24h /
+mining_tasks_running_now`. Exit 0 on success, 1 on DB error.
 
 ---
 
@@ -82,11 +63,11 @@ Save output to `docs/canary_T0_<date>.txt` for delta comparison at T+24h.
 
 | T+ | Action | Tool |
 |---|---|---|
-| **T+0** | Capture baseline (§2). Verify `/api/v1/ops/flags` returns 20 ON. | curl `/ops/flags -H "X-Ops-Token: ..."` |
+| **T+0** | Capture baseline (§2). Verify `/api/v1/ops/flags` returns 20 ON. | `python scripts/canary_baseline_capture.py --label T-0` |
 | **T+1h** | Boot health: `uvicorn` clean, no 500 in `.uvicorn.err`, celery worker up | `tail -200 .uvicorn.err` |
-| **T+1h** | R1a hook firing: `r1a_attribution_log` row count growing | §2 query |
-| **T+6h** | Mid-window check — run all §4 red-flag queries | §4 |
-| **T+24h** | Full sweep — re-run §2 baseline + diff vs T-0. Run §4 again. | §4 |
+| **T+1h** | R1a hook firing: `r1a_attribution_log` row count growing | re-run §2 capture script with `--label T+1h` |
+| **T+6h** | Mid-window check — run all §4 red-flag queries | `python scripts/canary_redflag_check.py --t0 <T-0 ISO>` |
+| **T+24h** | Full sweep — diff vs T-0 + re-run §4 | `--diff docs/canary_T-0_<date>.json` + `canary_redflag_check.py` |
 
 Off-hours: rely on `.uvicorn.err` tail (any new exception traceback = pager). No active polling needed.
 
