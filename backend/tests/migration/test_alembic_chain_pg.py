@@ -295,19 +295,6 @@ def test_chain_replay_idempotent(throwaway_db_at_head):
     assert current == expected_head
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Exposes a real pre-existing gap (NOT introduced by this test): "
-        "several non-additive ``CREATE TABLE`` migrations (e.g. Q10 "
-        "c5d9e1f3a7b8 qlib_prescreen_log) lack ``IF NOT EXISTS`` / inspector "
-        "guards, so forward-migrating past them on a ``create_all``-seeded DB "
-        "raises DuplicateTableError. The fix is to add inspector guards "
-        "(pattern in 7a3f9e1c2b8d) to those migrations — out-of-scope for "
-        "this LOW-priority test addition. xfail so CI stays green while the "
-        "gap is documented for follow-up."
-    ),
-)
 def test_chain_upgrade_from_pre_r1b_state(throwaway_db):
     """Stamp at ``c5d9e1f3a7b8`` (Q10 — the revision immediately BEFORE
     R1b.1a init ``d6f8a3b1e9c4``), then run ``alembic upgrade head``.
@@ -344,15 +331,6 @@ def test_chain_upgrade_from_pre_r1b_state(throwaway_db):
     assert current == expected_head
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Same pre-existing gap as test_chain_upgrade_from_pre_r1b_state — "
-        "Q10 c5d9e1f3a7b8 (downstream of b3c8d9e2f4a1) lacks IF NOT EXISTS "
-        "guard. xfail so CI stays green until those migrations grow "
-        "inspector guards."
-    ),
-)
 def test_chain_upgrade_from_intermediate_revision(throwaway_db):
     """Stamp at ``b3c8d9e2f4a1`` (R8 GIN — the "stuck DB" intermediate state
     from prior bug reports), then ``upgrade head``. Verifies the recovery

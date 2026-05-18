@@ -38,33 +38,65 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "r8_query_log",
-        sa.Column("id", sa.BigInteger(), primary_key=True),
-        sa.Column("task_id", sa.Integer(), nullable=True),
-        sa.Column("region", sa.String(length=8), nullable=True),
-        sa.Column("dataset_id", sa.String(length=64), nullable=True),
-        sa.Column("current_expression_hash", sa.String(length=64), nullable=True),
-        sa.Column(
-            "layer_hits", JSONB(), nullable=True,
-            server_default=sa.text("'{}'::jsonb"),
-        ),
-        sa.Column("total_queries", sa.Integer(), nullable=True, server_default="0"),
-        sa.Column("cache_hit", sa.Boolean(), nullable=True, server_default=sa.text("false")),
-        sa.Column(
-            "had_failure_tree_elevation", sa.Boolean(),
-            nullable=True, server_default=sa.text("false"),
-        ),
-        sa.Column(
-            "created_at", sa.DateTime(timezone=True),
-            nullable=False, server_default=sa.text("now()"),
-        ),
+    # inspector.has_table() guard — dev DBs created via
+    # database.init_db()'s metadata.create_all() fallback already have the
+    # r8_query_log table (ORM-mapped in backend/models/r8_query_log.py).
+    # When the chain replays from an earlier stamp, an unguarded
+    # create_table would crash with DuplicateTable. Surfaced by
+    # test_alembic_chain_pg.py::test_chain_upgrade_from_intermediate_revision.
+    # Pattern mirrors c5d9e1f3a7b8 Q10 PR1b.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+    existing_indexes = (
+        set(ix["name"] for ix in inspector.get_indexes("r8_query_log"))
+        if "r8_query_log" in existing_tables
+        else set()
     )
-    op.create_index("ix_r8q_created_at", "r8_query_log", ["created_at"])
-    op.create_index("ix_r8q_task_id", "r8_query_log", ["task_id"])
+
+    if "r8_query_log" not in existing_tables:
+        op.create_table(
+            "r8_query_log",
+            sa.Column("id", sa.BigInteger(), primary_key=True),
+            sa.Column("task_id", sa.Integer(), nullable=True),
+            sa.Column("region", sa.String(length=8), nullable=True),
+            sa.Column("dataset_id", sa.String(length=64), nullable=True),
+            sa.Column("current_expression_hash", sa.String(length=64), nullable=True),
+            sa.Column(
+                "layer_hits", JSONB(), nullable=True,
+                server_default=sa.text("'{}'::jsonb"),
+            ),
+            sa.Column("total_queries", sa.Integer(), nullable=True, server_default="0"),
+            sa.Column("cache_hit", sa.Boolean(), nullable=True, server_default=sa.text("false")),
+            sa.Column(
+                "had_failure_tree_elevation", sa.Boolean(),
+                nullable=True, server_default=sa.text("false"),
+            ),
+            sa.Column(
+                "created_at", sa.DateTime(timezone=True),
+                nullable=False, server_default=sa.text("now()"),
+            ),
+        )
+
+    for ix_name, ix_cols in (
+        ("ix_r8q_created_at", ["created_at"]),
+        ("ix_r8q_task_id", ["task_id"]),
+    ):
+        if ix_name not in existing_indexes:
+            op.create_index(ix_name, "r8_query_log", ix_cols)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_r8q_task_id", table_name="r8_query_log")
-    op.drop_index("ix_r8q_created_at", table_name="r8_query_log")
+    # Symmetric guard — drop only if present (mirrors upgrade's guard so
+    # downgrade is safe on partially-applied DBs).
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if "r8_query_log" not in set(inspector.get_table_names()):
+        return
+    existing_indexes = set(
+        ix["name"] for ix in inspector.get_indexes("r8_query_log")
+    )
+    for ix_name in ("ix_r8q_task_id", "ix_r8q_created_at"):
+        if ix_name in existing_indexes:
+            op.drop_index(ix_name, table_name="r8_query_log")
     op.drop_table("r8_query_log")

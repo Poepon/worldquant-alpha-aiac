@@ -37,6 +37,7 @@ manually dedupe first via:
 """
 from typing import Sequence, Union
 
+import sqlalchemy as sa
 from alembic import op
 
 
@@ -47,16 +48,44 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.create_unique_constraint(
-        "uq_r1b_retry_log_task_alpha_attempt_type",
-        "r1b_retry_log",
-        ["task_id", "round_idx", "original_expression_hash", "attempt_type"],
+    # inspector.get_unique_constraints() guard — dev DBs created via
+    # database.init_db()'s metadata.create_all() fallback already have the
+    # r1b_retry_log table (ORM-mapped in backend/models/r1b_retry.py). When
+    # the chain replays from an earlier stamp, an unguarded
+    # create_unique_constraint would crash with DuplicateObject. Surfaced by
+    # test_alembic_chain_pg.py::test_chain_upgrade_from_intermediate_revision.
+    # Pattern mirrors c5d9e1f3a7b8 Q10 PR1b.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+    if "r1b_retry_log" not in existing_tables:
+        # Table itself is created by d6f8a3b1e9c4 (also guarded); if it's
+        # missing here, that means the prior revision was likewise skipped
+        # on this connection — there's nothing to constrain.
+        return
+    existing_uniques = set(
+        uc["name"] for uc in inspector.get_unique_constraints("r1b_retry_log")
     )
+    if "uq_r1b_retry_log_task_alpha_attempt_type" not in existing_uniques:
+        op.create_unique_constraint(
+            "uq_r1b_retry_log_task_alpha_attempt_type",
+            "r1b_retry_log",
+            ["task_id", "round_idx", "original_expression_hash", "attempt_type"],
+        )
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "uq_r1b_retry_log_task_alpha_attempt_type",
-        "r1b_retry_log",
-        type_="unique",
+    # Symmetric guard — drop only if present.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    if "r1b_retry_log" not in set(inspector.get_table_names()):
+        return
+    existing_uniques = set(
+        uc["name"] for uc in inspector.get_unique_constraints("r1b_retry_log")
     )
+    if "uq_r1b_retry_log_task_alpha_attempt_type" in existing_uniques:
+        op.drop_constraint(
+            "uq_r1b_retry_log_task_alpha_attempt_type",
+            "r1b_retry_log",
+            type_="unique",
+        )
