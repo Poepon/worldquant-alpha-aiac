@@ -1377,6 +1377,13 @@ class R1bChainDepthOut(BaseModel):
     total_mutated_hypotheses: int
     total_root_hypotheses: int
     chain_depth_avg: float
+    # Cap-firing surface (review LOW 3, 2026-05-18) — saves operators
+    # from eyeballing the distribution against the configured cap.
+    # tasks_at_or_above_cap_count = COUNT(hypotheses where r1b_mutation_depth
+    # >= R1B_MAX_MUTATION_DEPTH); paired with the setting value so the
+    # dashboard can render "X / N tasks at depth ≥ Y" directly.
+    tasks_at_or_above_cap_count: int
+    r1b_max_mutation_depth_setting: int
 
 
 @router.get("/r1b/chain-depth-distribution", response_model=R1bChainDepthOut)
@@ -1419,12 +1426,24 @@ async def r1b_chain_depth_distribution(
     weighted_sum = sum(b.mutation_depth * b.hypothesis_count for b in buckets)
     avg = round(weighted_sum / total, 4) if total > 0 else 0.0
 
+    # Cap-firing surface (review LOW 3) — sum buckets at or above the
+    # configured cap so the dashboard can render "X / N at depth ≥ Y"
+    # without round-trip math. Cheap: reuse the already-aggregated
+    # buckets, no second SQL hit.
+    from backend.config import settings as _stg
+    cap = int(getattr(_stg, "R1B_MAX_MUTATION_DEPTH", 3))
+    at_or_above_cap = sum(
+        b.hypothesis_count for b in buckets if b.mutation_depth >= cap
+    )
+
     return R1bChainDepthOut(
         distribution=buckets,
         max_depth_observed=max_depth,
         total_mutated_hypotheses=mutated,
         total_root_hypotheses=roots,
         chain_depth_avg=avg,
+        tasks_at_or_above_cap_count=at_or_above_cap,
+        r1b_max_mutation_depth_setting=cap,
     )
 
 
