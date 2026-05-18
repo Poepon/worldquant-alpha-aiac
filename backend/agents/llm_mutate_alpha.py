@@ -36,6 +36,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from backend.config import settings
 from backend.agents.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,7 @@ Output Schema (strict JSON):
 }}
 
 Return at most {top_k} variants. Empty array allowed if no high-confidence pick.
+Each of the {top_k} wrappers MUST be distinct expressions (no duplicates).
 """
 
 
@@ -151,7 +153,13 @@ def _parse_variants(content: str, *, max_variants: int = 3) -> List[Dict[str, st
         if not isinstance(raw, list):
             return []
         out: List[Dict[str, str]] = []
-        for item in raw[:max_variants]:
+        seen: set[str] = set()  # dedupe key: raw expression (substitution
+        # is a deterministic str.replace, so dedupe pre-substitution is
+        # equivalent to dedupe post-substitution). Low-temp models often
+        # emit identical wrappers — drop them to honor flat-F3 cost claim.
+        for item in raw:
+            if len(out) >= max_variants:
+                break
             if not isinstance(item, dict):
                 continue
             expr = str(item.get("expression", "")).strip()
@@ -160,6 +168,10 @@ def _parse_variants(content: str, *, max_variants: int = 3) -> List[Dict[str, st
             if not expr or "<SEED>" not in expr:
                 # Malformed — skip silently
                 continue
+            if expr in seen:
+                logger.debug(f"[llm_mutate] dropping duplicate variant: {expr[:80]}")
+                continue
+            seen.add(expr)
             out.append({
                 "expression": expr,
                 "wrapper_kind": kind or "llm_mutate_unspecified",
@@ -210,6 +222,19 @@ async def llm_mutate_alpha(
         top_k=top_k,
     )
 
+    # M7 fix: honor settings.LLM_MUTATE_MODEL by temporarily swapping
+    # llm_service.model — LLMService.call has no per-call `model` arg, the
+    # provider branch reads `self.model` at request time. Restored in finally.
+    mutate_model = (getattr(settings, "LLM_MUTATE_MODEL", "") or "").strip()
+    original_model = getattr(llm_service, "model", None)
+    model_swapped = False
+    if mutate_model and original_model is not None and mutate_model != original_model:
+        try:
+            llm_service.model = mutate_model
+            model_swapped = True
+        except Exception:
+            model_swapped = False  # SimpleNamespace test doubles etc.
+
     try:
         resp = await llm_service.call(
             system_prompt=MUTATE_SYSTEM,
@@ -232,6 +257,12 @@ async def llm_mutate_alpha(
             f"[llm_mutate] LLM call failed for seed=`{seed_expression[:60]}...`: {ex}"
         )
         return []
+    finally:
+        if model_swapped:
+            try:
+                llm_service.model = original_model
+            except Exception:
+                pass
 
 
 __all__ = [

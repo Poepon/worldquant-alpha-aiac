@@ -136,6 +136,33 @@ def test_parse_variants_skips_non_dict_items():
     assert len(out) == 1
 
 
+def test_parse_variants_dedupes_identical_expressions():
+    """M7 fix: LLM returning duplicate wrapper expressions collapses to 1
+    candidate (low-temp models often emit identicals; dedupe honors the
+    flat-F3 cost-saving claim by not wasting BRAIN sim cycles)."""
+    raw = json.dumps({"variants": [
+        {"expression": "group_neutralize(<SEED>, industry)",
+         "wrapper_kind": "group_neutralize_industry",
+         "rationale": "first occurrence"},
+        {"expression": "group_neutralize(<SEED>, industry)",  # exact dup
+         "wrapper_kind": "group_neutralize_industry_alt",
+         "rationale": "duplicate — must be skipped"},
+        {"expression": "rank(<SEED>)",
+         "wrapper_kind": "rank_xs",
+         "rationale": "distinct — must survive"},
+    ]})
+    out = _parse_variants(raw, max_variants=3)
+    assert len(out) == 2
+    expressions = [v["expression"] for v in out]
+    assert expressions == [
+        "group_neutralize(<SEED>, industry)",
+        "rank(<SEED>)",
+    ]
+    # First-seen wins (the dup's wrapper_kind/rationale must NOT replace it)
+    assert out[0]["wrapper_kind"] == "group_neutralize_industry"
+    assert out[0]["rationale"] == "first occurrence"
+
+
 def test_parse_variants_supplies_default_wrapper_kind():
     """Missing wrapper_kind → default 'llm_mutate_unspecified'."""
     raw = json.dumps({"variants": [
