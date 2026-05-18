@@ -967,12 +967,80 @@ async def _prepare_round_fields(db, task, dataset_id: str):
     return fields
 
 
+async def _maybe_run_typed_pipeline_round(
+    db, task, brain, operators, *, dataset_id: str,
+) -> Optional[dict]:
+    """R1b.4b (2026-05-18): typed AlphaMiningPipeline dispatch wrapper.
+
+    Plan ~/.claude/plans/phase3-r1b-costeer-loop-2026-05-18.md v1.3 §8.2.
+    Returns a result dict shaped like ``_run_one_round_inline`` output
+    (``all_alphas`` + ``iterations_completed``) when the typed path is
+    active for this task, else ``None`` so the caller falls through to
+    the legacy LangGraph round.
+
+    Active conditions per ``is_typed_pipeline_active``:
+        - ``ENABLE_R1B_TYPED_PIPELINE=True`` (global flag)
+        - ``task.config['hypothesis_centric_variant']==3`` (per-task opt-in)
+
+    Soft-fail: any pipeline exception → ``None`` → legacy path takes over
+    (NEVER raises). Mirrors plan §8.6 test_typed_pipeline_falls_back...
+    contract.
+    """
+    try:
+        from backend.agents.graph.nodes.r1b_typed_pipeline import (
+            is_typed_pipeline_active, run_typed_round,
+        )
+    except Exception as ex:
+        logger.debug(f"[r1b_typed wire] dispatch imports unavailable: {ex}")
+        return None
+    if not is_typed_pipeline_active(task):
+        return None
+    fields = await _prepare_round_fields(db, task, dataset_id)
+    if fields is None:
+        return {"all_alphas": [], "iterations_completed": 0, "skipped": True}
+    try:
+        typed_result = await run_typed_round(
+            task=task, brain=brain, db=db,
+            region=task.region, universe=task.universe,
+            dataset_id=dataset_id,
+            fields=fields, operators=operators,
+        )
+    except Exception as ex:
+        # Per plan §8.6 — typed exception falls through to legacy
+        logger.warning(
+            f"[r1b_typed wire] typed round raised, falling back to legacy: {ex}"
+        )
+        return None
+    if typed_result.get("skipped_disabled"):
+        return None
+    # Map typed result shape → legacy round result shape callers expect.
+    # Keep typed-specific telemetry under '_r1b_typed_*' keys so
+    # downstream telemetry / DAG update code can inspect without colliding
+    # with mining_agent's result schema.
+    return {
+        "all_alphas": typed_result.get("all_alphas", []),
+        "iterations_completed": typed_result.get("num_iter_executed", 0),
+        "skipped": False,
+        "_r1b_typed_cost_usd": typed_result.get("cost_usd", 0.0),
+        "_r1b_typed_trace_size": typed_result.get("trace_size", 0),
+        "_r1b_typed_abandoned": typed_result.get("abandoned", False),
+    }
+
+
 async def _run_one_round_inline(
     db, task, run, brain, mining_agent, operators,
     *, dataset_id: str, tier: int,
 ) -> dict:
     """Run one round on the foreground session. Returns mining_agent result
     dict (or empty dict on failure)."""
+    # R1b.4b: route to typed AlphaMiningPipeline when the task opts in via
+    # hypothesis_centric_variant=3 + ENABLE_R1B_TYPED_PIPELINE flag.
+    typed_result = await _maybe_run_typed_pipeline_round(
+        db, task, brain, operators, dataset_id=dataset_id,
+    )
+    if typed_result is not None:
+        return typed_result
+
     fields = await _prepare_round_fields(db, task, dataset_id)
     if fields is None:
         return {"all_alphas": [], "iterations_completed": 0, "skipped": True}
