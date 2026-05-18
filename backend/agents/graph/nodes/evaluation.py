@@ -55,6 +55,40 @@ import redis.asyncio as _rb_redis_aio
 # =============================================================================
 
 
+def _eval_thresholds(*, sharpe_submit_min_override: Optional[float] = None) -> Dict:
+    """Single flat threshold dict — replaces the retired tier_thresholds module.
+
+    brain_role_snapshot override (P3-Brain) is still respected: when a running
+    task carries an elevated sharpe_min in its startup snapshot, that wins over
+    settings.EVAL_SHARPE_MIN so flag flips don't re-judge mid-round alphas.
+    """
+    sharpe_min = (
+        sharpe_submit_min_override if sharpe_submit_min_override is not None
+        else max(
+            settings.EVAL_SHARPE_MIN,
+            getattr(settings, "effective_sharpe_submit_min", settings.EVAL_SHARPE_MIN),
+        )
+    )
+    return {
+        "sharpe_min": sharpe_min,
+        "fitness_min": settings.EVAL_FITNESS_MIN,
+        "turnover_min": settings.EVAL_TURNOVER_MIN,
+        "turnover_max": settings.EVAL_TURNOVER_MAX,
+        "subuniv_min": settings.EVAL_SUBUNIV_MIN,
+        "self_corr_max": settings.EVAL_SELF_CORR_MAX,
+        "check_self_corr": True,
+        "check_concentrated": True,
+        "score_pass": settings.EVAL_SCORE_PASS,
+        "score_optimize": settings.EVAL_SCORE_OPTIMIZE,
+        "provisional": {
+            "sharpe_min": settings.EVAL_PROVISIONAL_SHARPE_MIN,
+            "fitness_min": settings.EVAL_PROVISIONAL_FITNESS_MIN,
+            "turnover_max": settings.EVAL_PROVISIONAL_TURNOVER_MAX,
+            "subuniv_min": settings.EVAL_PROVISIONAL_SUBUNIV_MIN,
+        },
+    }
+
+
 def _safe_metric(metrics: dict, key: str, default: float, fallback_flags: list) -> float:
     """Read a numeric metric; fall back to `default` on missing/None/NaN/inf/bool/str.
 
@@ -85,28 +119,17 @@ def _safe_metric(metrics: dict, key: str, default: float, fallback_flags: list) 
     return float(val)
 
 
-def _check_is_os_consistency(metrics: Dict, tier: Optional[int] = None) -> bool:
+def _check_is_os_consistency(metrics: Dict) -> bool:
     """V-12: reject alphas whose IS sharpe far exceeds OS sharpe.
 
     Spike (2026-05-02 → 03) revealed train_sharpe values up to 16.2 paired
-    with test_sharpe=0 — pure IS overfit. PASS gate must require OS
-    consistency for elevated IS sharpe.
+    with test_sharpe=0 — pure IS overfit. PASS gate requires OS consistency
+    when IS sharpe is elevated.
 
-    V-26.76 (2026-05-13): `tier` parameter raises the bar for T3, which
-    is one step from BRAIN submission. T1 keeps the original ratios
-    (exploration tier — false positives cost less than false negatives);
-    T2 keeps default; T3 adds a strict 0.5 floor when IS sharpe is
-    elevated. Caller threads through `state.factor_tier`.
-
-    Tiered rules:
+    Rules (flat post tier-system removal, 2026-05-18):
       - is_sharpe < 2:    no OS check (conservative IS already)
-      - 2 <= is_sharpe < 5: require os_sharpe > 0 AND os/is >= ratio_mid
-      - is_sharpe >= 5:   require os_sharpe > 0 AND os/is >= ratio_high
-
-    Ratios per tier (mid / high):
-      T1: 0.3 / 0.4  (explore — original spike calibration)
-      T2: 0.3 / 0.4
-      T3: 0.4 / 0.5  (strict — closest to submission gate)
+      - 2 <= is_sharpe < 5: require os_sharpe > 0 AND os/is >= 0.3
+      - is_sharpe >= 5:   require os_sharpe > 0 AND os/is >= 0.4
 
     OS sharpe sources, in priority order:
       1. metrics["os_sharpe"]           (BRAIN OS-evaluated sharpe)
@@ -124,10 +147,7 @@ def _check_is_os_consistency(metrics: Dict, tier: Optional[int] = None) -> bool:
     if os_sh is None or os_sh <= 0:
         return False
     ratio = os_sh / is_sh if is_sh > 0 else 0
-    if tier == 3:
-        threshold = 0.5 if is_sh >= 5 else 0.4
-    else:
-        threshold = 0.4 if is_sh >= 5 else 0.3
+    threshold = 0.4 if is_sh >= 5 else 0.3
     return ratio >= threshold
 
 
@@ -517,9 +537,7 @@ async def _evaluate_single_alpha(
         self_corr_ok = True
         self_corr_verified = True  # tier_skipped, not unknown
 
-    # V-26.76: pass tier so T3 hits the strict 0.4/0.5 floor
-    _tier_val = getattr(state, "factor_tier", None)
-    is_overfit_safe = _check_is_os_consistency(metrics, tier=_tier_val)
+    is_overfit_safe = _check_is_os_consistency(metrics)
 
     hard_gate_pass = (
         sharpe >= sharpe_min
@@ -1147,7 +1165,6 @@ async def node_simulate(
             expr = state.pending_alphas[idx].expression
             smart = smart_simulation_settings(
                 expr,
-                tier=getattr(state, "factor_tier", None),
                 region=state.region,
                 universe=state.universe,
                 # P3-Brain: 从 task-startup snapshot 传 test_period(plan §8.4)
@@ -1155,9 +1172,7 @@ async def node_simulate(
                 test_period=getattr(state, "effective_default_test_period", None),
             )
             smart_settings_per_idx[local_i] = smart
-            smart_reasons_per_idx[local_i] = settings_reason(
-                expr, tier=getattr(state, "factor_tier", None)
-            )
+            smart_reasons_per_idx[local_i] = settings_reason(expr)
             key = tuple(smart.get(k) for k in SETTINGS_KEYS)
             buckets.setdefault(key, []).append(local_i)
 
@@ -1464,18 +1479,11 @@ async def node_evaluate(
     
     logger.info(f"[{node_name}] Starting two-stage evaluation | count={len(state.pending_alphas)}")
 
-    # PR2: tier-aware thresholds + gate config. state.factor_tier is set by the
-    # router from agent_mode (AUTONOMOUS_TIER1 → 1, AUTONOMOUS_TIER2 → 2,
-    # AUTONOMOUS_TIER3 → 3). For legacy AUTONOMOUS, factor_tier defaults to 1
-    # via MiningState; setting ENABLE_FACTOR_TIERING=False keeps it on legacy
-    # globals via the tier=None fallback inside tier_thresholds.
-    from backend.agents.graph.tier_thresholds import get_tier_thresholds
-
+    # Flat evaluation thresholds post tier-system removal (2026-05-18).
     # BRAIN role-switch (P3-Brain): pass task-startup snapshot to keep running
     # tasks consistent across Consultant flag toggles (avoids re-judging
     # mid-round alphas with new sharpe bar).
-    tier_cfg = get_tier_thresholds(
-        getattr(state, "factor_tier", None),
+    tier_cfg = _eval_thresholds(
         sharpe_submit_min_override=getattr(state, "effective_sharpe_submit_min", None),
     )
 
@@ -1552,15 +1560,11 @@ async def node_evaluate(
     prov_turnover_min = prov_cfg.get("turnover_min", turnover_min)
     prov_turnover_max = prov_cfg.get("turnover_max", 0.85)
 
-    # P0 #3: tier-aware score thresholds. tier_cfg["score_pass/optimize"] are
-    # set by get_tier_thresholds() from TIER{N}_SCORE_PASS/OPTIMIZE; their
-    # defaults equal the global 0.8/0.3 constants, so behaviour is unchanged
-    # until per-tier values are explicitly tuned in .env.
     score_pass_threshold = tier_cfg.get("score_pass", getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8))
     score_optimize_threshold = tier_cfg.get("score_optimize", getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3))
     corr_check_threshold = getattr(settings, 'CORR_CHECK_THRESHOLD', 0.5)
     logger.info(
-        f"[{node_name}] tier={tier_cfg['tier']} sharpe>={sharpe_min} fitness>={fitness_min} "
+        f"[{node_name}] flat-eval sharpe>={sharpe_min} fitness>={fitness_min} "
         f"turnover [{turnover_min}, {turnover_max}] check_self_corr={check_self_corr} "
         f"check_concentrated={check_concentrated}"
     )
@@ -1650,17 +1654,15 @@ async def node_evaluate(
             )
         updated_alphas[i] = alpha
 
-    # PR5 — T1 sign-flip retry. For each FAIL alpha whose |sharpe| ≥
-    # T1_FLIP_RETRY_SHARPE (i.e. a real signal pointing the wrong direction,
-    # not just statistical noise), simulate the negated expression and
-    # re-evaluate. Bounded by T1_FLIP_RETRY_CAP. Only enabled at T1 because
-    # T2/T3 already operate on direction-stable seeds.
+    # PR5 — sign-flip retry. For each FAIL alpha whose |sharpe| ≥
+    # T1_FLIP_RETRY_SHARPE (real signal pointing the wrong direction, not
+    # statistical noise), simulate the negated expression and re-evaluate.
+    # Bounded by T1_FLIP_RETRY_CAP per round.
     flip_retry_count = 0
     flip_retry_pass = 0
     flip_retry_prov = 0
     if (
-        tier_cfg["tier"] == 1
-        and brain is not None
+        brain is not None
         and getattr(settings, "ENABLE_T1_SIGN_FLIP_RETRY", True)
     ):
         flip_threshold = getattr(settings, "T1_FLIP_RETRY_SHARPE", 0.5)
@@ -1769,7 +1771,6 @@ async def node_evaluate(
                         from backend.sim_settings import smart_simulation_settings
                         smart = smart_simulation_settings(
                             flipped_expr,
-                            tier=tier_cfg["tier"],
                             region=state.region,
                             universe=state.universe,
                             # P3-Brain: flip-retry 同 round 内必须保持 test_period
@@ -1894,7 +1895,7 @@ async def node_evaluate(
     dual_run_no_control = 0
     dual_run_sim_failed = 0
     if brain is not None and getattr(settings, "ENABLE_SIGNAL_CONTROL_DUAL_RUN", False):
-        from backend.factor_tier_classifier import derive_control_expression
+        from backend.alpha_expression_utils import derive_control_expression
         from backend.agents.prompts.alignment import determine_attribution_dual_run
         _dr_delta_min = getattr(settings, "SIGNAL_CONTROL_DELTA_SHARPE_MIN", 0.3)
         _dr_cap = getattr(settings, "SIGNAL_CONTROL_CAP", 5)

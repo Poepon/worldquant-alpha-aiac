@@ -1144,7 +1144,6 @@ async def node_hypothesis(
                         region=state.region,
                         universe=state.universe,
                         kind=HypothesisKind.INVESTMENT_THESIS.value,
-                        target_tier=int(getattr(state, "factor_tier", 1) or 1),
                         expected_signal=primary_h.get("expected_signal", "unknown"),
                         confidence=primary_h.get("confidence", "medium"),
                         novelty=primary_h.get("novelty", "established"),

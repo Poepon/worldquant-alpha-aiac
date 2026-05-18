@@ -31,14 +31,9 @@ class TaskCreateData:
     universe: str = "TOP3000"
     dataset_strategy: str = "AUTO"
     target_datasets: List[str] = None
-    agent_mode: str = "AUTONOMOUS"
     daily_goal: int = 4
     config: Dict[str, Any] = None
-    # Phase 1.5-Fields (plan v1.3 §5, 2026-05-17): new SoT fields, OPTIONAL.
-    # When unset, fallback derives from agent_mode (legacy). When set, take
-    # priority — see TaskService.create_task parsing.
-    schedule: Optional[str] = None       # ONESHOT | CASCADE
-    starting_tier: Optional[int] = None  # 1 | 2 | 3
+    schedule: Optional[str] = None       # ONESHOT | FLAT
 
     def __post_init__(self):
         if self.target_datasets is None:
@@ -55,7 +50,6 @@ class TaskSummary:
     region: str
     universe: str
     dataset_strategy: str
-    agent_mode: str
     status: str
     daily_goal: int
     progress_current: int
@@ -63,13 +57,7 @@ class TaskSummary:
     max_iterations: int
     created_at: datetime
     updated_at: Optional[datetime]
-    # Phase 1.5-C [V1.2-C5] (2026-05-18): authoritative scheduling fields.
-    # All Optional for backward compat.
-    # phase15-D PR3b/cleanup (2026-05-18): cascade_phase + cascade_round_idx
-    # dropped — ORM cols + DB cols already gone.
     schedule: Optional[str] = None
-    starting_tier: Optional[int] = None
-    mining_mode: Optional[str] = None
 
 
 @dataclass
@@ -96,7 +84,6 @@ class TaskDetail:
     universe: str
     dataset_strategy: str
     target_datasets: List[str]
-    agent_mode: str
     status: str
     daily_goal: int
     progress_current: int
@@ -111,30 +98,17 @@ class TaskDetail:
 
 @dataclass
 class MiningSessionInfo:
-    """Mining session DTO returned by start_flat_session / resume_flat_session.
-
-    phase15-D PR3e (2026-05-18): cascade_phase + cascade_round_idx fields
-    REMOVED — were only meaningful for CONTINUOUS_CASCADE sessions which
-    are retired. The remaining FLAT path uses runtime_state directly +
-    surfaces current_tier via the Phase 1.5-C dual-write field below.
-    """
+    """Mining session DTO returned by start_flat_session / resume_flat_session."""
     task_id: int
     task_name: str
     region: str
     universe: str
     status: str           # RUNNING / PAUSED
-    mining_mode: str      # FLAT_CONTINUOUS / DISCRETE (CONTINUOUS_CASCADE retired)
     progress_current: int
     last_alpha_persisted_at: Optional[datetime]
     started_at: Optional[datetime]   # task.created_at
     paused_at: Optional[datetime]    # task.updated_at when status moved to PAUSED
-    # Phase 1.5-C [V1.2-C5 NEW] (2026-05-18): authoritative scheduling
-    # fields. Populated from MiningTask.schedule / .starting_tier +
-    # latest run's runtime_state["current_tier"]. Optional for backward
-    # compat — old callers ignoring these still work.
-    schedule: Optional[str] = None         # ONESHOT / CASCADE
-    starting_tier: Optional[int] = None    # 1 / 2 / 3
-    current_tier: Optional[int] = None     # from latest run.runtime_state["current_tier"]
+    schedule: Optional[str] = None   # ONESHOT / FLAT
 
 
 @dataclass
@@ -205,7 +179,6 @@ class TaskService(BaseService):
             region=task.region,
             universe=task.universe,
             dataset_strategy=task.dataset_strategy,
-            agent_mode=task.agent_mode,
             status=task.status,
             daily_goal=task.daily_goal,
             progress_current=task.progress_current,
@@ -213,10 +186,7 @@ class TaskService(BaseService):
             max_iterations=task.max_iterations,
             created_at=task.created_at,
             updated_at=task.updated_at,
-            # Phase 1.5-C new fields (Optional, backward-compat)
             schedule=getattr(task, "schedule", None),
-            starting_tier=getattr(task, "starting_tier", None),
-            mining_mode=getattr(task, "mining_mode", None),
         )
     
     # =========================================================================
@@ -271,7 +241,6 @@ class TaskService(BaseService):
             universe=task.universe,
             dataset_strategy=task.dataset_strategy,
             target_datasets=task.target_datasets or [],
-            agent_mode=task.agent_mode,
             status=task.status,
             daily_goal=task.daily_goal,
             progress_current=task.progress_current,
@@ -302,134 +271,17 @@ class TaskService(BaseService):
     # =========================================================================
     # Create Operations
     # =========================================================================
-    
-    # PR2 — agent_mode → factor_tier mapping shared across router and beat task.
-    # Phase 1.5-Fields (2026-05-17): DEPRECATED in favor of task.starting_tier
-    # (Phase 1.5-A column, dual-written by Phase 1.5-B). New code should use
-    # ``tier_from_task(task)`` below — falls back to this mapping when the
-    # task pre-dates Revision B backfill.
-    # INTERACTIVE confirmed 0 rows in production (Phase 1.5 SF-V1.4-E
-    # pre-flight); kept as legacy enum value for type compat. Final delete
-    # at Phase 3 R1b with Revision D.
-    AGENT_MODE_TO_TIER = {
-        "AUTONOMOUS": 1,        # legacy mode behaves as T1 when tier system on
-        "AUTONOMOUS_TIER1": 1,
-        "AUTONOMOUS_TIER2": 2,
-        "AUTONOMOUS_TIER3": 3,
-        "INTERACTIVE": None,    # tier-agnostic; 0 rows in prod
-    }
-
-    @classmethod
-    def factor_tier_from_mode(cls, agent_mode: str) -> Optional[int]:
-        """Resolve agent_mode → factor_tier. Returns None for INTERACTIVE / unknown."""
-        return cls.AGENT_MODE_TO_TIER.get(agent_mode)
-
-    @classmethod
-    def tier_from_task(cls, task) -> int:
-        """Phase 1.5-Fields (2026-05-17): resolve task's effective tier.
-
-        Prefers the Phase 1.5-A column ``task.starting_tier`` (1/2/3) when
-        present; falls back to legacy ``AGENT_MODE_TO_TIER`` mapping for
-        tasks created before Revision B backfill. Always returns a valid
-        tier int (1 / 2 / 3); never None.
-
-        Phase 2+ may inline this as ``task.starting_tier`` after the
-        legacy column is dropped at Phase 3 R1b Revision D.
-        """
-        st = getattr(task, "starting_tier", None)
-        if isinstance(st, int) and st in (1, 2, 3):
-            return st
-        agent_mode = getattr(task, "agent_mode", None) or ""
-        return cls.AGENT_MODE_TO_TIER.get(agent_mode) or 1
-
-    async def _validate_tier_eligibility(self, data: "TaskCreateData") -> None:
-        """PR2: gate tier-mode tasks on feature flag + prerequisites.
-
-        - ENABLE_FACTOR_TIERING=False → reject all AUTONOMOUS_TIER* modes.
-        - T2/T3 → require MIN_TIER_SEED_COUNT PASS alphas in the predecessor tier
-          for the target region (dataset filter is too narrow this early —
-          users often haven't picked dataset yet for AUTO strategy).
-        - T1 → require at least one DataField row for the region (proxy for
-          "dataset has been synced from BRAIN"); skip if dataset_strategy=AUTO
-          and no specific datasets pinned.
-
-        Raises ValueError with a user-facing message; router maps to HTTP 400.
-        """
-        from backend.config import settings
-
-        tier = self.factor_tier_from_mode(data.agent_mode)
-        if data.agent_mode and data.agent_mode.startswith("AUTONOMOUS_TIER"):
-            if not getattr(settings, "ENABLE_FACTOR_TIERING", True):
-                raise ValueError(
-                    "tier system is disabled (ENABLE_FACTOR_TIERING=False); "
-                    "use agent_mode='AUTONOMOUS' instead"
-                )
-
-        if tier in (2, 3):
-            from backend.models import Alpha
-            from backend.agents.graph.tier_thresholds import get_min_seed_count
-
-            prior_tier = tier - 1
-            min_required = get_min_seed_count()
-            count_q = (
-                select(func.count(Alpha.id))
-                .where(Alpha.factor_tier == prior_tier)
-                .where(Alpha.quality_status == "PASS")
-                .where(Alpha.region == data.region)
-            )
-            seed_count = (await self.db.execute(count_q)).scalar() or 0
-            if seed_count < min_required:
-                raise ValueError(
-                    f"T{tier} task needs at least {min_required} PASS alphas "
-                    f"at T{prior_tier} for region={data.region}; found {seed_count}. "
-                    f"Run a T{prior_tier} task first to accumulate seeds."
-                )
-
-        if tier == 1 and data.dataset_strategy != "AUTO":
-            # V-22.6.4-followup (2026-05-12): DataField.dataset_id is an INTEGER
-            # FK to datasets.id, but data.target_datasets is a list of string
-            # dataset_id values (e.g. ["fundamental6"]). The old in_(strings)
-            # filter raised an UndefinedColumnError (mapped to 500). Join
-            # through DatasetMetadata.dataset_id (String) instead.
-            from backend.models import DataField, DatasetMetadata
-
-            if data.target_datasets:
-                ds_count_q = (
-                    select(func.count(DataField.id))
-                    .join(DatasetMetadata, DataField.dataset_id == DatasetMetadata.id)
-                    .where(DatasetMetadata.dataset_id.in_(data.target_datasets))
-                )
-                if (await self.db.execute(ds_count_q)).scalar() == 0:
-                    raise ValueError(
-                        f"none of {data.target_datasets} have synced DataField rows; "
-                        f"run sync_datasets task first"
-                    )
 
     async def create_task(self, data: TaskCreateData) -> TaskSummary:
-        """
-        Create a new mining task.
+        """Create a new mining task (post tier-system removal, 2026-05-18).
 
         Args:
             data: Task creation data
 
         Returns:
             Created TaskSummary
-
-        Raises:
-            ValueError: when tier-mode prerequisites aren't met (mapped to HTTP
-                400 by the router). Examples: tier system disabled, T2/T3
-                without enough prior-tier PASS seeds, T1 with unsynced dataset.
         """
-        await self._validate_tier_eligibility(data)
-
-        # Plan v5+ §F-5 50/50 A/B variant assignment. Pre-2026-05-06 the
-        # config slot existed but no code consumed CANDIDATE — tasks always
-        # used LEVEL. Now: if CANDIDATE > LEVEL, every new task gets a
-        # random.choice([LEVEL, CANDIDATE]) injected into config[
-        # "hypothesis_centric_variant"]. mining_tasks.run_mining_task reads
-        # this per-task value at execution time. Caller-supplied
-        # hypothesis_centric_variant in data.config takes precedence (lets
-        # ad-hoc scripts pin a variant for targeted runs).
+        # Plan v5+ §F-5 50/50 A/B variant assignment.
         config = dict(data.config or {})
         if "hypothesis_centric_variant" not in config:
             from backend.config import settings as _hge
@@ -444,20 +296,7 @@ class TaskService(BaseService):
                     f"(level={level} candidate={candidate})"
                 )
 
-        # Phase 1.5-B + 1.5-Fields (2026-05-17): write schedule + starting_tier
-        # Priority: explicit data.schedule / data.starting_tier > derived from
-        # legacy agent_mode. create_task only creates DISCRETE tasks (cascade
-        # tasks go via _start_cascade_session); explicit CASCADE schedule from
-        # request also accepted for forward compat.
         schedule = (data.schedule or "ONESHOT").upper()
-        if data.starting_tier in (1, 2, 3):
-            starting_tier = data.starting_tier
-        elif data.agent_mode == "AUTONOMOUS_TIER2":
-            starting_tier = 2
-        elif data.agent_mode == "AUTONOMOUS_TIER3":
-            starting_tier = 3
-        else:
-            starting_tier = 1
 
         task = MiningTask(
             task_name=data.name,
@@ -465,13 +304,10 @@ class TaskService(BaseService):
             universe=data.universe,
             dataset_strategy=data.dataset_strategy,
             target_datasets=data.target_datasets,
-            agent_mode=data.agent_mode,
             daily_goal=data.daily_goal,
             config=config,
             status="PENDING",
-            # Phase 1.5-B dual-write
             schedule=schedule,
-            starting_tier=starting_tier,
         )
 
         created = await self.task_repo.create(task)
@@ -568,15 +404,14 @@ class TaskService(BaseService):
 
         action = action.upper()
 
-        # flat-F1 v1.5 Q2 Variant A: FLAT_CONTINUOUS mode does not survive
-        # legacy intervene_task PAUSE/RESUME — that path flips status only and
-        # does NOT dispatch a worker, leaving FLAT tasks stuck RUNNING-with-no-
-        # worker. Route ops through the dedicated admin endpoints instead.
-        if task.mining_mode == "FLAT_CONTINUOUS" and action in ("PAUSE", "RESUME"):
+        # Post tier-system removal (2026-05-18): all running tasks are flat
+        # sessions managed via /ops/flat-sessions/... The intervene path is
+        # status-only and does NOT dispatch a worker, so PAUSE/RESUME is
+        # routed there instead.
+        if (task.schedule or "ONESHOT").upper() == "FLAT" and action in ("PAUSE", "RESUME"):
             raise ValueError(
-                f"FLAT_CONTINUOUS tasks use POST /ops/flat-sessions/{task_id}/resume "
-                f"(or flag-off via ENABLE_FLAT_CONTINUOUS=false) instead of "
-                f"/tasks/{task_id}/intervene which does not dispatch a worker."
+                f"FLAT sessions use POST /ops/flat-sessions/{task_id}/resume "
+                f"instead of /tasks/{task_id}/intervene which does not dispatch a worker."
             )
 
         if action == "PAUSE":
@@ -682,12 +517,8 @@ class TaskService(BaseService):
         ]
 
     # =========================================================================
-    # V-19 Persistent Mining Service
+    # Persistent Mining Service (flat sessions, post tier-system removal)
     # =========================================================================
-    # singleton-per-region semantics enforced at schema level by partial index
-    # ix_mining_tasks_active_cascade_per_region (mining_mode='CONTINUOUS_CASCADE'
-    # AND status IN ('RUNNING','PAUSED')). The service-layer methods below
-    # navigate that constraint, with idempotent start.
 
     SUPPORTED_REGIONS = ("USA", "CHN", "EUR", "ASI", "GLB")
 
@@ -716,9 +547,6 @@ class TaskService(BaseService):
             if prev_run is not None and isinstance(prev_run.runtime_state, dict):
                 prev_state = dict(prev_run.runtime_state)
 
-        # phase15-D PR3b: cascade_phase + cascade_round_idx ORM cols are
-        # dropped. Use defensive getattr so any straggler row (or future
-        # re-introduction) does not AttributeError.
         run = ExperimentRun(
             task_id=task_id,
             status="RUNNING",
@@ -728,9 +556,7 @@ class TaskService(BaseService):
                 "task": {
                     "region": task.region,
                     "universe": task.universe,
-                    "mining_mode": task.mining_mode,
-                    # phase15-D PR3b: cascade_phase / cascade_round_idx ORM
-                    # cols dropped; config_snapshot no longer carries them.
+                    "schedule": task.schedule,
                 },
             },
             strategy_snapshot={},
@@ -780,14 +606,11 @@ class TaskService(BaseService):
             universe=universe,
             dataset_strategy="MANUAL" if datasets else "AUTO",
             target_datasets=list(datasets or []),
-            agent_mode="AUTONOMOUS",
             daily_goal=0,                # 0 = unlimited within FLAT_CONTINUOUS_MAX_ITERATIONS
             max_iterations=999999,
-            config={"flat_cursor": 0},   # v1.5 Q1 V2 initial cursor
-            mining_mode="FLAT_CONTINUOUS",
+            config={"flat_cursor": 0},
             status="RUNNING",
-            schedule="ONESHOT",          # flat is single-pass, no CASCADE schedule
-            starting_tier=1,
+            schedule="FLAT",
         )
         created = await self.task_repo.create(task)
         await self.commit()
@@ -799,19 +622,13 @@ class TaskService(BaseService):
         return self._to_session_info(await self.task_repo.get_by_id(created.id))
 
     async def resume_flat_session(self, task_id: int) -> "MiningSessionInfo":
-        """Resume a paused FLAT_CONTINUOUS session, preserving runtime_state.
-
-        v1.5 Q1 Variant V2: calls ``_dispatch_session_worker`` with
-        ``inherit_runtime_state=True`` so ``flat_cursor`` (and any other
-        per-session keys) carries over to the new ExperimentRun.
-        """
+        """Resume a paused FLAT session, preserving runtime_state['flat_cursor']."""
         task = await self.task_repo.get_by_id(task_id)
         if not task:
             raise ValueError(f"task_id={task_id} not found")
-        if task.mining_mode != "FLAT_CONTINUOUS":
+        if (task.schedule or "").upper() != "FLAT":
             raise ValueError(
-                f"task_id={task_id} is not FLAT_CONTINUOUS "
-                f"(mining_mode={task.mining_mode})"
+                f"task_id={task_id} is not a FLAT session (schedule={task.schedule})"
             )
         if task.status == "RUNNING":
             return self._to_session_info(task)
@@ -829,26 +646,15 @@ class TaskService(BaseService):
         return self._to_session_info(await self.task_repo.get_by_id(task_id))
 
     def _to_session_info(self, task: MiningTask) -> MiningSessionInfo:
-        """phase15-D PR3e (2026-05-18): cascade_phase + cascade_round_idx
-        fields removed from MiningSessionInfo. current_tier now defaults
-        to None — flat-session callers don't surface tier-via-cascade
-        derivation since flat starts at task.starting_tier and stays there.
-        Future enhancement: read latest run.runtime_state["current_tier"]
-        via async repo call (sync method today; YAGNI).
-        """
         return MiningSessionInfo(
             task_id=task.id,
             task_name=task.task_name,
             region=task.region,
             universe=task.universe,
             status=task.status,
-            mining_mode=task.mining_mode,
             progress_current=task.progress_current,
             last_alpha_persisted_at=task.last_alpha_persisted_at,
             started_at=task.created_at,
             paused_at=task.updated_at if task.status == "PAUSED" else None,
-            # Phase 1.5-C new fields (Optional, backward-compat)
             schedule=getattr(task, "schedule", None),
-            starting_tier=getattr(task, "starting_tier", None),
-            current_tier=None,  # PR3e: cascade derivation removed
         )

@@ -306,7 +306,6 @@ class NegativeKnowledgeService(BaseService):
             "pattern_hash": pattern_hash,
             "description": (sig.remediation_hint or "")[:240],
             "meta_data": meta,
-            "factor_tier": None,
             "usage_count": 0,
             "is_active": True,
             "created_by": "P2D_NEGKB",

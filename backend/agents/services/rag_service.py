@@ -787,30 +787,28 @@ class RAGService:
         days_window: int = 7,
         prefer_hitl: bool = True,
         hitl_min_count: int = 5,
-        factor_tier: Optional[int] = None,
+        hypothesis_pillar: Optional[str] = None,
         hypothesis_id: Optional[int] = None,
         experiment_variant: Optional[str] = None,
     ) -> List[Dict]:
         """W6 (revised post-T9): rolling few-shot pool with dataset HARD filter.
 
-        Changes vs. v1:
-          - Dataset mismatch is now a HARD filter (not a -0.2 score). Mismatched
-            patterns are dropped instead of ranked lower. T9 confirmed that a
-            single mismatched HITL sample (fnd6) ranked #1 on a fundamental2 task
-            and produced no learning.
-          - HITL bonus only kicks in when global HITL count >= `hitl_min_count`
-            (default 5). One-off HITL signals are too noisy to bias prompts.
+        Post tier-system removal (2026-05-18), the tier-minus-one cold-start
+        trick is gone. New cascade fallback when the precise filter returns
+        too few rows:
 
-        Region remains soft-match (+0.2 score) to allow cross-region transfer.
+            1. region + dataset + pillar  (most specific)
+            2. region + dataset            (relax pillar)
+            3. region                      (relax dataset)
+            4. global by usage_count       (last resort)
 
-        PR2 — tier filter:
-          - `factor_tier` (1/2/3) restricts results to that tier; T1 task should
-            pass factor_tier=1 to avoid contaminating LLM context with T2/T3
-            wrappers.
-          - Cold-start fallback: when factor_tier=1 returns < 3 rows, the method
-            pulls historical T2 PASS patterns and strips one wrapper layer to
-            synthesize T1 kernels (marked `is_synthesized=True`). Caller's prompt
-            should warn the LLM these aren't real T1 PASS examples.
+        Pillar matching reads ``meta_data->>'hypothesis_pillar'`` (backfilled
+        by scripts/backfill_kb_hypothesis_pillar.py before the migration).
+
+        Changes vs. v1 (unchanged from pre-removal):
+          - Dataset mismatch is a HARD filter (not -0.2 score).
+          - HITL bonus only kicks in when global HITL count >= ``hitl_min_count``.
+          - Region remains soft-match (+0.2 score).
         """
         from datetime import datetime, timedelta
         from sqlalchemy import func
@@ -826,27 +824,46 @@ class RAGService:
         hitl_count = (await self.db.execute(hitl_count_stmt)).scalar() or 0
         apply_hitl_bonus = prefer_hitl and hitl_count >= hitl_min_count
 
-        # V-27.95: window on created_at, NOT updated_at. _track_retrieval_hit
-        # bumps updated_at on every retrieve hit (V-24.D), so windowing on
-        # updated_at was self-locking — a hit entry refreshed its own window
-        # eligibility, stayed a candidate forever, kept getting hit, and
-        # squeezed colder entries out. created_at ("when this pattern was
-        # discovered") is the right axis for "recent few-shot examples";
-        # updated_at stays free to mean "last activity" for kb_hit_audit.
-        stmt = (
-            select(KnowledgeEntry)
-            .where(
-                KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
-                KnowledgeEntry.is_active == True,
-                KnowledgeEntry.created_at >= cutoff,
+        async def _query(*, with_pillar: bool, with_dataset: bool, with_window: bool) -> list:
+            q = (
+                select(KnowledgeEntry)
+                .where(
+                    KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
+                    KnowledgeEntry.is_active == True,
+                )
+                .order_by(KnowledgeEntry.usage_count.desc())
+                .limit(limit * 6)
             )
-            .order_by(KnowledgeEntry.usage_count.desc())
-            .limit(limit * 6)  # over-fetch since dataset filter may drop many
-        )
-        if factor_tier is not None:
-            stmt = stmt.where(KnowledgeEntry.factor_tier == factor_tier)
-        result = await self.db.execute(stmt)
-        rows = list(result.scalars().all())
+            if with_window:
+                q = q.where(KnowledgeEntry.created_at >= cutoff)
+            if with_pillar and hypothesis_pillar:
+                q = q.where(
+                    KnowledgeEntry.meta_data["hypothesis_pillar"].astext == hypothesis_pillar
+                )
+            if with_dataset and dataset_id:
+                # dataset filter applies post-query via meta_data inspection
+                # below (since rows may store dataset under "dataset_id" or
+                # "dataset"); leave the SQL filter coarse.
+                pass
+            res = await self.db.execute(q)
+            return list(res.scalars().all())
+
+        rows = await _query(with_pillar=True, with_dataset=True, with_window=True)
+        if len(rows) < 3:
+            rows += await _query(with_pillar=False, with_dataset=True, with_window=True)
+        if len(rows) < 3:
+            rows += await _query(with_pillar=False, with_dataset=False, with_window=True)
+        if len(rows) < 3:
+            rows += await _query(with_pillar=False, with_dataset=False, with_window=False)
+        # Dedupe preserving order
+        seen = set()
+        deduped = []
+        for r in rows:
+            if r.id in seen:
+                continue
+            seen.add(r.id)
+            deduped.append(r)
+        rows = deduped
         if not rows:
             return []
 
@@ -985,7 +1002,7 @@ class RAGService:
                 "confidence": md.get("confidence", 0.5),
                 "source": entry.created_by,
                 "usage_count": entry.usage_count,
-                "factor_tier": entry.factor_tier,
+                "hypothesis_pillar": md.get("hypothesis_pillar"),
                 # V-22 (2026-05-10): surface BRAIN /check verdict so prompt
                 # can show "BRAIN rejected on X" — gives the LLM real
                 # feedback on submittability, not just IS PASS rate.
@@ -993,49 +1010,9 @@ class RAGService:
                 "brain_failed_checks": md.get("brain_failed_checks") or [],
             })
 
-        # T1 cold-start fallback (PR2): when T1 KB has < 3 entries, synthesize
-        # T1 kernels by stripping one wrapper layer from historical T2 KB rows.
-        # The LLM sees these flagged as is_synthesized=True so the prompt can
-        # warn against treating them as proven PASS examples.
-        if factor_tier == 1 and len(out) < 3:
-            from backend.factor_tier_classifier import extract_tier1_seed, is_t1_expression
-
-            t2_stmt = (
-                select(KnowledgeEntry)
-                .where(
-                    KnowledgeEntry.entry_type == "SUCCESS_PATTERN",
-                    KnowledgeEntry.is_active == True,
-                    KnowledgeEntry.factor_tier == 2,
-                )
-                .order_by(KnowledgeEntry.usage_count.desc())
-                .limit(10)
-            )
-            t2_rows = (await self.db.execute(t2_stmt)).scalars().all()
-            synthesized = []
-            for t2 in t2_rows:
-                kernel = extract_tier1_seed(t2.pattern or "")
-                if kernel and is_t1_expression(kernel):
-                    md = t2.meta_data or {}
-                    synthesized.append({
-                        "pattern": kernel,
-                        "description": (t2.description or "") + " (synthesized T1 kernel from T2)",
-                        "expected_sharpe": md.get("expected_sharpe"),
-                        "expected_fitness": md.get("expected_fitness"),
-                        "confidence": (md.get("confidence", 0.5) or 0.5) * 0.5,  # lower trust
-                        "source": "synthesized",
-                        "usage_count": t2.usage_count,
-                        "factor_tier": 1,
-                        "is_synthesized": True,
-                    })
-            out.extend(synthesized[: max(0, 5 - len(out))])
-            logger.info(
-                f"[RAGService] T1 cold-start fallback synthesized {len(synthesized)} "
-                f"kernels from T2 KB (out_total={len(out)})"
-            )
-
         logger.info(
             f"[RAGService] few-shot pool | region={region} dataset={dataset_id} "
-            f"tier={factor_tier} returned={len(out)} "
+            f"pillar={hypothesis_pillar} returned={len(out)} "
             f"(HITL={sum(1 for e in out if e.get('source')=='HITL')}, "
             f"hitl_bonus_active={apply_hitl_bonus}, global_hitl={hitl_count})"
         )

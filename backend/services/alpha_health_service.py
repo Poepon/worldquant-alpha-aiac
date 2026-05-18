@@ -521,7 +521,6 @@ class AlphaHealthService:
                 "region": a.region,
                 "universe": a.universe,
                 "quality_status": a.quality_status,
-                "factor_tier": getattr(a, "factor_tier", None),
                 "hypothesis_id": a.hypothesis_id,
                 "date_created": _iso(a.date_created),
                 "metrics_snapshot_at": _iso(a.metrics_snapshot_at),

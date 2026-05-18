@@ -131,16 +131,15 @@ async def _incremental_save_alphas(
     region: str,
     universe: str,
     dataset_id: str,
-    factor_tier: int,
     pending_alphas: List,
     hypothesis_id: Optional[int] = None,
 ) -> List["AlphaResult"]:
-    """For T2/T3: write Alpha rows directly to DB at save_results time
-    rather than buffering in state.generated_alphas until workflow returns.
+    """Write PASS / PASS_PROVISIONAL Alpha rows directly to DB at save_results
+    time rather than buffering in state.generated_alphas until workflow returns.
 
-    This makes PASSes visible to the frontend / FactorLibrary stats almost
-    instantly per seed, and prevents catastrophic data loss if a long-
-    running T2 task (1+ hour for 8 seeds) crashes mid-loop.
+    Post tier-system removal (2026-05-18) this is the only persistence path —
+    the old factor_tier=2/3 gate has been removed, FLAT_CONTINUOUS sessions get
+    1-4 INSERT/round via the same code.
 
     Returns AlphaResult list with persisted=True + db_id set, so
     workflow.run_with_persistence's batch path skips them.
@@ -281,7 +280,6 @@ async def _incremental_save_alphas(
             is_margin=metrics_dict.get("margin"),
             is_long_count=metrics_dict.get("longCount"),
             is_short_count=metrics_dict.get("shortCount"),
-            factor_tier=factor_tier,
             parent_alpha_id=alpha.parent_alpha_id,
             metrics_snapshot_at=snapshot_at,
             # V-26.89: fields_used now part of the same INSERT, atomic
@@ -327,7 +325,6 @@ async def _incremental_save_alphas(
                 expression=alpha.expression,
                 quality_status=alpha.quality_status,
                 extra={
-                    "factor_tier": factor_tier,
                     "dataset_id": dataset_id,
                     "traceback_inline": _tb.format_exc(),
                 },
@@ -370,7 +367,6 @@ async def _incremental_save_alphas(
             phase="incremental_outer_commit",
             exc=e,
             extra={
-                "factor_tier": factor_tier,
                 "dataset_id": dataset_id,
                 "n_pending": len(pending_alphas),
                 "traceback_inline": _tb.format_exc(),
@@ -520,11 +516,13 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
 
     logger.info(f"[{node_name}] Starting batch save | total={len(state.pending_alphas)}")
 
-    # PR7 — incremental persistence path for T2/T3
+    # Post tier-system removal (2026-05-18): incremental persistence is now
+    # the only path for flat sessions — the old factor_tier ∈ {2,3} gate has
+    # been retired. With daily_goal=4 this is at most 4 INSERTs per round,
+    # well within transaction budget.
     from backend.config import settings as _settings
     use_incremental = (
         getattr(_settings, "T2_INCREMENTAL_PERSISTENCE", True)
-        and (getattr(state, "factor_tier", None) in (2, 3))
         and configurable.get("db_session") is not None
     )
 
@@ -552,7 +550,6 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                 region=state.region,
                 universe=state.universe,
                 dataset_id=state.dataset_id,
-                factor_tier=state.factor_tier,
                 pending_alphas=state.pending_alphas,
                 hypothesis_id=current_hypothesis_id,
             )
@@ -560,7 +557,7 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                 if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
                     logger.info(
                         f"[{node_name}] Alpha Saved (incremental) | id={alpha.alpha_id} "
-                        f"status={alpha.quality_status} tier=T{state.factor_tier} "
+                        f"status={alpha.quality_status} "
                         f"hypothesis_id={current_hypothesis_id}"
                     )
         except Exception as e:

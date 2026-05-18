@@ -57,7 +57,6 @@ class KnowledgeRepository(BaseRepository[KnowledgeEntry]):
         region: Optional[str] = None,
         dataset_id: Optional[str] = None,
         created_by: str = "SYSTEM",
-        factor_tier: Optional[int] = None,
         alpha_id_ref: Optional[int] = None,
     ) -> KnowledgeEntry:
         """Atomic INSERT ... ON CONFLICT (pattern_hash) DO UPDATE.
@@ -70,32 +69,24 @@ class KnowledgeRepository(BaseRepository[KnowledgeEntry]):
             responsible for read-modify-write of confidence/score —
             see feedback_agent for the bump policy)
           - description coalesced (keeps existing if no new value)
-          - factor_tier coalesced (caller-supplied wins; preserves derived value
-            when re-upserting without re-classifying)
 
-        Tier system (PR2):
-          - factor_tier is a derived attribute of pattern_text; classify_tier()
-            must agree with the caller-supplied value. If caller passes a tier
-            that disagrees, ValueError is raised so bugs surface early instead
-            of inserting wrong rows.
-          - alpha_id_ref (if provided) is stored in meta_data and used by the
-            daily refresh beat job to find the source alpha.
+        Validation (post tier-system removal, 2026-05-18):
+          SUCCESS_PATTERN rows must be classifiable by the Five-Pillars
+          classifier — otherwise the LLM emitted nonsense fields/operators
+          and we refuse the insert (proxy for "unparseable expression").
 
-        TOCTOU-safe replacement for the ``_pattern_exists() + create()``
-        dance in feedback_agent; multiple concurrent writers can call
-        this without producing duplicate rows.
+        ``alpha_id_ref`` (if provided) is stored in meta_data and used by the
+        daily refresh beat job to find the source alpha.
+
+        TOCTOU-safe replacement for the ``_pattern_exists() + create()`` dance.
         """
-        # Tier coherence check — pattern's tier is derived, not free-form
-        from backend.factor_tier_classifier import classify_tier  # local import avoids cycle
-
-        derived_tier = classify_tier(pattern_text)
-        if factor_tier is not None and factor_tier != derived_tier:
-            raise ValueError(
-                f"factor_tier mismatch: caller={factor_tier}, "
-                f"classify_tier({pattern_text[:60]!r})={derived_tier}"
-            )
-        # Use caller value when supplied (lets backfill set explicitly), else derived
-        effective_tier = factor_tier if factor_tier is not None else derived_tier
+        if entry_type == "SUCCESS_PATTERN":
+            from backend.alpha_expression_utils import is_pillar_classifiable
+            if not is_pillar_classifiable(pattern_text):
+                raise ValueError(
+                    f"un-pillar-able pattern (no recognized fields/operators): "
+                    f"{pattern_text[:60]!r} — refusing KB insert"
+                )
 
         meta = dict(meta_data or {})
         if region and "region" not in meta:
@@ -115,7 +106,6 @@ class KnowledgeRepository(BaseRepository[KnowledgeEntry]):
             description=description,
             meta_data=meta,
             pattern_hash=ph,
-            factor_tier=effective_tier,
             usage_count=1,
             is_active=True,
             created_by=created_by,
@@ -127,11 +117,6 @@ class KnowledgeRepository(BaseRepository[KnowledgeEntry]):
             "is_active": True,
             "description": func.coalesce(excluded.description, KnowledgeEntry.description),
             "meta_data": excluded.meta_data,
-            # factor_tier preserved if existing row already has it; new value
-            # only overwrites NULL. classify_tier is deterministic so values
-            # should always agree, but COALESCE saves us if a future schema
-            # change drops the tier check.
-            "factor_tier": func.coalesce(KnowledgeEntry.factor_tier, excluded.factor_tier),
         }
 
         stmt = stmt.on_conflict_do_update(

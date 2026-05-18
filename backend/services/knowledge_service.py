@@ -34,7 +34,6 @@ class KnowledgeEntryInfo:
     created_by: str
     created_at: datetime
     updated_at: Optional[datetime]
-    factor_tier: Optional[int] = None  # PR3: surface tier from KB row
 
 
 @dataclass
@@ -60,9 +59,8 @@ class KnowledgeListFilters:
     """Filters for listing knowledge entries."""
     entry_type: Optional[str] = None
     is_active: Optional[bool] = None
-    factor_tier: Optional[int] = None  # PR2/PR3: tier-aware filter (1/2/3)
-    region: Optional[str] = None       # PR3: filter via meta_data->>'region'
-    created_by: Optional[str] = None   # PR3: SYSTEM / HITL / USER
+    region: Optional[str] = None
+    created_by: Optional[str] = None   # SYSTEM / HITL / USER
     limit: int = 50
     offset: int = 0
 
@@ -102,13 +100,6 @@ class KnowledgeService(BaseService):
             query = query.where(KnowledgeEntry.entry_type == filters.entry_type)
         if filters.is_active is not None:
             query = query.where(KnowledgeEntry.is_active == filters.is_active)
-        # PR3 — tier filter. Special value 0 means "explicitly NULL" (entries
-        # not in the tier hierarchy, e.g. multi-field arithmetic patterns).
-        if filters.factor_tier is not None:
-            if filters.factor_tier == 0:
-                query = query.where(KnowledgeEntry.factor_tier.is_(None))
-            else:
-                query = query.where(KnowledgeEntry.factor_tier == filters.factor_tier)
         if filters.created_by:
             query = query.where(KnowledgeEntry.created_by == filters.created_by)
         if filters.region:
@@ -132,7 +123,6 @@ class KnowledgeService(BaseService):
             pattern=e.pattern,
             description=e.description,
             meta_data=e.meta_data or {},
-            factor_tier=e.factor_tier,
             usage_count=e.usage_count,
             is_active=e.is_active,
             created_by=e.created_by,

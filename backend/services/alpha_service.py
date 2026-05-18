@@ -956,11 +956,10 @@ class AlphaService(BaseService):
             new_status: Target QualityStatus value (PASS / PASS_PROVISIONAL /
                 FAIL / OPTIMIZE / REJECT / PENDING).
             reason: Free-text human-readable explanation. Examples:
-                "tier_seed_refresh — sharpe drifted below T3 threshold",
-                "user manual review", "tier reclassified".
+                "user manual review", "metrics drifted below threshold".
             source: Controlled enum identifying the code path that triggered
-                the change. One of: "node_evaluate" / "tier_seed_refresh" /
-                "daily_beat_kb" / "daily_beat_os" / "backfill" / "manual_api".
+                the change. One of: "node_evaluate" / "daily_beat_kb" /
+                "daily_beat_os" / "backfill" / "manual_api".
 
         Returns:
             True if a transition row was written, False if no-op (status

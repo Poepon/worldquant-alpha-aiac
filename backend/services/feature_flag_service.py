@@ -363,36 +363,30 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         flag_type="bool",
         group="Phase3-flatF3",
         description=(
-            "Phase 3 flat-F3 (master plan §4.5): T2 path 替换 group_*+pure_xs "
-            "全 sweep (expand_t2_strategy 产 8-12 variants) 为 LLM 看 "
-            "_failed_tests + P2-D pitfalls 选 2-3 wrappers。消除盲目穷举,"
+            "Phase 3 flat-F3 (master plan §4.5): wrapper-mutation 路径让 LLM "
+            "看 _failed_tests + P2-D pitfalls 选 2-3 wrappers,替代盲目穷举。"
             "降 BRAIN sim cost ~40-75%,提 PASS rate (LLM 偏避有名失败模式)。"
-            "默认 OFF — flag ON 后 tier_seed.py T2 expand 走 llm_mutate_alpha;"
-            "OFF 走 legacy expand_t2_strategy。Soft-fail: LLM 失败 fall back "
-            "to legacy。Cost: haiku-4-5 ~$0.01/call/seed,top_k=3 variants。"
+            "Soft-fail: LLM 失败 fall back to legacy enumerate。"
+            "Cost: haiku-4-5 ~$0.01/call/seed,top_k=3 variants。"
         ),
     ),
-    # --- flat-F2: default mining_mode flip ---
+    # --- flat-F2: default flat session ---
     "ENABLE_DEFAULT_FLAT_SESSION": FlagSpec(
         name="ENABLE_DEFAULT_FLAT_SESSION",
         flag_type="bool",
         group="Phase3-flatF2",
         description=(
-            "Phase 3 flat-F2 (master plan §4.5 / 决策 5A): POST "
-            "/mining-session/start 不再创建 cascade task,改创 flat task。"
+            "Phase 3 flat-F2: POST /mining-session/start 默认创建 flat task。"
             "前置 ENABLE_FLAT_CONTINUOUS + ENABLE_DAG_TRACE 都 ON 才生效 "
-            "(R6 给 flat reward-guided exploration,避 linear cursor "
-            "regression)。默认 OFF — 翻 ON 后新 task 走 flat,既有 cascade "
-            "task 不影响 (Phase 3 flat-F4 cascade 退役才删 cascade legacy code)。"
-            "Rollback flip OFF: 下次 start_session 创 cascade。"
+            "(R6 给 flat reward-guided exploration)。"
         ),
     ),
-    # --- flat-F1 Advanced: FLAT_CONTINUOUS mining mode ---
+    # --- flat-F1 Advanced: FLAT continuous mining ---
     "ENABLE_FLAT_CONTINUOUS": FlagSpec(
         name="ENABLE_FLAT_CONTINUOUS",
         flag_type="bool",
         group="Phase3-flatF1",
-        description="启用 FLAT_CONTINUOUS mining_mode (与 legacy CONTINUOUS_CASCADE 并行)。Hypothesis-driven flat session — dataset × hypothesis 迭代,无 T1→T2→T3 级联。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。默认 OFF,flat-F2 后续 PR 翻默认。",
+        description="启用 FLAT 持续 session。Hypothesis-driven — dataset × hypothesis 迭代。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。",
     ),
     # --- Phase 2 R6: DAG Trace (MCTS-lite) ---
     "ENABLE_DAG_TRACE": FlagSpec(
@@ -402,14 +396,11 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         description=(
             "Phase 2 R6 (RD-Agent v0.8.0 MCTS-lite): 启用 DAG-structured "
             "multi-branch trace persisted in experiment_runs.runtime_state['dag'] "
-            "JSONB,替换 linear cascade_phase scalar 推进。"
-            "Selection: UCB1-lite + Thompson cold-start(per-leaf, not per-arm)。"
-            "Reward 3-tier fallback: composite_score (R5+R1a) > sharpe > 0.0。"
+            "JSONB。Selection: UCB1-lite + Thompson cold-start(per-leaf)。"
+            "Reward fallback: composite_score (R5+R1a) > sharpe > 0.0。"
             "Family-cap (R10) dropped 标 status='inactive' 不复用。"
-            "100-node write-side hard cap, prune LRU+reward 保 parent chain。"
-            "Rollback flip OFF: in-flight DAG 数据保留(forensic),下次 round "
-            "走 phase15-C runtime_state['current_tier'] → cascade_phase chain。"
-            "Phase 3 flat-F2 cascade 退役硬前置。"
+            "100-node write-side hard cap,prune LRU+reward 保 parent chain。"
+            "Rollback flip OFF: in-flight DAG 数据保留(forensic)。"
         ),
     ),
     # --- Phase 2 R7: Co-STEER self-correct 半接受 ---
@@ -454,19 +445,16 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "默认 OFF,flag 翻 ON 启动 attribution distribution shift 观察。"
         ),
     ),
-    # --- Phase 1.5-C: TaskSchema v2 cut-over ---
+    # --- Phase 1.5-C: TaskSchema v2 cut-over (post tier-removal: schedule 唯一权威) ---
     "ENABLE_TASK_SCHEMA_V2": FlagSpec(
         name="ENABLE_TASK_SCHEMA_V2",
         flag_type="bool",
         group="Phase15-C",
         description=(
-            "Phase 1.5-C: 切 cascade worker resume / watchdog liveness / "
-            "router responses / ops dashboard 的 read paths 从 legacy cols "
-            "(mining_mode / cascade_phase / agent_mode) 到 new authoritative "
-            "cols (schedule / starting_tier / runtime_state.current_tier)。"
-            "OFF = legacy path,代码保留 fallback;dual-write 已在 1.5-B 启,"
-            "flag 翻 ON 在 Revision B 之后创建的 task 上 byte-equivalent。"
-            "Gray rollout: staging → single task → region 全量。"
+            "Phase 1.5-C: 切 router responses / ops dashboard 的 read paths "
+            "走 task.schedule (sole authoritative scheduling column post "
+            "tier-system removal)。Tier removal 后 legacy fallback 已删,"
+            "flag 仍保留作 staged rollout 节流入口。"
         ),
     ),
 }

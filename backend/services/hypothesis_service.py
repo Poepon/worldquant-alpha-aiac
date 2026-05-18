@@ -79,8 +79,7 @@ def _hit_to_dict(hit) -> Dict[str, Any]:
 @dataclass
 class HypothesisCreateData:
     """Input for create_hypothesis. Mirrors the typed Hypothesis dataclass
-    plus operational fields not in the dataclass (region/dataset_pool/
-    target_tier/etc)."""
+    plus operational fields not in the dataclass (region/dataset_pool/etc)."""
 
     statement: str
     region: str
@@ -88,7 +87,6 @@ class HypothesisCreateData:
     universe: Optional[str] = None
 
     kind: str = HypothesisKind.INVESTMENT_THESIS.value
-    target_tier: int = 1
 
     expected_signal: str = "unknown"
     confidence: str = "medium"
@@ -153,7 +151,6 @@ class HypothesisService(BaseService):
             statement=data.statement,
             rationale=data.rationale,
             kind=data.kind,
-            target_tier=data.target_tier,
             expected_signal=data.expected_signal,
             confidence=data.confidence,
             novelty=data.novelty,
@@ -174,7 +171,7 @@ class HypothesisService(BaseService):
         await self.flush()
         await self.refresh(h)
         logger.info(
-            f"[hypothesis] created id={h.id} kind={h.kind} tier=T{h.target_tier} "
+            f"[hypothesis] created id={h.id} kind={h.kind} "
             f"region={h.region} variant={h.experiment_variant}"
         )
         return h
@@ -187,7 +184,6 @@ class HypothesisService(BaseService):
         region: str,
         *,
         kind: Optional[str] = None,
-        target_tier: Optional[int] = None,
         experiment_variant: Optional[str] = None,
         include_proposed: bool = True,
         limit: int = 50,
@@ -233,8 +229,6 @@ class HypothesisService(BaseService):
         )
         if kind is not None:
             stmt = stmt.where(Hypothesis.kind == kind)
-        if target_tier is not None:
-            stmt = stmt.where(Hypothesis.target_tier == target_tier)
         if experiment_variant is not None:
             stmt = stmt.where(Hypothesis.experiment_variant == experiment_variant)
 
