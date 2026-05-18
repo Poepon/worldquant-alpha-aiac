@@ -12,6 +12,7 @@ Contains:
 """
 
 import asyncio
+import hashlib
 import math
 import time
 import random
@@ -967,6 +968,106 @@ async def node_simulate(
                 }
     except Exception as e:
         logger.warning(f"[{node_name}] portfolio dedup failed, proceeding: {e}")
+
+    # Phase 3 Q10 PR2a (2026-05-18): pyqlib local pre-screen — Multi-Fidelity
+    # Layer 0. Plan ~/.claude/plans/phase3-q10-pyqlib-prescreen-2026-05-18.md
+    # §5 + §12: Q10 stacks BEFORE pre_simulate_filter (which is BEFORE R9 cache
+    # and BEFORE BRAIN call) so a rejected alpha saves R9 lookup + BRAIN sim +
+    # cache write. Asymmetric-cost rationale: Q10 reject is FREE, R9 cache-hit
+    # doesn't save Q10 either way, so Q10-first is strictly better for new
+    # expressions.
+    #
+    # Three modes (QLIB_PRESCREEN_MODE):
+    #   shadow → log only, BRAIN proceeds
+    #   soft   → log + alpha.metrics["_qlib_prescreen_warned"]=True, BRAIN proceeds
+    #   hard   → log + skip BRAIN (alpha marked simulation_success=False)
+    #
+    # Soft-fail: any per-alpha exception logs warn + continues (never blocks
+    # the round). Mode is read ONCE at entry to avoid mid-batch flip race
+    # ([V1.2-A2-3] in plan).
+    if getattr(settings, "ENABLE_QLIB_PRESCREEN", False) and indices_to_simulate:
+        try:
+            from backend.qlib_prescreen import prescreen_alpha
+            _q10_mode = (getattr(settings, "QLIB_PRESCREEN_MODE", "shadow") or "shadow").lower()
+            _q10_rows = []  # collect log rows; batch INSERT after loop
+            _q10_rejects = []  # original indices to drop when hard mode
+            _q10_task_id = getattr(state, "task_id", None)
+
+            for _q10_local, idx in enumerate(list(indices_to_simulate)):
+                a = state.pending_alphas[idx]
+                try:
+                    pres = await prescreen_alpha(
+                        a.expression, region=state.region,
+                        universe=getattr(state, "universe", "TOP3000"),
+                        mode=_q10_mode,
+                    )
+                except Exception as _pre_ex:
+                    logger.warning(f"[{node_name}] Q10 prescreen call raised for idx={idx}: {_pre_ex}")
+                    continue
+                # In soft mode, stamp the warning metric
+                if _q10_mode == "soft" and pres.verdict == "reject":
+                    _m = dict(a.metrics or {})
+                    _m["_qlib_prescreen_warned"] = True
+                    _m["_qlib_prescreen_sharpe"] = pres.local_sharpe
+                    _m["_qlib_prescreen_ic"] = pres.local_ic
+                    a.metrics = _m
+                # In hard mode, drop the index so BRAIN never sees it
+                if _q10_mode == "hard" and pres.verdict == "reject":
+                    _q10_rejects.append(idx)
+                    a.simulation_error = (
+                        f"Q10 pre-screen reject: {pres.reject_reason or ''}"
+                    )
+                    a.is_simulated = True
+                    a.simulation_success = False
+                # Build log row (all modes)
+                _q10_rows.append({
+                    "task_id": _q10_task_id,
+                    "alpha_candidate_idx": idx,
+                    "brain_expression": pres.brain_expression,
+                    "expression_hash": hashlib.sha256(
+                        (pres.brain_expression or "").encode("utf-8")
+                    ).hexdigest()[:64],
+                    "qlib_expression": pres.qlib_expression,
+                    "region": pres.region, "universe": pres.universe,
+                    "verdict": pres.verdict,
+                    "reject_reason": pres.reject_reason,
+                    "skip_reason": pres.skip_reason,
+                    "translation_error": pres.translation_error,
+                    "local_sharpe": pres.local_sharpe,
+                    "local_ic": pres.local_ic,
+                    "engine_kind": pres.engine_kind,
+                    "elapsed_ms": pres.elapsed_ms,
+                    "mode_at_call": pres.mode_at_call,
+                })
+
+            # In hard mode reduce indices_to_simulate
+            if _q10_rejects:
+                rejects_set = set(_q10_rejects)
+                indices_to_simulate = [i for i in indices_to_simulate if i not in rejects_set]
+                logger.info(
+                    f"[{node_name}] Q10 hard mode skipped={len(_q10_rejects)} "
+                    f"keep={len(indices_to_simulate)}"
+                )
+
+            # Batch-INSERT log rows on dedicated session per plan §6.4 — soft-fail
+            if _q10_rows:
+                try:
+                    from backend.database import AsyncSessionLocal as _Q10_SessionLocal
+                    from backend.models.qlib_prescreen_log import QlibPrescreenLog
+                    async with _Q10_SessionLocal() as _q10_db:
+                        for r in _q10_rows:
+                            _q10_db.add(QlibPrescreenLog(**r))
+                        await _q10_db.commit()
+                    logger.info(
+                        f"[{node_name}] Q10 wrote {len(_q10_rows)} prescreen_log rows "
+                        f"(mode={_q10_mode})"
+                    )
+                except Exception as _q10_db_ex:
+                    logger.warning(
+                        f"[{node_name}] Q10 log write failed (round unaffected): {_q10_db_ex}"
+                    )
+        except Exception as _q10_e:
+            logger.warning(f"[{node_name}] Q10 prescreen block failed (proceed full BRAIN): {_q10_e}")
 
     # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier filter.
     # When ENABLE_PRE_SIMULATE_FILTER=True, predict P(PASS) per candidate
