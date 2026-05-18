@@ -42,6 +42,13 @@ DAG_SCHEMA_VERSION = 1
 
 VALID_STATUSES = ("active", "inactive", "family_capped", "error")
 
+# Re-expansion threshold (plan §4.2 hybrid intent): an internal (non-leaf)
+# active node remains eligible for `select_next_parent` while its n_pulls
+# is below this threshold. Otherwise the original leaf-only filter caused
+# every parent to be expanded exactly once → DAG grew wide-only and UCB1
+# n_pulls on internal nodes was meaningless.
+N_PULLS_RE_EXPAND_THRESHOLD = 3
+
 
 def _now_iso() -> str:
     """ISO-8601 UTC timestamp for created_at fields."""
@@ -203,10 +210,12 @@ def select_next_parent(
     ucb_c: float = 1.4,
     rng: Optional[random.Random] = None,
 ) -> Optional[str]:
-    """Pick the next leaf to expand. Returns node_id or None when no eligible.
+    """Pick the next parent to expand. Returns node_id or None when no eligible.
 
     Algorithm per plan §4.2 (hybrid UCB1 + Thompson cold-start):
-      1. Collect eligible leaves (status='active', no children)
+      1. Collect eligible parents: active AND (leaf OR n_pulls<N_PULLS_RE_EXPAND_THRESHOLD)
+         — leaf-only would cause every internal node to be expanded exactly once,
+         making UCB1 n_pulls on internal nodes meaningless (Bug #9 review fix).
       2. Partition by warmth: cold = n_pulls < cold_threshold; warm = rest
       3. only-cold: Thompson sample each Beta(α + r*n, β + (1-r)*n) → argmax
       4. only-warm: UCB1 score = (r/n) + c * sqrt(ln(total_pulls)/n) → argmax
@@ -215,7 +224,11 @@ def select_next_parent(
     rng = rng or random
     leaves = [
         n for n in dag["nodes"].values()
-        if (n.get("status") or "active") == "active" and not n.get("children")
+        if (n.get("status") or "active") == "active"
+        and (
+            not n.get("children")
+            or int(n.get("n_pulls", 0) or 0) < N_PULLS_RE_EXPAND_THRESHOLD
+        )
     ]
     if not leaves:
         return None
@@ -414,6 +427,7 @@ def from_dict(d: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 __all__ = [
     "DAG_SCHEMA_VERSION",
     "VALID_STATUSES",
+    "N_PULLS_RE_EXPAND_THRESHOLD",
     "init_dag",
     "add_node",
     "update_reward",

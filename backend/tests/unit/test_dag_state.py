@@ -201,9 +201,11 @@ def test_select_next_parent_skips_inactive():
     n1 = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
     n2 = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
     mark_status(d, n1, "inactive")
-    # n2 is the only active leaf (root has children → not a leaf)
+    # Bug #9 fix: root (internal, n_pulls<3) is now also eligible for re-expansion.
+    # Eligible set = {root, n2}; n1 (inactive) excluded. Either valid; assert no inactive.
     sel = select_next_parent(d, cold_threshold=3)
-    assert sel == n2
+    assert sel in (d["root_id"], n2)
+    assert sel != n1
 
 
 def test_select_next_parent_skips_family_capped():
@@ -211,8 +213,10 @@ def test_select_next_parent_skips_family_capped():
     n1 = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
     n2 = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
     mark_status(d, n1, "family_capped")
+    # Bug #9 fix: root also eligible (internal + n_pulls<3); n1 (family_capped) excluded.
     sel = select_next_parent(d, cold_threshold=3)
-    assert sel == n2
+    assert sel in (d["root_id"], n2)
+    assert sel != n1
 
 
 def test_select_next_parent_no_eligible_returns_none():
@@ -221,8 +225,39 @@ def test_select_next_parent_no_eligible_returns_none():
     assert select_next_parent(d) is None
 
 
+def test_select_next_parent_internal_eligible_below_threshold():
+    """Bug #9 fix: internal node with n_pulls<N_PULLS_RE_EXPAND_THRESHOLD
+    remains eligible so promising subtrees can re-expand (plan §4.2 hybrid)."""
+    from backend.agents.graph.dag_state import N_PULLS_RE_EXPAND_THRESHOLD
+    assert N_PULLS_RE_EXPAND_THRESHOLD == 3
+    d = init_dag(run_id=1)
+    # Add one child → root is now internal with n_pulls=0 (below threshold).
+    child = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
+    # Mark child inactive so root is the only active eligible candidate.
+    mark_status(d, child, "inactive")
+    sel = select_next_parent(d, cold_threshold=3)
+    assert sel == d["root_id"]  # internal node re-eligible
+
+
+def test_select_next_parent_internal_excluded_above_threshold():
+    """Bug #9 fix boundary: once internal n_pulls >= threshold, only its
+    descendant leaves are eligible (legacy leaf-only semantics restored)."""
+    d = init_dag(run_id=1)
+    child = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
+    # Push root past N_PULLS_RE_EXPAND_THRESHOLD=3
+    for _ in range(3):
+        update_reward(d, d["root_id"], 0.5)
+    assert d["nodes"][d["root_id"]]["n_pulls"] == 3
+    sel = select_next_parent(d, cold_threshold=3)
+    assert sel == child  # root no longer eligible (internal + n_pulls>=3)
+
+
 def test_select_next_parent_warm_picks_high_score():
-    """All warm — UCB1 picks high-reward leaf (deterministic since no rng)."""
+    """All warm — UCB1 picks high-reward leaf (deterministic since no rng).
+
+    Bug #9 fix: root is now internal+cold (eligible for re-expansion); warm
+    root above the re-expand threshold to keep this test about pure UCB1.
+    """
     d = init_dag(run_id=1)
     # Make root non-leaf
     n_low = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
@@ -231,12 +266,20 @@ def test_select_next_parent_warm_picks_high_score():
     for _ in range(5):
         update_reward(d, n_low, 0.2)
         update_reward(d, n_high, 0.8)
+    # Warm root too (push past N_PULLS_RE_EXPAND_THRESHOLD=3) with low reward
+    # so it's no longer eligible as an internal node.
+    for _ in range(5):
+        update_reward(d, d["root_id"], 0.1)
     sel = select_next_parent(d, cold_threshold=3, ucb_c=0.0)  # c=0 → exploit only
     assert sel == n_high
 
 
 def test_select_next_parent_cold_uses_thompson():
-    """Cold path uses Beta sampling — deterministic via seeded rng."""
+    """Cold path uses Beta sampling — deterministic via seeded rng.
+
+    Bug #9 fix: root is also a cold internal node, so it joins the eligible
+    pool. Assert that some cold node is selected (root, n1, or n2 all valid).
+    """
     d = init_dag(run_id=1)
     n1 = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
     n2 = add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)
@@ -244,8 +287,8 @@ def test_select_next_parent_cold_uses_thompson():
     update_reward(d, n2, 0.1)  # 1 pull, cold
     rng = random.Random(42)
     sel = select_next_parent(d, cold_threshold=3, rng=rng)
-    # Selected one of the two cold leaves
-    assert sel in (n1, n2)
+    # Selected one of the three eligible cold nodes (root joined post-Bug-#9 fix)
+    assert sel in (d["root_id"], n1, n2)
 
 
 # ---------------------------------------------------------------------------
