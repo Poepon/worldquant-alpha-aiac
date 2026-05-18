@@ -347,7 +347,7 @@ class ExperimentTrace:
         """Get trace statistics."""
         successful = self.get_successful_experiments()
         failed = self.get_failed_experiments()
-        
+
         return {
             "total_experiments": len(self.hist),
             "successful": len(successful),
@@ -357,3 +357,35 @@ class ExperimentTrace:
             "max_depth": max(len(self.get_parents(i)) for i in range(len(self.hist))) if self.hist else 0,
             "knowledge_rules": len(self.knowledge_base.rules),
         }
+
+    # === Phase 2 R6 adapter (plan v1.0 §3, 2026-05-18) ===
+    # Minimal R6-v1 adapter for ExperimentRun.runtime_state["dag"] JSONB.
+    # The runtime DAG state lives in `backend/agents/graph/dag_state.py` as
+    # pure-function helpers — this class stays DORMANT in production except
+    # for these two adapter methods. R6-v1 does NOT instantiate
+    # ExperimentTrace itself; the JSONB dict and helpers are the production
+    # interface. Adapter exists for future R6-v2 / pipeline.py integration.
+
+    def to_runtime_state_dict(self) -> Dict[str, Any]:
+        """Serialize trace's `current_selection` + DAG-relevant fields to the
+        JSONB-friendly shape expected by `runtime_state["dag"]`. R6-v1 callers
+        should prefer `dag_state.init_dag()` / `add_node()` directly; this is
+        for forward-compat with R6-v2 when the in-memory ExperimentTrace
+        becomes the source of truth.
+        """
+        return {
+            "v": 1,
+            "in_memory_only": True,
+            "current_selection_tuple": list(self.current_selection),
+            "hist_length": len(self.hist),
+            "stats": self.get_stats(),
+        }
+
+    @classmethod
+    def from_runtime_state_dict(cls, d: Optional[Dict[str, Any]]) -> Optional["ExperimentTrace"]:
+        """Inverse of to_runtime_state_dict — currently returns None in R6-v1
+        because reconstructing AlphaExperiment/Hypothesis objects from JSONB
+        requires the full Pipeline. R6-v2 may flesh this out. Callers should
+        not depend on a non-None return.
+        """
+        return None

@@ -272,6 +272,23 @@ class Settings(BaseSettings):
     # 默认 OFF — flag ON 后 retry_count 行为不变(LLM 仍 1-3 次,reject 占 1 次)。
     ENABLE_SELF_CORRECT_SEMI_ACCEPT: bool = False
 
+    # ----- Phase 2 R6 DAG Trace (MCTS-lite, 2026-05-18) -----
+    # 替换 linear T1→T2→T3 cascade_phase scalar 推进为 DAG-structured
+    # multi-branch trace persisted in experiment_runs.runtime_state["dag"] JSONB
+    # (Phase 1.5-A 已加 col,无 Alembic 需要)。R6-v1 简化-MCTS(best-path expand
+    # + reward backprop);full UCT 推 R6-v2。
+    # 落地:backend/agents/graph/dag_state.py 纯函数 helpers + mining_tasks.py
+    # 集成 + _resolve_cascade_phase 3-层 fallback(DAG → current_tier → cascade_phase)。
+    # 默认 OFF — 翻 OFF 时 phase15-C 路径不变 byte-equivalent。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: ~/.claude/plans/phase2-r6-dag-2026-05-18.md v1.0
+    ENABLE_DAG_TRACE: bool = False
+    DAG_MAX_NODES: int = 100               # write-side hard cap (~25KB at avg 250B/node)
+    DAG_MAX_DEPTH: int = 10                # parent-chain depth cap
+    DAG_UCB_EXPLORATION_C: float = 1.4     # UCB1 c parameter (warm leaves)
+    DAG_COLD_THRESHOLD: int = 3            # n_pulls < this → Thompson sampling
+    DAG_PRUNE_LRU_KEEP_FRACTION: float = 0.7  # prune keeps top 70% by reward/LRU
+
     # ----- Phase 2 R10 Family-cap (Hubble v2 Table 1, 2026-05-18) -----
     # 同 pillar 同 family(operator-sequence signature)只保留 top-K=2 by score。
     # 防止一个 op pipeline 在评估批次刷榜挤掉异质 alpha。

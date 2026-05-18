@@ -167,6 +167,24 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase3-flatF1",
         description="启用 FLAT_CONTINUOUS mining_mode (与 legacy CONTINUOUS_CASCADE 并行)。Hypothesis-driven flat session — dataset × hypothesis 迭代,无 T1→T2→T3 级联。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。默认 OFF,flat-F2 后续 PR 翻默认。",
     ),
+    # --- Phase 2 R6: DAG Trace (MCTS-lite) ---
+    "ENABLE_DAG_TRACE": FlagSpec(
+        name="ENABLE_DAG_TRACE",
+        flag_type="bool",
+        group="Phase2-R6",
+        description=(
+            "Phase 2 R6 (RD-Agent v0.8.0 MCTS-lite): 启用 DAG-structured "
+            "multi-branch trace persisted in experiment_runs.runtime_state['dag'] "
+            "JSONB,替换 linear cascade_phase scalar 推进。"
+            "Selection: UCB1-lite + Thompson cold-start(per-leaf, not per-arm)。"
+            "Reward 3-tier fallback: composite_score (R5+R1a) > sharpe > 0.0。"
+            "Family-cap (R10) dropped 标 status='inactive' 不复用。"
+            "100-node write-side hard cap, prune LRU+reward 保 parent chain。"
+            "Rollback flip OFF: in-flight DAG 数据保留(forensic),下次 round "
+            "走 phase15-C runtime_state['current_tier'] → cascade_phase chain。"
+            "Phase 3 flat-F2 cascade 退役硬前置。"
+        ),
+    ),
     # --- Phase 2 R7: Co-STEER self-correct 半接受 ---
     "ENABLE_SELF_CORRECT_SEMI_ACCEPT": FlagSpec(
         name="ENABLE_SELF_CORRECT_SEMI_ACCEPT",
