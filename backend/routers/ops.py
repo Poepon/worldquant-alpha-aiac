@@ -2196,6 +2196,161 @@ async def r9_cache_stats(
 
 
 # =============================================================================
+# Phase 2 R5 — LLM Judge cost + agreement telemetry (2026-05-18)
+# =============================================================================
+# Complements /ops/r1a/telemetry which already reports
+# r5_agrees_r1a_pct / r5_avg_composite_score / r5_total_cost_usd / r5_sample_size.
+# This endpoint adds the R5-internal metrics: per-judge cost, c1/c2 align rates,
+# c1↔c2 internal agreement (the real critic-disagreement signal), error rate,
+# cost outlier, and composite-score distribution buckets.
+#
+# Schema reused: backend/models/r1a_attribution.py R1aAttributionLog has 10
+# R5 columns (r5_c1_aligned/confidence/reason, r5_c2_*, r5_composite_score,
+# r5_agrees_r1a, r5_hook_error, r5_cost_usd). No pillar/region columns on
+# r1a_log, so this endpoint is pillar-agnostic (operator wants pillar split
+# can JOIN hypothesis later if demand emerges).
+
+
+class R5CompositeBucket(BaseModel):
+    bucket: str       # "0.7-1.0" | "0.5-0.7" | "0.0-0.5"
+    count: int
+
+
+class R5JudgeStatsOut(BaseModel):
+    flags: Dict[str, bool]
+
+    total_judges_run: int           # rows with r5_composite_score IS NOT NULL
+    total_attempts: int             # judges_run + hook_errors (denominator for error_rate)
+    error_count: int                # r5_hook_error IS NOT NULL
+    error_rate: float
+
+    total_cost_usd: float
+    avg_cost_per_judge: float
+    max_cost_per_judge: float
+
+    c1_align_rate: float            # r5_c1_aligned='true' / r5_c1_aligned IS NOT NULL
+    c2_align_rate: float
+    c1_avg_confidence: float
+    c2_avg_confidence: float
+    c1_c2_internal_agreement: float # COUNT(c1=c2) / COUNT(both not null) — real critic agreement
+
+    avg_composite_score: float
+    composite_score_buckets: List[R5CompositeBucket]
+
+    healthy_gates: Dict[str, float]
+    is_healthy: bool
+
+    window_days: int
+
+
+@router.get("/r5/judge-stats", response_model=R5JudgeStatsOut)
+async def r5_judge_stats(
+    days: int = 7,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> R5JudgeStatsOut:
+    """R5 LLM judge internal telemetry — cost-per-judge + c1/c2 alignment.
+
+    Healthy R5 deploy: ``avg_cost_per_judge <= $0.010`` (deploy GO gate),
+    ``c1_c2_internal_agreement >= 0.6`` (two critics genuinely independent
+    but mostly consistent — if 1.0 the second critic is redundant; if <0.5
+    they're disagreeing more than chance and the composite score is noise),
+    ``error_rate <= 0.05`` (LLM call failures rare), and
+    ``total_judges_run >= 30`` for stable averages.
+
+    Per-region / per-pillar splits intentionally omitted — r1a_attribution_log
+    carries neither column. To add per-pillar would require expression_hash
+    JOIN through alphas → hypothesis; defer until operator requests it.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_LLM_JUDGE": bool(getattr(_stg, "ENABLE_LLM_JUDGE", False)),
+    }
+
+    row = (await db.execute(_text(
+        "SELECT "
+        "  COUNT(*) FILTER (WHERE r5_composite_score IS NOT NULL) AS judges, "
+        "  COUNT(*) FILTER (WHERE r5_hook_error IS NOT NULL) AS errs, "
+        "  COALESCE(SUM(r5_cost_usd), 0.0) AS total_cost, "
+        "  COALESCE(AVG(r5_cost_usd), 0.0) AS avg_cost, "
+        "  COALESCE(MAX(r5_cost_usd), 0.0) AS max_cost, "
+        "  COUNT(*) FILTER (WHERE r5_c1_aligned = 'true') AS c1_true, "
+        "  COUNT(*) FILTER (WHERE r5_c1_aligned IS NOT NULL) AS c1_total, "
+        "  COUNT(*) FILTER (WHERE r5_c2_aligned = 'true') AS c2_true, "
+        "  COUNT(*) FILTER (WHERE r5_c2_aligned IS NOT NULL) AS c2_total, "
+        "  COALESCE(AVG(r5_c1_confidence), 0.0) AS c1_conf, "
+        "  COALESCE(AVG(r5_c2_confidence), 0.0) AS c2_conf, "
+        "  COUNT(*) FILTER (WHERE r5_c1_aligned IS NOT NULL AND r5_c2_aligned IS NOT NULL) AS both_present, "
+        "  COUNT(*) FILTER (WHERE r5_c1_aligned IS NOT NULL AND r5_c1_aligned = r5_c2_aligned) AS both_agree, "
+        "  COALESCE(AVG(r5_composite_score), 0.0) AS avg_score, "
+        "  COUNT(*) FILTER (WHERE r5_composite_score >= 0.7) AS hi, "
+        "  COUNT(*) FILTER (WHERE r5_composite_score >= 0.5 AND r5_composite_score < 0.7) AS mid, "
+        "  COUNT(*) FILTER (WHERE r5_composite_score >= 0.0 AND r5_composite_score < 0.5) AS lo "
+        "FROM r1a_attribution_log "
+        "WHERE created_at > now() - (:days || ' day')::interval"
+    ), {"days": str(int(days))})).one()
+
+    (judges, errs, total_cost, avg_cost, max_cost,
+     c1_true, c1_total, c2_true, c2_total,
+     c1_conf, c2_conf,
+     both_present, both_agree,
+     avg_score, hi, mid, lo) = row
+
+    judges_int = int(judges or 0)
+    errs_int = int(errs or 0)
+    total_attempts = judges_int + errs_int
+    error_rate = round(errs_int / total_attempts, 4) if total_attempts > 0 else 0.0
+
+    c1_total_int = int(c1_total or 0)
+    c2_total_int = int(c2_total or 0)
+    c1_rate = round(int(c1_true or 0) / c1_total_int, 4) if c1_total_int > 0 else 0.0
+    c2_rate = round(int(c2_true or 0) / c2_total_int, 4) if c2_total_int > 0 else 0.0
+
+    both_int = int(both_present or 0)
+    internal_agree = round(int(both_agree or 0) / both_int, 4) if both_int > 0 else 0.0
+
+    avg_cost_f = round(float(avg_cost or 0.0), 6)
+    healthy = (
+        avg_cost_f <= 0.010
+        and internal_agree >= 0.60
+        and error_rate <= 0.05
+        and judges_int >= 30
+    )
+
+    return R5JudgeStatsOut(
+        flags=flags,
+        total_judges_run=judges_int,
+        total_attempts=total_attempts,
+        error_count=errs_int,
+        error_rate=error_rate,
+        total_cost_usd=round(float(total_cost or 0.0), 4),
+        avg_cost_per_judge=avg_cost_f,
+        max_cost_per_judge=round(float(max_cost or 0.0), 6),
+        c1_align_rate=c1_rate,
+        c2_align_rate=c2_rate,
+        c1_avg_confidence=round(float(c1_conf or 0.0), 4),
+        c2_avg_confidence=round(float(c2_conf or 0.0), 4),
+        c1_c2_internal_agreement=internal_agree,
+        avg_composite_score=round(float(avg_score or 0.0), 4),
+        composite_score_buckets=[
+            R5CompositeBucket(bucket="0.7-1.0", count=int(hi or 0)),
+            R5CompositeBucket(bucket="0.5-0.7", count=int(mid or 0)),
+            R5CompositeBucket(bucket="0.0-0.5", count=int(lo or 0)),
+        ],
+        healthy_gates={
+            "avg_cost_per_judge_max": 0.010,
+            "c1_c2_internal_agreement_min": 0.60,
+            "error_rate_max": 0.05,
+            "min_judges_run": 30,
+        },
+        is_healthy=healthy,
+        window_days=int(days),
+    )
+
+
+# =============================================================================
 # Phase 15-D PR2 — operator cascade drain (2026-05-18)
 # =============================================================================
 # Idempotent drain action: convert PAUSED CONTINUOUS_CASCADE rows to

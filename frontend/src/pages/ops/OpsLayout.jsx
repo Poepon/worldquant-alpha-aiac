@@ -13,6 +13,7 @@ import LLMOpMonitor from './LLMOpMonitor'
 import CoSTEERMonitor from './CoSTEERMonitor'
 import BrainRoleSwitch from './BrainRoleSwitch'
 import SimulationCacheMonitor from './SimulationCacheMonitor'
+import LLMJudgeMonitor from './LLMJudgeMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -67,6 +68,8 @@ export default function OpsLayout() {
         <Route path="brain-role" element={<BrainRoleSwitch />} />
         {/* Phase 3 R9 — simulation cache telemetry (2026-05-18) */}
         <Route path="r9-cache" element={<SimulationCacheMonitor />} />
+        {/* Phase 2 R5 — LLM judge cost + c1/c2 telemetry (2026-05-18) */}
+        <Route path="r5-judge" element={<LLMJudgeMonitor />} />
       </Routes>
     </div>
   )

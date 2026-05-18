@@ -1,0 +1,301 @@
+import { useQuery } from '@tanstack/react-query'
+import {
+  Alert,
+  Card,
+  Col,
+  Empty,
+  InputNumber,
+  List,
+  Progress,
+  Row,
+  Space,
+  Spin,
+  Statistic,
+  Tag,
+  Tooltip,
+  Typography,
+} from 'antd'
+import {
+  CheckCircleOutlined,
+  CloseCircleOutlined,
+  DollarOutlined,
+  ExperimentOutlined,
+  InfoCircleOutlined,
+} from '@ant-design/icons'
+import { useState } from 'react'
+import api from '../../services/api'
+
+const { Title, Text } = Typography
+
+export default function LLMJudgeMonitor() {
+  const [days, setDays] = useState(7)
+  const { data, isLoading, error, isFetching } = useQuery({
+    queryKey: ['ops/r5/judge-stats', days],
+    queryFn: () => api.getOpsR5JudgeStats(days),
+    refetchInterval: 60_000,
+  })
+
+  if (isLoading) {
+    return (
+      <div style={{ textAlign: 'center', padding: 80 }}>
+        <Spin size="large" />
+      </div>
+    )
+  }
+  if (error) {
+    return (
+      <Alert
+        type="error"
+        showIcon
+        message="加载 R5 LLM Judge stats 失败"
+        description={error?.response?.data?.detail || error?.message || '未知错误'}
+      />
+    )
+  }
+  if (!data) return <Empty description="无 R5 数据" />
+
+  const flagOn = data.flags?.ENABLE_LLM_JUDGE
+  const gates = data.healthy_gates || {}
+  const buckets = data.composite_score_buckets || []
+  const bucketTotal = buckets.reduce((s, b) => s + b.count, 0)
+
+  // Each healthy gate: { key, ok, value, threshold, label }
+  const gateChecks = [
+    {
+      key: 'cost',
+      label: '每次 judge 成本',
+      value: `$${data.avg_cost_per_judge.toFixed(6)}`,
+      ok: data.avg_cost_per_judge <= gates.avg_cost_per_judge_max,
+      threshold: `≤ $${gates.avg_cost_per_judge_max}`,
+    },
+    {
+      key: 'agree',
+      label: 'c1↔c2 内部一致率',
+      value: `${(data.c1_c2_internal_agreement * 100).toFixed(1)}%`,
+      ok: data.c1_c2_internal_agreement >= gates.c1_c2_internal_agreement_min,
+      threshold: `≥ ${(gates.c1_c2_internal_agreement_min * 100).toFixed(0)}%`,
+    },
+    {
+      key: 'err',
+      label: 'LLM 错误率',
+      value: `${(data.error_rate * 100).toFixed(1)}%`,
+      ok: data.error_rate <= gates.error_rate_max,
+      threshold: `≤ ${(gates.error_rate_max * 100).toFixed(0)}%`,
+    },
+    {
+      key: 'sample',
+      label: 'judge 样本量',
+      value: data.total_judges_run,
+      ok: data.total_judges_run >= gates.min_judges_run,
+      threshold: `≥ ${gates.min_judges_run}`,
+    },
+  ]
+
+  return (
+    <div>
+      <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
+        <Title level={3} style={{ margin: 0 }}>
+          <ExperimentOutlined style={{ marginRight: 8 }} />
+          R5 LLM Judge
+        </Title>
+        <Space>
+          <Text type="secondary">窗口(天):</Text>
+          <InputNumber
+            min={1}
+            max={90}
+            value={days}
+            onChange={(v) => setDays(v || 7)}
+            style={{ width: 80 }}
+          />
+          {isFetching && <Spin size="small" />}
+        </Space>
+      </Space>
+
+      <Alert
+        type={data.is_healthy ? 'success' : 'warning'}
+        showIcon
+        style={{ marginBottom: 16 }}
+        message={
+          <Space>
+            <span>ENABLE_LLM_JUDGE:</span>
+            <Tag color={flagOn ? 'green' : 'default'}>{String(flagOn)}</Tag>
+            <span>·</span>
+            <span>整体 deploy 健康度:</span>
+            <Tag color={data.is_healthy ? 'success' : 'warning'}>
+              {data.is_healthy ? '全 gate 通过' : '部分 gate 未达标'}
+            </Tag>
+          </Space>
+        }
+        description={
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            R1a telemetry 已含 R5 总览（agreement vs R1a、composite 均值、总 cost）。
+            本页聚焦 R5 内部:cost-per-judge、c1↔c2 critic 间一致率、错误率、composite 分布。
+          </Text>
+        }
+      />
+
+      {/* Healthy-gate 4 卡片 */}
+      <Row gutter={[16, 16]}>
+        {gateChecks.map((g) => (
+          <Col key={g.key} xs={12} sm={6}>
+            <Card className="glass-card">
+              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <Space>
+                  {g.ok ? (
+                    <CheckCircleOutlined style={{ color: '#00ff88' }} />
+                  ) : (
+                    <CloseCircleOutlined style={{ color: '#ff4d4f' }} />
+                  )}
+                  <Text>{g.label}</Text>
+                </Space>
+                <Text strong style={{ fontSize: 22, color: g.ok ? '#00ff88' : '#ffb700' }}>
+                  {g.value}
+                </Text>
+                <Text type="secondary" style={{ fontSize: 11 }}>
+                  门槛 {g.threshold}
+                </Text>
+              </Space>
+            </Card>
+          </Col>
+        ))}
+      </Row>
+
+      {/* Cost + Volume 行 */}
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} sm={8}>
+          <Card className="glass-card" size="small" title="累计 cost (USD)">
+            <Statistic
+              value={data.total_cost_usd}
+              precision={4}
+              prefix={<DollarOutlined />}
+              valueStyle={{ color: '#9c88ff' }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              单 judge 最高 ${data.max_cost_per_judge.toFixed(6)}
+            </Text>
+          </Card>
+        </Col>
+        <Col xs={24} sm={8}>
+          <Card className="glass-card" size="small" title="judge 量">
+            <Statistic
+              value={data.total_judges_run}
+              suffix={
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  / 总尝试 {data.total_attempts}
+                </Text>
+              }
+              valueStyle={{ color: '#00d4ff' }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              错误 {data.error_count} 条
+            </Text>
+          </Card>
+        </Col>
+        <Col xs={24} sm={8}>
+          <Card className="glass-card" size="small" title="平均 composite score">
+            <Statistic
+              value={data.avg_composite_score}
+              precision={4}
+              valueStyle={{ color: '#ffb700' }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              AlphaAgent Eq.7 α=0.5
+            </Text>
+          </Card>
+        </Col>
+      </Row>
+
+      {/* c1 / c2 critic 详情 */}
+      <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
+        <Col xs={24} sm={12}>
+          <Card
+            className="glass-card"
+            size="small"
+            title={
+              <Space>
+                c1 — hyp↔desc critic
+                <Tooltip title="第一 critic 校验 hypothesis 与 description 是否对齐">
+                  <InfoCircleOutlined style={{ color: '#9c88ff' }} />
+                </Tooltip>
+              </Space>
+            }
+          >
+            <Statistic
+              title="对齐率"
+              value={data.c1_align_rate * 100}
+              precision={1}
+              suffix="%"
+              valueStyle={{ color: '#00d4ff' }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              平均信心 {data.c1_avg_confidence.toFixed(3)}
+            </Text>
+          </Card>
+        </Col>
+        <Col xs={24} sm={12}>
+          <Card
+            className="glass-card"
+            size="small"
+            title={
+              <Space>
+                c2 — desc↔expr critic
+                <Tooltip title="第二 critic 校验 description 与 expression 是否对齐">
+                  <InfoCircleOutlined style={{ color: '#9c88ff' }} />
+                </Tooltip>
+              </Space>
+            }
+          >
+            <Statistic
+              title="对齐率"
+              value={data.c2_align_rate * 100}
+              precision={1}
+              suffix="%"
+              valueStyle={{ color: '#00d4ff' }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              平均信心 {data.c2_avg_confidence.toFixed(3)}
+            </Text>
+          </Card>
+        </Col>
+      </Row>
+
+      {/* composite 分布 */}
+      <Card
+        className="glass-card"
+        title="composite score 分布"
+        style={{ marginTop: 16 }}
+      >
+        {bucketTotal === 0 ? (
+          <Empty description="窗口内无 composite score 数据" />
+        ) : (
+          <List
+            size="small"
+            dataSource={buckets}
+            renderItem={(b) => {
+              const pct = bucketTotal > 0 ? (b.count / bucketTotal) * 100 : 0
+              const color =
+                b.bucket === '0.7-1.0' ? '#00ff88' : b.bucket === '0.5-0.7' ? '#ffb700' : '#ff4d4f'
+              return (
+                <List.Item>
+                  <Space direction="vertical" style={{ width: '100%' }} size={4}>
+                    <Space>
+                      <Tag color={color}>{b.bucket}</Tag>
+                      <Text>{b.count} 条</Text>
+                      <Text type="secondary">({pct.toFixed(1)}%)</Text>
+                    </Space>
+                    <Progress
+                      percent={pct}
+                      showInfo={false}
+                      strokeColor={color}
+                      size="small"
+                    />
+                  </Space>
+                </List.Item>
+              )
+            }}
+          />
+        )}
+      </Card>
+    </div>
+  )
+}

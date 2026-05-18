@@ -603,6 +603,13 @@ const api = {
     return data
   },
 
+  // R5 LLM Judge telemetry (2026-05-18) — complements /ops/r1a/telemetry
+  // with per-judge cost + c1/c2 internal agreement + composite distribution
+  getOpsR5JudgeStats: async (days = 7) => {
+    const { data } = await client.get('/ops/r5/judge-stats', { params: { days } })
+    return data
+  },
+
   // flat-F1 advanced kickoff (2026-05-18). Gated server-side by
   // ENABLE_FLAT_CONTINUOUS — flag OFF returns HTTP 400 with detail string.
   startFlatSession: async ({ region, universe, datasets = [] }) => {
