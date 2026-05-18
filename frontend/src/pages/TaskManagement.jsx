@@ -11,12 +11,14 @@ import {
   Space,
   Typography,
   Modal,
+  Drawer,
   Form,
   Input,
   Select,
   InputNumber,
   message,
   Alert,
+  Tooltip as AntdTooltip,
 } from 'antd'
 import {
   PlusOutlined,
@@ -24,11 +26,14 @@ import {
   PlayCircleOutlined,
   PauseCircleOutlined,
   EyeOutlined,
+  RocketOutlined,
 } from '@ant-design/icons'
 import api from '../services/api'
+import { formatRelative } from '../utils/time'
 
 const { Title } = Typography
 const { Option } = Select
+const { Search } = Input
 
 // V-19 Persistent Mining Service: backend supports these regions
 // phase15-D PR4b (2026-05-18): SESSION_REGIONS + SESSION_REGION_UNIVERSE
@@ -77,6 +82,10 @@ export default function TaskManagement() {
   const [datasetStrategy, setDatasetStrategy] = useState('AUTO')
   const [selectedRegion, setSelectedRegion] = useState('USA')
   const [agentMode, setAgentMode] = useState('AUTONOMOUS')
+  const [searchText, setSearchText] = useState('')
+  const [isFlatDrawerOpen, setIsFlatDrawerOpen] = useState(false)
+  const [flatRegion, setFlatRegion] = useState('USA')
+  const [flatForm] = Form.useForm()
 
   // V-19: persistent mining service — primary single-button surface
   // phase15-D PR4b (2026-05-18): sessionRegion state + V-19 cascade
@@ -165,6 +174,33 @@ export default function TaskManagement() {
       queryClient.invalidateQueries(['tasks'])
     },
   })
+
+  // flat-F1 advanced kickoff — gated by ENABLE_FLAT_CONTINUOUS (backend 400)
+  const startFlatSessionMutation = useMutation({
+    mutationFn: api.startFlatSession,
+    onSuccess: (info) => {
+      message.success(`Flat Session 已启动 — task #${info.task_id} (${info.region}/${info.universe})`)
+      queryClient.invalidateQueries(['tasks'])
+      setIsFlatDrawerOpen(false)
+      flatForm.resetFields()
+    },
+    onError: (err) => {
+      const detail = err?.response?.data?.detail || err?.message || '未知错误'
+      message.error(`启动失败：${detail}`)
+    },
+  })
+
+  const handleStartFlatSession = (values) => {
+    const datasetsList = (values.datasets || '')
+      .split(/[\s,，\n]+/)
+      .map((s) => s.trim())
+      .filter(Boolean)
+    startFlatSessionMutation.mutate({
+      region: values.region,
+      universe: values.universe,
+      datasets: datasetsList,
+    })
+  }
 
   const handleCreateTask = (values) => {
     // Format target_datasets as a list if it exists
@@ -268,8 +304,12 @@ export default function TaskManagement() {
       title: '创建时间',
       dataIndex: 'created_at',
       key: 'created_at',
-      width: 180,
-      render: (date) => new Date(date).toLocaleString(),
+      width: 110,
+      render: (date) => (
+        <AntdTooltip title={date ? new Date(date).toLocaleString() : ''}>
+          <span>{formatRelative(date)}</span>
+        </AntdTooltip>
+      ),
     },
     {
       title: '操作',
@@ -324,24 +364,151 @@ export default function TaskManagement() {
           </Title>
         </Col>
         <Col>
-          <Button
-            icon={<PlusOutlined />}
-            onClick={() => setIsModalOpen(true)}
-          >
-            创建离散任务
-          </Button>
+          <Space>
+            <Button
+              type="primary"
+              icon={<RocketOutlined />}
+              onClick={() => {
+                setIsFlatDrawerOpen(true)
+                flatForm.setFieldsValue({
+                  region: 'USA',
+                  universe: 'TOP3000',
+                  datasets: '',
+                })
+                setFlatRegion('USA')
+              }}
+            >
+              启动 Flat Session
+            </Button>
+            <Button
+              icon={<PlusOutlined />}
+              onClick={() => setIsModalOpen(true)}
+            >
+              创建离散任务
+            </Button>
+          </Space>
         </Col>
       </Row>
 
       <Card className="glass-card">
+        <Search
+          placeholder="按任务名 / 地区 / 模式 / 状态搜索..."
+          allowClear
+          value={searchText}
+          onChange={(e) => setSearchText(e.target.value)}
+          style={{ marginBottom: 12, maxWidth: 360 }}
+        />
         <Table
           columns={columns}
-          dataSource={tasks || []}
+          dataSource={(tasks || []).filter((t) => {
+            if (!searchText) return true
+            const q = searchText.toLowerCase()
+            return (
+              (t.task_name || '').toLowerCase().includes(q) ||
+              (t.region || '').toLowerCase().includes(q) ||
+              (t.universe || '').toLowerCase().includes(q) ||
+              (t.agent_mode || '').toLowerCase().includes(q) ||
+              (t.schedule || '').toLowerCase().includes(q) ||
+              (t.status || '').toLowerCase().includes(q)
+            )
+          })}
           rowKey="id"
           loading={isLoading}
-          pagination={{ pageSize: 10 }}
+          pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
+          scroll={{ x: 1100 }}
         />
       </Card>
+
+      {/* flat-F1 advanced kickoff Drawer — gated by ENABLE_FLAT_CONTINUOUS flag */}
+      <Drawer
+        title={
+          <Space>
+            <RocketOutlined />
+            <span>启动 Flat Session</span>
+          </Space>
+        }
+        width={480}
+        open={isFlatDrawerOpen}
+        onClose={() => setIsFlatDrawerOpen(false)}
+        destroyOnHidden
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="Flat Continuous Mining"
+          description={
+            <span style={{ fontSize: 12 }}>
+              假设驱动的扁平挖掘会话，不走 T1→T2→T3 级联。
+              需先在 Ops Console 打开 <code>ENABLE_FLAT_CONTINUOUS</code> flag；
+              flag OFF 时本表单会返回 400 并提示。
+            </span>
+          }
+        />
+        <Form
+          form={flatForm}
+          layout="vertical"
+          onFinish={handleStartFlatSession}
+          initialValues={{ region: 'USA', universe: 'TOP3000', datasets: '' }}
+        >
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item
+                name="region"
+                label="地区"
+                rules={[{ required: true }]}
+              >
+                <Select
+                  onChange={(v) => {
+                    setFlatRegion(v)
+                    flatForm.setFieldsValue({ universe: (REGION_UNIVERSE_MAP[v] || [])[0] })
+                  }}
+                >
+                  {Object.entries(REGION_NAMES).map(([key, name]) => (
+                    <Option key={key} value={key}>{name}</Option>
+                  ))}
+                </Select>
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item
+                name="universe"
+                label="股票池"
+                rules={[{ required: true }]}
+              >
+                <Select>
+                  {(REGION_UNIVERSE_MAP[flatRegion] || []).map((u) => (
+                    <Option key={u} value={u}>{u}</Option>
+                  ))}
+                </Select>
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item
+            name="datasets"
+            label="数据集（可选）"
+            tooltip="留空 = AUTO（自动选 dataset）；多个用逗号或换行分隔，例：analyst10, news4"
+          >
+            <Input.TextArea
+              rows={3}
+              placeholder="留空 = AUTO；或填 dataset_id，例如：analyst10, news4"
+            />
+          </Form.Item>
+          <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
+            <Space>
+              <Button onClick={() => setIsFlatDrawerOpen(false)}>取消</Button>
+              <Button
+                type="primary"
+                htmlType="submit"
+                icon={<RocketOutlined />}
+                loading={startFlatSessionMutation.isPending}
+              >
+                启动
+              </Button>
+            </Space>
+          </Form.Item>
+        </Form>
+      </Drawer>
 
       {/* Create Task Modal */}
       <Modal

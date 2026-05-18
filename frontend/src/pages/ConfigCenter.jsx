@@ -533,7 +533,7 @@ export default function ConfigCenter() {
             dataSource={successPatterns || []}
             rowKey="id"
             loading={patternsLoading}
-            pagination={{ pageSize: 10 }}
+            pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
           />
         </Card>
       ),
@@ -553,7 +553,7 @@ export default function ConfigCenter() {
             dataSource={failurePitfalls || []}
             rowKey="id"
             loading={pitfallsLoading}
-            pagination={{ pageSize: 10 }}
+            pagination={{ pageSize: 20, showSizeChanger: true, showTotal: (t) => `共 ${t} 条` }}
           />
         </Card>
       ),

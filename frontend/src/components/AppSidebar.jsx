@@ -10,6 +10,7 @@ import {
   ApartmentOutlined,
   WarningOutlined,
   MonitorOutlined,
+  SwapOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -58,6 +59,7 @@ const menuItems = [
       { key: '/ops/regime', label: '市场体制' },
       { key: '/ops/llm-op-monitor', label: 'LLM 算子监控' },
       { key: '/ops/costeer', label: 'CoSTEER 循环监控 (R1a/R1b)' },
+      { key: '/ops/brain-role', icon: <SwapOutlined />, label: 'BRAIN 模式' },
     ],
   },
   {

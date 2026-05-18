@@ -31,6 +31,7 @@ import {
   ResponsiveContainer 
 } from 'recharts'
 import api from '../services/api'
+import { formatTime } from '../utils/time'
 
 const { Title, Text } = Typography
 
@@ -296,7 +297,7 @@ export default function Dashboard() {
                   }}>
                     <Space>
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        {item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : '--:--:--'}
+                        {formatTime(item.timestamp)}
                       </Text>
                       <Text>{item.message}</Text>
                     </Space>

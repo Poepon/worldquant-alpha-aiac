@@ -11,6 +11,7 @@ import MacroNarratives from './MacroNarratives'
 import Regime from './Regime'
 import LLMOpMonitor from './LLMOpMonitor'
 import CoSTEERMonitor from './CoSTEERMonitor'
+import BrainRoleSwitch from './BrainRoleSwitch'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -61,6 +62,8 @@ export default function OpsLayout() {
         <Route path="llm-op-monitor" element={<LLMOpMonitor />} />
         {/* Phase 3 R1b — CoSTEER loop telemetry (R1a + R1b + chain depth) */}
         <Route path="costeer" element={<CoSTEERMonitor />} />
+        {/* P3-Brain — BRAIN Consultant mode dedicated page (2026-05-18) */}
+        <Route path="brain-role" element={<BrainRoleSwitch />} />
       </Routes>
     </div>
   )

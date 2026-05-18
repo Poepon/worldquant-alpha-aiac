@@ -42,9 +42,9 @@ import {
   ResponsiveContainer 
 } from 'recharts'
 import api from '../services/api'
+import { formatRelative, formatDateTime } from '../utils/time'
 
 const { Title, Text, Paragraph } = Typography
-const { TextArea } = Input
 
 // Mock PnL data for demo
 const mockPnL = [
@@ -270,7 +270,7 @@ export default function AlphaDetail() {
               {alpha.quality_status}
             </Tag>
             {alpha.date_submitted ? (
-              <AntTooltip title={`已提交至 BRAIN：${new Date(alpha.date_submitted).toLocaleString()}`}>
+              <AntTooltip title={`已提交至 BRAIN：${formatDateTime(alpha.date_submitted)}`}>
                 <Tag color="green">✅ 已提交</Tag>
               </AntTooltip>
             ) : (
@@ -463,12 +463,18 @@ export default function AlphaDetail() {
                 </Space>
               </Descriptions.Item>
               <Descriptions.Item label="创建时间">
-                {new Date(alpha.created_at).toLocaleString()}
+                <AntTooltip title={formatDateTime(alpha.created_at)}>
+                  <span>{formatRelative(alpha.created_at)}</span>
+                </AntTooltip>
               </Descriptions.Item>
               <Descriptions.Item label="提交时间">
-                {alpha.date_submitted
-                  ? new Date(alpha.date_submitted).toLocaleString()
-                  : <Text type="secondary">未提交</Text>}
+                {alpha.date_submitted ? (
+                  <AntTooltip title={formatDateTime(alpha.date_submitted)}>
+                    <span>{formatRelative(alpha.date_submitted)}</span>
+                  </AntTooltip>
+                ) : (
+                  <Text type="secondary">未提交</Text>
+                )}
               </Descriptions.Item>
             </Descriptions>
           </Card>
@@ -891,9 +897,11 @@ function LineageSection({ alphaId }) {
                       )}
                       <Space>
                         {t.source && <Tag>{t.source}</Tag>}
-                        <Text type="secondary" style={{ fontSize: 11 }}>
-                          {new Date(t.transitioned_at).toLocaleString()}
-                        </Text>
+                        <AntTooltip title={formatDateTime(t.transitioned_at)}>
+                          <Text type="secondary" style={{ fontSize: 11 }}>
+                            {formatRelative(t.transitioned_at)}
+                          </Text>
+                        </AntTooltip>
                       </Space>
                     </Space>
                   ),

@@ -121,13 +121,6 @@ const api = {
     return data
   },
 
-  // phase15-D PR4b (2026-05-18): V-19 Persistent Mining Service api
-  // wrappers (listMiningSessions / getMiningSession / startMiningSession
-  // / stopMiningSession / resumeMiningSession) REMOVED — backend
-  // mining_session router gone (PR3c), task_service cascade methods
-  // gone (PR3e), MiningSessionInfo cascade fields gone. Flat sessions
-  // are created via POST /api/v1/ops/start-flat-session.
-
   getTaskRuns: async (taskId) => {
     const { data } = await client.get(`/tasks/${taskId}/runs`)
     return data
@@ -601,6 +594,22 @@ const api = {
     const { data } = await client.get('/ops/costeer/deploy-recommendation', {
       params: { days },
     })
+    return data
+  },
+
+  // flat-F1 advanced kickoff (2026-05-18). Gated server-side by
+  // ENABLE_FLAT_CONTINUOUS — flag OFF returns HTTP 400 with detail string.
+  startFlatSession: async ({ region, universe, datasets = [] }) => {
+    const { data } = await client.post('/ops/start-flat-session', {
+      region,
+      universe,
+      datasets,
+    })
+    return data
+  },
+
+  resumeFlatSession: async (taskId) => {
+    const { data } = await client.post(`/ops/flat-sessions/${taskId}/resume`)
     return data
   },
 }
