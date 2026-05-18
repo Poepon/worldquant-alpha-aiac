@@ -263,6 +263,7 @@ __all__ = [
     "layer1_pillar",
     "layer2_family",
     "layer3_field_level",
+    "query_hierarchical",
 ]
 
 
@@ -420,3 +421,118 @@ async def layer2_family(
     except Exception as ex:
         logger.warning(f"[hier_rag L2] family query failed (return empty): {ex}")
         return [], []
+
+
+# ---------------------------------------------------------------------------
+# Orchestrator — fall-through L0 → L1 → L2 → L3 (PR3, plan §4)
+# ---------------------------------------------------------------------------
+
+async def query_hierarchical(
+    db: AsyncSession,
+    *,
+    current_expression: Optional[str] = None,
+    hypothesis_pillar: Optional[str] = None,
+    region: Optional[str] = None,
+    universe: Optional[str] = None,
+    dataset_id: Optional[str] = None,
+    max_patterns: int = 20,
+    max_pitfalls: int = 10,
+    layer_budgets: Optional[Dict[str, int]] = None,
+) -> RAGResult:
+    """Phase 3 R8 PR3 orchestrator — sequential fall-through L0 → L1 → L2 → L3.
+
+    Per plan v1.0 §4.1 decision lock: sequential (NOT parallel union)
+    because:
+      1. Cost asymmetry — L0 is O(log N), L1/L2/L3 are JSONB scans;
+         parallel-then-discard wastes work
+      2. Determinism — LLM sees L0 first → highest specificity → trust
+      3. Cache-friendly — L0 filling budget skips L1/L2/L3 entirely
+
+    Algorithm:
+      remaining_pat = max_patterns; remaining_fail = max_pitfalls
+      seen_hashes: dedupe by pattern_hash across layers
+      For each layer in [L0, L1, L2, L3]:
+        if remaining_pat <= 0 AND remaining_fail <= 0: break
+        succ, fail = await layer(...)
+        for e in succ:
+          if e.pattern_hash not in seen AND remaining_pat > 0:
+            append + decrement + record layer hit
+        (same for fail)
+
+    Returns RAGResult with patterns + pitfalls + layer_hits telemetry.
+    Soft-fail: any layer error → empty from that layer, orchestrator
+    continues. Mirrors the existing layer-level soft-fail philosophy.
+    """
+    result = RAGResult()
+    seen_hashes: Set[str] = set()
+    remaining_pat = max_patterns
+    remaining_fail = max_pitfalls
+
+    layer_budgets = layer_budgets or {"L0": 5, "L1": 5, "L2": 5, "L3": 5}
+
+    def _consume(succ: List[RAGEntry], fail: List[RAGEntry], layer_key: str) -> None:
+        nonlocal remaining_pat, remaining_fail
+        for e in succ:
+            if remaining_pat <= 0:
+                break
+            if e.pattern_hash and e.pattern_hash in seen_hashes:
+                continue
+            seen_hashes.add(e.pattern_hash)
+            result.patterns.append(e)
+            remaining_pat -= 1
+            result.layer_hits[layer_key] = result.layer_hits.get(layer_key, 0) + 1
+        for e in fail:
+            if remaining_fail <= 0:
+                break
+            if e.pattern_hash and e.pattern_hash in seen_hashes:
+                continue
+            seen_hashes.add(e.pattern_hash)
+            result.pitfalls.append(e)
+            remaining_fail -= 1
+            # Don't double-count layer hit (only count patterns for hit-rate
+            # telemetry per plan §10 GO gate)
+
+    # L0 — exact pattern_hash match
+    if current_expression and (remaining_pat > 0 or remaining_fail > 0):
+        s, f = await layer0_exact_match(
+            db, current_expression=current_expression, region=region,
+            dataset_id=dataset_id, budget=layer_budgets.get("L0", 5),
+        )
+        result.total_queries += 1
+        _consume(s, f, "L0")
+
+    # L1 — pillar/theme
+    if (current_expression or hypothesis_pillar) and (remaining_pat > 0 or remaining_fail > 0):
+        s, f = await layer1_pillar(
+            db, current_expression=current_expression,
+            hypothesis_pillar=hypothesis_pillar, region=region,
+            budget=layer_budgets.get("L1", 5),
+        )
+        result.total_queries += 1
+        _consume(s, f, "L1")
+
+    # L2 — family_signature
+    if current_expression and (remaining_pat > 0 or remaining_fail > 0):
+        s, f = await layer2_family(
+            db, current_expression=current_expression, region=region,
+            budget=layer_budgets.get("L2", 5),
+        )
+        result.total_queries += 1
+        _consume(s, f, "L2")
+
+    # L3 — field-level
+    if current_expression and (remaining_pat > 0 or remaining_fail > 0):
+        s, f = await layer3_field_level(
+            db, current_expression=current_expression,
+            region=region, universe=universe,
+            budget=layer_budgets.get("L3", 5),
+        )
+        result.total_queries += 1
+        _consume(s, f, "L3")
+
+    logger.info(
+        f"[hier_rag] query complete | patterns={len(result.patterns)} "
+        f"pitfalls={len(result.pitfalls)} layer_hits={result.layer_hits} "
+        f"sql_queries={result.total_queries}"
+    )
+    return result

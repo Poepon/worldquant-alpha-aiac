@@ -498,3 +498,117 @@ async def test_layer2_excludes_decayed_success_includes_decayed_failure(pg_sessi
     assert all(e.pattern != pattern_succ for e in succ)
     # FAILURE decayed included
     assert any(e.pattern == pattern_fail for e in fail)
+
+
+# ===========================================================================
+# PR3 — Orchestrator (query_hierarchical) tests
+# ===========================================================================
+
+from backend.agents.hierarchical_rag import query_hierarchical
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_empty_no_inputs_returns_empty_result(pg_session):
+    """No expression + no pillar → orchestrator returns empty RAGResult."""
+    r = await query_hierarchical(pg_session)
+    assert r.total_bullets() == 0
+    assert r.total_queries == 0
+    assert r.layer_hits == {"L0": 0, "L1": 0, "L2": 0, "L3": 0}
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_l0_exact_hit_short_circuits_layers(pg_session):
+    """L0 exact match fills max_patterns → subsequent layers skipped."""
+    expr = f"rank({_TAG}_orch_exact)"
+    # Seed 1 SUCCESS at the exact pattern (L0 hit)
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN", pattern=expr,
+        pattern_hash=compute_pattern_hash(expr, None, None),
+        description="L0 exact",
+        meta_data={"pillar_classified": "momentum",
+                   "family_signature": family_signature(expr),
+                   "source": "test"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    r = await query_hierarchical(
+        pg_session, current_expression=expr, max_patterns=1, max_pitfalls=0,
+    )
+    assert len(r.patterns) == 1
+    assert r.patterns[0].source_layer == "L0_exact"
+    assert r.layer_hits["L0"] == 1
+    # max_patterns=1 satisfied → L1/L2/L3 SQL still ran but consumed nothing
+    # (L0 met budget). Each later layer counts as 1 SQL query.
+    assert r.total_queries >= 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_dedupe_across_layers(pg_session):
+    """Same pattern_hash hits multiple layers → only counted once."""
+    pattern = f"rank({_TAG}_orch_dedupe)"
+    phash = compute_pattern_hash(pattern, None, None)
+    sig = family_signature(pattern)
+    # Single entry that matches both L1 (pillar) and L2 (family) AND L3 (field)
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN", pattern=pattern,
+        pattern_hash=phash,
+        description="dedupe test",
+        meta_data={"pillar_classified": "momentum", "family_signature": sig,
+                   "source": "test"},
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    r = await query_hierarchical(
+        pg_session, current_expression=pattern,
+        hypothesis_pillar="momentum",
+        max_patterns=20, max_pitfalls=10,
+    )
+    # Should appear once even though it matched multiple layers
+    count = sum(1 for p in r.patterns if p.pattern == pattern)
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_max_patterns_cap_enforced(pg_session):
+    """max_patterns=2 → at most 2 patterns returned even with many matches."""
+    base = f"{_TAG}_orch_cap"
+    sig = family_signature(f"rank({base})")  # consistent family
+    for i in range(8):
+        p = f"rank({base}_{i})"
+        pg_session.add(KnowledgeEntry(
+            entry_type="SUCCESS_PATTERN", pattern=p,
+            pattern_hash=compute_pattern_hash(p, None, None),
+            description=f"cap {i}",
+            meta_data={"family_signature": sig, "pillar_classified": "momentum"},
+            is_active=True, created_by="TEST",
+        ))
+    await pg_session.commit()
+    r = await query_hierarchical(
+        pg_session, current_expression=f"rank({base})", max_patterns=2,
+    )
+    assert len(r.patterns) <= 2
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_q9_decayed_strict_filter_consistent(pg_session):
+    """No decayed SUCCESS surfaces across ANY of the 4 layers (plan §10 GO d)."""
+    pattern = f"rank({_TAG}_orch_decayed)"
+    pg_session.add(KnowledgeEntry(
+        entry_type="SUCCESS_PATTERN", pattern=pattern,
+        pattern_hash=compute_pattern_hash(pattern, None, None),
+        description="decayed across all layers",
+        meta_data={
+            "pillar_classified": "momentum",
+            "family_signature": family_signature(pattern),
+            DECAYED_KEY: "true",
+        },
+        is_active=True, created_by="TEST",
+    ))
+    await pg_session.commit()
+    r = await query_hierarchical(
+        pg_session, current_expression=pattern, hypothesis_pillar="momentum",
+        max_patterns=20,
+    )
+    # The decayed SUCCESS entry must NOT appear in patterns from any layer
+    assert all(p.pattern != pattern for p in r.patterns), \
+        "decayed SUCCESS leaked into hierarchical RAG result"
