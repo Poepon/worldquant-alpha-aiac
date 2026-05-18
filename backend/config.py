@@ -408,6 +408,19 @@ class Settings(BaseSettings):
     # Operational tunable — no feature flag.
     R8_QUERY_LOG_RETENTION_DAYS: int = 90
 
+    # ----- phase15-D cascade retirement (2026-05-18) -----
+    # Kill-switch for the entire legacy CONTINUOUS_CASCADE code path.
+    # Default True = full backward-compat (pre-phase15-D behavior).
+    # When False:
+    #   - mining_tasks.run_mining_task refuses cascade dispatch (marks FAILED)
+    #   - routers/mining_session.py endpoints return 410 Gone
+    #   - tasks/session_watchdog.py cascade probe short-circuits
+    # The 410-Gone body points operators at POST /ops/start-flat-session.
+    # Operator deploy: flip OFF after running POST /ops/cascade-deprecation/drain
+    # to convert any PAUSED cascade tasks to STOPPED.
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_CASCADE_LEGACY: bool = True
+
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
     # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression

@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import settings
 from backend.database import get_db
 from backend.services.task_service import TaskService, MiningSessionInfo
 
@@ -29,6 +30,22 @@ router = APIRouter(
     tags=["mining-session"],
     responses={404: {"description": "Not found"}},
 )
+
+
+# phase15-D (2026-05-18): kill-switch dependency. Once
+# ENABLE_CASCADE_LEGACY=False, every endpoint in this router returns
+# 410 Gone with the migration hint instead of executing. Default True
+# preserves backward-compat until operator flips. PR3 (column drop)
+# requires this flag OFF + ≥7d clean obs.
+def _require_cascade_legacy_enabled() -> None:
+    if not bool(getattr(settings, "ENABLE_CASCADE_LEGACY", True)):
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "cascade legacy retired; use POST /api/v1/ops/start-flat-session "
+                "(see plan v1.30 flat-F4 + plan v1.74+ phase15-D)"
+            ),
+        )
 
 
 # =============================================================================
@@ -105,6 +122,7 @@ class SessionActionRequest(BaseModel):
 @router.get("", response_model=List[MiningSessionResponse])
 async def list_active_sessions(
     service: TaskService = Depends(get_task_service),
+    _gate: None = Depends(_require_cascade_legacy_enabled),
 ) -> List[MiningSessionResponse]:
     """List all active CONTINUOUS_CASCADE sessions (across regions)."""
     sessions = await service.list_active_sessions()
@@ -115,6 +133,7 @@ async def list_active_sessions(
 async def get_active_session(
     region: str,
     service: TaskService = Depends(get_task_service),
+    _gate: None = Depends(_require_cascade_legacy_enabled),
 ) -> Optional[MiningSessionResponse]:
     """Return the active session for a region, or 404 if none.
 
@@ -138,6 +157,7 @@ async def get_active_session(
 async def start_session(
     body: StartSessionRequest,
     service: TaskService = Depends(get_task_service),
+    _gate: None = Depends(_require_cascade_legacy_enabled),
 ) -> MiningSessionResponse:
     """Start (or auto-resume) the singleton mining session for a region.
 
@@ -154,6 +174,7 @@ async def start_session(
 async def stop_session(
     body: SessionActionRequest,
     service: TaskService = Depends(get_task_service),
+    _gate: None = Depends(_require_cascade_legacy_enabled),
 ) -> MiningSessionResponse:
     """Pause an active mining session.
 
@@ -171,6 +192,7 @@ async def stop_session(
 async def resume_session(
     body: SessionActionRequest,
     service: TaskService = Depends(get_task_service),
+    _gate: None = Depends(_require_cascade_legacy_enabled),
 ) -> MiningSessionResponse:
     """Explicit RESUME from PAUSED. Equivalent to POST /start when the
     region's session is PAUSED, but lets clients re-dispatch by task_id.

@@ -381,6 +381,32 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
             # Discrete tasks (mining_mode='DISCRETE', the default) keep
             # original behavior 100%.
             if _is_cascade_schedule(task):
+                # phase15-D (2026-05-18): kill-switch refuses cascade dispatch
+                # when ENABLE_CASCADE_LEGACY=False. Mark task FAILED with a
+                # clear reason so operators see the cutover. Rollback < 1 min
+                # via flag flip ON.
+                if not bool(getattr(settings, "ENABLE_CASCADE_LEGACY", True)):
+                    logger.warning(
+                        f"[phase15-D] cascade dispatch refused for task {task_id} "
+                        f"— ENABLE_CASCADE_LEGACY=False; use /ops/start-flat-session"
+                    )
+                    try:
+                        await db.execute(
+                            update(MiningTask)
+                            .where(MiningTask.id == task_id)
+                            .values(status="FAILED")
+                        )
+                        if run is not None:
+                            run.status = "FAILED"
+                            run.finished_at = datetime.utcnow()
+                            run.error_message = (
+                                "cascade legacy retired (ENABLE_CASCADE_LEGACY=False); "
+                                "use POST /api/v1/ops/start-flat-session"
+                            )[:500]
+                        await db.commit()
+                    except Exception as db_err:
+                        logger.error(f"[phase15-D] failed to mark task FAILED: {db_err}")
+                    return None
                 try:
                     return await _run_continuous_cascade(
                         db, task, run, self.request.id,

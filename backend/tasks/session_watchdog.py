@@ -71,18 +71,29 @@ async def _watchdog_revive_async() -> dict:
 
     revived = []
     async with AsyncSessionLocal() as db:
+        # phase15-D (2026-05-18): kill-switch short-circuits cascade probe
+        # entirely when ENABLE_CASCADE_LEGACY=False. The discrete-task
+        # probe below still runs because it handles DISCRETE-historical
+        # rows independent of cascade retirement.
+        cascade_legacy_on = bool(
+            getattr(settings, "ENABLE_CASCADE_LEGACY", True)
+        )
+
         # --- (a) V-19 CONTINUOUS_CASCADE sessions ---
         # Phase 1.5-C (2026-05-18): SQL prefilter still uses mining_mode for
         # index efficiency (operates on the dual-written column either way);
         # Python-side guard via _is_cascade_schedule(task) makes the flag-flip
         # semantic correct when schedule and mining_mode diverge (won't happen
         # under dual-write but defensive for hand-edited DB rows).
-        stmt = (
-            select(MiningTask)
-            .where(MiningTask.mining_mode == "CONTINUOUS_CASCADE")
-            .where(MiningTask.status == "RUNNING")
-        )
-        cascade_rows = (await db.execute(stmt)).scalars().all()
+        if not cascade_legacy_on:
+            cascade_rows = []
+        else:
+            stmt = (
+                select(MiningTask)
+                .where(MiningTask.mining_mode == "CONTINUOUS_CASCADE")
+                .where(MiningTask.status == "RUNNING")
+            )
+            cascade_rows = (await db.execute(stmt)).scalars().all()
         for task in cascade_rows:
             if not _is_cascade_schedule(task):
                 # flag ON + schedule mismatch → defer to discrete loop below
