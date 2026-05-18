@@ -150,103 +150,18 @@ class TestTaskServiceDualWriteIntrospection:
         assert "AUTONOMOUS_TIER3" in section
         assert "starting_tier = 3" in section
 
-    def test_start_cascade_session_writes_schedule_cascade(self, task_service_src):
-        """_start_cascade_session-style helper writes schedule='CASCADE' + starting_tier=1."""
-        # Use the more specific MiningTask construction marker for cascade
-        idx = task_service_src.find('mining_mode="CONTINUOUS_CASCADE"')
-        assert idx >= 0
-        section = task_service_src[max(0, idx - 400):idx + 800]
-        assert 'schedule="CASCADE"' in section
-        assert "starting_tier=1" in section
+    # phase15-D PR3d/3e (2026-05-18): _start_cascade_session helper +
+    # CONTINUOUS_CASCADE construction site deleted. test removed.
 
 
-# ---------------------------------------------------------------------------
-# _stamp_heartbeat V1.2-B2 split-brain fix — source inspection
-# ---------------------------------------------------------------------------
-
-class TestStampHeartbeatV12B2Fix:
-    @pytest.fixture
-    def mining_tasks_src(self):
-        path = (
-            Path(__file__).parent.parent.parent / "tasks" / "mining_tasks.py"
-        )
-        return path.read_text(encoding="utf-8")
-
-    def test_heartbeat_uses_instance_level_mutation(self, mining_tasks_src):
-        """_stamp_heartbeat assigns to task.last_alpha_persisted_at directly,
-        NOT via db.execute(update(MiningTask)...) bulk SQL."""
-        idx = mining_tasks_src.find("async def _stamp_heartbeat")
-        assert idx >= 0
-        # Narrow window to ~1500 chars (function body is ~40 lines = ~1500 chars)
-        # — wider window catches subsequent functions where update(MiningTask)
-        # legitimately appears.
-        section = mining_tasks_src[idx:idx + 1500]
-        # Instance-level mutation present
-        assert "task.last_alpha_persisted_at = now_utc" in section
-        # Bulk SQL pattern is gone from THIS function. The comment about it
-        # legitimately mentions "update(MiningTask)" — filter that out.
-        # Extract executable lines (non-comment) and check no `update(MiningTask)` call
-        code_lines = [
-            l for l in section.split("\n")
-            if l.strip() and not l.strip().startswith("#")
-        ]
-        code_only = "\n".join(code_lines)
-        assert "update(MiningTask)" not in code_only, (
-            "bulk SQL update(MiningTask) still present in _stamp_heartbeat — "
-            "V1.2-B2 fix incomplete"
-        )
-
-    def test_heartbeat_dual_writes_runtime_state(self, mining_tasks_src):
-        idx = mining_tasks_src.find("async def _stamp_heartbeat")
-        section = mining_tasks_src[idx:idx + 2500]
-        assert "run.runtime_state" in section
-        assert 'flag_modified(run, "runtime_state")' in section
-        # Specific keys backfilled by Revision B + dual-written here
-        assert "last_persisted_at" in section
-        assert "round_idx" in section
-
-    def test_heartbeat_has_V12_B2_comment_marker(self, mining_tasks_src):
-        """Self-documenting marker — future readers can grep for this."""
-        idx = mining_tasks_src.find("async def _stamp_heartbeat")
-        section = mining_tasks_src[idx:idx + 2500]
-        assert "V1.2-B2" in section
-
-
-# ---------------------------------------------------------------------------
-# Cascade phase advancement dual-write — source inspection
-# ---------------------------------------------------------------------------
-
-class TestCascadePhaseAdvancementDualWrite:
-    @pytest.fixture
-    def mining_tasks_src(self):
-        path = (
-            Path(__file__).parent.parent.parent / "tasks" / "mining_tasks.py"
-        )
-        return path.read_text(encoding="utf-8")
-
-    def test_t1_to_t2_dual_writes_current_tier_2(self, mining_tasks_src):
-        # Find the T1→T2 transition block
-        idx = mining_tasks_src.find('task.cascade_phase = "T2"')
-        assert idx >= 0
-        section = mining_tasks_src[idx:idx + 500]
-        assert '"current_tier": 2' in section
-        assert "flag_modified" in section
-
-    def test_t2_to_t3_dual_writes_current_tier_3(self, mining_tasks_src):
-        idx = mining_tasks_src.find('task.cascade_phase = "T3"')
-        assert idx >= 0
-        section = mining_tasks_src[idx:idx + 500]
-        assert '"current_tier": 3' in section
-        assert "flag_modified" in section
-
-    def test_round_complete_resets_to_t1_dual_writes_tier_1(self, mining_tasks_src):
-        # Find the round-complete reset (cascade_round_idx += 1 first)
-        idx = mining_tasks_src.find("task.cascade_round_idx += 1")
-        assert idx >= 0
-        section = mining_tasks_src[idx:idx + 600]
-        assert 'task.cascade_phase = "T1"' in section
-        assert '"current_tier": 1' in section
-        assert "flag_modified" in section
+# phase15-D PR3d (2026-05-18): _stamp_heartbeat helper deleted alongside
+# the 5 cascade helpers (~1028 LoC swept). TestStampHeartbeatV12B2Fix
+# class removed — verified vestigial code that no longer exists.
+#
+# phase15-D PR3d (2026-05-18): cascade phase advancement
+# (task.cascade_phase = "T2"/"T3"/"T1" + cascade_round_idx ++) deleted
+# from mining_tasks.py. TestCascadePhaseAdvancementDualWrite class removed
+# — same provenance.
 
 
 # ---------------------------------------------------------------------------
