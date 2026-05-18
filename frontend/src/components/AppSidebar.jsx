@@ -57,6 +57,7 @@ const menuItems = [
       { key: '/ops/macro-narratives', label: '宏观叙事' },
       { key: '/ops/regime', label: '市场体制' },
       { key: '/ops/llm-op-monitor', label: 'LLM 算子监控' },
+      { key: '/ops/costeer', label: 'CoSTEER 循环监控 (R1a/R1b)' },
     ],
   },
   {

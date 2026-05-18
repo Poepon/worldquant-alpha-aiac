@@ -598,6 +598,22 @@ const api = {
     const { data } = await client.post('/ops/llm-op/rerun')
     return data
   },
+
+  // CoSTEER loop telemetry — R1a + R1b + chain depth (2026-05-18)
+  getOpsR1aTelemetry: async (days = 7) => {
+    const { data } = await client.get('/ops/r1a/telemetry', { params: { days } })
+    return data
+  },
+  getOpsR1bTelemetry: async (days = 7, topN = 5) => {
+    const { data } = await client.get('/ops/r1b/telemetry', {
+      params: { days, top_n: topN },
+    })
+    return data
+  },
+  getOpsR1bChainDepth: async () => {
+    const { data } = await client.get('/ops/r1b/chain-depth-distribution')
+    return data
+  },
 }
 
 export default api
