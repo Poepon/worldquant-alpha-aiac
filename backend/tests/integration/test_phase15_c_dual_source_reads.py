@@ -240,6 +240,66 @@ def test_cascade_revive_inheritance_logic_unit():
 # Edge case: case-insensitivity + whitespace robustness for schedule
 # ---------------------------------------------------------------------------
 
+def test_resolve_cascade_phase_r6_dag_takes_priority():
+    """plan v1.0 §5.3 R6 PR2: DAG selection wins over phase15-C current_tier."""
+    _flag_override_cache["ENABLE_TASK_SCHEMA_V2"] = True
+    _flag_override_cache["ENABLE_DAG_TRACE"] = True
+
+    task = SimpleNamespace(cascade_phase="T1")
+    # phase15-C says T2 but DAG selection points to a T3 node — DAG wins
+    run = SimpleNamespace(runtime_state={
+        "current_tier": 2,
+        "dag": {
+            "v": 1,
+            "nodes": {"n_99_1_0": {"id": "n_99_1_0", "tier": 3}},
+            "current_selection": "n_99_1_0",
+        },
+    })
+    assert _resolve_cascade_phase(task, run) == "T3"
+
+
+def test_resolve_cascade_phase_r6_dag_off_falls_to_phase15c():
+    """DAG flag OFF → phase15-C current_tier wins (byte-equivalent legacy)."""
+    _flag_override_cache["ENABLE_TASK_SCHEMA_V2"] = True
+    # ENABLE_DAG_TRACE not set (default False)
+
+    task = SimpleNamespace(cascade_phase="T1")
+    run = SimpleNamespace(runtime_state={
+        "current_tier": 3,
+        "dag": {"v": 1, "nodes": {"n_99_1_0": {"id": "n_99_1_0", "tier": 1}}, "current_selection": "n_99_1_0"},
+    })
+    # DAG ignored, phase15-C wins
+    assert _resolve_cascade_phase(task, run) == "T3"
+
+
+def test_resolve_cascade_phase_r6_dag_on_missing_selection_falls_through():
+    """DAG ON but no current_selection → falls through to phase15-C."""
+    _flag_override_cache["ENABLE_TASK_SCHEMA_V2"] = True
+    _flag_override_cache["ENABLE_DAG_TRACE"] = True
+
+    task = SimpleNamespace(cascade_phase="T1")
+    run = SimpleNamespace(runtime_state={
+        "current_tier": 2,
+        "dag": {"v": 1, "nodes": {}, "current_selection": None},
+    })
+    # DAG selection missing → fall through to phase15-C T2
+    assert _resolve_cascade_phase(task, run) == "T2"
+
+
+def test_resolve_cascade_phase_r6_dag_on_invalid_tier_falls_through():
+    """DAG node tier not in {1,2,3} → fall through."""
+    _flag_override_cache["ENABLE_TASK_SCHEMA_V2"] = True
+    _flag_override_cache["ENABLE_DAG_TRACE"] = True
+
+    task = SimpleNamespace(cascade_phase="T2")
+    run = SimpleNamespace(runtime_state={
+        "current_tier": None,
+        "dag": {"v": 1, "nodes": {"n_99_1_0": {"tier": 99}}, "current_selection": "n_99_1_0"},
+    })
+    # DAG tier=99 invalid → falls through to phase15-C (None) → legacy T2
+    assert _resolve_cascade_phase(task, run) == "T2"
+
+
 def test_is_cascade_schedule_handles_various_string_cases():
     """schedule comparison should be case-insensitive and tolerant."""
     _flag_override_cache["ENABLE_TASK_SCHEMA_V2"] = True

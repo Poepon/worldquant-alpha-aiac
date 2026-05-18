@@ -402,3 +402,169 @@ def test_dag_full_roundtrip_via_dict():
     assert restored["node_count"] == d["node_count"]
     assert restored["nodes"][n1]["reward"] == pytest.approx(0.7)
     assert restored["current_selection"] == d["current_selection"]
+
+
+# ===========================================================================
+# PR2 integration helpers
+# ===========================================================================
+
+from types import SimpleNamespace
+
+from backend.agents.graph.dag_state import (
+    add_children_for_phase,
+    compute_reward_for_node,
+    load_or_init,
+    mark_family_capped_children,
+)
+
+
+def _mk_alpha(expr: str, composite: float = None, sharpe: float = None,
+              family_capped: bool = False):
+    """Build a SimpleNamespace mimicking AlphaCandidate for DAG tests."""
+    metrics = {}
+    if composite is not None:
+        metrics["composite_score"] = composite
+    if sharpe is not None:
+        metrics["sharpe"] = sharpe
+    if family_capped:
+        metrics["_r10_family_cap_dropped"] = True
+    return SimpleNamespace(expression=expr, metrics=metrics)
+
+
+# --- load_or_init ---
+
+def test_load_or_init_none_creates_fresh():
+    d = load_or_init(None, run_id=42)
+    assert d["root_id"] == "n_42_0_0"
+    assert d["node_count"] == 1
+
+
+def test_load_or_init_empty_dict_creates_fresh():
+    d = load_or_init({}, run_id=42)
+    assert d["root_id"] == "n_42_0_0"
+
+
+def test_load_or_init_existing_preserved():
+    existing = init_dag(run_id=42)
+    n1 = add_node(existing, parent_id=existing["root_id"], round_idx=1, tier=2)
+    update_reward(existing, n1, 0.7)
+    snap = to_dict(existing)
+    d = load_or_init(snap, run_id=42)
+    assert d["node_count"] == 2
+    assert d["nodes"][n1]["reward"] == pytest.approx(0.7)
+
+
+def test_load_or_init_partial_falls_back_to_init():
+    """Malformed (no root_id) → init fresh."""
+    d = load_or_init({"v": 1, "nodes": {}}, run_id=42)
+    assert d["root_id"] == "n_42_0_0"
+
+
+# --- compute_reward_for_node ---
+
+def test_compute_reward_composite_preferred():
+    a = _mk_alpha("rank(close)", composite=0.8, sharpe=3.0)
+    assert compute_reward_for_node(a) == pytest.approx(0.8)
+
+
+def test_compute_reward_falls_back_to_sharpe():
+    a = _mk_alpha("rank(close)", sharpe=2.0)  # no composite
+    assert compute_reward_for_node(a) == pytest.approx(0.5)  # 2.0/4.0 = 0.5
+
+
+def test_compute_reward_sharpe_clipped():
+    a_high = _mk_alpha("x", sharpe=10.0)
+    assert compute_reward_for_node(a_high) == pytest.approx(1.0)
+    a_neg = _mk_alpha("x", sharpe=-2.0)
+    assert compute_reward_for_node(a_neg) == pytest.approx(0.0)
+
+
+def test_compute_reward_no_metrics_default():
+    a = SimpleNamespace(expression="x", metrics=None)
+    assert compute_reward_for_node(a) == 0.5
+
+
+def test_compute_reward_node_dict_uses_existing_reward():
+    """When passed a DAG node dict directly, read node['reward']."""
+    n = {"reward": 0.65}
+    assert compute_reward_for_node(n) == pytest.approx(0.65)
+
+
+# --- add_children_for_phase ---
+
+def test_add_children_for_phase_bulk_insert():
+    d = init_dag(run_id=42)
+    alphas = [
+        _mk_alpha("rank(close)"),
+        _mk_alpha("ts_mean(volume, 20)"),
+        _mk_alpha("zscore(returns)"),
+    ]
+    ids = add_children_for_phase(
+        d, parent_id=d["root_id"], round_idx=1, tier=2,
+        dataset_id="pv1", loop_id=42, alphas=alphas,
+    )
+    assert len(ids) == 3
+    for cid in ids:
+        n = d["nodes"][cid]
+        assert n["parent_id"] == d["root_id"]
+        assert n["tier"] == 2
+        assert n["dataset_id"] == "pv1"
+        assert n["expression_signature"]  # non-empty sha prefix
+    assert d["node_count"] == 4  # root + 3
+
+
+def test_add_children_for_phase_empty_alphas():
+    d = init_dag(run_id=42)
+    ids = add_children_for_phase(d, parent_id=d["root_id"], round_idx=1, tier=1,
+                                 dataset_id="pv1", loop_id=42, alphas=[])
+    assert ids == []
+    assert d["node_count"] == 1
+
+
+def test_add_children_for_phase_signature_uniqueness():
+    """Different expressions produce different signatures."""
+    d = init_dag(run_id=42)
+    alphas = [_mk_alpha("rank(close)"), _mk_alpha("rank(volume)")]
+    ids = add_children_for_phase(d, parent_id=d["root_id"], round_idx=1, tier=1,
+                                 dataset_id="x", loop_id=42, alphas=alphas)
+    sigs = {d["nodes"][cid]["expression_signature"] for cid in ids}
+    assert len(sigs) == 2
+
+
+def test_add_children_for_phase_skips_bad_alpha():
+    """Non-Alpha-like object → skip with warning (defensive soft-fail)."""
+    d = init_dag(run_id=42)
+    alphas = [_mk_alpha("rank(close)"), None, _mk_alpha("zscore(x)")]
+    ids = add_children_for_phase(d, parent_id=d["root_id"], round_idx=1, tier=1,
+                                 dataset_id="x", loop_id=42, alphas=alphas)
+    # None entry skipped; 2 valid alphas → 2 ids
+    assert len(ids) == 2
+
+
+# --- mark_family_capped_children ---
+
+def test_mark_family_capped_children_marks_dropped():
+    d = init_dag(run_id=42)
+    alphas = [
+        _mk_alpha("ok1"),
+        _mk_alpha("dropped1", family_capped=True),
+        _mk_alpha("dropped2", family_capped=True),
+        _mk_alpha("ok2"),
+    ]
+    ids = add_children_for_phase(d, parent_id=d["root_id"], round_idx=1, tier=1,
+                                 dataset_id="x", loop_id=42, alphas=alphas)
+    marked = mark_family_capped_children(d, ids, alphas)
+    assert marked == 2
+    assert d["nodes"][ids[0]]["status"] == "active"
+    assert d["nodes"][ids[1]]["status"] == "family_capped"
+    assert d["nodes"][ids[2]]["status"] == "family_capped"
+    assert d["nodes"][ids[3]]["status"] == "active"
+
+
+def test_mark_family_capped_children_length_mismatch_safe():
+    """Defensive: child_ids and alphas different lengths → use min."""
+    d = init_dag(run_id=42)
+    ids = [add_node(d, parent_id=d["root_id"], round_idx=1, tier=1)]
+    alphas = [_mk_alpha("a", family_capped=True), _mk_alpha("b", family_capped=True)]
+    marked = mark_family_capped_children(d, ids, alphas)
+    assert marked == 1  # only 1 id, 2 alphas → uses min

@@ -423,4 +423,130 @@ __all__ = [
     "prune_to_cap",
     "to_dict",
     "from_dict",
+    # === PR2 cascade integration helpers ===
+    "load_or_init",
+    "add_children_for_phase",
+    "compute_reward_for_node",
+    "mark_family_capped_children",
 ]
+
+
+# ---------------------------------------------------------------------------
+# PR2: cascade/flat integration helpers (plan v1.0 §5.1 + §5.2)
+# ---------------------------------------------------------------------------
+
+def load_or_init(
+    d: Optional[Dict[str, Any]],
+    *,
+    run_id: int,
+    root_tier: int = 1,
+    root_dataset_id: str = "",
+) -> Dict[str, Any]:
+    """Convenience: load existing DAG from runtime_state["dag"] OR init fresh.
+
+    Used by `_run_continuous_cascade` / `_run_flat_iteration` at session
+    start to get a guaranteed-valid DAG dict without branching the call site.
+    """
+    parsed = from_dict(d)
+    if parsed and parsed.get("root_id") and parsed.get("nodes"):
+        return parsed
+    return init_dag(run_id=run_id, root_tier=root_tier, root_dataset_id=root_dataset_id)
+
+
+def _alpha_score(alpha: Any) -> float:
+    """Resolve alpha's composite/sharpe score for DAG reward. Plan §4.5.
+
+    Tries metrics["composite_score"] (R5+R1a combined) → metrics["sharpe"]/4
+    → 0.5. Clip to [0.01, 0.99] applied by update_reward caller.
+    """
+    metrics = getattr(alpha, "metrics", None)
+    if not isinstance(metrics, dict):
+        return 0.5
+    comp = metrics.get("composite_score") or metrics.get("_r5_composite_score")
+    if isinstance(comp, (int, float)):
+        return float(comp)
+    sharpe = metrics.get("sharpe")
+    if isinstance(sharpe, (int, float)):
+        return max(0.0, min(1.0, float(sharpe) / 4.0))
+    return 0.5
+
+
+def compute_reward_for_node(node_or_alpha: Any) -> float:
+    """Reward signal for a DAG node from an alpha (or node already populated).
+
+    Per plan §4.5 3-tier fallback:
+        Tier 1: composite_score (R5+R1a) > Tier 2: sharpe/4 > Tier 3: 0.5
+
+    Accepts either an Alpha/AlphaCandidate (reads .metrics) OR a DAG node
+    dict (reads node["expression_signature"] / fallback 0.5).
+    """
+    # If it's a node dict (no .metrics attr), fall back to 0.5
+    if isinstance(node_or_alpha, dict):
+        return float(node_or_alpha.get("reward", 0.5) or 0.5)
+    return _alpha_score(node_or_alpha)
+
+
+def add_children_for_phase(
+    dag: Dict[str, Any],
+    *,
+    parent_id: str,
+    round_idx: int,
+    tier: int,
+    dataset_id: str,
+    loop_id: int,
+    alphas: List[Any],
+    max_nodes: int = 100,
+) -> List[str]:
+    """Bulk-add one DAG child per alpha produced in a round.
+
+    Per plan §4.7 [V1.0-A2-1] lock: alpha-as-node, not round-as-node.
+    Returns list of new node ids (sorted by insertion order). Soft-fails
+    on individual alpha errors (skip with warning) so one bad alpha
+    doesn't drop the whole batch.
+    """
+    import hashlib
+    child_ids: List[str] = []
+    for alpha in alphas or []:
+        # Defensive: skip None / non-alpha-shaped entries (e.g. error placeholders)
+        if alpha is None or not hasattr(alpha, "expression"):
+            logger.debug(f"[dag_state] add_children_for_phase skip non-alpha entry: {type(alpha).__name__}")
+            continue
+        try:
+            expr = (getattr(alpha, "expression", "") or "")[:200]
+            sig = hashlib.sha256(expr.encode("utf-8")).hexdigest()[:16] if expr else ""
+            cid = add_node(
+                dag,
+                parent_id=parent_id,
+                round_idx=round_idx,
+                tier=tier,
+                dataset_id=dataset_id,
+                loop_id=loop_id,
+                expression_signature=sig,
+                max_nodes=max_nodes,
+            )
+            child_ids.append(cid)
+        except Exception as e:
+            logger.warning(f"[dag_state] add_children_for_phase skip alpha (non-fatal): {e}")
+    return child_ids
+
+
+def mark_family_capped_children(
+    dag: Dict[str, Any],
+    child_ids: List[str],
+    alphas: List[Any],
+) -> int:
+    """R10 propagation: alphas marked _r10_family_cap_dropped=True →
+    corresponding DAG node status='family_capped' (per plan §2.5).
+
+    child_ids and alphas must be parallel lists (same order). Returns count
+    of nodes marked family_capped. Defensive on length mismatch — uses min.
+    """
+    marked = 0
+    n = min(len(child_ids), len(alphas or []))
+    for i in range(n):
+        alpha = alphas[i]
+        metrics = getattr(alpha, "metrics", None) or {}
+        if isinstance(metrics, dict) and metrics.get("_r10_family_cap_dropped") is True:
+            mark_status(dag, child_ids[i], "family_capped")
+            marked += 1
+    return marked

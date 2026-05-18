@@ -44,26 +44,43 @@ def _is_cascade_schedule(task) -> bool:
 
 
 def _resolve_cascade_phase(task, run) -> str:
-    """Phase 1.5-C dual-source cascade resume — prefer run.runtime_state.current_tier.
+    """Phase 1.5-C + Phase 2 R6 (2026-05-18) 3-stage cascade resume fallback.
 
-    Flag ON: read ``current_tier`` from the active run's ``runtime_state``
-    (populated by Phase 1.5-B heartbeat). Fallback to ``task.cascade_phase``
-    when runtime_state is empty (historical runs pre-1.5-B, or freshly-revived
-    runs whose inherited state is missing — though §3.4.1 watchdog revive
-    inheritance should populate this).
+    Priority chain (per plan v1.0 §5.3):
+      1. ENABLE_DAG_TRACE ON + ``run.runtime_state["dag"]["current_selection"]``
+         non-null + that node's tier resolvable → derive phase from node.tier
+      2. ENABLE_TASK_SCHEMA_V2 ON + ``run.runtime_state["current_tier"]`` ∈ {1,2,3}
+         → derive phase from current_tier
+      3. Legacy ``task.cascade_phase`` (default "T1" when null)
 
-    Flag OFF: read ``task.cascade_phase`` (legacy path), unchanged.
+    R6 fallback to phase15-C → legacy is automatic — if DAG OFF or selection
+    missing, falls through cleanly. Phase 1.5-C tests still pass byte-equivalent
+    when DAG OFF.
 
     Returns the phase string ("T1" / "T2" / "T3").
     """
-    if getattr(settings, "ENABLE_TASK_SCHEMA_V2", False):
-        rs = getattr(run, "runtime_state", None) if run is not None else None
-        current_tier = None
-        if isinstance(rs, dict):
-            current_tier = rs.get("current_tier")
+    rs = getattr(run, "runtime_state", None) if run is not None else None
+
+    # Stage 1: R6 DAG selection
+    if getattr(settings, "ENABLE_DAG_TRACE", False) and isinstance(rs, dict):
+        dag = rs.get("dag")
+        if isinstance(dag, dict):
+            sel_id = dag.get("current_selection")
+            nodes = dag.get("nodes") or {}
+            if sel_id and sel_id in nodes:
+                tier = nodes[sel_id].get("tier")
+                if tier in (1, 2, 3):
+                    return {1: "T1", 2: "T2", 3: "T3"}[tier]
+        # fall through if DAG missing / current_selection unresolvable
+
+    # Stage 2: Phase 1.5-C current_tier
+    if getattr(settings, "ENABLE_TASK_SCHEMA_V2", False) and isinstance(rs, dict):
+        current_tier = rs.get("current_tier")
         if current_tier in (1, 2, 3):
             return {1: "T1", 2: "T2", 3: "T3"}[current_tier]
         # fall through to legacy
+
+    # Stage 3: legacy cascade_phase
     return task.cascade_phase or "T1"
 
 
