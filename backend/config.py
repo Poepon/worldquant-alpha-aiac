@@ -315,6 +315,25 @@ class Settings(BaseSettings):
     R5_L2_RANKING_MIN_SAMPLES: int = 1   # 至少 N r1a sample 才参与重排
     R5_L2_RANKING_LOOKBACK_DAYS: int = 30  # AVG 窗口
 
+    # ----- Phase 3 Q10: pyqlib local pre-screen (Multi-Fidelity Layer 0) -----
+    # 2026-05-18 — plan: ~/.claude/plans/phase3-q10-pyqlib-prescreen-2026-05-18.md v1.3
+    # Slot in front of BRAIN simulate: translate BRAIN expression → qlib DSL,
+    # evaluate on local OHLCV snapshot for approximate Sharpe/IC; reject ones
+    # below floor (saves BRAIN sim cost).
+    # 3-stage rollout: shadow (log only) → soft (warn metric) → hard (reject).
+    # 3-tier engine degrade: pyqlib_live → pyqlib_snapshot → pandas_snapshot
+    # → disabled. Coverage ~30-45% T1 traffic (price-volume-only alphas;
+    # fnd*/analyst_*/group_neutralize/trade_when are untranslatable by design).
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_QLIB_PRESCREEN: bool = False
+    QLIB_PRESCREEN_MODE: str = "shadow"  # shadow | soft | hard
+    QLIB_PRESCREEN_SHARPE_FLOOR: float = 0.3
+    QLIB_PRESCREEN_IC_FLOOR: float = 0.005
+    QLIB_PRESCREEN_TIMEOUT_MS: int = 1500    # hard per-alpha timeout
+    QLIB_DATA_DIR: str = os.getenv("QLIB_DATA_DIR", "backend/data/qlib_data")
+    QLIB_SNAPSHOT_DIR: str = os.getenv("QLIB_SNAPSHOT_DIR", "backend/data/qlib_ohlcv_snapshot")
+    QLIB_ENGINE_PREFER_PANDAS: bool = False  # force tier-3 for testing
+
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
     # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression

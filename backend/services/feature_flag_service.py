@@ -179,6 +179,34 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "meta_data GIN index + backfill_kb_pillar_family_signature.py 3K+ entries。"
         ),
     ),
+    # --- Phase 3 Q10: pyqlib local pre-screen (Multi-Fidelity Layer 0) ---
+    "ENABLE_QLIB_PRESCREEN": FlagSpec(
+        name="ENABLE_QLIB_PRESCREEN",
+        flag_type="bool",
+        group="Phase3-Q10",
+        description=(
+            "Phase 3 Q10 (2026-05-18): local pyqlib pre-screen layer in front "
+            "of BRAIN simulate. Translate BRAIN expression → qlib DSL → eval "
+            "on local OHLCV snapshot → approximate Sharpe/IC. Below floor "
+            "rejects (hard mode) save BRAIN call. 3-tier engine degrade "
+            "(pyqlib_live → pyqlib_snapshot → pandas_snapshot → disabled). "
+            "Untranslatable expressions (group_neutralize / trade_when / "
+            "fnd*) skip — proceed to BRAIN. Coverage ~30-45% T1 traffic. "
+            "Must pair with QLIB_PRESCREEN_MODE setting (shadow|soft|hard)."
+        ),
+    ),
+    "QLIB_PRESCREEN_MODE": FlagSpec(
+        name="QLIB_PRESCREEN_MODE",
+        flag_type="str",
+        group="Phase3-Q10",
+        description=(
+            "Q10 rollout stage: 'shadow' (log only, BRAIN proceeds) → 'soft' "
+            "(log + alpha.metrics['_qlib_prescreen_warned']=True, BRAIN "
+            "proceeds) → 'hard' (skip BRAIN, alpha marked simulation_success="
+            "False with simulation_error). Default 'shadow'. Calibration phase "
+            "~5d shadow → 3d soft → hard per plan §10 stage gates."
+        ),
+    ),
     # --- R8-v2 #3 R5 L2 ranking ---
     "ENABLE_R5_L2_RANKING": FlagSpec(
         name="ENABLE_R5_L2_RANKING",

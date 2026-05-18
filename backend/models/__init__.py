@@ -91,6 +91,10 @@ from backend.models.direction_bandit_log import DirectionBanditLog
 # R1a v1.6 lesson [[feedback_r1a_dedicated_log_table]])
 from backend.models.ast_distance_log import AstDistanceLog
 
+# Q10 pyqlib pre-screen log (Phase 3 Q10 PR1b — one row per prescreen_alpha
+# call; dedicated table per same R1a lesson)
+from backend.models.qlib_prescreen_log import QlibPrescreenLog
+
 __all__ = [
     # Enums
     "MiningStatus",
