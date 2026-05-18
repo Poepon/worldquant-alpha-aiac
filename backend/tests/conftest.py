@@ -33,6 +33,53 @@ from backend.database import SQLAlchemyBase
 import backend.tasks  # noqa: F401
 
 
+# JSONB-on-SQLite shim (2026-05-18): models use PostgreSQL JSONB / ARRAY
+# for production. The in-memory SQLite fixture below can't compile those
+# types, so 51 unit tests (test_services + test_repositories) ERRORed on
+# metadata.create_all(). Three dispatch hooks cover the full surface:
+#
+#   1. JSONB → JSON column type fallback
+#   2. ARRAY → JSON column type fallback
+#   3. CreateTable DDL post-process: strip PG cast suffixes (``::jsonb`` /
+#      ``::text``) from server_default literals — required because Phase
+#      1.5-MF-V1.4 chose ``text("'X'::jsonb")`` server_defaults for
+#      production atomicity, which SQLite parses as "unrecognized token".
+#
+# Round-trips correctly for tests that don't use JSONB-specific operators
+# (``?``, ``@>``, ``->>``); those tests should carry
+# ``@pytest.mark.requires_postgres`` anyway and are skipped here.
+import re  # noqa: E402
+
+from sqlalchemy.ext.compiler import compiles  # noqa: E402
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB  # noqa: E402
+from sqlalchemy.schema import CreateTable  # noqa: E402
+from sqlalchemy.sql import compiler as _sql_compiler  # noqa: E402
+
+
+@compiles(JSONB, "sqlite")
+def _jsonb_to_json_sqlite(type_, compiler, **kw):  # pragma: no cover - dispatch
+    return "JSON"
+
+
+@compiles(ARRAY, "sqlite")
+def _array_to_json_sqlite(type_, compiler, **kw):  # pragma: no cover - dispatch
+    return "JSON"
+
+
+_PG_CAST_RE = re.compile(r"::\w+")
+
+
+@compiles(CreateTable, "sqlite")
+def _create_table_sqlite_strip_pg_casts(element, compiler, **kw):  # pragma: no cover
+    """Render default DDL then strip PostgreSQL ``::cast`` suffixes so
+    ``server_default=text("'[]'::jsonb")`` becomes the SQLite-valid
+    ``DEFAULT '[]'``. SQLite's DDLCompiler doesn't override
+    visit_create_table, so calling the base class method is equivalent
+    to the default render path."""
+    rendered = _sql_compiler.DDLCompiler.visit_create_table(compiler, element)
+    return _PG_CAST_RE.sub("", rendered)
+
+
 # =============================================================================
 # Phase 1.5-A [V1.2-C3] requires_postgres mark (plan v1.3 §1.5.1)
 # =============================================================================

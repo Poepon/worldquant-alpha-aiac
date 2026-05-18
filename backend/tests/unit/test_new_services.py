@@ -10,6 +10,7 @@ Tests cover:
 """
 
 import pytest
+import pytest_asyncio
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
@@ -358,7 +359,7 @@ class TestConfigService:
 # Fixtures for Tests (add to conftest.py if not present)
 # =============================================================================
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def sample_dataset(db_session):
     """Create a sample dataset for testing."""
     from backend.models import DatasetMetadata
@@ -379,7 +380,7 @@ async def sample_dataset(db_session):
     return dataset
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def sample_operator(db_session):
     """Create a sample operator for testing."""
     from backend.models import Operator
