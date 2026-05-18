@@ -194,4 +194,16 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.refresh_portfolio_skeletons_all",
         "schedule": crontab(hour="*/6", minute=45),
     },
+    # P3-Q10 PR2d (2026-05-18): daily Q10 pyqlib-prescreen telemetry report
+    # at 09:00 Asia/Shanghai. Aggregates the last 24h of qlib_prescreen_log
+    # (verdict / mode / engine / latency / cost_saved / fn_rate) and prints
+    # to Celery worker stdout — also posts to Slack when Q10_SLACK_WEBHOOK
+    # env var is set. Pure read aggregation (no DB mutation). Co-located at
+    # 09:00 with pillar-balance-check; on the Windows solo-pool worker they
+    # serialize, which is fine since both are read-only and well under the
+    # 1h task_time_limit.
+    "q10-layer-telemetry": {
+        "task": "backend.tasks.run_q10_layer_telemetry",
+        "schedule": crontab(hour=9, minute=0),
+    },
 }

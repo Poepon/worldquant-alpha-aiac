@@ -67,6 +67,8 @@ from backend.tasks.negative_knowledge_extract import run_negative_knowledge_extr
 from backend.tasks.macro_narrative_extract import run_macro_narrative_extract
 # P2-C (2026-05-16): daily regime-inference task
 from backend.tasks.regime_infer import run_regime_infer
+# P3-Q10 PR2d (2026-05-18): daily Q10 telemetry report beat task
+from backend.tasks.q10_tasks import run_q10_layer_telemetry
 
 __all__ = [
     # Utilities
@@ -110,4 +112,6 @@ __all__ = [
     "run_macro_narrative_extract",
     # P2-C: daily regime inference
     "run_regime_infer",
+    # P3-Q10 PR2d: daily Q10 telemetry report
+    "run_q10_layer_telemetry",
 ]
