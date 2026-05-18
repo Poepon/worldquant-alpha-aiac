@@ -1,0 +1,488 @@
+{
+  "_meta": {
+    "source": "McLean-Pontiff 2016 (JoF) + Hou-Xue-Zhang 2020 (RFS) + Harvey-Liu-Zhu 2016 + Chen-Zimmermann 2022 (open-source asset pricing)",
+    "purpose": "Phase 2 Q9 (master plan §4.4) — Replication Crisis 反例库 for negative_knowledge",
+    "import_batch": "phase2_q9_decayed_2026_05_18",
+    "selection_criteria": "Published anomalies with documented post-publication decay >= 20% OR t-stat falling below Harvey-Liu-Zhu 3.0 threshold OR Hou-Xue-Zhang 2020 'not replicated' status",
+    "decay_pct_convention": "negative number = post-pub Sharpe drop (e.g. -26 = 26% drop); McLean-Pontiff median is -26% in-sample, -58% out-of-sample"
+  },
+  "entries": [
+    {
+      "name": "accruals_sloan_1996",
+      "pattern": "rank(-1 * ((income_statement_accruals) / total_assets))",
+      "description": "Sloan (1996 TAR): firms with high accruals tend to underperform. Pre-pub annual return spread 10.4%; post-pub <2%.",
+      "decay_pct": -85,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Sloan 1996 TAR; replicated McLean-Pontiff 2016",
+      "t_stat_orig": 4.1
+    },
+    {
+      "name": "book_to_market_classic",
+      "pattern": "rank(book_value / market_cap)",
+      "description": "Fama-French value premium. Strong pre-1990, substantially decayed post-pub esp. post-2000.",
+      "decay_pct": -65,
+      "failure_mode": "limits_to_arb_disappeared",
+      "theoretical_anchor": "Fama-French 1992 JF; HML decay documented Asness-Frazzini 2013",
+      "t_stat_orig": 3.7
+    },
+    {
+      "name": "momentum_12_1_jegadeesh_titman",
+      "pattern": "ts_rank(ts_returns(close, 252) - ts_returns(close, 21), 60)",
+      "description": "12-1 momentum (skip last month). Still works but reduced; major crashes in 2009 and 2016.",
+      "decay_pct": -40,
+      "failure_mode": "regime_crash_risk",
+      "theoretical_anchor": "Jegadeesh-Titman 1993 JF; crash risk Daniel-Moskowitz 2016",
+      "t_stat_orig": 4.3
+    },
+    {
+      "name": "asset_growth_cooper_2008",
+      "pattern": "rank(-1 * (total_assets / ts_delay(total_assets, 252) - 1))",
+      "description": "Cooper-Gulen-Schill 2008: firms with high asset growth underperform. Decayed substantially.",
+      "decay_pct": -55,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Cooper-Gulen-Schill 2008 JF; replicated McLean-Pontiff 2016",
+      "t_stat_orig": 4.5
+    },
+    {
+      "name": "net_share_issuance_pontiff_woodgate",
+      "pattern": "rank(-1 * (shares_outstanding / ts_delay(shares_outstanding, 252) - 1))",
+      "description": "Pontiff-Woodgate 2008: net stock issuance is a robust short signal. Decay post-pub ~40%.",
+      "decay_pct": -40,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Pontiff-Woodgate 2008 JF",
+      "t_stat_orig": 5.0
+    },
+    {
+      "name": "profitability_novy_marx",
+      "pattern": "rank(gross_profit / total_assets)",
+      "description": "Novy-Marx 2013: gross profitability premium. Decayed post-2013 ~30%.",
+      "decay_pct": -30,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Novy-Marx 2013 JFE",
+      "t_stat_orig": 4.8
+    },
+    {
+      "name": "investment_anomaly_fama_french_5",
+      "pattern": "rank(-1 * capital_expenditure / total_assets)",
+      "description": "FF5 investment factor. Conservative-minus-aggressive investment. Decay ~25% post-pub.",
+      "decay_pct": -25,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Fama-French 2015 JFE",
+      "t_stat_orig": 3.5
+    },
+    {
+      "name": "idiosyncratic_volatility_ang_2006",
+      "pattern": "rank(-1 * ts_std_dev(returns, 21))",
+      "description": "Ang-Hodrick-Xing-Zhang 2006: high idio vol predicts lower returns (puzzle). Hou-Xue-Zhang 2020 rated 'not replicated' in modern data.",
+      "decay_pct": -75,
+      "failure_mode": "data_mining",
+      "theoretical_anchor": "Ang-Hodrick-Xing-Zhang 2006 JF; failed replication Hou-Xue-Zhang 2020",
+      "t_stat_orig": 3.0
+    },
+    {
+      "name": "max_daily_return_bali_2011",
+      "pattern": "rank(-1 * ts_max(returns, 21))",
+      "description": "Bali-Cakici-Whitelaw 2011 MAX. Hou-Xue-Zhang 2020 rated 'not replicated' (decay >80%).",
+      "decay_pct": -80,
+      "failure_mode": "data_mining",
+      "theoretical_anchor": "Bali-Cakici-Whitelaw 2011 JFE; failed replication HXZ 2020",
+      "t_stat_orig": 3.4
+    },
+    {
+      "name": "amihud_illiquidity_2002",
+      "pattern": "rank(ts_mean(abs(returns) / (volume * close), 21))",
+      "description": "Amihud 2002 illiquidity measure. Decay tied to ETF / HFT-driven liquidity provision.",
+      "decay_pct": -50,
+      "failure_mode": "structural_change",
+      "theoretical_anchor": "Amihud 2002 JFM",
+      "t_stat_orig": 3.7
+    },
+    {
+      "name": "net_operating_assets_hirshleifer",
+      "pattern": "rank(-1 * (total_operating_assets - total_operating_liabilities) / total_assets)",
+      "description": "Hirshleifer-Hou-Teoh-Zhang 2004: NOA scale predicts underperformance. McLean-Pontiff -50%.",
+      "decay_pct": -50,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Hirshleifer-Hou-Teoh-Zhang 2004 JAE",
+      "t_stat_orig": 4.3
+    },
+    {
+      "name": "external_financing_bradshaw_2006",
+      "pattern": "rank(-1 * (issued_equity + issued_debt - share_repurchases - debt_repayment) / total_assets)",
+      "description": "Bradshaw-Richardson-Sloan 2006: external financing predicts underperformance. McLean-Pontiff -45%.",
+      "decay_pct": -45,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Bradshaw-Richardson-Sloan 2006 JAE",
+      "t_stat_orig": 4.0
+    },
+    {
+      "name": "composite_issuance_daniel_titman",
+      "pattern": "rank(-1 * (log(market_cap / ts_delay(market_cap, 1260)) - ts_returns(close, 1260)))",
+      "description": "Daniel-Titman 2006: 5-year composite issuance. Strong original; decay ~35%.",
+      "decay_pct": -35,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Daniel-Titman 2006 JF",
+      "t_stat_orig": 4.2
+    },
+    {
+      "name": "sue_post_earnings_drift",
+      "pattern": "rank(standardized_earnings_surprise)",
+      "description": "PEAD (Bernard-Thomas 1989). Persistent but reduced as algos trade earnings faster. Decay ~50%.",
+      "decay_pct": -50,
+      "failure_mode": "arbitrage_speed",
+      "theoretical_anchor": "Bernard-Thomas 1989 JAE; Ke-Ramalingegowda 2005",
+      "t_stat_orig": 5.5
+    },
+    {
+      "name": "analyst_revision_chan_jegadeesh_lakonishok",
+      "pattern": "rank(ts_change(analyst_eps_forecast_mean, 30))",
+      "description": "Chan-Jegadeesh-Lakonishok 1996 analyst revisions. Substantially arbitraged away.",
+      "decay_pct": -60,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Chan-Jegadeesh-Lakonishok 1996 JF",
+      "t_stat_orig": 4.6
+    },
+    {
+      "name": "insider_buying_seyhun",
+      "pattern": "rank(insider_buy_dollar_value - insider_sell_dollar_value)",
+      "description": "Seyhun 1986/1998 insider trading. Reduced edge post Reg FD + faster info diffusion.",
+      "decay_pct": -55,
+      "failure_mode": "regulatory_arbitrage",
+      "theoretical_anchor": "Seyhun 1986 JFE",
+      "t_stat_orig": 4.0
+    },
+    {
+      "name": "short_interest_asquith_pathak_ritter",
+      "pattern": "rank(-1 * short_interest_ratio)",
+      "description": "Asquith-Pathak-Ritter 2005: high short interest predicts underperformance. Decay ~40%.",
+      "decay_pct": -40,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Asquith-Pathak-Ritter 2005 JFE",
+      "t_stat_orig": 4.1
+    },
+    {
+      "name": "institutional_holdings_change",
+      "pattern": "rank(ts_change(institutional_ownership_pct, 90))",
+      "description": "Institutional ownership change as signal. Modest decay; still partial signal.",
+      "decay_pct": -30,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Nofsinger-Sias 1999 JF",
+      "t_stat_orig": 3.5
+    },
+    {
+      "name": "capital_expenditures_titman_wei_xie",
+      "pattern": "rank(-1 * (capital_expenditure / ts_delay(capital_expenditure, 252) - 1))",
+      "description": "Titman-Wei-Xie 2004: high capex investment underperforms. Decay ~35%.",
+      "decay_pct": -35,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Titman-Wei-Xie 2004 JFQA",
+      "t_stat_orig": 3.9
+    },
+    {
+      "name": "rd_to_market_chan_lakonishok_sougiannis",
+      "pattern": "rank(r_and_d_expenditure / market_cap)",
+      "description": "Chan-Lakonishok-Sougiannis 2001: R&D/M premium. Decay ~30% as analysts adjust.",
+      "decay_pct": -30,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Chan-Lakonishok-Sougiannis 2001 JF",
+      "t_stat_orig": 3.6
+    },
+    {
+      "name": "advertising_chan_lakonishok_sougiannis",
+      "pattern": "rank(advertising_expenditure / market_cap)",
+      "description": "Advertising/M premium. Weakly persistent; Harvey-Liu-Zhu t-stat below 3.0 in modern data.",
+      "decay_pct": -60,
+      "failure_mode": "data_mining",
+      "theoretical_anchor": "Chan-Lakonishok-Sougiannis 2001 JF",
+      "t_stat_orig": 2.8
+    },
+    {
+      "name": "inventory_growth_thomas_zhang",
+      "pattern": "rank(-1 * (inventory / ts_delay(inventory, 252) - 1))",
+      "description": "Thomas-Zhang 2002: inventory growth as inefficiency signal. Decay ~40%.",
+      "decay_pct": -40,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Thomas-Zhang 2002 RAS",
+      "t_stat_orig": 3.7
+    },
+    {
+      "name": "long_term_reversal_debondt_thaler",
+      "pattern": "rank(-1 * ts_returns(close, 1260))",
+      "description": "DeBondt-Thaler 1985 5-year reversal. Largely arbitraged away post-pub.",
+      "decay_pct": -70,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "DeBondt-Thaler 1985 JF",
+      "t_stat_orig": 3.4
+    },
+    {
+      "name": "industry_momentum_moskowitz_grinblatt",
+      "pattern": "rank(ts_returns(industry_avg_close, 252))",
+      "description": "Moskowitz-Grinblatt 1999 industry momentum. Decay ~35% post 2000.",
+      "decay_pct": -35,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Moskowitz-Grinblatt 1999 JF",
+      "t_stat_orig": 4.2
+    },
+    {
+      "name": "low_beta_anomaly_frazzini_pedersen",
+      "pattern": "rank(-1 * beta)",
+      "description": "Frazzini-Pedersen BAB (Betting Against Beta). Still works but reduced; sensitive to vol regime.",
+      "decay_pct": -25,
+      "failure_mode": "regime_sensitive",
+      "theoretical_anchor": "Frazzini-Pedersen 2014 JFE",
+      "t_stat_orig": 5.0
+    },
+    {
+      "name": "size_premium_banz_fama_french",
+      "pattern": "rank(-1 * market_cap)",
+      "description": "Size premium (Banz 1981). Substantially weaker post-1980; HXZ 2020 disputed.",
+      "decay_pct": -60,
+      "failure_mode": "data_mining",
+      "theoretical_anchor": "Banz 1981 JFE; Fama-French 1992 JF",
+      "t_stat_orig": 3.2
+    },
+    {
+      "name": "earnings_yield_basu_1977",
+      "pattern": "rank(earnings / market_cap)",
+      "description": "Basu 1977 E/P. Decayed substantially with index growth dominance post-2000.",
+      "decay_pct": -55,
+      "failure_mode": "regime_growth_dominance",
+      "theoretical_anchor": "Basu 1977 JF",
+      "t_stat_orig": 3.5
+    },
+    {
+      "name": "cash_flow_yield_lakonishok_shleifer_vishny",
+      "pattern": "rank(operating_cash_flow / market_cap)",
+      "description": "LSV 1994 CF/P. Better than E/P in early periods; decayed ~40%.",
+      "decay_pct": -40,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Lakonishok-Shleifer-Vishny 1994 JF",
+      "t_stat_orig": 4.0
+    },
+    {
+      "name": "sales_growth_lakonishok_shleifer_vishny",
+      "pattern": "rank(-1 * (sales / ts_delay(sales, 1260) - 1))",
+      "description": "LSV 1994 5-year sales growth (negative predictor). Decay ~45%.",
+      "decay_pct": -45,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Lakonishok-Shleifer-Vishny 1994 JF",
+      "t_stat_orig": 3.8
+    },
+    {
+      "name": "earnings_momentum_chan_jegadeesh_lakonishok",
+      "pattern": "rank(ts_change(quarterly_eps, 90))",
+      "description": "Chan-Jegadeesh-Lakonishok 1996 earnings momentum. Decay ~40%.",
+      "decay_pct": -40,
+      "failure_mode": "arbitrage_speed",
+      "theoretical_anchor": "Chan-Jegadeesh-Lakonishok 1996 JF",
+      "t_stat_orig": 4.3
+    },
+    {
+      "name": "stock_split_post_announcement_drift",
+      "pattern": "rank(stock_split_announcement_indicator * ts_days_since_announcement)",
+      "description": "Ikenberry-Rankine-Stice 1996 post-split drift. Mostly disappeared post-decimalization.",
+      "decay_pct": -75,
+      "failure_mode": "microstructure_change",
+      "theoretical_anchor": "Ikenberry-Rankine-Stice 1996 JFQA",
+      "t_stat_orig": 3.4
+    },
+    {
+      "name": "dividend_yield_litzenberger_ramaswamy",
+      "pattern": "rank(dividend_yield)",
+      "description": "Litzenberger-Ramaswamy 1979 dividend yield. Decayed ~50% post-1990; tax-driven.",
+      "decay_pct": -50,
+      "failure_mode": "tax_regime_change",
+      "theoretical_anchor": "Litzenberger-Ramaswamy 1979 JFE",
+      "t_stat_orig": 3.6
+    },
+    {
+      "name": "buyback_announcement_ikenberry",
+      "pattern": "rank(repurchase_announcement_indicator * ts_days_since(repurchase_announcement_indicator, 252))",
+      "description": "Ikenberry-Lakonishok-Vermaelen 1995 buyback drift. Decay ~55%.",
+      "decay_pct": -55,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Ikenberry-Lakonishok-Vermaelen 1995 JFE",
+      "t_stat_orig": 4.2
+    },
+    {
+      "name": "spinoff_cusatis_miles_woolridge",
+      "pattern": "rank(spinoff_indicator)",
+      "description": "Cusatis-Miles-Woolridge 1993 spin-off outperformance. Largely disappeared.",
+      "decay_pct": -65,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Cusatis-Miles-Woolridge 1993 JFE",
+      "t_stat_orig": 3.3
+    },
+    {
+      "name": "ipo_long_run_underperformance_ritter",
+      "pattern": "rank(-1 * ipo_indicator * ts_months_since_ipo)",
+      "description": "Ritter 1991 IPO long-run underperformance. Decay ~40% post 2000.",
+      "decay_pct": -40,
+      "failure_mode": "structural_change",
+      "theoretical_anchor": "Ritter 1991 JF",
+      "t_stat_orig": 3.5
+    },
+    {
+      "name": "seo_post_announcement_loughran_ritter",
+      "pattern": "rank(-1 * seo_indicator * ts_months_since_seo)",
+      "description": "Loughran-Ritter 1995 SEO underperformance. Decay ~50%.",
+      "decay_pct": -50,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Loughran-Ritter 1995 JF",
+      "t_stat_orig": 3.9
+    },
+    {
+      "name": "merger_acquirer_underperformance",
+      "pattern": "rank(-1 * acquirer_indicator * ts_months_since_acquisition)",
+      "description": "Acquirer long-run underperformance (Loughran-Vijh 1997). Decay ~45%.",
+      "decay_pct": -45,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Loughran-Vijh 1997 JF",
+      "t_stat_orig": 3.7
+    },
+    {
+      "name": "earnings_restatement_palmrose",
+      "pattern": "rank(-1 * earnings_restatement_indicator)",
+      "description": "Palmrose-Richardson-Scholz 2004 restatement underperformance. Modern data: weaker.",
+      "decay_pct": -50,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Palmrose-Richardson-Scholz 2004 JAE",
+      "t_stat_orig": 3.6
+    },
+    {
+      "name": "going_concern_audit_opinion",
+      "pattern": "rank(-1 * going_concern_opinion_indicator)",
+      "description": "Going concern opinion predicts underperformance. Faded as info diffuses quickly.",
+      "decay_pct": -60,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Kausar-Taffler-Tan 2009",
+      "t_stat_orig": 3.4
+    },
+    {
+      "name": "operating_leverage_garcia_pellicer",
+      "pattern": "rank(fixed_costs / total_costs)",
+      "description": "Operating leverage premium. Hou-Xue-Zhang 2020 rated weak; t-stat below 3.0.",
+      "decay_pct": -70,
+      "failure_mode": "data_mining",
+      "theoretical_anchor": "Garcia-Feijoo-Jorgensen 2010 RFS",
+      "t_stat_orig": 2.7
+    },
+    {
+      "name": "financial_leverage_bhandari",
+      "pattern": "rank(total_debt / total_equity)",
+      "description": "Bhandari 1988 leverage premium. Decay; positive risk premium not consistently realized.",
+      "decay_pct": -55,
+      "failure_mode": "regime_sensitive",
+      "theoretical_anchor": "Bhandari 1988 JF",
+      "t_stat_orig": 3.2
+    },
+    {
+      "name": "quick_ratio_ou_penman",
+      "pattern": "rank((cash + receivables) / current_liabilities)",
+      "description": "Quick ratio as fundamental signal (Ou-Penman 1989). Largely subsumed by other factors.",
+      "decay_pct": -65,
+      "failure_mode": "factor_subsumption",
+      "theoretical_anchor": "Ou-Penman 1989 JAE",
+      "t_stat_orig": 3.0
+    },
+    {
+      "name": "working_capital_changes_sloan_extension",
+      "pattern": "rank(-1 * ts_change(working_capital, 252) / total_assets)",
+      "description": "Working capital component of accruals (Sloan 1996 decomposition). Decayed.",
+      "decay_pct": -70,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Sloan 1996 TAR",
+      "t_stat_orig": 3.8
+    },
+    {
+      "name": "dividend_initiation_michaely_thaler_womack",
+      "pattern": "rank(dividend_initiation_indicator * ts_days_since(dividend_initiation_indicator, 252))",
+      "description": "Michaely-Thaler-Womack 1995 dividend initiation drift. Decay ~50%.",
+      "decay_pct": -50,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Michaely-Thaler-Womack 1995 JF",
+      "t_stat_orig": 3.6
+    },
+    {
+      "name": "earnings_persistence_richardson",
+      "pattern": "rank(earnings_persistence_estimate)",
+      "description": "Earnings persistence quality (Richardson-Sloan-Soliman-Tuna 2005). Faded.",
+      "decay_pct": -55,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Richardson-Sloan-Soliman-Tuna 2005 JAE",
+      "t_stat_orig": 3.7
+    },
+    {
+      "name": "tax_avoidance_dyreng_hanlon_maydew",
+      "pattern": "rank(cash_etr_5y - statutory_etr)",
+      "description": "Dyreng-Hanlon-Maydew 2008 tax avoidance. Hou-Xue-Zhang 2020 rated 'not replicated'.",
+      "decay_pct": -80,
+      "failure_mode": "data_mining",
+      "theoretical_anchor": "Dyreng-Hanlon-Maydew 2008 TAR",
+      "t_stat_orig": 2.5
+    },
+    {
+      "name": "share_turnover_datar_naik_radcliffe",
+      "pattern": "rank(-1 * ts_mean(volume / shares_outstanding, 21))",
+      "description": "Datar-Naik-Radcliffe 1998 turnover anomaly. Decayed with HFT-driven volume.",
+      "decay_pct": -60,
+      "failure_mode": "structural_change",
+      "theoretical_anchor": "Datar-Naik-Radcliffe 1998 JFM",
+      "t_stat_orig": 3.4
+    },
+    {
+      "name": "earnings_announcement_premium_frazzini_lamont",
+      "pattern": "rank(days_to_next_earnings_announcement * (days_to_next_earnings_announcement < 5))",
+      "description": "Frazzini-Lamont 2007 earnings announcement premium. Decay ~50% post 2010.",
+      "decay_pct": -50,
+      "failure_mode": "arbitrage",
+      "theoretical_anchor": "Frazzini-Lamont 2007 JFE",
+      "t_stat_orig": 4.1
+    },
+    {
+      "name": "52_week_high_george_hwang",
+      "pattern": "rank(close / ts_max(close, 252))",
+      "description": "George-Hwang 2004 52-week high anchor. Decay ~35%; subsumed by momentum.",
+      "decay_pct": -35,
+      "failure_mode": "factor_subsumption",
+      "theoretical_anchor": "George-Hwang 2004 JF",
+      "t_stat_orig": 4.0
+    },
+    {
+      "name": "earnings_consistency_white_richardson",
+      "pattern": "rank(-1 * ts_std_dev(quarterly_eps, 8))",
+      "description": "Earnings volatility as quality. Decayed; positive but weak premium.",
+      "decay_pct": -55,
+      "failure_mode": "data_mining",
+      "theoretical_anchor": "Richardson-Sloan-Soliman-Tuna 2005",
+      "t_stat_orig": 3.0
+    },
+    {
+      "name": "cash_to_assets_palazzo_2012",
+      "pattern": "rank(cash / total_assets)",
+      "description": "Palazzo 2012 cash holdings premium. Hou-Xue-Zhang 2020 weak replication.",
+      "decay_pct": -65,
+      "failure_mode": "data_mining",
+      "theoretical_anchor": "Palazzo 2012 JFE",
+      "t_stat_orig": 2.9
+    },
+    {
+      "name": "max_min_ratio_gibbons_hess",
+      "pattern": "rank(-1 * (ts_max(close, 21) / ts_min(close, 21)))",
+      "description": "Range-based volatility (Gibbons-Hess). Largely subsumed by std-dev measures.",
+      "decay_pct": -75,
+      "failure_mode": "factor_subsumption",
+      "theoretical_anchor": "Gibbons-Hess 1981 JoB",
+      "t_stat_orig": 2.6
+    },
+    {
+      "name": "skewness_amaya_christoffersen_jacobs_vasquez",
+      "pattern": "rank(-1 * ts_skewness(returns, 21))",
+      "description": "Realized skewness premium (Amaya et al. 2015). Weak post-pub; HXZ 2020 not replicated.",
+      "decay_pct": -70,
+      "failure_mode": "data_mining",
+      "theoretical_anchor": "Amaya-Christoffersen-Jacobs-Vasquez 2015 JFE",
+      "t_stat_orig": 2.8
+    }
+  ]
+}
