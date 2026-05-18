@@ -614,6 +614,10 @@ const api = {
     const { data } = await client.get('/ops/r1b/chain-depth-distribution')
     return data
   },
+  getOpsR8KbShape: async () => {
+    const { data } = await client.get('/ops/r8/kb-shape')
+    return data
+  },
 }
 
 export default api

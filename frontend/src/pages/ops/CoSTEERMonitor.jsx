@@ -47,10 +47,12 @@ export default function CoSTEERMonitor() {
   const r1a = useOpsData(() => api.getOpsR1aTelemetry(days), [days])
   const r1b = useOpsData(() => api.getOpsR1bTelemetry(days, 5), [days])
   const chainDepth = useOpsData(() => api.getOpsR1bChainDepth(), [])
+  const r8 = useOpsData(() => api.getOpsR8KbShape(), [])
 
   const r1aPayload = r1a.data || {}
   const r1bPayload = r1b.data || {}
   const chainPayload = chainDepth.data || {}
+  const r8Payload = r8.data || {}
 
   // ---- R1a attribution pie ------------------------------------------------
   const ATTR_COLORS = {
@@ -131,13 +133,14 @@ export default function CoSTEERMonitor() {
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
       <OpsSectionCard
-        title="CoSTEER Loop Monitor (R1a + R1b)"
+        title="CoSTEER Loop Monitor (R1a + R1b + R8)"
         source="live"
-        loading={r1a.loading || r1b.loading || chainDepth.loading}
+        loading={r1a.loading || r1b.loading || chainDepth.loading || r8.loading}
         onRefresh={() => {
           r1a.refetch()
           r1b.refetch()
           chainDepth.refetch()
+          r8.refetch()
         }}
       >
         <Space size="middle" style={{ marginBottom: 16 }}>
@@ -162,6 +165,7 @@ export default function CoSTEERMonitor() {
               <strong>Flag state:</strong>
               {Object.entries(r1aPayload.flags || {}).map(([k, v]) => flagTag(k, v))}
               {Object.entries(r1bPayload.flags || {}).map(([k, v]) => flagTag(k, v))}
+              {Object.entries(r8Payload.flags || {}).map(([k, v]) => flagTag(k, v))}
             </Space>
           }
           type="info"
@@ -312,6 +316,84 @@ export default function CoSTEERMonitor() {
               pagination={false}
               locale={{ emptyText: 'No tasks with R1b budget yet' }}
             />
+          </OpsSectionCard>
+        </Col>
+      </Row>
+
+      {/* R8 hierarchical RAG KB shape — gate evidence for ENABLE_HIERARCHICAL_RAG flip */}
+      <Row gutter={[16, 16]}>
+        <Col xs={24} lg={14}>
+          <OpsSectionCard title="R8 KB Entry Types (active vs decayed)">
+            {(r8Payload.entry_types || []).length === 0 ? (
+              <Empty description="No KB rows" />
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <BarChart
+                  data={(r8Payload.entry_types || []).map((b) => ({
+                    type: b.entry_type,
+                    active: b.active_count,
+                    decayed: b.decayed_count,
+                  }))}
+                >
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="type" />
+                  <YAxis allowDecimals={false} />
+                  <Tooltip />
+                  <Legend />
+                  <Bar dataKey="active" stackId="kb" fill="#1677ff" />
+                  <Bar dataKey="decayed" stackId="kb" fill="#bfbfbf" />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+            <Space wrap style={{ marginTop: 12 }}>
+              <Tag color="blue">
+                Total active: {r8Payload.total_active ?? 0}
+              </Tag>
+              <Tag>Total decayed: {r8Payload.total_decayed ?? 0}</Tag>
+              <Tag color="success">
+                SUCCESS active: {r8Payload.success_pattern_active ?? 0}
+              </Tag>
+              <Tag color="error">
+                FAILURE active: {r8Payload.failure_pitfall_active ?? 0}
+              </Tag>
+              <Tag color="purple">
+                R5-rankable SUCCESS: {r8Payload.r5_rankable_success_count ?? 0}
+              </Tag>
+            </Space>
+          </OpsSectionCard>
+        </Col>
+
+        <Col xs={24} lg={10}>
+          <OpsSectionCard title="R8 Pillar Coverage (active)">
+            {(r8Payload.pillars || []).length === 0 ? (
+              <Empty description="No pillar data" />
+            ) : (
+              <ResponsiveContainer width="100%" height={260}>
+                <PieChart>
+                  <Pie
+                    data={(r8Payload.pillars || []).map((p) => ({
+                      name: p.pillar,
+                      value: p.entry_count,
+                    }))}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    outerRadius={90}
+                    label={({ name, value }) => `${name}: ${value}`}
+                  >
+                    {(r8Payload.pillars || []).map((p) => (
+                      <Cell
+                        key={p.pillar}
+                        fill={p.pillar === 'none' ? '#bfbfbf' : '#13c2c2'}
+                      />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                  <Legend />
+                </PieChart>
+              </ResponsiveContainer>
+            )}
           </OpsSectionCard>
         </Col>
       </Row>
