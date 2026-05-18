@@ -248,6 +248,16 @@ class Settings(BaseSettings):
     FLAT_CONTINUOUS_DAILY_GOAL: int = 20         # alphas/iteration cap
     FLAT_CONTINUOUS_MAX_ITERATIONS: int = 100    # safety bound per session
 
+    # ----- flat-F2 default mining_mode flip (Phase 3, 2026-05-18) -----
+    # 默认 mining_mode 翻 CONTINUOUS_CASCADE → FLAT_CONTINUOUS — POST
+    # /mining-session/start 不再创建 cascade task,改创 flat task。
+    # 前置:ENABLE_FLAT_CONTINUOUS + ENABLE_DAG_TRACE 都 ON(R6 给 flat
+    # reward-guided exploration,避 linear cursor regression)+ flat-F1
+    # 2 周灰度 PASS。决策 5A lock。
+    # 默认 OFF — 翻 ON 后新 task 走 flat,既有 cascade task 不影响。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_DEFAULT_FLAT_SESSION: bool = False
+
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
     # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
     # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression

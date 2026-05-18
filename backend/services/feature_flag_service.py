@@ -160,6 +160,21 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase1-R3Q8",
         description="启用 DiversityScore 第 6 维 ast_diversity (1 − Jaccard subtree overlap)。Light wiring 仅记录到 ast_distance_log,不 gate 生成。Phase 2+ R10 family-cap 复用此信号。",
     ),
+    # --- flat-F2: default mining_mode flip ---
+    "ENABLE_DEFAULT_FLAT_SESSION": FlagSpec(
+        name="ENABLE_DEFAULT_FLAT_SESSION",
+        flag_type="bool",
+        group="Phase3-flatF2",
+        description=(
+            "Phase 3 flat-F2 (master plan §4.5 / 决策 5A): POST "
+            "/mining-session/start 不再创建 cascade task,改创 flat task。"
+            "前置 ENABLE_FLAT_CONTINUOUS + ENABLE_DAG_TRACE 都 ON 才生效 "
+            "(R6 给 flat reward-guided exploration,避 linear cursor "
+            "regression)。默认 OFF — 翻 ON 后新 task 走 flat,既有 cascade "
+            "task 不影响 (Phase 3 flat-F4 cascade 退役才删 cascade legacy code)。"
+            "Rollback flip OFF: 下次 start_session 创 cascade。"
+        ),
+    ),
     # --- flat-F1 Advanced: FLAT_CONTINUOUS mining mode ---
     "ENABLE_FLAT_CONTINUOUS": FlagSpec(
         name="ENABLE_FLAT_CONTINUOUS",

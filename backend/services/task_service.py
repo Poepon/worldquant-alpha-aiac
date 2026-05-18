@@ -735,11 +735,37 @@ class TaskService(BaseService):
         defaults (daily_goal=0 = unlimited, max_iterations=999999) and
         dispatches the celery worker.
 
+        flat-F2 (Phase 3, 2026-05-18, 决策 5A): when
+        ``ENABLE_DEFAULT_FLAT_SESSION`` AND ``ENABLE_FLAT_CONTINUOUS`` both ON,
+        delegates to ``start_flat_session`` instead — new session created as
+        FLAT_CONTINUOUS with hypothesis-driven flat path + R6 DAG-guided
+        exploration. Existing per-region cascade tasks (PAUSED/RUNNING) are
+        unaffected — only NEW sessions go flat. Cascade legacy code paths
+        kept until flat-F4. Rollback: flip flag OFF (< 1 min).
+
         Raises ValueError on unsupported region.
         """
         if region not in self.SUPPORTED_REGIONS:
             raise ValueError(
                 f"region={region!r} not supported; choose one of {self.SUPPORTED_REGIONS}"
+            )
+
+        # flat-F2 default flip — delegate to flat path when flag ON.
+        # Requires BOTH ENABLE_DEFAULT_FLAT_SESSION (Phase 3 flat-F2) AND
+        # ENABLE_FLAT_CONTINUOUS (Phase 3 flat-F1, prerequisite for flat
+        # dispatch to be enabled at all). Without flat-F1 flag ON, the
+        # dispatch branch in mining_tasks.run_mining_task rejects FLAT
+        # tasks — so we guard at the create site too.
+        from backend.config import settings as _stg
+        if (
+            getattr(_stg, "ENABLE_DEFAULT_FLAT_SESSION", False)
+            and getattr(_stg, "ENABLE_FLAT_CONTINUOUS", False)
+        ):
+            logger.info(
+                f"[start_session] flat-F2 active: region={region} routing to start_flat_session"
+            )
+            return await self.start_flat_session(
+                region=region, universe=universe, datasets=None,
             )
 
         existing = await self.get_active_session(region)
