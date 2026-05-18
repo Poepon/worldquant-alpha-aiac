@@ -105,7 +105,11 @@ def _mock_celery_dispatch():
 
 @pytest.mark.asyncio
 async def test_start_flat_session_creates_flat_task(pg_session):
-    """plan §5 (1): start_flat_session creates FLAT_CONTINUOUS task with cursor=0."""
+    """plan §5 (1): start_flat_session creates FLAT task with cursor=0.
+
+    Post tier-system removal (Ship #7) mining_mode column is dropped — the
+    flat marker is now task.schedule == 'FLAT' (per TaskService.start_flat_session).
+    """
     _flag_override_cache["ENABLE_FLAT_CONTINUOUS"] = True
     svc = TaskService(pg_session)
 
@@ -117,11 +121,10 @@ async def test_start_flat_session_creates_flat_task(pg_session):
     task.task_name = f"{_TAG}_{task.task_name}"
     await pg_session.commit()
 
-    assert info.mining_mode == "FLAT_CONTINUOUS"
     assert info.status == "RUNNING"
     assert task.target_datasets == ["pv1", "fundamental6"]
     assert (task.config or {}).get("flat_cursor") == 0
-    assert task.schedule == "ONESHOT"
+    assert task.schedule == "FLAT"
 
 
 # ---------------------------------------------------------------------------
@@ -177,22 +180,21 @@ async def test_flat_resume_preserves_cursor(pg_session):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["PAUSE", "RESUME"])
 async def test_intervene_task_blocks_flat_mode(pg_session, action):
-    """plan §5 (4) Q2 A: intervene_task raises ValueError on FLAT_CONTINUOUS."""
+    """intervene_task raises ValueError on FLAT-scheduled tasks (post tier-
+    removal the marker is task.schedule == 'FLAT')."""
     svc = TaskService(pg_session)
 
     task = MiningTask(
         task_name=f"{_TAG}_intervene_{action}",
         region="USA",
         universe="TOP3000",
-        mining_mode="FLAT_CONTINUOUS",
         status="RUNNING" if action == "PAUSE" else "PAUSED",
-        schedule="ONESHOT",
-        starting_tier=1,
+        schedule="FLAT",
     )
     created = await svc.task_repo.create(task)
     await pg_session.commit()
 
-    with pytest.raises(ValueError, match=r"FLAT_CONTINUOUS tasks use POST /ops/flat-sessions"):
+    with pytest.raises(ValueError, match=r"FLAT sessions use POST /ops/flat-sessions"):
         await svc.intervene_task(created.id, action)
 
     # Status should NOT have changed
@@ -221,27 +223,19 @@ async def test_start_flat_session_unknown_region_rejected(pg_session):
 
 @pytest.mark.asyncio
 async def test_resume_flat_session_rejects_non_flat_task(pg_session):
-    """plan §5 (6): resume_flat_session validates mining_mode.
-
-    phase15-D PR3e cleanup (2026-05-18): originally constructed a
-    CONTINUOUS_CASCADE task to exercise the guard. Cascade ORM cols
-    (cascade_phase / cascade_round_idx) are dropped + cascade is
-    retired — use DISCRETE as the non-FLAT case instead. The guard
-    rejects any non-FLAT_CONTINUOUS mining_mode equally.
-    """
+    """resume_flat_session validates schedule (post tier-removal — was
+    mining_mode pre-Ship-#7)."""
     svc = TaskService(pg_session)
 
     task = MiningTask(
         task_name=f"{_TAG}_discrete_misroute",
         region="CHN",
         universe="TOP2000A",
-        mining_mode="DISCRETE",
         status="PAUSED",
         schedule="ONESHOT",
-        starting_tier=1,
     )
     created = await svc.task_repo.create(task)
     await pg_session.commit()
 
-    with pytest.raises(ValueError, match="is not FLAT_CONTINUOUS"):
+    with pytest.raises(ValueError, match="is not a FLAT session"):
         await svc.resume_flat_session(created.id)

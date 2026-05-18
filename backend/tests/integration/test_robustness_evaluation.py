@@ -63,14 +63,17 @@ def _mk_alpha(
     """
     metrics: Dict[str, Any] = {
         "sharpe": sharpe,
-        "fitness": 1.1,
+        # Post tier-removal (Ship #7) the flat threshold is EVAL_FITNESS_MIN=1.2
+        # (was TIER1=0.95) so the test alpha needs a higher baseline to keep
+        # exercising the robustness gate rather than failing on fitness.
+        "fitness": 1.3,
         "turnover": 0.25,
         "returns": 0.18,
         "drawdown": 0.05,
         # BRAIN-style checks list — all PASS so quality_status stays PASS.
         "checks": [
             {"name": "LOW_SHARPE", "result": "PASS", "limit": 1.25, "value": sharpe},
-            {"name": "LOW_FITNESS", "result": "PASS", "limit": 1.0, "value": 1.1},
+            {"name": "LOW_FITNESS", "result": "PASS", "limit": 1.0, "value": 1.3},
             {"name": "HIGH_TURNOVER", "result": "PASS", "limit": 0.7, "value": 0.25},
             {"name": "LOW_TURNOVER", "result": "PASS", "limit": 0.01, "value": 0.25},
         ],
@@ -106,10 +109,20 @@ def _sim_ok(sharpe: float, can_submit: bool = False) -> Dict[str, Any]:
     }
 
 
+def _stub_correlation_payload() -> Dict[str, Any]:
+    """check_correlation mock return — low self/prod corr so the alpha
+    survives the BRAIN correlation check (post tier-removal the flat
+    eval gate requires check_self_corr=True, so brain.check_correlation
+    must yield a valid payload — pre-removal T1 had check_self_corr=False
+    which short-circuited the call)."""
+    return {"status_code": 200, "data": {"max": 0.1}}
+
+
 def _stable_brain() -> MagicMock:
     """BrainAdapter mock whose simulate_alpha always returns a 'stable' sharpe."""
     brain = MagicMock()
     brain.simulate_alpha = AsyncMock(side_effect=lambda **kw: _sim_ok(1.4))
+    brain.check_correlation = AsyncMock(return_value=_stub_correlation_payload())
     return brain
 
 
@@ -117,6 +130,7 @@ def _unstable_brain() -> MagicMock:
     """BrainAdapter mock whose simulate_alpha returns very weak sharpes (fail ratio)."""
     brain = MagicMock()
     brain.simulate_alpha = AsyncMock(side_effect=lambda **kw: _sim_ok(0.2))
+    brain.check_correlation = AsyncMock(return_value=_stub_correlation_payload())
     return brain
 
 

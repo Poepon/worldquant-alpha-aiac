@@ -113,9 +113,7 @@ async def seeded_task(pg_session):
         task_name=f"{_TAG}task",
         region="USA",
         universe="TOP3000",
-        dataset_strategy="AUTO",
-        agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING",
+        dataset_strategy="AUTO",        status="RUNNING",
         daily_goal=4,
         max_iterations=2,
         config={},
@@ -140,9 +138,7 @@ async def _mk_hyp(s, *, suffix, **over):
         statement=f"{_TAG}{suffix}",
         rationale="r",
         region="USA",
-        kind="INVESTMENT_THESIS",
-        target_tier=1,
-        status="ACTIVE",
+        kind="INVESTMENT_THESIS",        status="ACTIVE",
         is_active=True,
     )
     base.update(over)

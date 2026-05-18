@@ -46,11 +46,11 @@ def test_migration_docstring_warns_against_premature_apply():
 
 def test_orm_columns_dropped_in_pr3b():
     """PR3b (2026-05-18): cascade_phase + cascade_round_idx removed from ORM
-    in lockstep with migration apply. mining_mode kept for FLAT path."""
+    in lockstep with migration apply. mining_mode was also dropped in the
+    later tier-system removal big-bang (Ship #5, revision e1f3b9c2a4d8)."""
     from backend.models import MiningTask
     cols = {c.name for c in MiningTask.__table__.columns}
-    # PR3b dropped from ORM
     assert "cascade_phase" not in cols
     assert "cascade_round_idx" not in cols
-    # mining_mode kept indefinitely for FLAT path
-    assert "mining_mode" in cols
+    # mining_mode dropped post tier-system removal (Ship #5 + #7).
+    assert "mining_mode" not in cols

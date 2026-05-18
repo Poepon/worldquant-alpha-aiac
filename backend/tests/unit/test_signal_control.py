@@ -1,13 +1,13 @@
 """
 Unit tests for signal-vs-control dual-run attribution:
-  - derive_control_expression  (backend/factor_tier_classifier.py)
+  - derive_control_expression  (backend/alpha_expression_utils.py)
   - determine_attribution_dual_run (backend/agents/prompts/alignment.py)
 
 来源: docs/alphagbm_skills_research_2026-05-15.md P0 — signal-vs-control 双跑归因
 """
 
 import pytest
-from backend.factor_tier_classifier import derive_control_expression, classify_tier
+from backend.alpha_expression_utils import derive_control_expression
 from backend.agents.prompts.alignment import determine_attribution_dual_run
 
 

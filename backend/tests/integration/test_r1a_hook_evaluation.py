@@ -110,7 +110,6 @@ def _mk_state(alphas: List[AlphaCandidate], factor_tier: int = 1) -> MiningState
         hypotheses=[],
         fields=[],
     )
-    s.factor_tier = factor_tier
     return s
 
 

@@ -126,8 +126,7 @@ async def session_with_task():
         task = MiningTask(
             task_name=f"{_TAG}_task",
             region="USA", universe="TOP3000",
-            dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
-            status="RUNNING", daily_goal=4, max_iterations=2,
+            dataset_strategy="AUTO",            status="RUNNING", daily_goal=4, max_iterations=2,
             config={"hypothesis_centric_variant": 2},
         )
         s.add(task)
@@ -185,9 +184,7 @@ async def test_b10_happy_path_propose_pass_promote_kb(session_with_task):
         task_id=task.id, region="USA", universe="TOP3000",
         dataset_id="pv1",
         fields=[{"id": "close"}, {"id": "volume"}],
-        operators=[{"name": "ts_rank", "category": "ts"}],
-        factor_tier=1,
-        available_dataset_pool=["pv1"],
+        operators=[{"name": "ts_rank", "category": "ts"}],        available_dataset_pool=["pv1"],
     )
     config = {"configurable": {
         "hypothesis_centric_level": 2,
@@ -237,9 +234,7 @@ async def test_b10_happy_path_propose_pass_promote_kb(session_with_task):
         expression=success_batch[0].expression,
         region="USA", universe="TOP3000", dataset_id="pv1",
         quality_status="PASS",
-        is_sharpe=2.0,
-        factor_tier=1,
-        hypothesis_id=hid,
+        is_sharpe=2.0,        hypothesis_id=hid,
     )
     s.add(landed_alpha)
     await s.commit()
@@ -297,9 +292,7 @@ async def test_b10_3_round_abandon(session_with_task):
         statement=f"{_TAG}_abandon_h1",
         rationale="test",
         region="USA", universe="TOP3000",
-        kind=HypothesisKind.INVESTMENT_THESIS.value,
-        target_tier=1,
-        experiment_variant="b10-abandon",
+        kind=HypothesisKind.INVESTMENT_THESIS.value,        experiment_variant="b10-abandon",
     ))
     await s.commit()
     hid = h.id
@@ -308,8 +301,7 @@ async def test_b10_3_round_abandon(session_with_task):
     for round_idx in (1, 2, 3):
         state = MiningState(
             task_id=task.id, region="USA", universe="TOP3000",
-            dataset_id="pv1", fields=[], operators=[], factor_tier=1,
-            current_hypothesis_id=hid,
+            dataset_id="pv1", fields=[], operators=[],            current_hypothesis_id=hid,
             current_hypothesis_ids=[hid],
             hypothesis_round_history=history,
             pending_alphas=[

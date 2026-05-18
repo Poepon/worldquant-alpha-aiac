@@ -58,8 +58,7 @@ async def session_and_seed():
         task = MiningTask(
             task_name=f"{_TAG}task",
             region="USA", universe="TOP3000",
-            dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER2",
-            status="RUNNING", daily_goal=4, max_iterations=2,
+            dataset_strategy="AUTO",            status="RUNNING", daily_goal=4, max_iterations=2,
         )
         s.add(task)
         await s.flush()
@@ -72,9 +71,7 @@ async def session_and_seed():
             statement=f"{_TAG}h1",
             rationale="b4 link test",
             region="USA",
-            universe="TOP3000",
-            target_tier=2,
-        ))
+            universe="TOP3000",        ))
         await s.commit()
 
         yield s, task, run, h
@@ -130,9 +127,7 @@ async def test_incremental_save_writes_hypothesis_id(session_and_seed):
         run_id=run.id,
         region="USA",
         universe="TOP3000",
-        dataset_id="pv1",
-        factor_tier=2,
-        pending_alphas=pending,
+        dataset_id="pv1",        pending_alphas=pending,
         hypothesis_id=h.id,
     )
 
@@ -166,9 +161,7 @@ async def test_incremental_save_no_hypothesis_id_keeps_null(session_and_seed):
         run_id=run.id,
         region="USA",
         universe="TOP3000",
-        dataset_id="pv1",
-        factor_tier=2,
-        pending_alphas=pending,
+        dataset_id="pv1",        pending_alphas=pending,
         hypothesis_id=None,
     )
 
@@ -233,9 +226,7 @@ async def test_node_save_results_legacy_path_no_hypothesis_id(session_and_seed):
         universe="TOP3000",
         dataset_id="pv1",
         fields=[],
-        operators=[],
-        factor_tier=1,
-        pending_alphas=[_candidate("rank(close)", sharpe=2.0)],
+        operators=[],        pending_alphas=[_candidate("rank(close)", sharpe=2.0)],
         current_hypothesis_id=None,
     )
     config = {"configurable": {"trace_service": None}}

@@ -109,9 +109,7 @@ async def seeded_task(pg_session):
         task_name=f"{_TAG}_task",
         region="USA",
         universe="TOP3000",
-        dataset_strategy="AUTO",
-        agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING",
+        dataset_strategy="AUTO",        status="RUNNING",
         daily_goal=4,
         max_iterations=2,
         config={},
@@ -134,9 +132,7 @@ def _make_alpha(task_id, *, suffix, status="PASS",
                 decay_curve=None,
                 is_sharpe=1.5, is_fitness=0.8, is_turnover=0.3,
                 metrics_snapshot_at=None,
-                hypothesis_id=None,
-                factor_tier=1,
-                dataset_id="fnd6") -> Alpha:
+                hypothesis_id=None,                dataset_id="fnd6") -> Alpha:
     return Alpha(
         alpha_id=_aid(suffix),
         task_id=task_id,
@@ -153,9 +149,7 @@ def _make_alpha(task_id, *, suffix, status="PASS",
         is_turnover=is_turnover,
         decay_curve=decay_curve or [],
         metrics_snapshot_at=metrics_snapshot_at,
-        hypothesis_id=hypothesis_id,
-        factor_tier=factor_tier,
-    )
+        hypothesis_id=hypothesis_id,    )
 
 
 # ---------------------------------------------------------------------------

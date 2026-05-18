@@ -11,7 +11,7 @@ Covers:
         * `result.errors` truthy / iterable still works for legacy tests.
         * `divide_by_zero` / `lookahead` substring assertions on
           `validation_error` still hold (existing test_static_alpha_checks).
-        * factor_tier_classifier's `result.error_messages` returns string list.
+        * `result.error_messages` returns clean string list for logger consumers.
 
 Run with: pytest backend/tests/integration/test_validation_finding_e2e.py -v
 """
@@ -358,7 +358,7 @@ class TestBackwardCompatRegression:
         assert divide.is_valid is True
         assert "divide_by_zero" in (divide.validation_error or "")
 
-    def test_factor_tier_classifier_logger_uses_error_messages(self):
+    def test_error_messages_returns_clean_string_list(self):
         """S-7: `result.error_messages` returns clean List[str] for logger."""
         from backend.alpha_semantic_validator import AlphaSemanticValidator
 

@@ -73,9 +73,7 @@ def _data(suffix: str = "", **overrides) -> HypothesisCreateData:
         rationale="test rationale",
         region="USA",
         universe="TOP3000",
-        kind=HypothesisKind.INVESTMENT_THESIS.value,
-        target_tier=1,
-        expected_signal="momentum",
+        kind=HypothesisKind.INVESTMENT_THESIS.value,        expected_signal="momentum",
         confidence="medium",
         novelty="established",
         key_fields=["close", "volume"],
@@ -124,8 +122,7 @@ async def test_list_active_filters_by_region_kind_tier_variant(session):
     svc = HypothesisService(session)
     h_usa_t1 = await svc.create_hypothesis(_data("usa-t1", region="USA", target_tier=1))
     h_usa_t2 = await svc.create_hypothesis(_data(
-        "usa-t2", region="USA", target_tier=2,
-        kind=HypothesisKind.IMPROVEMENT_RULE.value,
+        "usa-t2", region="USA",        kind=HypothesisKind.IMPROVEMENT_RULE.value,
     ))
     h_chn_t1 = await svc.create_hypothesis(_data("chn-t1", region="CHN", target_tier=1))
     await session.commit()
@@ -313,8 +310,7 @@ async def test_refresh_stats_aggregates_alpha_join(session):
     task = MiningTask(
         task_name=f"{_TAG}stats-task",
         region="USA", universe="TOP3000",
-        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING", daily_goal=4, max_iterations=2,
+        dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, max_iterations=2,
     )
     session.add(task)
     await session.flush()
@@ -373,8 +369,7 @@ async def test_refresh_stats_counts_alpha_failures_v26_13(session):
     task = MiningTask(
         task_name=f"{_TAG}v2613-task",
         region="USA", universe="TOP3000",
-        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING", daily_goal=4, max_iterations=2,
+        dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, max_iterations=2,
     )
     session.add(task)
     await session.flush()
@@ -428,8 +423,7 @@ async def test_refresh_stats_sums_alpha_and_failures_v26_13(session):
     task = MiningTask(
         task_name=f"{_TAG}v2613-mix-task",
         region="USA", universe="TOP3000",
-        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING", daily_goal=4, max_iterations=2,
+        dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, max_iterations=2,
     )
     session.add(task)
     await session.flush()
@@ -497,8 +491,7 @@ async def test_rounds_active_counts_round_stats_rows(session):
     # Need a real task for the round-stats FK.
     task = MiningTask(
         task_name=f"{_TAG}rounds-task", region="USA", universe="TOP3000",
-        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING", daily_goal=4, max_iterations=2,
+        dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, max_iterations=2,
     )
     session.add(task)
     await session.flush()

@@ -57,8 +57,7 @@ async def _mk_alpha(pg_session, *, can_submit, metrics, region="ZZ1"):
     from backend.models import Alpha, MiningTask
     task = MiningTask(
         task_name=f"{_TAG}-task-{uuid.uuid4().hex[:6]}", region=region,
-        universe="TOP3000", dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING", daily_goal=4, max_iterations=2,
+        universe="TOP3000", dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, max_iterations=2,
     )
     pg_session.add(task)
     await pg_session.flush()

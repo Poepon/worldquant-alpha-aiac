@@ -110,8 +110,7 @@ async def _mk_task(pg_session, suffix):
     from backend.models import MiningTask, ExperimentRun
     t = MiningTask(
         task_name=f"{_TAG}-task-{suffix}", region="USA", universe="TOP3000",
-        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING", daily_goal=4, max_iterations=2,
+        dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, max_iterations=2,
     )
     pg_session.add(t)
     await pg_session.flush()
@@ -186,7 +185,7 @@ class TestIncrementalSaveTerminalGuard:
         await _incremental_save_alphas(
             db_session=pg_session, task_id=tid, run_id=rid,
             region="USA", universe="TOP3000", dataset_id="pv1",
-            factor_tier=2, pending_alphas=alphas, hypothesis_id=hid,
+pending_alphas=alphas, hypothesis_id=hid,
         )
         await pg_session.commit()
 
@@ -213,7 +212,7 @@ class TestIncrementalSaveTerminalGuard:
         await _incremental_save_alphas(
             db_session=pg_session, task_id=tid, run_id=rid,
             region="USA", universe="TOP3000", dataset_id="pv1",
-            factor_tier=2, pending_alphas=alphas, hypothesis_id=hid,
+pending_alphas=alphas, hypothesis_id=hid,
         )
         await pg_session.commit()
 
@@ -242,7 +241,7 @@ class TestIncrementalSaveTerminalGuard:
         await _incremental_save_alphas(
             db_session=pg_session, task_id=tid, run_id=rid,
             region="USA", universe="TOP3000", dataset_id="pv1",
-            factor_tier=2, pending_alphas=alphas, hypothesis_id=hid,
+pending_alphas=alphas, hypothesis_id=hid,
         )
         await pg_session.commit()
 

@@ -215,8 +215,7 @@ async def _mk_test_task(s, suffix: str):
     from backend.models import MiningTask
     t = MiningTask(
         task_name=f"{_TAG}task-{suffix}", region="USA", universe="TOP3000",
-        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING", daily_goal=4, max_iterations=2,
+        dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, max_iterations=2,
     )
     s.add(t)
     await s.flush()
@@ -242,8 +241,7 @@ async def test_b5_marks_promoted_when_round_has_pass():
         svc = HypothesisService(s)
         h = await svc.create_hypothesis(HypothesisCreateData(
             statement=f"{_TAG}promoted-test",
-            region="USA", target_tier=1,
-        ))
+            region="USA",        ))
         task = await _mk_test_task(s, "promoted")
         await s.commit()
 
@@ -305,8 +303,7 @@ async def test_b6_abandons_after_3_hypothesis_fail_rounds():
         svc = HypothesisService(s)
         h = await svc.create_hypothesis(HypothesisCreateData(
             statement=f"{_TAG}abandon-test",
-            region="USA", target_tier=1,
-        ))
+            region="USA",        ))
         task = await _mk_test_task(s, "abandon")
         await s.commit()
 
@@ -375,14 +372,11 @@ async def test_v19_6_no_ghost_promotion_for_non_primary():
     async with maker() as s:
         svc = HypothesisService(s)
         primary = await svc.create_hypothesis(HypothesisCreateData(
-            statement=f"{_TAG}primary", region="USA", target_tier=1,
-        ))
+            statement=f"{_TAG}primary", region="USA",        ))
         sibling_a = await svc.create_hypothesis(HypothesisCreateData(
-            statement=f"{_TAG}sibling-a", region="USA", target_tier=1,
-        ))
+            statement=f"{_TAG}sibling-a", region="USA",        ))
         sibling_b = await svc.create_hypothesis(HypothesisCreateData(
-            statement=f"{_TAG}sibling-b", region="USA", target_tier=1,
-        ))
+            statement=f"{_TAG}sibling-b", region="USA",        ))
         task = await _mk_test_task(s, "ghost")
         await s.commit()
 
@@ -450,11 +444,9 @@ async def test_v19_6_abandon_only_primary_in_multi_hypothesis_round():
     async with maker() as s:
         svc = HypothesisService(s)
         primary = await svc.create_hypothesis(HypothesisCreateData(
-            statement=f"{_TAG}aban-primary", region="USA", target_tier=1,
-        ))
+            statement=f"{_TAG}aban-primary", region="USA",        ))
         sibling = await svc.create_hypothesis(HypothesisCreateData(
-            statement=f"{_TAG}aban-sibling", region="USA", target_tier=1,
-        ))
+            statement=f"{_TAG}aban-sibling", region="USA",        ))
         task = await _mk_test_task(s, "aban-multi")
         await s.commit()
 
@@ -516,8 +508,7 @@ async def test_b6_does_not_abandon_for_3_implementation_fails():
         svc = HypothesisService(s)
         h = await svc.create_hypothesis(HypothesisCreateData(
             statement=f"{_TAG}impl-fail-test",
-            region="USA", target_tier=1,
-        ))
+            region="USA",        ))
         task = await _mk_test_task(s, "impl-fail")
         await s.commit()
 

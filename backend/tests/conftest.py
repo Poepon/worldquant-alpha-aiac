@@ -191,7 +191,6 @@ async def sample_task(db_session):
         universe="TOP3000",
         dataset_strategy="AUTO",
         target_datasets=[],
-        agent_mode="AUTONOMOUS",
         status="PENDING",
         daily_goal=4,
         progress_current=0,

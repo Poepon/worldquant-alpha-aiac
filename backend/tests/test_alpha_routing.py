@@ -237,8 +237,9 @@ class TestBandAPriority:
 
 class TestTierAwareThresholds:
     """Verify that score_pass_threshold and score_optimize_threshold are
-    respected — the actual tier-cfg values come from tier_thresholds.py /
-    config.py, but the routing function only cares about the passed floats."""
+    respected — the actual values come from config.EVAL_SCORE_PASS /
+    EVAL_SCORE_OPTIMIZE, but the routing function only cares about the
+    passed floats."""
 
     def test_custom_pass_threshold(self):
         # With thr=0.6, a score=0.65 should PASS

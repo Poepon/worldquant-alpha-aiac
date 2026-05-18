@@ -92,9 +92,7 @@ def _state(**overrides) -> MiningState:
             {"name": "ts_rank", "category": "time_series"},
             {"name": "rank", "category": "cross_sectional"},
             {"name": "multiply", "category": "arithmetic"},
-        ],
-        factor_tier=1,
-        available_dataset_pool=["pv1"],
+        ],        available_dataset_pool=["pv1"],
     )
     base.update(overrides)
     return MiningState(**base)
@@ -194,7 +192,6 @@ async def test_level_2_persists_one_hypothesis():
         assert row.expected_signal == "momentum"
         assert row.confidence == "high"
         assert row.novelty == "emerging"
-        assert row.target_tier == 1
         assert row.region == "USA"
         assert row.universe == "TOP3000"
         assert row.dataset_pool == ["pv1"]

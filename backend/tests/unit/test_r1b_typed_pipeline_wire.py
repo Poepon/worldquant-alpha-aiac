@@ -177,7 +177,7 @@ async def test_run_one_round_inline_calls_typed_wire_first(monkeypatch):
         out = await mining_tasks._run_one_round_inline(
             db=None, task=_mk_task(hcv=3), run=None, brain=None,
             mining_agent=fake_mining_agent, operators=[],
-            dataset_id="pv1", tier=1,
+            dataset_id="pv1",
         )
     assert out["iterations_completed"] == 1
     assert out["all_alphas"][0]["alpha_id"] == "x"

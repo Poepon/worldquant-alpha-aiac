@@ -127,7 +127,6 @@ def test_persistence_error_logger_writes_file(tmp_path, monkeypatch):
     assert "task=42" in content
     assert "alpha_id=TST123" in content
     assert "RuntimeError: synthetic V-19.2 test error" in content
-    assert "factor_tier=1" in content
 
 
 def test_persistence_error_logger_swallows_log_failures(monkeypatch, tmp_path):

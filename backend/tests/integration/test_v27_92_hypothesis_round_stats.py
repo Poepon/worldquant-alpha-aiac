@@ -109,8 +109,7 @@ async def _seed(pg_session, suffix):
     )
     task = MiningTask(
         task_name=f"{_TAG}-task-{suffix}", region="USA", universe="TOP3000",
-        dataset_strategy="AUTO", agent_mode="AUTONOMOUS_TIER1",
-        status="RUNNING", daily_goal=4, max_iterations=2,
+        dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, max_iterations=2,
     )
     pg_session.add(task)
     await pg_session.commit()

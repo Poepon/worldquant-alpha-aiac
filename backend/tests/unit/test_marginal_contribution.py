@@ -57,9 +57,7 @@ async def test_alpha(pg_session):
         region="USA",
         universe="TOP3000",
         dataset_strategy="AUTO",
-        target_datasets=[],
-        agent_mode="AUTONOMOUS_TIER1",
-        status="PENDING",
+        target_datasets=[],        status="PENDING",
         daily_goal=1,
         config={},
     )

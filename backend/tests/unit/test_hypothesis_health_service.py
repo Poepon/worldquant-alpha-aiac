@@ -100,9 +100,7 @@ async def _mk_hyp(session, *, suffix="", **overrides):
         statement=f"{_TAG}{suffix}",
         rationale="rationale",
         region="USA",
-        kind="INVESTMENT_THESIS",
-        target_tier=1,
-        status="PROPOSED",
+        kind="INVESTMENT_THESIS",        status="PROPOSED",
         is_active=True,
     )
     base.update(overrides)
