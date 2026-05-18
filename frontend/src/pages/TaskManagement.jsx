@@ -548,6 +548,10 @@ export default function TaskManagement() {
             agent_mode: 'AUTONOMOUS',
             daily_goal: 4,
             max_iterations: 10,
+            // Phase 1.5-Fields (2026-05-18): explicit schedule + starting_tier
+            // override the legacy agent_mode-derived defaults when set.
+            schedule: 'ONESHOT',
+            starting_tier: 1,
           }}
         >
           <Form.Item
@@ -596,6 +600,38 @@ export default function TaskManagement() {
                   <Option value="AUTONOMOUS_TIER2">T2 — 二阶（横截面 / 平滑包装）</Option>
                   <Option value="AUTONOMOUS_TIER3">T3 — 三阶（trade_when 择时）</Option>
                   <Option value="INTERACTIVE">交互 (Step-by-step)</Option>
+                </Select>
+              </Form.Item>
+            </Col>
+          </Row>
+
+          {/* Phase 1.5-Fields (2026-05-18): explicit schedule + starting_tier
+              authoritative fields. Backend writes both regardless; when these
+              are set they take precedence over the legacy agent_mode-derived
+              defaults. ONESHOT + tier=1 covers the legacy create_task path. */}
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item
+                name="schedule"
+                label="Schedule (Phase 1.5)"
+                tooltip="ONESHOT = 单 cycle DISCRETE 任务;CASCADE = T1→T2→T3 cascade(走 /mining-session/start 路径,不是 /tasks POST)"
+              >
+                <Select>
+                  <Option value="ONESHOT">ONESHOT — 单 cycle (推荐)</Option>
+                  <Option value="CASCADE">CASCADE — T1→T2→T3 链路</Option>
+                </Select>
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item
+                name="starting_tier"
+                label="Starting Tier"
+                tooltip="1/2/3 — explicit override;若未设,从 agent_mode 派生(AUTONOMOUS_TIER2→2 等);ONESHOT 通常用 1"
+              >
+                <Select>
+                  <Option value={1}>T1 — 一阶</Option>
+                  <Option value={2}>T2 — 二阶</Option>
+                  <Option value={3}>T3 — 三阶</Option>
                 </Select>
               </Form.Item>
             </Col>
