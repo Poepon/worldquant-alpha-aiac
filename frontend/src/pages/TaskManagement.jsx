@@ -270,12 +270,11 @@ export default function TaskManagement() {
           const tierLabel = startingTier ? `T${startingTier}` : ''
           const liveLabel =
             currentTier && currentTier !== startingTier ? ` → T${currentTier}` : ''
-          const color =
-            schedule === 'CASCADE'
-              ? 'blue'
-              : schedule === 'FLAT'
-              ? 'green'
-              : 'purple'
+          // Flat tasks deliberately store schedule="ONESHOT" (see
+          // backend/services/task_service.py:932) — there is no 'FLAT'
+          // literal in the DB, so ONESHOT (purple) covers both legacy
+          // one-shot and flat-F1/F2 sessions.
+          const color = schedule === 'CASCADE' ? 'blue' : 'purple'
           return (
             <Tag color={color}>
               {schedule}
