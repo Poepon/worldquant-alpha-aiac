@@ -114,6 +114,11 @@ from backend.models.g5_crossover_log import G5CrossoverLog
 # _classify_pitfall_error_type — drop vs stamp telemetry)
 from backend.models.classifier_call_log import ClassifierCallLog
 
+# Phase 4 Sprint 1 A2 — R14 task_stop_loss trigger event log (Millennium
+# 5%/7.5% hard stop-loss pattern; dedicated table per
+# [[feedback_r1a_dedicated_log_table]])
+from backend.models.task_stop_loss_event import TaskStopLossEvent
+
 __all__ = [
     # Enums
     "MiningStatus",

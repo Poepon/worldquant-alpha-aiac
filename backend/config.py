@@ -223,6 +223,26 @@ class Settings(BaseSettings):
     # 双文件注册:本文件 + feature_flag_service.py SUPPORTED_FLAGS。
     ENABLE_R8_L0: bool = True
 
+    # ===== Phase 4 Sprint 1 (2026-05-19+) =====
+    # ----- A2 R14 task_stop_loss -----
+    # Millennium 5%/7.5% hard stop-loss 工业模式 — task 累计 PASS rate 低于
+    # EMA floor OR 连续 N round 0 PASS → auto-pause task。
+    # Spike-calibrated (2026-05-19, scripts/sprint0_baseline_spike.py):
+    # production p50 round PASS rate = 0% (28 rounds, hypothesis_round_stats
+    # 30d window)。半数 round 是 0 PASS,EMA floor 设到 0.005 (0.5%) 才不会
+    # false-trigger;主 trigger 走 CONSECUTIVE_FAIL_ROUNDS=3。
+    # Race fix (Round S0-A finding):flat loop 已在 CB-skip 时 `continue`,
+    # 自动满足 EXCLUDE_CB_SKIPPED;flag 保留作 defense-in-depth(若未来其他
+    # caller 路径不 continue,service 仍可 skip 计数器)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.2
+    ENABLE_TASK_STOP_LOSS: bool = False
+    TASK_STOP_LOSS_EMA_ALPHA: float = 0.3
+    TASK_STOP_LOSS_MIN_ROUNDS: int = 5         # warmup — 前 N round 不 trigger
+    TASK_STOP_LOSS_PASS_RATE_FLOOR: float = 0.005    # Spike-calibrated 0.5% (production p50=0)
+    TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS: int = 3  # 主 trigger
+    TASK_STOP_LOSS_EXCLUDE_CB_SKIPPED: bool = True   # race fix (defense-in-depth)
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入
@@ -1107,6 +1127,25 @@ class Settings(BaseSettings):
     ROBUSTNESS_HOTCHECK_QUOTA_PCT: float = 0.85
     ROBUSTNESS_PER_ALPHA_TIMEOUT_SEC: int = 600
     ROBUSTNESS_SELECTION_STRATEGY: str = "first"
+
+    # ----------------------------------------------------------------------
+    # Persistence-Ontology refactor (2026-05-19) — plan
+    # ~/.claude/plans/alpha-persistence-ontology-refactor-2026-05-19.md v1.3.1
+    # ----------------------------------------------------------------------
+    # P1: 把 BRAIN 接受过的 FAIL alpha (alpha_id 存在 + 真 sim 成功) 写 alphas
+    # 表;OFF 时回到 PASS-only legacy 行为。Mining-time write filter 修复:
+    # alpha_failures.QUALITY_CHECK_FAILED 不再丢 BRAIN handle。
+    # 双文件注册: 本文件 + backend/services/feature_flag_service.py per
+    # [[feedback_enable_flag_double_file]]
+    ENABLE_FAIL_ALPHA_PERSIST: bool = False
+
+    # P4: R1b mutate prompt v2 — parent context 富化为 failure-metrics-with-
+    # diagnosis;tri-state 因 shadow-mode A/B 需求 [V1.1-S2]:
+    #   'off'    — byte-equivalent legacy prompt(default)
+    #   'shadow' — 生成 OLD+NEW 两份 prompt,把 NEW 写 llm_call_log 但只发
+    #              OLD 给 LLM(零行为变化,纯 cost/parse-failure 对比)
+    #   'active' — 只生成 NEW prompt 发给 LLM
+    ENABLE_R1B_MUTATE_PROMPT_V2: str = "off"
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

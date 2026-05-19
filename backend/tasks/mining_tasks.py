@@ -1325,6 +1325,62 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 f"round_alphas={round_alphas} total={total_alphas}/{daily_goal}"
             )
 
+            # Phase 4 Sprint 1 A2 (2026-05-19): R14 task_stop_loss check.
+            # Counts PASS alpha in this round; updates EMA + consecutive_zero
+            # state on task.config[stop_loss_state]; pauses task on trigger.
+            # Race fix: CB-skipped rounds reach `continue` above and never
+            # touch this code — auto-excluded from counters.
+            # Soft-fail: any exception in service → log + continue mining;
+            # never block round (task fault tolerance > stop_loss precision).
+            try:
+                if bool(getattr(settings, "ENABLE_TASK_STOP_LOSS", False)):
+                    from backend.services.task_stop_loss_service import (
+                        check_should_pause as _stop_loss_check,
+                        apply_stop_loss_decision as _stop_loss_apply,
+                    )
+
+                    def _pass_count(alphas_list):
+                        n = 0
+                        for _a in alphas_list:
+                            _q = (
+                                getattr(_a, "quality_status", None)
+                                or (isinstance(_a, dict) and _a.get("quality_status"))
+                                or ""
+                            )
+                            _q_str = getattr(_q, "value", _q) if _q is not None else ""
+                            if _q_str == "PASS":
+                                n += 1
+                        return n
+
+                    _round_pass = _pass_count(result.get("all_alphas") or [])
+                    _r14_decision = _stop_loss_check(
+                        task,
+                        round_pass_count=_round_pass,
+                        round_alpha_count=round_alphas,
+                    )
+                    # Persist EMA/counter state mutation (service set
+                    # task.config + flag_modified; commit here).
+                    await db.commit()
+                    if _r14_decision.should_pause:
+                        await _stop_loss_apply(
+                            db, task, _r14_decision,
+                            extra_meta={
+                                "iteration": iterations,
+                                "dataset_id": dataset_id,
+                                "total_alphas": total_alphas,
+                            },
+                        )
+                        logger.warning(
+                            f"[flat] task={task.id} R14 stop_loss TRIGGERED "
+                            f"reason={_r14_decision.reason} — exiting flat loop"
+                        )
+                        break
+            except Exception as _r14_ex:  # noqa: BLE001
+                logger.warning(
+                    f"[flat] task={task.id} R14 stop_loss check failed "
+                    f"(non-fatal): {_r14_ex}"
+                )
+
     # HIGH-#5 fix (2026-05-18): mirror cascade's V-19.10 H2 finalization
     # (cf. line 1821-1833). Only mark the run COMPLETED when the loop
     # exited under its own completion criterion (daily_goal hit or

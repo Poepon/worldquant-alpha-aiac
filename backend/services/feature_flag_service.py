@@ -547,6 +547,63 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "`backend/agents/services/rag_service.py:query()` legacy entry。"
         ),
     ),
+    # --- Persistence-Ontology (P1-P4 2026-05-19, plan v1.3.1) ---
+    "ENABLE_FAIL_ALPHA_PERSIST": FlagSpec(
+        name="ENABLE_FAIL_ALPHA_PERSIST",
+        flag_type="bool",
+        group="Persistence-Ontology",
+        description=(
+            "P1:把 BRAIN 接受过的 FAIL alpha (alpha_id 存在 + 真 sim 成功)"
+            "写 alphas 表;OFF 时回到 PASS-only legacy 行为。修复 mining-time"
+            "write filter — alpha_failures.QUALITY_CHECK_FAILED 不再丢 BRAIN"
+            "handle。Flip ON 后 ≥1h 才能跑 P2 backfill 脚本(脚本自检)。"
+        ),
+    ),
+    "ENABLE_R1B_MUTATE_PROMPT_V2": FlagSpec(
+        name="ENABLE_R1B_MUTATE_PROMPT_V2",
+        flag_type="str",
+        group="Persistence-Ontology",
+        description=(
+            "P4:R1b mutate prompt v2 — parent context 富化为 failure-metrics-"
+            "with-diagnosis。Tri-state:'off' = byte-equivalent legacy / "
+            "'shadow' = 双 prompt 生成,只发 OLD 给 LLM,NEW 仅写 llm_call_log "
+            "供对比 / 'active' = 只发 NEW prompt。Rollout: off → shadow(7d) "
+            "→ active。"
+        ),
+    ),
+    # --- Phase 4 Sprint 1 A2 R14 task_stop_loss (2026-05-19) ---
+    "ENABLE_TASK_STOP_LOSS": FlagSpec(
+        name="ENABLE_TASK_STOP_LOSS",
+        flag_type="bool",
+        group="Phase4-Sprint1",
+        description=(
+            "Phase 4 A2 R14:Millennium-style hard stop-loss — task 累计 PASS "
+            "rate 低于 EMA floor OR 连续 CONSECUTIVE_FAIL_ROUNDS round 0 PASS "
+            "→ auto-pause task + INSERT task_stop_loss_events 行。Default OFF;"
+            "翻 ON 前看 scripts/sprint0_baseline_spike.py 校准 PASS_RATE_FLOOR "
+            "(production p50=0 → 推荐 floor=0.005)。Race fix:flat loop 已在 "
+            "BRAIN_AUTH_CIRCUIT skip 时 continue,CB-skipped round 不计 counter。"
+        ),
+    ),
+    "TASK_STOP_LOSS_PASS_RATE_FLOOR": FlagSpec(
+        name="TASK_STOP_LOSS_PASS_RATE_FLOOR",
+        flag_type="float",
+        group="Phase4-Sprint1",
+        description=(
+            "R14 EMA PASS rate 阈值。Default 0.005(0.5%)— spike-calibrated;"
+            "production p50 round PASS rate = 0,floor 设 5% 会全部 false-trigger。"
+            "Operator 想更保守可调到 0.001。"
+        ),
+    ),
+    "TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS": FlagSpec(
+        name="TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS",
+        flag_type="int",
+        group="Phase4-Sprint1",
+        description=(
+            "R14 连续 0-PASS round 数阈值。Default 3 — production 主 trigger "
+            "(EMA floor 因 p50=0 受 noise 干扰大)。调高 → 更宽松,调低 → 更早 pause。"
+        ),
+    ),
 }
 
 
