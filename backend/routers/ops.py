@@ -1139,6 +1139,128 @@ class RestoreSentinelOut(BaseModel):
     actor: Optional[str] = None
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 Sprint 1 A1.4 — R12 LLM_MODE comparison + GO gate (2026-05-20)
+# ---------------------------------------------------------------------------
+
+
+class LLMModeBucket(BaseModel):
+    total: int
+    pass_count: int = Field(alias="pass")
+    rate: float
+    sharpe_mean: float
+    sharpe_count: int
+
+    class Config:
+        populate_by_name = True
+
+
+class LLMModeComparisonOut(BaseModel):
+    window_days: int
+    region_filter: Optional[str] = None
+    total_alphas: int
+    by_mode: Dict[str, LLMModeBucket]
+    by_region_mode: Dict[str, Dict[str, LLMModeBucket]]
+    by_template: Dict[str, LLMModeBucket]
+    assistant_fallthrough_count: int
+
+
+class LLMModeGoGateOut(BaseModel):
+    decision: str  # GO | NO-GO | PARTIAL | INSUFFICIENT | ERROR
+    rationale: str
+    stats: Optional[Dict[str, Any]] = None
+    thresholds: Optional[Dict[str, Any]] = None
+
+
+@router.get("/llm-mode/comparison", response_model=LLMModeComparisonOut)
+async def llm_mode_comparison(
+    days: int = Query(default=30, ge=1, le=365),
+    region: Optional[str] = Query(default=None),
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> LLMModeComparisonOut:
+    """A1.4: PASS-rate distribution stratified by (author/assistant) +
+    region + assistant_template_id over the last ``days`` days.
+
+    Powers the operator's pre-decision view BEFORE polling the GO gate.
+    No decision is taken here — just the raw stats.
+
+    Reads ``alpha.metrics['llm_mode_used']`` (planted by A1.1 via
+    workflow.py initial_state) and ``alpha.metrics['assistant_template_id']``
+    (planted by A1.3 per-alpha branch in node_code_gen). Alphas
+    pre-dating A1.1 deploy have no llm_mode_used field — counted as
+    'author' (which is what they actually were).
+    """
+    from backend.services.llm_mode_comparison import query_mode_pool
+    result = await query_mode_pool(db, days=days, region=region)
+    if result.get("error"):
+        raise HTTPException(
+            status_code=500,
+            detail=f"comparison query failed: {result['error']}",
+        )
+
+    def _to_bucket(b: dict) -> LLMModeBucket:
+        return LLMModeBucket(
+            total=int(b.get("total", 0)),
+            pass_count=int(b.get("pass", 0)),
+            rate=float(b.get("rate", 0.0)),
+            sharpe_mean=float(b.get("sharpe_mean", 0.0)),
+            sharpe_count=int(b.get("sharpe_count", 0)),
+        )
+
+    return LLMModeComparisonOut(
+        window_days=result["window_days"],
+        region_filter=result["region_filter"],
+        total_alphas=result["total_alphas"],
+        by_mode={k: _to_bucket(v) for k, v in result["by_mode"].items()},
+        by_region_mode={
+            r: {m: _to_bucket(v) for m, v in mode_dict.items()}
+            for r, mode_dict in result["by_region_mode"].items()
+        },
+        by_template={t: _to_bucket(v) for t, v in result["by_template"].items()},
+        assistant_fallthrough_count=int(result["assistant_fallthrough_count"]),
+    )
+
+
+@router.get("/llm-mode/go-gate", response_model=LLMModeGoGateOut)
+async def llm_mode_go_gate(
+    days: int = Query(default=30, ge=1, le=365),
+    region: Optional[str] = Query(default=None),
+    effect_floor_pct_pts: float = Query(default=-0.10),
+    iterations: int = Query(default=1000, ge=100, le=10000),
+    ci_level: float = Query(default=0.80, ge=0.5, le=0.99),
+    seed: Optional[int] = Query(default=None),
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> LLMModeGoGateOut:
+    """A1.4: apply the R12 GO/NO-GO/PARTIAL gate on the current
+    comparison window.
+
+    Decision rules (plan v5 §6.1):
+      - effect ≤ floor OR upper CI < floor → NO-GO
+      - effect > floor AND lower CI > 0    → GO
+      - otherwise                          → PARTIAL (or INSUFFICIENT)
+
+    ``effect_floor_pct_pts`` defaults to -0.10pp (assistant ≥ author -
+    10 percentage points). For production R12 decision, leave at default;
+    for debugging or per-region exploration, operator can override.
+
+    ``seed`` is optional — set in tests / debugging to reproduce CI.
+    """
+    from backend.services.llm_mode_comparison import (
+        query_mode_pool, evaluate_go_gate,
+    )
+    comparison = await query_mode_pool(db, days=days, region=region)
+    decision = evaluate_go_gate(
+        comparison,
+        effect_floor_pct_pts=effect_floor_pct_pts,
+        iterations=iterations,
+        ci_level=ci_level,
+        seed=seed,
+    )
+    return LLMModeGoGateOut(**decision)
+
+
 @router.post("/llm-mode/restore-sentinel", response_model=RestoreSentinelOut)
 async def llm_mode_restore_sentinel(
     _token: str = Depends(_require_ops_token),
