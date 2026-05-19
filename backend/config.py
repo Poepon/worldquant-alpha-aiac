@@ -188,6 +188,26 @@ class Settings(BaseSettings):
     BRAIN_SIM_SLOT_LIMIT_USER: int = 3
     BRAIN_SIM_SLOT_LIMIT_CONSULTANT: int = 80
 
+    # ===== Phase 4 Sprint 0 (2026-05-19) =====
+    # Plan: docs/phase4_a_b_plan_v5_2026-05-19.md
+    # ----- PR0 LLM_API_CIRCUIT (Sprint 0) -----
+    # 防 DeepSeek/Anthropic outage silent burn — 复用 backend/circuit_breaker.py
+    # framework + N-consecutive-fail trip pattern。Default ON(防御机制 default ON
+    # 与 BRAIN_AUTH_CIRCUIT 一致)。Soft-fail Redis blip 永不 brown-out。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_LLM_API_CIRCUIT: bool = True
+    LLM_API_CIRCUIT_FAIL_THRESHOLD: int = 5    # 60s 内连续 N 次 5xx/timeout 跳闸
+    LLM_API_CIRCUIT_FAIL_WINDOW_SEC: int = 60  # 失败计数器 TTL
+    LLM_API_CIRCUIT_COOLDOWN_SEC: int = 300    # 跳闸冷却(同 BRAIN_AUTH_CIRCUIT)
+
+    # ----- PR0.5 ENABLE_R8_L0 sub-flag (Sprint 0,Phase 4 R12 sentinel 前置) -----
+    # 默认 True(R8 hierarchical RAG 已 LIVE,L0 是 4 层之一)。R12 sentinel ON
+    # 时全局 set False,跳过 L0(exact pattern_hash match)进 L1 pillar/L2 family/L3 field。
+    # 双 entry skip:`backend/agents/hierarchical_rag.py:query_hierarchical` +
+    # `backend/agents/services/rag_service.py:query()` legacy entry。
+    # 双文件注册:本文件 + feature_flag_service.py SUPPORTED_FLAGS。
+    ENABLE_R8_L0: bool = True
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入

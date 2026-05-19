@@ -520,6 +520,33 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "flag 仍保留作 staged rollout 节流入口。"
         ),
     ),
+    # --- Phase 4 Sprint 0 (2026-05-19) ---
+    "ENABLE_LLM_API_CIRCUIT": FlagSpec(
+        name="ENABLE_LLM_API_CIRCUIT",
+        flag_type="bool",
+        group="Phase4-Sprint0",
+        description=(
+            "Phase 4 PR0:LLM provider(DeepSeek/Anthropic)outage 熔断。"
+            "60s 内连续 LLM_API_CIRCUIT_FAIL_THRESHOLD(默认 5)次 5xx/timeout "
+            "→ trip 300s 冷却 → 任何 LLM caller fast-fail return success=False/"
+            "error='llm_api_circuit_open',不发实际 HTTP。任何 success → "
+            "立即 clear。Default ON(防御机制 default ON 与 BRAIN_AUTH_CIRCUIT "
+            "一致)。Soft-fail Redis blip 永不 brown-out。"
+        ),
+    ),
+    "ENABLE_R8_L0": FlagSpec(
+        name="ENABLE_R8_L0",
+        flag_type="bool",
+        group="Phase4-Sprint0",
+        description=(
+            "Phase 4 PR0.5:R8 hierarchical RAG L0(exact pattern_hash match)"
+            "选择性 sub-flag。Default ON(R8 4-layer 全部 LIVE)。"
+            "R12 LLM_MODE=assistant sentinel ON 时,全局 set False 仅 skip L0,"
+            "保留 L1 pillar / L2 family / L3 field。双 entry skip:"
+            "`backend/agents/hierarchical_rag.py:query_hierarchical` 主 entry + "
+            "`backend/agents/services/rag_service.py:query()` legacy entry。"
+        ),
+    ),
 }
 
 

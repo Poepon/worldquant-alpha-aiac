@@ -1067,6 +1067,66 @@ async def brain_auth_circuit_clear(
 
 
 # ---------------------------------------------------------------------------
+# Phase 4 Sprint 0 PR0 — LLM_API_CIRCUIT ops endpoints (2026-05-19)
+# ---------------------------------------------------------------------------
+# Mirrors the BRAIN auth-circuit endpoints above but for the LLM provider
+# (DeepSeek/Anthropic) circuit. The two circuits are independent — LLM can
+# be OPEN while BRAIN is CLOSED (e.g. DeepSeek outage but BRAIN auth ok)
+# and vice versa.
+
+
+class LLMApiCircuitOut(BaseModel):
+    state: str
+    until_ts: Optional[float] = None
+    until_iso: Optional[str] = None
+    last_failure_at: Optional[float] = None
+    last_failure_iso: Optional[str] = None
+    last_failure_reason: Optional[str] = None
+    trip_count: int = 0
+    seconds_until_half_open: int = 0
+
+
+class LLMApiCircuitClearOut(BaseModel):
+    cleared: bool
+    actor: Optional[str] = None
+
+
+@router.get("/llm/api-circuit-status", response_model=LLMApiCircuitOut)
+async def llm_api_circuit_status(
+    _token: str = Depends(_require_ops_token),
+) -> LLMApiCircuitOut:
+    """Current LLM provider (DeepSeek/Anthropic) API circuit state.
+    CLOSED = normal; OPEN = LLM callers fast-failing (no LLM cost burnt during
+    a provider outage); HALF_OPEN = TTL elapsed, next real LLM call will
+    probe + flip CLOSED/OPEN based on outcome.
+
+    Trip trigger: ``LLM_API_CIRCUIT_FAIL_THRESHOLD`` consecutive 5xx/timeout/
+    connection-error within ``LLM_API_CIRCUIT_FAIL_WINDOW_SEC`` seconds.
+    JSON parse / ValueError do NOT trip — only API-transport failures.
+    """
+    from backend.agents.services.llm_service import LLM_API_CIRCUIT
+    return LLMApiCircuitOut(**LLM_API_CIRCUIT.status().to_dict())
+
+
+@router.post("/llm/api-circuit-clear", response_model=LLMApiCircuitClearOut)
+async def llm_api_circuit_clear(
+    _token: str = Depends(_require_ops_token),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> LLMApiCircuitClearOut:
+    """Force-close the LLM API circuit. Use after manual confirmation that
+    the LLM provider has recovered (e.g. DeepSeek/Anthropic status page back
+    to green) and ops wants to skip the 300s TTL wait.
+
+    Note: any successful LLMService.call() inside the worker process ALSO
+    clears the circuit on probe (HALF_OPEN → CLOSED). This endpoint is for
+    immediate manual recovery.
+    """
+    from backend.agents.services.llm_service import LLM_API_CIRCUIT
+    LLM_API_CIRCUIT.clear(reason=f"ops_manual_by_{actor or 'unknown'}")
+    return LLMApiCircuitClearOut(cleared=True, actor=actor)
+
+
+# ---------------------------------------------------------------------------
 # Flat session admin endpoints (post tier-system removal, 2026-05-18)
 # ---------------------------------------------------------------------------
 # Post tier-system removal cascade is permanently retired — the prior

@@ -779,6 +779,13 @@ async def node_hypothesis(
     # set) AND AFTER P2-C (experiment_variant resolution via cfg) so the
     # filter is well-informed.
     cross_task_hyps: List[Dict] = []
+    # F-A3 fix (2026-05-19 review): Unconditionally reset on every node
+    # entry so a 2nd fire of node_hypothesis within the same workflow.run()
+    # (e.g. R1b CoSTEER retry/mutate cycle) cannot carry stale forest_ids
+    # from a previous fire's G8 fetch when this fire's fetch returns 0 hits.
+    # LangGraph's MiningState IS shared across nodes within one run; only a
+    # fresh workflow.run() builds a new state instance.
+    state.g8_forest_referenced_ids = []
     _forest_enabled = bool(getattr(
         _gen_settings, "ENABLE_HYPOTHESIS_FOREST_REUSE", False,
     ))
@@ -829,6 +836,18 @@ async def node_hypothesis(
                     f"region={state.region} pillar_filter={pillar_hint} "
                     f"ids={[h['hypothesis_id'] for h in cross_task_hyps]}"
                 )
+                # Phase 4 PR0.6 (Sprint 0, 2026-05-19): expose the referenced
+                # hypothesis ids on the state so evaluation.py can stamp
+                # alpha.metrics["_hypothesis_forest_reference"]=True for the
+                # alphas produced under these referenced hypotheses. The field
+                # `g8_forest_referenced_ids` (List[int]) is already declared on
+                # MiningState (state.py:182) — direct assignment, not setattr.
+                try:
+                    state.g8_forest_referenced_ids = [
+                        int(h["hypothesis_id"]) for h in cross_task_hyps
+                    ]
+                except Exception:  # noqa: BLE001 — state assign never breaks round
+                    pass
         except Exception as _g8_ex:
             logger.warning(
                 f"[{node_name}] G8 hypothesis-forest fetch failed "

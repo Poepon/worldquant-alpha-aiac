@@ -256,6 +256,21 @@ async def cached_simulate_batch(
             f"{len(uncached_indices)} BRAIN sims to run"
         )
 
+    # Phase 4 PR0.6 (Sprint 0, 2026-05-19) — F-A1 fix (2026-05-19 review):
+    # Stamp must land inside ``result["metrics"]`` (the nested dict that
+    # evaluation.py:1267 propagates to ``alpha.metrics``), NOT at the top
+    # level — top-level keys are dropped when ``updated.metrics =
+    # res.get("metrics", {}) or {}`` runs. Use the final stamp name
+    # ``_simulation_cache_hit`` so evaluation doesn't need to rename.
+    for _r in cached_results:
+        if not isinstance(_r, dict):
+            continue
+        _m = _r.get("metrics")
+        if not isinstance(_m, dict):
+            _m = {}
+            _r["metrics"] = _m
+        _m["_simulation_cache_hit"] = True
+
     if not uncached_indices:
         # 100% cache hit — return all cached
         return [r for r in cached_results if r is not None]

@@ -453,6 +453,22 @@ class RAGService:
                 )
                 # Fall through to legacy path
 
+        # Phase 4 PR0.5 (Sprint 0, 2026-05-19) — F-S2 fix (post-review):
+        # R8_L0 sentinel telemetry — only emitted when control flow reaches
+        # legacy retrieval (i.e. NOT hierarchical-dispatched). Logging at
+        # query() entry was misleading because hierarchical-dispatch
+        # callers also saw the message; the legacy path has no L0-equivalent
+        # so this is the meaningful point to surface "R12 sentinel ACTIVE,
+        # legacy used".
+        _r8_l0_on = bool(getattr(_stg, "ENABLE_R8_L0", True))
+        if not _r8_l0_on:
+            logger.info(
+                "[RAGService] R8_L0 sentinel ACTIVE (ENABLE_R8_L0=False) | "
+                f"dataset={dataset_id} region={region} "
+                f"expr_present={bool(current_expression)} "
+                "— legacy retrieval used (no L0-equivalent to skip)"
+            )
+
         # Infer category from dataset_id
         category = infer_dataset_category(dataset_id) if dataset_id else "other"
 

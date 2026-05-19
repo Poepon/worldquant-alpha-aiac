@@ -1001,7 +1001,17 @@ async def query_hierarchical(
             # telemetry per plan §10 GO gate)
 
     # L0 — exact pattern_hash match
-    if current_expression and (remaining_pat > 0 or remaining_fail > 0):
+    # Phase 4 PR0.5 (Sprint 0, 2026-05-19): ENABLE_R8_L0 sub-flag — when
+    # R12 LLM_MODE=assistant sentinel ON, this flag flips False globally so
+    # the L0 (exact-expression-hash match) layer is skipped, letting the
+    # assistant-mode-generated hypotheses fall through to L1 pillar / L2
+    # family / L3 field. The other 3 layers stay LIVE.
+    _r8_l0_on = bool(getattr(_stg, "ENABLE_R8_L0", True))
+    if (
+        _r8_l0_on
+        and current_expression
+        and (remaining_pat > 0 or remaining_fail > 0)
+    ):
         _l0_budget = layer_budgets.get("L0", 5)
         s, f = await _layer_call(
             "L0",

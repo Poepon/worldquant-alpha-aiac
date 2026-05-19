@@ -27,6 +27,55 @@ from backend.agents.graph.nodes.base import (
     EXPERIMENT_TRACKING_ENABLED,
     get_current_experiment,
 )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 PR0.6 — sentinel attribution lookup (Sprint 0, 2026-05-19)
+# ---------------------------------------------------------------------------
+# Extracted to a top-level helper so the F-T1 integration test (post-S0-B
+# review) can drive it with an in-memory aiosqlite session (db_session
+# fixture). Production callers pass db=None which opens a fresh
+# AsyncSessionLocal (mirrors the original inline behavior).
+
+
+async def _pr06_lookup_mutated_hypothesis_ids(
+    hypothesis_ids,
+    db=None,
+):
+    """Return ``set[int]`` of hypothesis_ids whose ``r1b_mutation_depth >= 1``.
+
+    Args:
+        hypothesis_ids: iterable of hypothesis ids to filter
+        db: optional AsyncSession. None → open AsyncSessionLocal (production).
+
+    Soft-fail: any error returns empty set + logs debug. Never raises.
+    """
+    from sqlalchemy import select as _sel
+    from backend.models import Hypothesis as _PR06Hyp
+
+    _hyp_ids = {hid for hid in hypothesis_ids if hid is not None}
+    if not _hyp_ids:
+        return set()
+
+    async def _query(session):
+        stmt = _sel(_PR06Hyp.id).where(
+            _PR06Hyp.id.in_(_hyp_ids),
+            _PR06Hyp.r1b_mutation_depth >= 1,
+        )
+        rows = (await session.execute(stmt)).all()
+        return {r[0] for r in rows}
+
+    try:
+        if db is not None:
+            return await _query(db)
+        from backend.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as _pr06_db:
+            return await _query(_pr06_db)
+    except Exception as ex:  # noqa: BLE001
+        logger.debug(
+            "[PR0.6 stamp] R1b mutation lookup failed (non-fatal): %s", ex,
+        )
+        return set()
 from backend.adapters.brain_adapter import BrainAdapter
 from backend.config import settings
 from backend.agents.prompts import (
@@ -2853,6 +2902,66 @@ async def node_evaluate(
         except Exception as _r10_e:  # noqa: BLE001
             logger.warning(f"[R10] family-cap failed (non-fatal): {_r10_e}")
     # === end R10 family-cap ===
+
+    # === Phase 4 PR0.6 Sentinel stamp (Sprint 0, 2026-05-19) ===
+    # Backfills 3 of the 6 R12-sentinel-tied stamps onto alpha.metrics so the
+    # R12 decision counterfactual SQL (Sprint末) can attribute per-sentinel
+    # PASS rate margin. Sources of truth already exist:
+    #   - R1b mutation: Hypothesis.r1b_mutation_depth ≥ 1
+    #   - G8 forest reference: state.g8_forest_referenced_ids (List[int],
+    #     set in node_hypothesis after fetch_cross_task_promoted; reset on
+    #     every node entry per F-A3 fix)
+    #   - R9 cache hit: alpha.metrics["_simulation_cache_hit"]=True (planted
+    #     by sim_cache.cached_simulate_batch in result["metrics"] nested dict
+    #     which evaluation.py:1267 propagates to alpha.metrics — F-A1 fix)
+    # Soft-fail: any error skips stamping; never blocks the round.
+    if updated_alphas:
+        try:
+            _hyp_ids = {
+                getattr(a, "hypothesis_id", None) for a in updated_alphas
+                if getattr(a, "hypothesis_id", None) is not None
+            }
+            # F-T1 fix (post-review): SQL lookup extracted to top-level
+            # helper _pr06_lookup_mutated_hypothesis_ids so the integration
+            # test can drive it with an in-memory aiosqlite session.
+            _mutated_hids = await _pr06_lookup_mutated_hypothesis_ids(_hyp_ids)
+            _forest_hids: set = set(
+                getattr(state, "g8_forest_referenced_ids", None) or []
+            )
+
+            _stamp_count = {"r1b": 0, "forest": 0, "cache": 0}
+            for _a in updated_alphas:
+                try:
+                    _m = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+                    _hid = getattr(_a, "hypothesis_id", None)
+                    if _hid is not None and _hid in _mutated_hids:
+                        _m["_r1b_mutation_triggered"] = True
+                        _stamp_count["r1b"] += 1
+                    if _hid is not None and _hid in _forest_hids:
+                        _m["_hypothesis_forest_reference"] = True
+                        _stamp_count["forest"] += 1
+                    # F-A1 fix (2026-05-19 review): sim_cache stamps
+                    # `_simulation_cache_hit` directly into result["metrics"]
+                    # (the nested dict propagated to alpha.metrics in
+                    # node_simulate line ~1267). AlphaCandidate has no
+                    # `sim_result` attribute — the only carrier is metrics.
+                    if _m.get("_simulation_cache_hit") is True:
+                        _stamp_count["cache"] += 1
+                    if _m is not _a.metrics:
+                        _a.metrics = _m
+                except Exception:  # noqa: BLE001
+                    pass
+            if any(_stamp_count.values()):
+                logger.info(
+                    "[PR0.6 stamp] r1b=%d forest=%d cache=%d / total=%d",
+                    _stamp_count["r1b"], _stamp_count["forest"],
+                    _stamp_count["cache"], len(updated_alphas),
+                )
+        except Exception as _pr06_outer:  # noqa: BLE001
+            logger.debug(
+                "[PR0.6 stamp] outer block failed (non-fatal): %s", _pr06_outer
+            )
+    # === end Phase 4 PR0.6 ===
 
     # === G3 AST Originality Gate (Phase A shadow, 2026-05-19) ===
     # Runs AFTER R10 family-cap (coarse operator-sequence dedup) to catch
