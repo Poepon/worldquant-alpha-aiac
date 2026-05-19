@@ -294,6 +294,22 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "(soft cap, no fail)."
         ),
     ),
+    # --- G2 Phase A — per-call LLM cost telemetry ---
+    "ENABLE_COST_TELEMETRY": FlagSpec(
+        name="ENABLE_COST_TELEMETRY",
+        flag_type="bool",
+        group="G2-CostTelemetry",
+        description=(
+            "G2 Phase A (2026-05-19): per-LLM-call row INSERT 到 llm_call_log "
+            "覆盖普通 round + R1b retry/mutate 全路径 (R1b 路径仍保留 "
+            "r1b_retry_log 写入,llm_call_log 用作全局聚合源)。task_id / "
+            "run_id / round_idx / node_key 经 contextvar 推送,round 末 batch "
+            "flush。Soft-fail:tracker 异常永不打断 LLM 调用。cost_usd 由 "
+            "tokens × LLM_PRICING_USD_PER_1K_TOKENS 估算 (Phase A 用 blended "
+            "rate,Phase B 可拆 prompt/completion)。flag OFF 时纯 no-op,零"
+            "采集开销。Phase C ≥7d 观察后 promote 到 cost-aware throttling。"
+        ),
+    ),
     # --- R8-v2 #2 Hierarchical RAG Redis cache ---
     "ENABLE_HIERARCHICAL_RAG_CACHE": FlagSpec(
         name="ENABLE_HIERARCHICAL_RAG_CACHE",

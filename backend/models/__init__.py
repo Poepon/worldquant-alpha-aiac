@@ -102,6 +102,10 @@ from backend.models.r1b_retry import R1bRetryLog
 # R8 query-level telemetry (per-call layer_hits + cache_hit row, flag-gated)
 from backend.models.r8_query_log import R8QueryLog
 
+# G2 Phase A per-call LLM cost telemetry (flag-gated, batched flush at round
+# boundary; dedicated per [[feedback_r1a_dedicated_log_table]])
+from backend.models.llm_call_log import LLMCallLog
+
 __all__ = [
     # Enums
     "MiningStatus",

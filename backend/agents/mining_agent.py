@@ -203,6 +203,28 @@ class MiningAgent:
         from backend.services.alpha_service import AlphaService
         alpha_service = AlphaService(self.db)
 
+        # G2 Phase A (2026-05-19): set the cost_tracker round contextvar so
+        # every LLMService.call inside this iteration's workflow accumulates
+        # into a per-round bucket, then batch-INSERT to llm_call_log at the
+        # end (flush_round_async). flag-gated inside the tracker — when
+        # ENABLE_COST_TELEMETRY=False the contextvar set still happens but
+        # record_llm_call no-ops and flush is a no-op too (cheap idempotent).
+        from backend.cost_tracker import (
+            begin_round as _cost_begin_round,
+            end_round as _cost_end_round,
+            flush_round_async as _cost_flush_round_async,
+        )
+        _cost_token = _cost_begin_round(
+            task_id=getattr(task, "id", None),
+            run_id=run_id,
+            round_idx=iteration,
+            dataset_id=dataset_id,
+            # pillar best-effort from strategy (P2-C may have stamped it);
+            # node-level pillar_hint isn't known until node_hypothesis runs
+            # so this is a coarse approximation.
+            pillar=getattr(strategy, "regime", None),
+        )
+
         try:
             # Run workflow with strategy context
             result = await self._workflow.run_with_persistence(
@@ -250,11 +272,19 @@ class MiningAgent:
             )
             
             return generated_alphas
-            
+
         except Exception as e:
             logger.error(f"[MiningAgent] Iteration {iteration} failed: {e}")
             raise
-    
+        finally:
+            # G2 Phase A — flush whatever calls accumulated regardless of
+            # whether the iteration raised. soft-fail in tracker keeps this
+            # try/finally pattern free of secondary except.
+            try:
+                await _cost_flush_round_async(self.db)
+            finally:
+                _cost_end_round(_cost_token)
+
     def _apply_field_filters(
         self,
         fields: List[Dict],

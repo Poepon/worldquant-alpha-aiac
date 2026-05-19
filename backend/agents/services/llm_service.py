@@ -496,6 +496,27 @@ class LLMService:
             # parse-fail warning already emitted inside the loop.
             self._emit_metrics(node_key, effort_active, tokens_used, latency_ms, success=success_final)
 
+            # G2 Phase A (2026-05-19): record per-call cost telemetry into the
+            # active round's contextvar accumulator (drained by mining_agent
+            # at round exit via cost_tracker.flush_round_async). No-op when
+            # ENABLE_COST_TELEMETRY=False or no active round context —
+            # tracker is the recorder of last resort, never raises.
+            try:
+                from backend.cost_tracker import record_llm_call as _cost_record
+                _cost_record(
+                    model=self.model,
+                    provider=self.provider,
+                    effort=effort_active,
+                    node_key=node_key,
+                    tokens_total=tokens_used,
+                    latency_ms=latency_ms,
+                    success=success_final,
+                    error_kind=("parse_error" if (json_mode and parse_error) else None),
+                    call_id=call_id,
+                )
+            except Exception:
+                pass
+
             return LLMResponse(
                 content=content,
                 parsed=parsed,
@@ -513,6 +534,26 @@ class LLMService:
                 f"node={node_key or '-'} effort={effort_active} error={e}"
             )
             self._emit_metrics(node_key, effort_active, 0, latency_ms, success=False)
+
+            # G2 Phase A: still record failed calls (0 tokens, success=False,
+            # error_kind=exception class). Useful for the /ops/cost/telemetry
+            # to surface failure-rate-per-node alongside cost — provider
+            # outages currently invisible to operators.
+            try:
+                from backend.cost_tracker import record_llm_call as _cost_record
+                _cost_record(
+                    model=self.model,
+                    provider=self.provider,
+                    effort=effort_active,
+                    node_key=node_key,
+                    tokens_total=0,
+                    latency_ms=latency_ms,
+                    success=False,
+                    error_kind=type(e).__name__[:40],
+                    call_id=call_id,
+                )
+            except Exception:
+                pass
 
             return LLMResponse(
                 content="",

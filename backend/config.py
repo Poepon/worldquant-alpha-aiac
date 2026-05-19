@@ -840,6 +840,35 @@ class Settings(BaseSettings):
     MAX_SIMULATIONS_PER_DAY: int = 100
     MAX_TOKENS_PER_DAY: int = 500000
 
+    # ----- G2 Phase A — per-call LLM cost telemetry (2026-05-19) -----
+    # Light wiring per [[feedback_light_wiring_deferred_gate]]: Phase A logs
+    # every LLMService.call to llm_call_log table (task_id / round_idx /
+    # node_key contextvar-resolved), no behavior change. Phase C (~7d obs
+    # later) will promote to cost-aware throttling using LLM_PRICING + a new
+    # COST_CEILING_USD_PER_TASK_DAY check.
+    # Default OFF — flip via FeatureFlagOverride (双文件注册 per
+    # [[feedback_enable_flag_double_file]]). Soft-fail: tracker exception
+    # never breaks LLM hot path.
+    ENABLE_COST_TELEMETRY: bool = False
+    # Pricing dict — blended per-1k-token rate by model prefix. Used at
+    # round-flush time to derive cost_usd from raw tokens (Phase A keeps it
+    # simple; if prompt vs completion split ever matters we can swap dict
+    # values to {"prompt": x, "completion": y} without schema change).
+    # Source: provider public pages as of 2026-05-19. Unknown models fall
+    # back to 0.0 (cost_usd=None in the row), tokens still recorded.
+    LLM_PRICING_USD_PER_1K_TOKENS: dict = {
+        "deepseek-chat": 0.00027,        # DeepSeek V3 blended input/output
+        "deepseek-reasoner": 0.00055,    # DeepSeek R1 blended
+        "claude-haiku-4-5": 0.00125,     # Anthropic Haiku 4.5 blended
+        "claude-sonnet-4-6": 0.0075,     # Anthropic Sonnet 4.6 blended
+        "claude-opus-4-7": 0.0375,       # Anthropic Opus 4.7 blended
+    }
+    # 90-day retention for llm_call_log — weekly Sunday 04:45 SH beat task
+    # ``run_llm_call_log_pruner`` deletes rows older than this value (rounded
+    # up to the day). Match R8_QUERY_LOG_RETENTION_DAYS pattern. Operational
+    # tunable — no feature flag.
+    LLM_CALL_LOG_RETENTION_DAYS: int = 90
+
     # Layer 1 Anti-collapse (2026-05-11) — ε-greedy explore budget.
     # Probability that a strategy_select round runs in EXPLORE mode: RAG
     # success patterns hidden from the LLM, prompt directs structural
