@@ -742,6 +742,42 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "根据 7d obs 数据校准 region-specific 值(fast-follow)。"
         ),
     ),
+    # --- B5 R8-v3 cognitive layer 7-layer (Sprint 3, 2026-05-20) ---
+    "ENABLE_COGNITIVE_LAYER_PROMPT": FlagSpec(
+        name="ENABLE_COGNITIVE_LAYER_PROMPT",
+        flag_type="bool",
+        group="Phase4-Sprint3",
+        description=(
+            "Phase 4 B5 R8-v3:每 round 选 1 个 cognitive layer(7 选 1,"
+            "macro/behavioral/technical/value/microstructure/cross_sectional/"
+            "time_series_mean_reversion)splice 进 hypothesis prompt。Default "
+            "OFF — flag ON 时 node_hypothesis fetch + 注入 layer block + "
+            "stamp alpha.metrics['cognitive_layer_id']。R12 sentinel 联动:"
+            "R8 L0 disable 时 R8-v3 仍可独立 LIVE(L1/L2/L3 + cognitive "
+            "layer 共存)。"
+        ),
+    ),
+    "COGNITIVE_LAYER_SELECT_MODE": FlagSpec(
+        name="COGNITIVE_LAYER_SELECT_MODE",
+        flag_type="string",
+        group="Phase4-Sprint3",
+        description=(
+            "R8-v3 layer 选择策略:'round_robin'(default,公平轮转)/ "
+            "'bandit'(Beta-Bernoulli Thompson sample exploit > 0.5 优势 "
+            "layer)/ 'deficit_aware'(挑 PASS rate 最低 boost coverage)。"
+            "运行 ≥7d 累积 bandit state 后建议 flip 到 'bandit'。"
+        ),
+    ),
+    "COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET": FlagSpec(
+        name="COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET",
+        flag_type="int",
+        group="Phase4-Sprint3",
+        description=(
+            "R8-v3 hypothesis prompt 总 token 上限。Default 8000 — 超过时按 "
+            "drop order(dedup_blacklist → cross_task_forest → macro_narrative)"
+            "删除上下文块。cognitive_layer 块绝不删(R8-v3 的核心)。"
+        ),
+    ),
 }
 
 

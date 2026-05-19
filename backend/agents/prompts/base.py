@@ -78,6 +78,19 @@ class PromptContext:
     # legacy invariant, mirrors P2-A/B/C/D pattern).
     cross_task_hypotheses: List[Dict] = field(default_factory=list)
 
+    # B5 R8-v3 (Sprint 3, 2026-05-20): selected cognitive-layer block —
+    # rendered markdown ready to splice. None / "" → no nudge → template
+    # splice produces empty (byte-for-byte legacy). When set, it's the
+    # output of cognitive_layer_service.build_cognitive_layer_block(layer)
+    # for one of 7 research lenses (macro / behavioral / technical / value
+    # / microstructure / cross_sectional / time_series_mean_reversion).
+    # node_hypothesis fills this when ENABLE_COGNITIVE_LAYER_PROMPT is on.
+    cognitive_layer_block: str = ""
+    # Layer id stamped on the resulting alpha.metrics for bandit reward
+    # feedback (the orchestrator updates BanditArmStats from this on
+    # round end). Empty when no layer fired.
+    cognitive_layer_id: str = ""
+
 
 def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     """Build concise field reference with type info."""

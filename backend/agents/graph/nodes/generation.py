@@ -855,6 +855,53 @@ async def node_hypothesis(
             )
             cross_task_hyps = []
 
+    # B5 R8-v3 (Sprint 3, 2026-05-20): cognitive-layer selection. Pick
+    # one of 7 research lenses (macro / behavioral / technical / value /
+    # microstructure / cross_sectional / time_series_mean_reversion) per
+    # ENABLE_COGNITIVE_LAYER_PROMPT + COGNITIVE_LAYER_SELECT_MODE; the
+    # chosen layer's prompt block splices into the hypothesis prompt to
+    # bias the LLM's direction of search. Default OFF → cognitive_layer_
+    # block stays empty → byte-for-byte legacy. Soft-fail: any error
+    # leaves both block + id empty.
+    _r8v3_block = ""
+    _r8v3_layer_id = ""
+    state.cognitive_layer_id_used = ""
+    if bool(getattr(_gen_settings, "ENABLE_COGNITIVE_LAYER_PROMPT", False)):
+        try:
+            from backend.services import cognitive_layer_service as _r8v3_svc
+            _r8v3_strategy = str(getattr(
+                _gen_settings, "COGNITIVE_LAYER_SELECT_MODE", "round_robin",
+            ))
+            # Round index proxy: state.round_index when available, else
+            # 0 (single-round Phase A obs is fine with 0 → first layer).
+            _r8v3_round = int(getattr(state, "round_index", 0) or 0)
+            # Bandit stats stub: layer rewards persist offline (fast-
+            # follow), so within-round selection uses uniform priors.
+            # When the cron updates BanditState rows + node_hypothesis
+            # loads them, this dict will be populated.
+            _r8v3_stats: Dict[str, Any] = {}
+            _r8v3_layer = _r8v3_svc.select_layer(
+                strategy=_r8v3_strategy,
+                stats=_r8v3_stats,
+                round_index=_r8v3_round,
+                pillar_hint=pillar_hint,
+            )
+            if _r8v3_layer is not None:
+                _r8v3_block = _r8v3_svc.build_cognitive_layer_block(_r8v3_layer)
+                _r8v3_layer_id = _r8v3_layer.layer_id
+                state.cognitive_layer_id_used = _r8v3_layer_id
+                logger.info(
+                    f"[{node_name}] R8-v3 cognitive layer | "
+                    f"strategy={_r8v3_strategy} layer={_r8v3_layer_id} "
+                    f"pillar_hint={pillar_hint}"
+                )
+        except Exception as _r8v3_ex:
+            logger.warning(
+                f"[{node_name}] R8-v3 cognitive layer failed (non-fatal): {_r8v3_ex}"
+            )
+            _r8v3_block = ""
+            _r8v3_layer_id = ""
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -895,6 +942,11 @@ async def node_hypothesis(
         # so build_cross_task_hypotheses_block returns "" → template splice
         # produces the empty-string byte-for-byte legacy render.
         cross_task_hypotheses=(cross_task_hyps if _forest_enabled else []),
+        # B5 R8-v3 (Sprint 3, 2026-05-20): pre-rendered cognitive-layer
+        # block (str). "" = OFF / no layer fired → template splice yields
+        # empty (byte-for-byte legacy).
+        cognitive_layer_block=_r8v3_block,
+        cognitive_layer_id=_r8v3_layer_id,
     )
     
     # Use new hypothesis builder with experiment trace

@@ -365,6 +365,22 @@ class Settings(BaseSettings):
     FACTOR_LENS_OLS_LOOKBACK_DAYS: int = 504  # ~2y daily
     FACTOR_LENS_MIN_OVERLAP_DAYS: int = 60  # < N 天交集 → 跳过 decompose
 
+    # ----- B5 R8-v3 cognitive layer 7-layer (Sprint 3, 2026-05-20) -----
+    # 7 research-lens prompts (macro/behavioral/technical/value/microstructure/
+    # cross_sectional/time_series_mean_reversion) — 每 round 选 1 个 splice
+    # 进 hypothesis prompt,nudge LLM 朝该 lens 思考。3 个 select 策略:
+    #   - bandit:Beta-Bernoulli Thompson sample,exploit > 0.5 优势 layer
+    #   - round_robin:固定顺序轮转
+    #   - deficit_aware:挑 PASS rate 最低的 boost coverage
+    # Token budget guard:hypothesis prompt 总 token ≤ 8k,超出时按
+    # _DROP_ORDER 删 dedup_blacklist → cross_task_forest → macro_narrative
+    # (cognitive_layer 块绝不删,这是 R8-v3 整个目的)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.11 / v4 §6.11
+    ENABLE_COGNITIVE_LAYER_PROMPT: bool = False
+    COGNITIVE_LAYER_SELECT_MODE: str = "round_robin"  # bandit | round_robin | deficit_aware
+    COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET: int = 8000
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入

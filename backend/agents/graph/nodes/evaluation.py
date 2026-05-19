@@ -3142,6 +3142,19 @@ async def node_evaluate(
             logger.warning(f"[R13] factor_lens shadow failed (non-fatal): {_r13_e}")
     # === end R13 factor_lens ===
 
+    # === B5 R8-v3 cognitive layer stamp (Sprint 3, 2026-05-20) ===
+    # Copy the layer id used at hypothesis time onto each alpha's metrics
+    # so the offline bandit reward update (cron, Sprint 3 fast-follow)
+    # can attribute PASS/FAIL to the active layer. Soft-fail: when state
+    # has no layer id (R8-v3 OFF), nothing happens.
+    _cognitive_layer_id = getattr(state, "cognitive_layer_id_used", "") or ""
+    if _cognitive_layer_id and updated_alphas:
+        for _a in updated_alphas:
+            _new_m = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+            _new_m["_cognitive_layer_used"] = _cognitive_layer_id
+            _a.metrics = _new_m
+    # === end R8-v3 stamp ===
+
     # === F13 Sprint 2 R13 hard-mode stamp → FAIL finalize (review fix) ===
     # Mirrors the R10/R10-v2 stamp → FAIL pattern: R13 hard mode no longer
     # transitions quality_status inline (avoids the same anti-pattern B3

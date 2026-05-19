@@ -259,6 +259,15 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
         f"\n{cross_task_block}\n" if cross_task_block else ""
     )
 
+    # B5 R8-v3 (Sprint 3, 2026-05-20): cognitive-layer research-lens block.
+    # Pre-rendered by cognitive_layer_service.build_cognitive_layer_block
+    # in node_hypothesis. Empty string when R8-v3 OFF or no layer fired →
+    # splice below collapses to "" → byte-for-byte legacy.
+    cognitive_layer_text = getattr(ctx, "cognitive_layer_block", "") or ""
+    cognitive_layer_block_with_leading_newline = (
+        f"\n{cognitive_layer_text}\n" if cognitive_layer_text else ""
+    )
+
     return f"""## Research Context
 
 **Dataset**: {ctx.dataset_id}
@@ -269,7 +278,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 ## Available Data Fields (Sample)
 
 {field_overview}
-{macro_block_with_leading_newline}{style_block_with_leading_newline}{cross_task_block_with_leading_newline}
+{macro_block_with_leading_newline}{style_block_with_leading_newline}{cross_task_block_with_leading_newline}{cognitive_layer_block_with_leading_newline}
 {patterns_block}
 {trace_section}
 {strategy_section}

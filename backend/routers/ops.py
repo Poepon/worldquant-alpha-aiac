@@ -2550,6 +2550,94 @@ async def r8_query_stats(
 
 
 # =============================================================================
+# Phase 4 Sprint 3 B5 — R8-v3 cognitive-layer telemetry (2026-05-20)
+# =============================================================================
+# Aggregates alpha.metrics['_cognitive_layer_used'] over the trailing window.
+# Stamped by node_evaluate when ENABLE_COGNITIVE_LAYER_PROMPT was on at
+# hypothesis time. Surfaces per-layer fire count + PASS rate to inform
+# (a) flip COGNITIVE_LAYER_SELECT_MODE 'round_robin'→'bandit' once stats
+# are seeded, and (b) future BanditState seed via offline cron.
+
+
+class CognitiveLayerStat(BaseModel):
+    layer_id: str
+    fired_count: int
+    pass_count: int
+    fail_count: int
+    pass_rate: float
+
+
+class CognitiveLayerStatsOut(BaseModel):
+    flags: Dict[str, bool]
+    total_stamped_alphas: int
+    by_layer: List[CognitiveLayerStat]
+    window_days: int
+
+
+@router.get("/r8-v3/cognitive-layer-stats", response_model=CognitiveLayerStatsOut)
+async def r8v3_cognitive_layer_stats(
+    days: int = 7,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> CognitiveLayerStatsOut:
+    """R8-v3 per-layer PASS/FAIL distribution.
+
+    Aggregates ``alpha.metrics->>'_cognitive_layer_used'`` over the
+    trailing ``days`` window. Use to confirm that
+    ENABLE_COGNITIVE_LAYER_PROMPT is actually stamping (non-zero
+    total_stamped_alphas) and to seed the bandit state before flipping
+    COGNITIVE_LAYER_SELECT_MODE to 'bandit'.
+
+    Returns zero stats when the flag was OFF in the window (no stamps).
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_COGNITIVE_LAYER_PROMPT": bool(
+            getattr(_stg, "ENABLE_COGNITIVE_LAYER_PROMPT", False)
+        ),
+    }
+
+    rows = (await db.execute(_text("""
+        SELECT
+          metrics->>'_cognitive_layer_used' AS layer_id,
+          COUNT(*) AS fired,
+          COUNT(*) FILTER (WHERE quality_status IN ('PASS', 'PASS_PROVISIONAL')) AS passed,
+          COUNT(*) FILTER (WHERE quality_status = 'FAIL') AS failed
+        FROM alphas
+        WHERE created_at > now() - (:days || ' day')::interval
+          AND metrics ? '_cognitive_layer_used'
+          AND metrics->>'_cognitive_layer_used' <> ''
+        GROUP BY metrics->>'_cognitive_layer_used'
+        ORDER BY fired DESC
+    """), {"days": str(int(days))})).all()
+
+    by_layer: List[CognitiveLayerStat] = []
+    total = 0
+    for layer_id, fired, passed, failed in rows:
+        fired_i = int(fired or 0)
+        passed_i = int(passed or 0)
+        failed_i = int(failed or 0)
+        total += fired_i
+        rate = round(passed_i / fired_i, 4) if fired_i > 0 else 0.0
+        by_layer.append(CognitiveLayerStat(
+            layer_id=str(layer_id),
+            fired_count=fired_i,
+            pass_count=passed_i,
+            fail_count=failed_i,
+            pass_rate=rate,
+        ))
+
+    return CognitiveLayerStatsOut(
+        flags=flags,
+        total_stamped_alphas=total,
+        by_layer=by_layer,
+        window_days=int(days),
+    )
+
+
+# =============================================================================
 # Phase 3 R9 — simulation cache telemetry (2026-05-18)
 # =============================================================================
 # Reads simulation_cache table aggregates. hit/miss has no dedicated counter;

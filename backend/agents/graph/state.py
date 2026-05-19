@@ -213,6 +213,14 @@ class MiningState(BaseModel):
     # state module.
     r10v2_pnl_corr_matrix: Optional[Any] = None
 
+    # B5 R8-v3 (Sprint 3, 2026-05-20): cognitive-layer id chosen by
+    # cognitive_layer_service.select_layer at hypothesis time. Empty
+    # string = R8-v3 OFF or layer load failed → no stamp downstream.
+    # evaluation node copies this onto each alpha.metrics[
+    # "_cognitive_layer_used"] so the bandit reward update (offline cron,
+    # fast-follow) can attribute PASS/FAIL to the layer that was active.
+    cognitive_layer_id_used: str = ""
+
     # Plan v5+ §Phase 2 B5/B6: per-hypothesis round history. Key = hypothesis_id.
     # Each entry: {round_index, alpha_count, pass_count, fail_count,
     #              syntax_fail_count, simulate_fail_count, attribution,
