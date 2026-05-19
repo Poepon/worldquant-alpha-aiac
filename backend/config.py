@@ -339,6 +339,32 @@ class Settings(BaseSettings):
     # 会校准到 region-specific(USA 通常较高,emerging market 较低)。
     FAMILY_BAN_MIN_PAIRWISE_CORR: float = 0.65
 
+    # ----- B2 R13 factor_decomposition shadow (Sprint 2, 2026-05-20) -----
+    # Two Sigma 18-factor lens / AQR autoencoder asset pricing intuition —
+    # AIAC evaluation 只看 sharpe/fitness/turnover/self-corr,无 style factor
+    # neutralization。R13 把 alpha 的 daily returns 对 5 个 style factor
+    # (size/value/momentum/quality/low_vol) OLS 分解,产 residual_sharpe +
+    # factor_exposures + r_squared。
+    # 三阶段 rollout(per [[feedback_light_wiring_deferred_gate]]):
+    #   1. shadow(default):default OFF;flip ON → log + stamp,无 quality
+    #      _status 改动
+    #   2. soft:7d obs ≥30 alpha residual → flip MODE='soft',
+    #      residual<τ → quality_status='PASS_PROVISIONAL'
+    #   3. hard:再 7d obs PASS_PROVISIONAL 中 ≥80% can_submit=True →
+    #      flip MODE='hard',residual<τ → quality_status='FAIL'
+    # Path:R13-spike GO OLS 路径(backend/services/factor_lens_service.py)。
+    # 数据依赖:backend/data/factor_returns_snapshot/{region}.parquet
+    # (operator manual maintenance,每月 refresh)。stale >90d → /ops/r13/
+    # snapshot-stale-check 告警(fast-follow)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.9 / v2 §4.6
+    ENABLE_FACTOR_LENS: bool = False
+    FACTOR_LENS_MODE: str = "shadow"  # "shadow" | "soft" | "hard"
+    FACTOR_LENS_FACTORS: list = ["size", "value", "momentum", "quality", "low_vol"]
+    FACTOR_LENS_RESIDUAL_SHARPE_MIN: float = 0.5  # hard 模式 < τ → FAIL
+    FACTOR_LENS_OLS_LOOKBACK_DAYS: int = 504  # ~2y daily
+    FACTOR_LENS_MIN_OVERLAP_DAYS: int = 60  # < N 天交集 → 跳过 decompose
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入

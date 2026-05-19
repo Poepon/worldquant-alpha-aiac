@@ -119,6 +119,10 @@ from backend.models.classifier_call_log import ClassifierCallLog
 # [[feedback_r1a_dedicated_log_table]])
 from backend.models.task_stop_loss_event import TaskStopLossEvent
 
+# Phase 4 Sprint 2 B2 — R13 factor_lens OLS decomposition per PASS alpha
+# (Two Sigma 18-factor lens / AQR autoencoder asset pricing pattern)
+from backend.models.factor_lens_residual import FactorLensResidual
+
 __all__ = [
     # Enums
     "MiningStatus",

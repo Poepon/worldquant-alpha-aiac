@@ -2999,6 +2999,99 @@ async def node_evaluate(
             )
     # === end finalize pass ===
 
+    # === B2 Sprint 2 R13 factor_lens shadow stamp (plan v5 §6.9) ===
+    # OLS decompose each PASS alpha's daily PnL against the region's
+    # static factor-returns snapshot. shadow mode (default): stamp only;
+    # soft/hard modes transition quality_status when residual < τ.
+    # Default OFF → byte-identical round behavior. Each PASS alpha adds
+    # ~0.5-1s of BRAIN /alphas/{id}/recordsets/pnl latency; only fires
+    # when snapshot file exists for the region (soft-skip otherwise).
+    if (
+        updated_alphas
+        and getattr(settings, "ENABLE_FACTOR_LENS", False)
+        and brain is not None
+    ):
+        try:
+            from backend.services import factor_lens_service as _r13_svc
+            from backend.services.correlation_service import (
+                CorrelationService as _CorrSvc,
+                _series_to_returns as _to_returns,
+            )
+
+            _r13_mode = getattr(settings, "FACTOR_LENS_MODE", "shadow")
+            _r13_tau = float(getattr(settings, "FACTOR_LENS_RESIDUAL_SHARPE_MIN", 0.5))
+            _r13_factors = list(getattr(settings, "FACTOR_LENS_FACTORS", []) or None)
+            _r13_min_overlap = int(getattr(settings, "FACTOR_LENS_MIN_OVERLAP_DAYS", 60))
+
+            _corr_svc = _CorrSvc(brain)
+            _r13_stamped = 0
+            _r13_soft_pp = 0
+            _r13_hard_fail = 0
+            for _a in updated_alphas:
+                _status = getattr(_a, "quality_status", None)
+                _status_str = getattr(_status, "value", _status)
+                # Only decompose PASS alphas (FAIL already excluded from
+                # downstream submission; decomposition adds no value)
+                if _status_str not in ("PASS", "PASS_PROVISIONAL"):
+                    continue
+                _alpha_id = getattr(_a, "alpha_id", None)
+                _region = getattr(_a, "region", None)
+                if not _alpha_id or not _region:
+                    continue
+                try:
+                    _pnl_series = await _corr_svc._fetch_pnl_series(
+                        _alpha_id, max_attempts=2,
+                    )
+                except Exception as _fetch_e:
+                    logger.debug(
+                        f"[R13] PnL fetch failed for {_alpha_id}: {_fetch_e}"
+                    )
+                    continue
+                if _pnl_series is None or _pnl_series.empty:
+                    continue
+                _daily_returns = _to_returns(_pnl_series)
+                if _daily_returns is None or _daily_returns.empty:
+                    continue
+                _residual = _r13_svc.decompose_alpha(
+                    alpha_returns=_daily_returns,
+                    region=_region,
+                    factors=_r13_factors or None,
+                    min_overlap_days=_r13_min_overlap,
+                )
+                if _residual.mode_used == "skipped" or _residual.mode_used == "no_snapshot":
+                    # Snapshot missing or insufficient overlap — soft-skip
+                    continue
+
+                _new_m = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+                _new_m["_r13_residual_sharpe"] = float(_residual.residual_sharpe)
+                _new_m["_r13_factor_exposures"] = _residual.factor_exposures
+                _new_m["_r13_r_squared"] = float(_residual.r_squared)
+                _new_m["_r13_ols_n_days"] = int(_residual.ols_n_days)
+                _new_m["_r13_mode_used"] = _residual.mode_used
+                _new_m["_r13_factor_lens_phase"] = _r13_mode
+                _a.metrics = _new_m
+                _r13_stamped += 1
+
+                # Mode-specific quality_status transitions
+                if _r13_mode == "soft" and _residual.residual_sharpe < _r13_tau:
+                    if _status_str == "PASS":
+                        _a.quality_status = "PASS_PROVISIONAL"
+                        _r13_soft_pp += 1
+                elif _r13_mode == "hard" and _residual.residual_sharpe < _r13_tau:
+                    _a.quality_status = "FAIL"
+                    _new_m["_r13_hard_failed"] = True
+                    _a.metrics = _new_m
+                    _r13_hard_fail += 1
+
+            if _r13_stamped > 0:
+                logger.info(
+                    f"[R13] factor_lens stamped {_r13_stamped} alpha(s) "
+                    f"(mode={_r13_mode}, soft_pp={_r13_soft_pp}, hard_fail={_r13_hard_fail})"
+                )
+        except Exception as _r13_e:  # noqa: BLE001
+            logger.warning(f"[R13] factor_lens shadow failed (non-fatal): {_r13_e}")
+    # === end R13 factor_lens ===
+
     # === Phase 4 PR0.6 Sentinel stamp (Sprint 0, 2026-05-19) ===
     # Backfills 3 of the 6 R12-sentinel-tied stamps onto alpha.metrics so the
     # R12 decision counterfactual SQL (Sprint末) can attribute per-sentinel

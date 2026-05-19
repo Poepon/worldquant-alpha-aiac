@@ -697,6 +697,44 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "调低 → 更激进 ban。"
         ),
     ),
+    # --- B2 R13 factor_decomposition shadow (Sprint 2, 2026-05-20) ---
+    "ENABLE_FACTOR_LENS": FlagSpec(
+        name="ENABLE_FACTOR_LENS",
+        flag_type="bool",
+        group="Phase4-Sprint2",
+        description=(
+            "Phase 4 B2 R13:OLS 分解 PASS alpha daily returns 对 5 个 style "
+            "factor(size/value/momentum/quality/low_vol)产 residual_sharpe + "
+            "factor_exposures。Default OFF。三阶段 rollout:shadow→soft→hard "
+            "(per FACTOR_LENS_MODE)。Shadow 模式 stamp 不改 quality_status,"
+            "soft 模式 residual<τ → PASS_PROVISIONAL,hard 模式 residual<τ → "
+            "FAIL。数据依赖 backend/data/factor_returns_snapshot/{region}."
+            "parquet — operator 月维护。flag ON 但 snapshot 缺失 → soft-fall "
+            "skip(无 exception)。"
+        ),
+    ),
+    "FACTOR_LENS_MODE": FlagSpec(
+        name="FACTOR_LENS_MODE",
+        flag_type="string",
+        group="Phase4-Sprint2",
+        description=(
+            "R13 rollout 阶段 — 'shadow'(default)/ 'soft' / 'hard'。验收期"
+            "(per [[feedback_light_wiring_deferred_gate]]):shadow 7d obs ≥30 "
+            "alpha residual → flip soft → 7d obs PASS_PROV 中 ≥80% can_submit "
+            "→ flip hard。"
+        ),
+    ),
+    "FACTOR_LENS_RESIDUAL_SHARPE_MIN": FlagSpec(
+        name="FACTOR_LENS_RESIDUAL_SHARPE_MIN",
+        flag_type="float",
+        group="Phase4-Sprint2",
+        description=(
+            "R13 soft/hard 模式的 residual_sharpe 阈值 τ。default 0.5 — "
+            "alpha 经 style factor neutralize 后年化 sharpe 仍 ≥0.5 才认为"
+            "有 idiosyncratic 编辑。scripts/calibrate_r13_threshold.py 可"
+            "根据 7d obs 数据校准 region-specific 值(fast-follow)。"
+        ),
+    ),
 }
 
 
