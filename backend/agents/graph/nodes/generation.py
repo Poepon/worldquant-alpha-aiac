@@ -1489,17 +1489,46 @@ async def node_code_gen(
         if not isinstance(alternatives_considered, list):
             alternatives_considered = []
 
+        # Phase 4 Sprint 1 A1.3 (2026-05-20): assistant-mode template synth.
+        # When state.llm_mode_used == "assistant", every alpha_data has its
+        # LLM-emitted ``expression`` overwritten by the template composer's
+        # output. The hypothesis text remains the authoritative artifact;
+        # the DSL is *re-derived* from a curated 10-entry library
+        # (backend/data/assistant_mode_templates.yaml) keyed on pillar +
+        # keyword overlap. Soft-fail: per-alpha — if no template matches,
+        # the LLM's own expression survives (we fall through to author
+        # behavior for that single candidate; never break the round).
+        # A1.4 will measure via /ops/llm-mode/comparison whether this
+        # actually moves PASS rate. Authorial path is byte-identical when
+        # state.llm_mode_used == "author".
+        _assistant_mode_active = (
+            getattr(state, "llm_mode_used", "author") == "assistant"
+        )
+        if _assistant_mode_active:
+            try:
+                from backend.services.assistant_template import (
+                    compose_for_hypothesis as _assistant_compose,
+                )
+            except Exception as _imp_ex:  # noqa: BLE001
+                logger.warning(
+                    "[%s] A1.3 assistant_template import failed (falling through "
+                    "to author per-alpha): %s", node_name, _imp_ex,
+                )
+                _assistant_compose = None  # type: ignore
+        else:
+            _assistant_compose = None
+
         for alpha_data in raw_alphas:
             # Handle both old format (hypothesis) and new format (hypothesis_tested)
             hypothesis_text = alpha_data.get("hypothesis_tested", alpha_data.get("hypothesis", ""))
-            
+
             # Handle both old format (string) and new format (dict) for explanation
             explanation_raw = alpha_data.get("explanation", "")
             if isinstance(explanation_raw, dict):
                 explanation = f"{explanation_raw.get('approach', '')} - {explanation_raw.get('market_logic', '')}"
             else:
                 explanation = explanation_raw
-            
+
             # V-26.50 (2026-05-13): LLM output sometimes has expected_sharpe
             # as a string, NaN, or absurd magnitude (the field is user-facing
             # context in downstream prompts so a junk value pollutes the loop).
@@ -1515,20 +1544,59 @@ async def node_code_gen(
             except (TypeError, ValueError):
                 sanitized_es = None
 
+            # A1.3 assistant override: re-compose DSL from template library.
+            _composed_expression: Optional[str] = None
+            _composed_template_id: Optional[str] = None
+            _composed_score: Optional[float] = None
+            if _assistant_compose is not None and hypothesis_text:
+                try:
+                    pillar_hint = alpha_data.get("pillar") or alpha_data.get(
+                        "pillar_choice"
+                    )
+                    composed = _assistant_compose(
+                        hypothesis_text,
+                        pillar=pillar_hint if isinstance(pillar_hint, str) else None,
+                    )
+                    if composed is not None and composed.get("expression"):
+                        _composed_expression = composed["expression"]
+                        _composed_template_id = composed.get("template_id")
+                        _composed_score = composed.get("score")
+                except Exception as _comp_ex:  # noqa: BLE001
+                    logger.warning(
+                        "[%s] A1.3 assistant compose failed for hypothesis %r "
+                        "(falling through to author expression): %s",
+                        node_name, hypothesis_text[:40], _comp_ex,
+                    )
+
             candidate = AlphaCandidate(
-                expression=alpha_data.get("expression", ""),
+                expression=(
+                    _composed_expression
+                    if _composed_expression is not None
+                    else alpha_data.get("expression", "")
+                ),
                 hypothesis=hypothesis_text,
                 explanation=explanation,
                 expected_sharpe=sanitized_es,
             )
-            
+
             # Attach additional metadata for tracking
             candidate.metadata = {
                 "fields_used": alpha_data.get("fields_used", []),
                 "complexity": alpha_data.get("complexity", "unknown"),
                 "novelty_level": alpha_data.get("novelty_level", "unknown"),
             }
-            
+            # A1.3 trace assistant-mode synth so A1.4 ops endpoint can
+            # stratify PASS rate by template_id (and to flag candidates
+            # where assistant fell through to LLM's own DSL).
+            if _assistant_mode_active:
+                candidate.metadata["llm_mode_used"] = "assistant"
+                if _composed_expression is not None:
+                    candidate.metadata["assistant_template_id"] = _composed_template_id
+                    candidate.metadata["assistant_template_score"] = _composed_score
+                    candidate.metadata["assistant_template_fallthrough"] = False
+                else:
+                    candidate.metadata["assistant_template_fallthrough"] = True
+
             if candidate.expression and candidate.expression.strip():
                 pending_alphas.append(candidate)
     
