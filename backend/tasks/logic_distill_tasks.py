@@ -57,6 +57,7 @@ async def _distill_async() -> Dict[str, Any]:
     from backend.services.logic_distill_service import (
         distill_last_week_pass_alphas,
         stamp_similarity_to_prev_week,
+        refine_logic_library,
     )
 
     max_cost = float(getattr(settings, "LOGIC_DISTILL_MAX_COST_USD_PER_WEEK", 5.0))
@@ -119,11 +120,31 @@ async def _distill_async() -> Dict[str, Any]:
         f"[g10] weekly distill committed: {len(entries)} entries, "
         f"spent ${total_cost:.4f} (cap ${max_cost:.2f})"
     )
+
+    # A5.2 G10 PR2 (Sprint 4): after committing this week's distillation,
+    # retire stale prior-week entries that are near-duplicates of the new
+    # ones. Separate session to avoid mixing the INSERT and UPDATE
+    # transactions; refine has its own commit. Soft-fail.
+    refine_stats: Dict[str, Any] = {"retired": 0, "checked": 0}
+    sim_threshold = float(
+        getattr(settings, "LOGIC_DISTILL_SIMILARITY_THRESHOLD", 0.70)
+    )
+    try:
+        async with AsyncSessionLocal() as refine_db:
+            refine_stats = await refine_logic_library(
+                refine_db,
+                similarity_threshold=sim_threshold,
+            )
+    except Exception as ex:  # noqa: BLE001
+        logger.warning(f"[g10] refine_logic_library failed (non-fatal): {ex}")
+        refine_stats = {"retired": 0, "checked": 0, "error": str(ex)[:200]}
+
     return {
         "distilled": len(entries),
         "spent_usd": round(total_cost, 4),
         "max_cost_usd": max_cost,
         "by_region": _count_by_region(entries),
+        "refine": refine_stats,
     }
 
 

@@ -400,6 +400,15 @@ class Settings(BaseSettings):
     LOGIC_DISTILL_LOOKBACK_DAYS: int = 7
     LOGIC_DISTILL_SIMILARITY_THRESHOLD: float = 0.70
 
+    # ----- A5.2 G10 PR2 (Sprint 4, 2026-05-20) - prompt injection -----
+    # PR1 (Sprint 3) 建库;PR2 注入回 hypothesis prompt 形成正反馈。
+    # ENABLE_G10_LOGIC_INJECT 独立 flag(可单独启用 inject 不启用 distill,
+    # 比如已有库时只 inject 不重蒸馏)。
+    # G10_LOGIC_INJECT_TOP_K 注入到 prompt 的 entry 数。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.13
+    ENABLE_G10_LOGIC_INJECT: bool = False
+    G10_LOGIC_INJECT_TOP_K: int = 5
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入

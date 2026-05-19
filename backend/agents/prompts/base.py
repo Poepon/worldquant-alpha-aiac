@@ -91,6 +91,13 @@ class PromptContext:
     # round end). Empty when no layer fired.
     cognitive_layer_id: str = ""
 
+    # A5.2 G10 PR2 (Sprint 4, 2026-05-20): distilled-logic block —
+    # rendered markdown from active distilled_logic_library entries
+    # for (region, pillar). Empty string when ENABLE_G10_LOGIC_INJECT
+    # is OFF or no rows match → template splice yields empty (byte-
+    # for-byte legacy). Mirrors cognitive_layer_block pattern.
+    distilled_logic_block: str = ""
+
 
 def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     """Build concise field reference with type info."""

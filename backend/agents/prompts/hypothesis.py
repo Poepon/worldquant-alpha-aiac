@@ -268,6 +268,15 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
         f"\n{cognitive_layer_text}\n" if cognitive_layer_text else ""
     )
 
+    # A5.2 G10 PR2 (Sprint 4, 2026-05-20): distilled-logic block. Pre-
+    # rendered by logic_distill_service.build_distilled_logic_block in
+    # node_hypothesis. Empty when ENABLE_G10_LOGIC_INJECT OFF / no rows →
+    # splice below yields "" → byte-for-byte legacy.
+    distilled_logic_text = getattr(ctx, "distilled_logic_block", "") or ""
+    distilled_logic_block_with_leading_newline = (
+        f"\n{distilled_logic_text}\n" if distilled_logic_text else ""
+    )
+
     return f"""## Research Context
 
 **Dataset**: {ctx.dataset_id}
@@ -278,7 +287,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 ## Available Data Fields (Sample)
 
 {field_overview}
-{macro_block_with_leading_newline}{style_block_with_leading_newline}{cross_task_block_with_leading_newline}{cognitive_layer_block_with_leading_newline}
+{macro_block_with_leading_newline}{style_block_with_leading_newline}{cross_task_block_with_leading_newline}{cognitive_layer_block_with_leading_newline}{distilled_logic_block_with_leading_newline}
 {patterns_block}
 {trace_section}
 {strategy_section}

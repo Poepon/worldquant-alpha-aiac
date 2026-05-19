@@ -364,6 +364,193 @@ async def stamp_similarity_to_prev_week(
         entry.similarity_jaccard_to_prev_week = sim
 
 
+# ---------------------------------------------------------------------------
+# A5.2 G10 PR2 (Sprint 4): refine + retrieval + prompt block
+# ---------------------------------------------------------------------------
+
+async def refine_logic_library(
+    db: Any,
+    *,
+    similarity_threshold: float = 0.70,
+    lookback_weeks: int = 4,
+) -> Dict[str, int]:
+    """Mark stale logic entries as retired_at = now.
+
+    Strategy:
+      For each active (retired_at IS NULL) (region, pillar) bucket,
+      compare the newest entry's tokens against the next-newest entry's
+      tokens via Jaccard. When similarity ≥ ``similarity_threshold``,
+      the OLDER entry is redundant — set its retired_at so it stops
+      appearing in retrieval. Repeat through the bucket's history up
+      to ``lookback_weeks`` deep.
+
+    Returns: {"retired": N, "checked": M} for cron log + ops telemetry.
+
+    Soft-fail per bucket — any DB error logged + bucket skipped.
+    """
+    from sqlalchemy import text as _text
+    retired = 0
+    checked = 0
+
+    # Bucket inventory (still-active entries) grouped by region+pillar
+    bucket_rows = (await db.execute(_text("""
+        SELECT id, region, pillar, distilled_at_week, tokens
+        FROM distilled_logic_library
+        WHERE retired_at IS NULL
+        ORDER BY region, pillar, distilled_at_week DESC
+    """))).all()
+
+    # Group Python-side; tokens column is JSONB list
+    groups: Dict[Tuple[str, Optional[str]], List[tuple]] = {}
+    for row_id, region, pillar, week, tokens in bucket_rows:
+        groups.setdefault((str(region), pillar), []).append(
+            (int(row_id), week, list(tokens) if isinstance(tokens, list) else [])
+        )
+
+    now = datetime.now(timezone.utc)
+    for (region, pillar), members in groups.items():
+        if len(members) < 2:
+            continue
+        # members is already DESC by week. Compare newest [0] vs [1].
+        # If similar enough, retire [1]. Then [0] vs [2]. Etc.
+        for i in range(1, min(len(members), lookback_weeks + 1)):
+            checked += 1
+            sim = jaccard_similarity(members[0][2], members[i][2])
+            if sim >= similarity_threshold:
+                try:
+                    await db.execute(
+                        _text(
+                            "UPDATE distilled_logic_library SET retired_at = :now "
+                            "WHERE id = :id"
+                        ),
+                        {"now": now, "id": members[i][0]},
+                    )
+                    retired += 1
+                except Exception as ex:  # noqa: BLE001
+                    logger.warning(
+                        f"[g10] refine UPDATE failed for id={members[i][0]}: {ex}"
+                    )
+
+    try:
+        await db.commit()
+    except Exception as ex:  # noqa: BLE001
+        await db.rollback()
+        logger.warning(f"[g10] refine commit failed (rolled back): {ex}")
+        return {"retired": 0, "checked": checked, "error": str(ex)[:200]}
+
+    logger.info(f"[g10] refine: retired {retired}/{checked} stale entries")
+    return {"retired": retired, "checked": checked}
+
+
+async def fetch_active_logic_entries(
+    db: Any,
+    *,
+    region: str,
+    pillar: Optional[str] = None,
+    limit: int = 5,
+) -> List[Dict]:
+    """Retrieve active distilled-logic entries for hypothesis prompt
+    injection. Filters retired_at IS NULL, prefers (region, pillar)
+    match but soft-falls to region-only when pillar match returns < limit.
+
+    Returns: ordered list of {logic_text, pillar, region, distilled_at_week,
+    source_alpha_count, llm_model}. Newest first.
+    """
+    from sqlalchemy import text as _text
+
+    out: List[Dict] = []
+    if pillar:
+        # Try pillar-matched first
+        try:
+            rows = (await db.execute(_text("""
+                SELECT id, logic_text, pillar, region, distilled_at_week,
+                       source_alpha_ids, llm_model
+                FROM distilled_logic_library
+                WHERE retired_at IS NULL
+                  AND region = :region
+                  AND pillar = :pillar
+                ORDER BY distilled_at_week DESC
+                LIMIT :limit
+            """), {"region": region, "pillar": pillar, "limit": int(limit)})).all()
+            out = [_row_to_dict(r) for r in rows]
+        except Exception as ex:  # noqa: BLE001
+            logger.warning(f"[g10] fetch (pillar-matched) failed: {ex}")
+            return []
+
+    if len(out) < limit:
+        remaining = limit - len(out)
+        seen_ids = {r["id"] for r in out}
+        try:
+            rows = (await db.execute(_text("""
+                SELECT id, logic_text, pillar, region, distilled_at_week,
+                       source_alpha_ids, llm_model
+                FROM distilled_logic_library
+                WHERE retired_at IS NULL
+                  AND region = :region
+                ORDER BY distilled_at_week DESC
+                LIMIT :limit
+            """), {"region": region, "limit": int(limit * 2)})).all()
+            for r in rows:
+                d = _row_to_dict(r)
+                if d["id"] in seen_ids:
+                    continue
+                out.append(d)
+                if len(out) >= limit:
+                    break
+        except Exception as ex:  # noqa: BLE001
+            logger.warning(f"[g10] fetch (region-fallback) failed: {ex}")
+
+    return out[:limit]
+
+
+def _row_to_dict(row: tuple) -> Dict:
+    row_id, logic_text, pillar, region, week, source_ids, llm_model = row
+    if isinstance(source_ids, list):
+        src_count = len(source_ids)
+    else:
+        src_count = 0
+    return {
+        "id": int(row_id),
+        "logic_text": str(logic_text),
+        "pillar": str(pillar) if pillar else None,
+        "region": str(region),
+        "distilled_at_week": week,
+        "source_alpha_count": src_count,
+        "llm_model": str(llm_model) if llm_model else None,
+    }
+
+
+def build_distilled_logic_block(entries: List[Dict]) -> str:
+    """Render the G10 distilled-logic block for hypothesis prompt injection.
+
+    Empty input → "" so the splice site collapses to byte-for-byte
+    legacy when ENABLE_G10_LOGIC_INJECT is OFF or no rows exist
+    (mirrors P2-A/B/C/D + G8 + R8-v3 contract).
+    """
+    if not entries:
+        return ""
+    lines = [
+        "## Distilled Logic — Recent PASS-Alpha Patterns (this region)",
+        "",
+        (
+            "These are LLM-distilled summaries of common logic across "
+            "alphas that recently PASSed in this region. Use as a research "
+            "*prior*: extend a pattern that aligns with your hypothesis, "
+            "or propose a genuinely orthogonal direction if none fit. "
+            "Do NOT verbatim copy."
+        ),
+        "",
+    ]
+    for e in entries[:5]:
+        pillar = e.get("pillar") or "general"
+        src_n = e.get("source_alpha_count", 0)
+        logic = (e.get("logic_text") or "").strip()
+        if not logic:
+            continue
+        lines.append(f"- **{pillar}** (n={src_n}): {logic}")
+    return "\n".join(lines)
+
+
 __all__ = [
     "AlphaSummary",
     "DistilledEntry",
@@ -372,4 +559,7 @@ __all__ = [
     "build_distill_prompt",
     "distill_last_week_pass_alphas",
     "stamp_similarity_to_prev_week",
+    "refine_logic_library",
+    "fetch_active_logic_entries",
+    "build_distilled_logic_block",
 ]

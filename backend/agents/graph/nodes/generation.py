@@ -926,6 +926,38 @@ async def node_hypothesis(
             _r8v3_block = ""
             _r8v3_layer_id = ""
 
+    # A5.2 G10 PR2 (Sprint 4, 2026-05-20): distilled-logic injection.
+    # Fetch active distilled_logic_library entries for (region, pillar)
+    # and render into a markdown block. Default OFF → block stays "" →
+    # byte-for-byte legacy. Soft-fail: any error logged + block empty.
+    _g10_block = ""
+    if bool(getattr(_gen_settings, "ENABLE_G10_LOGIC_INJECT", False)):
+        try:
+            from backend.database import AsyncSessionLocal as _g10_session
+            from backend.services.logic_distill_service import (
+                fetch_active_logic_entries as _g10_fetch,
+                build_distilled_logic_block as _g10_render,
+            )
+            _g10_top_k = int(getattr(_gen_settings, "G10_LOGIC_INJECT_TOP_K", 5))
+            async with _g10_session() as _g10_db:
+                _g10_entries = await _g10_fetch(
+                    _g10_db,
+                    region=state.region,
+                    pillar=pillar_hint,
+                    limit=_g10_top_k,
+                )
+            if _g10_entries:
+                _g10_block = _g10_render(_g10_entries)
+                logger.info(
+                    f"[{node_name}] G10 inject | n={len(_g10_entries)} "
+                    f"region={state.region} pillar_filter={pillar_hint}"
+                )
+        except Exception as _g10_ex:  # noqa: BLE001
+            logger.warning(
+                f"[{node_name}] G10 inject failed (non-fatal): {_g10_ex}"
+            )
+            _g10_block = ""
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -971,6 +1003,9 @@ async def node_hypothesis(
         # empty (byte-for-byte legacy).
         cognitive_layer_block=_r8v3_block,
         cognitive_layer_id=_r8v3_layer_id,
+        # A5.2 G10 PR2 (Sprint 4, 2026-05-20): pre-rendered distilled-
+        # logic block (str). "" = OFF / no rows → splice yields empty.
+        distilled_logic_block=_g10_block,
     )
     
     # Use new hypothesis builder with experiment trace

@@ -837,6 +837,29 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "阈值。Default 0.70 — token 集合 70% 重叠就视为 stale 不写。"
         ),
     ),
+    # --- A5.2 G10 PR2 (Sprint 4, 2026-05-20) - prompt injection ---
+    "ENABLE_G10_LOGIC_INJECT": FlagSpec(
+        name="ENABLE_G10_LOGIC_INJECT",
+        flag_type="bool",
+        group="Phase4-Sprint4",
+        description=(
+            "Phase 4 A5.2:G10 distilled_logic_library 注入回 hypothesis "
+            "prompt(独立 block 渲染 + 与 R8-v3 cognitive layer 并存)。"
+            "Default OFF。node_hypothesis 在 G8 forest fetch 之后 fetch "
+            "active 条目(retired_at IS NULL,region+pillar match),5 entry "
+            "拼成 distilled_logic_block splice 进 prompt template。OFF 路径"
+            "byte-for-byte legacy(空 block → 空 splice)。"
+        ),
+    ),
+    "G10_LOGIC_INJECT_TOP_K": FlagSpec(
+        name="G10_LOGIC_INJECT_TOP_K",
+        flag_type="int",
+        group="Phase4-Sprint4",
+        description=(
+            "G10 inject 到 hypothesis prompt 的 entry 上限。Default 5。"
+            "考虑 token 预算 + 信号噪声,过多 entry → prompt 稀释 + LLM 选择困难。"
+        ),
+    ),
 }
 
 
