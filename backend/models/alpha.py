@@ -166,6 +166,14 @@ class AlphaFailure(SQLAlchemyBase):
     # For feedback analysis
     is_analyzed = Column(Boolean, default=False)
 
+    # G1 follow-up (2026-05-19): bandit-arm provenance stamp. Symmetric with
+    # Alpha.metrics["_direction_bandit_recommended_arm"] on the PASS path so
+    # /ops/direction-bandit/telemetry per-arm denominator includes
+    # PASS + FAIL (true Bayesian arm posterior, not PASS-only sample).
+    # NULL for legacy rows (pre-migration) and for rounds where the bandit
+    # was OFF / cold-start (round 1).
+    bandit_arm_recommended = Column(String(40), nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

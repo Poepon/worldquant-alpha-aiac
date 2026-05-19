@@ -640,6 +640,12 @@ class MiningWorkflow:
                         # FK is consistent with the PASS-path Alpha.hypothesis_id.
                         # V-27.45: _f_hid is the terminal-guarded value.
                         hypothesis_id=_f_hid,
+                        # G1 follow-up (2026-05-19): bandit-arm provenance for
+                        # FAIL alphas — symmetric with Alpha.metrics on PASS
+                        # path. Same _g1_bandit_arm read once per batch above
+                        # so PASS+FAIL both reflect the round's arm. NULL
+                        # when flag OFF / round 1 / read failed (soft-fail).
+                        bandit_arm_recommended=_g1_bandit_arm,
                     )
                     async with self.db.begin_nested():
                         self.db.add(fail_record)

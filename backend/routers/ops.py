@@ -3362,25 +3362,40 @@ async def direction_bandit_telemetry(
         "ORDER BY pulls DESC"
     ), {"days": str(int(days))})).all()
 
-    # 3. Per-arm PASS rate from the alphas table — joins on the G1 Phase A
-    #    metric stamp. Same window. Skipped if no rows (empty result).
+    # 3. Per-arm PASS rate — UNION ALL of PASS-path (alphas.metrics JSONB key
+    #    stamped by G1 Phase A) and FAIL-path (alpha_failures.bandit_arm_
+    #    recommended column stamped by G1 follow-up). The previous SQL was
+    #    PASS-only which gave a half-blind posterior (Phase B GO gate could
+    #    not be calibrated because denominator was missing fails). Now
+    #    denominator = PASS + FAIL on the same arm = true Bayesian sample.
+    #    LEFT joins both sources so an arm appearing in only one table is
+    #    still counted.
     pass_rate_map: Dict[str, tuple] = {}  # arm -> (pass_n, total_n)
     try:
         pass_rows = (await db.execute(_text(
-            "SELECT metrics->>'_direction_bandit_recommended_arm' AS arm, "
-            "       COUNT(*) AS n, "
-            "       COUNT(*) FILTER (WHERE quality_status IN ('PASS','PASS_PROVISIONAL')) AS p "
-            "FROM alphas "
-            "WHERE created_at > now() - (:days || ' day')::interval "
-            "  AND metrics ? '_direction_bandit_recommended_arm' "
+            "WITH arm_outcomes AS ( "
+            "  SELECT metrics->>'_direction_bandit_recommended_arm' AS arm, "
+            "         (quality_status IN ('PASS','PASS_PROVISIONAL'))::int AS is_pass "
+            "  FROM alphas "
+            "  WHERE created_at > now() - (:days || ' day')::interval "
+            "    AND metrics ? '_direction_bandit_recommended_arm' "
+            "  UNION ALL "
+            "  SELECT bandit_arm_recommended AS arm, "
+            "         0 AS is_pass "
+            "  FROM alpha_failures "
+            "  WHERE created_at > now() - (:days || ' day')::interval "
+            "    AND bandit_arm_recommended IS NOT NULL "
+            ") "
+            "SELECT arm, COUNT(*) AS n, SUM(is_pass) AS p "
+            "FROM arm_outcomes "
             "GROUP BY arm"
         ), {"days": str(int(days))})).all()
         for arm, n, p in pass_rows:
             if arm:
                 pass_rate_map[str(arm)] = (int(p or 0), int(n or 0))
     except Exception:
-        # If alphas table missing / migration not applied / JSONB key not
-        # populated yet (Phase A first deploy), gracefully report None per-arm.
+        # If alphas/alpha_failures table missing / migration not applied /
+        # G1 stamp keys not yet populated, gracefully report None per-arm.
         pass_rate_map = {}
 
     by_arm: List[DirectionBanditArmStatOut] = []
