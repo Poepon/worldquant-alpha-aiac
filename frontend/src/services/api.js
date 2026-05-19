@@ -628,6 +628,39 @@ const api = {
     return data
   },
 
+  // G8 Phase A hypothesis forest telemetry (2026-05-19) — eligible pool +
+  // top-N entries + per-pillar breakdown + reverse-attribution stats
+  // (alphas.metrics._g8_forest_referenced_ids). Healthy gate: flag ON +
+  // eligible_count > 0 + total_referenced_alphas > 0.
+  getOpsHypothesisForest: async (
+    days = 7,
+    region = 'USA',
+    topN = 10,
+    minPassCount = 2,
+    minSharpeAvg = 1.0,
+  ) => {
+    const params = {
+      days,
+      top_n: topN,
+      min_pass_count: minPassCount,
+      min_sharpe_avg: minSharpeAvg,
+    }
+    if (region) params.region = region
+    const { data } = await client.get('/ops/hypothesis/forest', { params })
+    return data
+  },
+
+  // G5 Phase A trajectory crossover telemetry (2026-05-19) — per-strategy +
+  // per-pillar-pair calls / offspring volume / PASS rate (joined from
+  // alphas.metrics._g5_crossover_parent_ids). Healthy gate: flag ON +
+  // total_crossover_calls > 0 + offspring_pass_rate > 0.
+  getOpsG5CrossoverStats: async (days = 7) => {
+    const { data } = await client.get('/ops/g5/crossover-stats', {
+      params: { days },
+    })
+    return data
+  },
+
   // flat-F1 advanced kickoff (2026-05-18). Gated server-side by
   // ENABLE_FLAT_CONTINUOUS — flag OFF returns HTTP 400 with detail string.
   startFlatSession: async ({ region, universe, datasets = [] }) => {

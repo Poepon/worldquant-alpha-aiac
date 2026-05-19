@@ -18,6 +18,8 @@ import DagMonitor from './DagMonitor'
 import CostMonitor from './CostMonitor'
 import DirectionBanditMonitor from './DirectionBanditMonitor'
 import G3OriginalityMonitor from './G3OriginalityMonitor'
+import G8ForestMonitor from './G8ForestMonitor'
+import G5CrossoverMonitor from './G5CrossoverMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -82,6 +84,10 @@ export default function OpsLayout() {
         <Route path="direction-bandit-monitor" element={<DirectionBanditMonitor />} />
         {/* G3 Phase A — AST originality stats (2026-05-19) */}
         <Route path="g3-monitor" element={<G3OriginalityMonitor />} />
+        {/* G8 Phase A — hypothesis forest telemetry (2026-05-19) */}
+        <Route path="g8-monitor" element={<G8ForestMonitor />} />
+        {/* G5 Phase A — trajectory crossover telemetry (2026-05-19) */}
+        <Route path="g5-monitor" element={<G5CrossoverMonitor />} />
       </Routes>
     </div>
   )

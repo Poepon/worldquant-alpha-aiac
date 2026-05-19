@@ -15,6 +15,8 @@ import {
   FunctionOutlined,
   DollarOutlined,
   CopyOutlined,
+  ApartmentOutlined,
+  ForkOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -65,8 +67,10 @@ const menuItems = [
       { key: '/ops/costeer', label: '归因与重试' },
       { key: '/ops/r5-judge', icon: <ExperimentOutlined />, label: 'LLM 评判' },
       { key: '/ops/r6-dag', icon: <BranchesOutlined />, label: '挖掘 DAG' },
+      { key: '/ops/g8-monitor', icon: <ApartmentOutlined />, label: '假设森林' },
       { key: '/ops/direction-bandit-monitor', icon: <BranchesOutlined />, label: '方向 Bandit' },
       { key: '/ops/g3-monitor', icon: <CopyOutlined />, label: 'AST 原创性' },
+      { key: '/ops/g5-monitor', icon: <ForkOutlined />, label: '交叉变异' },
       { key: '/ops/r9-cache', icon: <DatabaseOutlined />, label: '模拟缓存' },
       { key: '/ops/cost-monitor', icon: <DollarOutlined />, label: 'LLM 成本' },
       { key: '/ops/brain-role', icon: <SwapOutlined />, label: 'BRAIN 模式' },
