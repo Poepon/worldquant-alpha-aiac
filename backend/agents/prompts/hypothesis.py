@@ -18,6 +18,7 @@ from typing import Dict, List, Optional
 
 from backend.agents.prompts.base import (
     PromptContext,
+    build_cross_task_hypotheses_block,  # G8 (2026-05-19)
     build_dual_channel_patterns_block,  # R4' (2026-05-17 Phase 1)
     build_fields_context,
     build_macro_context_block,  # P2-A (2026-05-16)
@@ -247,6 +248,17 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
         dual_channel=getattr(settings, "ENABLE_DUAL_CHANNEL_RAG", False),
     )
 
+    # G8 Phase A (2026-05-19): cross-task hypothesis-forest reference. Empty
+    # when ctx.cross_task_hypotheses is [] (legacy / flag-off path) so the
+    # splice below produces the empty string at the insertion point and the
+    # template renders byte-for-byte identical to pre-G8.
+    cross_task_block = build_cross_task_hypotheses_block(
+        getattr(ctx, "cross_task_hypotheses", []) or []
+    )
+    cross_task_block_with_leading_newline = (
+        f"\n{cross_task_block}\n" if cross_task_block else ""
+    )
+
     return f"""## Research Context
 
 **Dataset**: {ctx.dataset_id}
@@ -257,7 +269,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 ## Available Data Fields (Sample)
 
 {field_overview}
-{macro_block_with_leading_newline}{style_block_with_leading_newline}
+{macro_block_with_leading_newline}{style_block_with_leading_newline}{cross_task_block_with_leading_newline}
 {patterns_block}
 {trace_section}
 {strategy_section}

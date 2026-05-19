@@ -892,6 +892,25 @@ class Settings(BaseSettings):
     # tunable — no feature flag.
     LLM_CALL_LOG_RETENTION_DAYS: int = 90
 
+    # ----- G8 Phase A — Hypothesis forest cross-task reference (2026-05-19) -----
+    # RD-Agent NeurIPS 2025 假设森林。当前 Hypothesis 表 region-scoped
+    # 无 task_id,本就全局共享;但 node_hypothesis 只做 V-22.13 cross-round
+    # reuse(同 task),不 cross-task。G8 Phase A = prompt-level reference,
+    # 不 hard reuse hypothesis_id 避免 V-27.45 terminal race 复杂度。
+    # OFF 时 byte-for-byte legacy 渲染。soft-fail:fetch 异常 → 注入空 list
+    # → prompt 不变。Phase C(7d+ obs)再考虑 hard reuse(parent_hypothesis_id
+    # 跨 task chain)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py
+    # (per [[feedback_enable_flag_double_file]])。
+    ENABLE_HYPOTHESIS_FOREST_REUSE: bool = False
+    # 过滤阈值:只把 ≥N pass + sharpe_avg ≥X 的 hypothesis 加进 prompt。
+    # 默认 conservative 防早期 noise dominate(production 用 PROMOTED 状态
+    # 已 implicit 满足这两个 ≥1 PASS 的 lifecycle 约束,但显式 gate
+    # 保护未来 status 语义漂移)。
+    HYPOTHESIS_FOREST_MIN_PASS_COUNT: int = 2
+    HYPOTHESIS_FOREST_MIN_SHARPE_AVG: float = 1.0
+    HYPOTHESIS_FOREST_TOP_K: int = 5
+
     # Layer 1 Anti-collapse (2026-05-11) — ε-greedy explore budget.
     # Probability that a strategy_select round runs in EXPLORE mode: RAG
     # success patterns hidden from the LLM, prompt directs structural

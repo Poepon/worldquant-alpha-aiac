@@ -315,6 +315,22 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "(soft cap, no fail)."
         ),
     ),
+    # --- G8 Phase A — Hypothesis forest cross-task reference ---
+    "ENABLE_HYPOTHESIS_FOREST_REUSE": FlagSpec(
+        name="ENABLE_HYPOTHESIS_FOREST_REUSE",
+        flag_type="bool",
+        group="G8-HypothesisForest",
+        description=(
+            "G8 Phase A (2026-05-19, RD-Agent hypothesis-forest):node_hypothesis "
+            "在 LLM 生成前调 HypothesisService.fetch_cross_task_promoted 拉同 "
+            "region 内 top-K (pass_count ≥ HYPOTHESIS_FOREST_MIN_PASS_COUNT "
+            "AND sharpe_avg ≥ HYPOTHESIS_FOREST_MIN_SHARPE_AVG) PROMOTED/ACTIVE "
+            "hypothesis,经 P2-B pillar_hint 过滤后注入 prompt 作为 reference。"
+            "LLM 可选 extend 或 propose new。OFF 时 byte-for-byte legacy 渲染。"
+            "Soft-fail:fetch 异常 → cross_task_hypotheses=[] → prompt 不变。"
+            "Phase C(7d+ obs)再考虑 hard reuse(parent_hypothesis_id 跨 task chain)。"
+        ),
+    ),
     # --- G2 Phase A — per-call LLM cost telemetry ---
     "ENABLE_COST_TELEMETRY": FlagSpec(
         name="ENABLE_COST_TELEMETRY",

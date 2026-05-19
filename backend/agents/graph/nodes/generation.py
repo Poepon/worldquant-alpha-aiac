@@ -767,6 +767,75 @@ async def node_hypothesis(
             style_preset = None
             _p2c_regime = None
 
+    # G8 Phase A (2026-05-19): cross-task hypothesis-forest reference —
+    # opt-in via ``ENABLE_HYPOTHESIS_FOREST_REUSE``. When OFF (default) the
+    # entire block is skipped so prompt rendering is byte-for-byte legacy
+    # (cross_task_hypotheses stays []). When ON, top-K PROMOTED/ACTIVE
+    # hypotheses in this region (filtered by pillar_hint when P2-B fires,
+    # and by min_pass_count + min_sharpe_avg thresholds) are attached so
+    # the LLM can reference proven directions. Failure of the SQL path is
+    # non-fatal: ``cross_task_hyps`` stays empty and prompt falls back to
+    # legacy. Note: we deliberately query AFTER P2-B (pillar_hint may be
+    # set) AND AFTER P2-C (experiment_variant resolution via cfg) so the
+    # filter is well-informed.
+    cross_task_hyps: List[Dict] = []
+    _forest_enabled = bool(getattr(
+        _gen_settings, "ENABLE_HYPOTHESIS_FOREST_REUSE", False,
+    ))
+    if _forest_enabled:
+        try:
+            from backend.database import AsyncSessionLocal as _g8_session
+            from backend.services.hypothesis_service import (
+                HypothesisService as _G8HypService,
+            )
+            _g8_min_pass = int(getattr(
+                _gen_settings, "HYPOTHESIS_FOREST_MIN_PASS_COUNT", 2,
+            ))
+            _g8_min_sharpe = float(getattr(
+                _gen_settings, "HYPOTHESIS_FOREST_MIN_SHARPE_AVG", 1.0,
+            ))
+            _g8_top_k = int(getattr(
+                _gen_settings, "HYPOTHESIS_FOREST_TOP_K", 5,
+            ))
+            _g8_variant = (
+                (config.get("configurable", {}) or {}).get("experiment_variant")
+                if config else None
+            )
+            async with _g8_session() as _g8_db:
+                _g8_svc = _G8HypService(_g8_db)
+                _g8_rows = await _g8_svc.fetch_cross_task_promoted(
+                    region=state.region,
+                    pillar=pillar_hint,
+                    experiment_variant=_g8_variant,
+                    min_pass_count=_g8_min_pass,
+                    min_sharpe_avg=_g8_min_sharpe,
+                    limit=_g8_top_k,
+                )
+            cross_task_hyps = [
+                {
+                    "hypothesis_id": h.id,
+                    "statement": h.statement,
+                    "rationale": h.rationale or "",
+                    "pillar": h.pillar,
+                    "sharpe_avg": h.sharpe_avg,
+                    "pass_count": h.pass_count,
+                    "alpha_count": h.alpha_count,
+                }
+                for h in _g8_rows
+            ]
+            if cross_task_hyps:
+                logger.info(
+                    f"[{node_name}] G8 forest reference | n={len(cross_task_hyps)} "
+                    f"region={state.region} pillar_filter={pillar_hint} "
+                    f"ids={[h['hypothesis_id'] for h in cross_task_hyps]}"
+                )
+        except Exception as _g8_ex:
+            logger.warning(
+                f"[{node_name}] G8 hypothesis-forest fetch failed "
+                f"(non-fatal): {_g8_ex}"
+            )
+            cross_task_hyps = []
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -802,6 +871,11 @@ async def node_hypothesis(
         # a regime injection. Off path: style_preset = None → builder
         # returns "" → byte-for-byte legacy.
         style_preset=(style_preset if _style_enabled else None),
+        # G8 Phase A (2026-05-19): only attach when the flag is ON AND we
+        # fetched ≥1 row. Off / fetch-failed paths set cross_task_hypotheses=[]
+        # so build_cross_task_hypotheses_block returns "" → template splice
+        # produces the empty-string byte-for-byte legacy render.
+        cross_task_hypotheses=(cross_task_hyps if _forest_enabled else []),
     )
     
     # Use new hypothesis builder with experiment trace
