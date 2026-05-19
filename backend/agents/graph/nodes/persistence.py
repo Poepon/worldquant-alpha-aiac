@@ -390,6 +390,43 @@ async def _incremental_save_alphas(
                 continue
             if alpha.alpha_id:
                 inserted_alpha_ids.append(alpha.alpha_id)
+
+            # G5 follow-up (2026-05-19): outcome back-fill. When this is a
+            # G5 offspring alpha (metrics carries _g5_crossover_parent_ids),
+            # append the new alpha.id to the matching g5_crossover_log row's
+            # outcome_alpha_ids JSONB array, bump outcome_pass_count (if PASS).
+            # Closes the parent → offspring attribution loop so /ops/g5/
+            # crossover-stats can compute true offspring PASS rate without
+            # re-scanning alphas.metrics. Soft-fail: any error logged but
+            # never breaks the round.
+            _g5_parents = None
+            try:
+                _g5_parents = metrics_dict.get("_g5_crossover_parent_ids") if isinstance(metrics_dict, dict) else None
+            except Exception:
+                _g5_parents = None
+            if isinstance(_g5_parents, list) and len(_g5_parents) >= 2 and inserted_id:
+                try:
+                    from sqlalchemy import text as _g5_text
+                    _g5_is_pass = alpha.quality_status in ("PASS", "PASS_PROVISIONAL")
+                    async with db_session.begin_nested():
+                        await db_session.execute(_g5_text(
+                            "UPDATE g5_crossover_log "
+                            "SET outcome_alpha_ids = COALESCE(outcome_alpha_ids, '[]'::jsonb) "
+                            "                       || to_jsonb(:new_id::int), "
+                            "    outcome_pass_count = COALESCE(outcome_pass_count, 0) "
+                            "                         + CASE WHEN :is_pass THEN 1 ELSE 0 END "
+                            "WHERE parent_a_alpha_id = :pa AND parent_b_alpha_id = :pb"
+                        ), {
+                            "new_id": int(inserted_id),
+                            "is_pass": bool(_g5_is_pass),
+                            "pa": int(_g5_parents[0]),
+                            "pb": int(_g5_parents[1]),
+                        })
+                except Exception as _g5_bf:
+                    logger.warning(
+                        f"[_incremental_save_alphas] G5 outcome back-fill failed "
+                        f"(non-fatal): {_g5_bf}"
+                    )
         except Exception as e:
             import traceback as _tb
             logger.error(

@@ -77,11 +77,27 @@ class Row:
 # ---------------------------------------------------------------------------
 
 async def load_pairs_from_db(lookback_days: int) -> List[Pair]:
-    """JOIN ast_distance_log + alphas on expression_hash, return pairs.
+    """JOIN ast_distance_log + alphas on raw expression text, return pairs.
 
-    Uses ast_distance_log.expression_hash (16-char sha256 prefix) and
-    alphas.expression_hash. Phase 1 R3/Q8 logger uses the same prefix
-    so the JOIN is valid (verified — see ast_distance_logger._hash_expr).
+    Schema fix (2026-05-19 G3 follow-up #2): the original G3 ship SQL
+    `ON a.expression_hash = adl.expression_hash` never matched any row
+    because the two tables use INCOMPATIBLE hash algorithms:
+      * ``alphas.expression_hash``         = MD5 with operator-case +
+        whitespace normalisation (32-char hex,
+        compute_expression_hash in alpha_semantic_validator.py)
+      * ``ast_distance_log.expression_hash`` = SHA256[:16] of raw expression
+        (16-char hex, _hash_expr in ast_distance_logger.py)
+
+    Even my first attempt (LEFT(a.hash, 16) = adl.hash) didn't help — the
+    underlying byte-streams hashed differently. Fix: JOIN on the
+    ``expression`` text columns themselves (ast_distance_log stores the
+    full original expression; alphas does too). The join is O(N*M) but
+    ast_distance_log is bounded ~10^4 rows long-term and alphas ~10^5 in
+    a 30-day window — Postgres handles this in well under a second with
+    the existing ix_alphas_expression_hash + ix_adl_expression_hash on
+    the prefix indexes. Future cleanup: add a compatible_hash column to
+    ast_distance_log (Alembic) and back-fill; defer that until G3 Phase B
+    actually validates a τ.
 
     Soft-fails to empty list on DB error.
     """
@@ -98,7 +114,7 @@ async def load_pairs_from_db(lookback_days: int) -> List[Pair]:
             rows = (await s.execute(_text(
                 "SELECT adl.ast_distance_min, a.quality_status "
                 "FROM ast_distance_log adl "
-                "JOIN alphas a ON a.expression_hash = adl.expression_hash "
+                "JOIN alphas a ON a.expression = adl.expression "
                 "WHERE adl.created_at > now() - (:days || ' day')::interval "
                 "  AND adl.ast_distance_min IS NOT NULL "
                 "  AND a.quality_status IN ('PASS', 'PASS_PROVISIONAL', 'FAIL', 'REJECT', 'OPTIMIZE')"
