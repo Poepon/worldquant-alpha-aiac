@@ -52,10 +52,21 @@ SELECT_DEFICIT_AWARE = "deficit_aware"
 _VALID_STRATEGIES = (SELECT_BANDIT, SELECT_ROUND_ROBIN, SELECT_DEFICIT_AWARE)
 
 # Drop order for token-budget guard. Keys correspond to PromptContext
-# field names; the orchestrator (build_hypothesis_prompt) consults this
-# list when total prompt tokens exceed budget.
+# field names; the orchestrator consults this list when total prompt
+# tokens exceed budget.
+#
+# F10 review fix (Sprint 3 R1): the prior entry `dedup_blacklist` is NOT
+# a PromptContext field — drop loop silently skipped it. Replaced with
+# real field names (failure_pitfalls / cross_task_hypotheses /
+# macro_narratives).
+#
+# Note: enforce_token_budget is a STANDALONE utility — Sprint 3 PR1 did
+# not wire it into build_hypothesis_prompt. The hypothesis prompt
+# template builds blocks via lazy splice; integrating the budget guard
+# is Sprint 4 follow-up (target: after R8-v3 + macro + G8 all in same
+# session). Until then, callers may use this util directly.
 _DROP_ORDER: List[str] = [
-    "dedup_blacklist",
+    "failure_pitfalls",
     "cross_task_hypotheses",
     "macro_narratives",
 ]

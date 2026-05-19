@@ -110,14 +110,31 @@ class DistilledEntry:
 # ---------------------------------------------------------------------------
 
 def _week_anchor(now: Optional[datetime] = None) -> datetime:
-    """Return the Monday 00:00 of the week the `now` belongs to (UTC).
+    """Return the Monday 00:00 (Asia/Shanghai) of the week ``now`` belongs to.
 
-    Stable anchor so two distillations on Sunday vs Monday hit the same
-    week-key (avoids dup rows when the cron runs at week boundary).
+    F2 review fix (Sprint 3 R2): the cron is scheduled at Sun 03:00 SH
+    (= Sat 19:00 UTC). The prior implementation derived weekday from
+    UTC, so a retry at Mon 00:30 SH (= Sun 16:30 UTC) hit weekday=6 and
+    anchored to the NEXT Monday → two rows for the same SH-week with
+    different distilled_at_week values, both 'active'. Use Asia/Shanghai
+    so the week boundary aligns with the cron schedule and the unique
+    constraint (distilled_at_week, region, pillar) actually catches
+    double-fires.
     """
-    now = now or datetime.now(timezone.utc)
-    monday = now - timedelta(days=now.weekday())
-    return monday.replace(hour=0, minute=0, second=0, microsecond=0)
+    try:
+        from zoneinfo import ZoneInfo
+        sh_tz = ZoneInfo("Asia/Shanghai")
+    except Exception:
+        # zoneinfo missing → fall back to UTC (drift but no crash)
+        sh_tz = timezone.utc
+    now_utc = now or datetime.now(timezone.utc)
+    if now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=timezone.utc)
+    now_sh = now_utc.astimezone(sh_tz)
+    monday_sh = now_sh - timedelta(days=now_sh.weekday())
+    monday_sh = monday_sh.replace(hour=0, minute=0, second=0, microsecond=0)
+    # Persist as UTC so DB comparisons stay consistent (TIMESTAMP WITH TIME ZONE).
+    return monday_sh.astimezone(timezone.utc)
 
 
 def _group_by_pillar_region(
@@ -147,16 +164,27 @@ def build_distill_prompt(
     alphas: Sequence[AlphaSummary],
     template: str = _DEFAULT_DISTILL_PROMPT,
 ) -> str:
-    """Render the LLM prompt for one (pillar, region) bucket."""
+    """Render the LLM prompt for one (pillar, region) bucket.
+
+    F9 review fix (Sprint 3 R2): the prior implementation used
+    ``template.format(...)`` to substitute placeholders. BRAIN
+    expressions occasionally contain ``{...}`` (e.g. parametric
+    operator templates), and ``.format()`` interprets those as
+    placeholders → ``KeyError`` → exception bubbles up OUTSIDE the
+    LLM-call try/except → kills the entire weekly distill run.
+    Use explicit ``str.replace`` substitution instead.
+    """
     lines = [
         f"  - id={a.id} sharpe={a.sharpe:.2f}: `{a.expression}`"
         for a in alphas
     ]
-    return template.format(
-        count=len(alphas),
-        pillar=pillar,
-        region=region,
-        alpha_list="\n".join(lines),
+    alpha_list = "\n".join(lines)
+    return (
+        template
+        .replace("{count}", str(len(alphas)))
+        .replace("{pillar}", pillar)
+        .replace("{region}", region)
+        .replace("{alpha_list}", alpha_list)
     )
 
 

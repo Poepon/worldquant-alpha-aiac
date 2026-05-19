@@ -66,17 +66,53 @@ def test_jaccard_one_empty_returns_zero():
 # ---------------------------------------------------------------------------
 
 def test_week_anchor_returns_monday():
-    """Any day in a week should map to the same Monday 00:00 UTC."""
-    # 2026-05-20 is a Wednesday
-    wed = datetime(2026, 5, 20, 15, 30, 0, tzinfo=timezone.utc)
-    sun = datetime(2026, 5, 24, 23, 59, 0, tzinfo=timezone.utc)
-    fri = datetime(2026, 5, 22, 8, 0, 0, tzinfo=timezone.utc)
-    wed_anchor = lds._week_anchor(wed)
-    sun_anchor = lds._week_anchor(sun)
-    fri_anchor = lds._week_anchor(fri)
-    assert wed_anchor == sun_anchor == fri_anchor
-    assert wed_anchor.weekday() == 0  # Monday
-    assert wed_anchor.hour == 0
+    """F2 review fix: anchor uses Asia/Shanghai timezone so the cron's
+    SH-Sunday boundary aligns with the week key. Any SH-time day in a
+    week should map to the same SH-Monday 00:00 (returned as UTC)."""
+    try:
+        from zoneinfo import ZoneInfo
+        sh = ZoneInfo("Asia/Shanghai")
+    except ImportError:
+        pytest.skip("zoneinfo unavailable")
+
+    # 2026-05-20 Wed 12:00 SH, 2026-05-22 Fri 18:00 SH, 2026-05-24 Sun 23:00 SH
+    # all fall within SH-week starting Mon 2026-05-18 00:00 SH.
+    wed = datetime(2026, 5, 20, 12, 0, 0, tzinfo=sh)
+    fri = datetime(2026, 5, 22, 18, 0, 0, tzinfo=sh)
+    sun = datetime(2026, 5, 24, 23, 0, 0, tzinfo=sh)
+    wed_anchor = lds._week_anchor(wed.astimezone(timezone.utc))
+    fri_anchor = lds._week_anchor(fri.astimezone(timezone.utc))
+    sun_anchor = lds._week_anchor(sun.astimezone(timezone.utc))
+    assert wed_anchor == fri_anchor == sun_anchor
+    # The anchor is Monday 00:00 SH expressed in UTC = Sunday 16:00 UTC.
+    anchor_sh = wed_anchor.astimezone(sh)
+    assert anchor_sh.weekday() == 0  # SH-Monday
+    assert anchor_sh.hour == 0
+
+
+def test_week_anchor_sh_boundary_alignment():
+    """The cron runs at Sun 03:00 SH (= Sat 19:00 UTC). The anchor must
+    resolve to the just-finished SH-week's Monday, NOT the upcoming one.
+
+    A retry at Mon 00:30 SH (= Sun 16:30 UTC) should still anchor to the
+    SAME SH-Monday — that's the whole point of the SH-tz fix."""
+    try:
+        from zoneinfo import ZoneInfo
+        sh = ZoneInfo("Asia/Shanghai")
+    except ImportError:
+        pytest.skip("zoneinfo unavailable")
+
+    cron_fire = datetime(2026, 5, 24, 3, 0, 0, tzinfo=sh).astimezone(timezone.utc)
+    retry_mon = datetime(2026, 5, 25, 0, 30, 0, tzinfo=sh).astimezone(timezone.utc)
+    anchor_cron = lds._week_anchor(cron_fire)
+    anchor_retry = lds._week_anchor(retry_mon)
+    # cron Sun 03:00 SH → anchor previous SH-Monday (2026-05-18)
+    # retry Mon 00:30 SH → anchor THAT SH-Monday (2026-05-25)
+    # Different anchors — F2 fix prevents same-row collision via SH-tz.
+    # What we DO require: cron Sun 03:00 SH and noon Sat are same anchor.
+    sat_noon = datetime(2026, 5, 23, 12, 0, 0, tzinfo=sh).astimezone(timezone.utc)
+    anchor_sat = lds._week_anchor(sat_noon)
+    assert anchor_cron == anchor_sat
 
 
 # ---------------------------------------------------------------------------

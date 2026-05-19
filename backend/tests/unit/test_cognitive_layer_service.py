@@ -220,16 +220,19 @@ def test_enforce_token_budget_below_budget_no_drops():
 
 
 def test_enforce_token_budget_drops_in_order():
+    """F10 review fix: drop order updated to real PromptContext field names
+    (failure_pitfalls / cross_task_hypotheses / macro_narratives) — the
+    prior fixture used the stub `dedup_blacklist` which wasn't a real field."""
     blocks = {
-        "dedup_blacklist": "x" * 16_000,  # ~4000 tokens
+        "failure_pitfalls": "x" * 16_000,  # ~4000 tokens
         "cross_task_hypotheses": "x" * 16_000,
         "macro_narratives": "x" * 16_000,
         "main": "x" * 8_000,  # ~2000 tokens
     }
     # Budget=4000 means we need to drop 2 blocks
     out = cls.enforce_token_budget(blocks=blocks, budget=4000)
-    # dedup_blacklist dropped first
-    assert out["dedup_blacklist"] == ""
+    # failure_pitfalls dropped first
+    assert out["failure_pitfalls"] == ""
     # cross_task_hypotheses dropped second
     assert out["cross_task_hypotheses"] == ""
     # main never touched (not in drop_order)

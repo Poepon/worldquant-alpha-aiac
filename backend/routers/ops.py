@@ -2588,7 +2588,10 @@ async def r8v3_cognitive_layer_stats(
     total_stamped_alphas) and to seed the bandit state before flipping
     COGNITIVE_LAYER_SELECT_MODE to 'bandit'.
 
-    Returns zero stats when the flag was OFF in the window (no stamps).
+    Returns zero stats when the flag was OFF in the window (no stamps)
+    OR when the DB dialect is not Postgres (the query uses JSONB
+    operators ``?`` + ``->>`` which are Postgres-only — F12 review
+    fix: degrade gracefully rather than throw on dev SQLite).
     """
     from sqlalchemy import text as _text
     from backend.config import settings as _stg
@@ -2598,6 +2601,18 @@ async def r8v3_cognitive_layer_stats(
             getattr(_stg, "ENABLE_COGNITIVE_LAYER_PROMPT", False)
         ),
     }
+
+    # F12 review fix: SQLite (dev) lacks JSONB key-existence operator.
+    # Return an empty payload rather than crash so dev workflows stay
+    # green; operator runs the real telemetry on Postgres.
+    dialect_name = db.bind.dialect.name if db.bind is not None else "unknown"
+    if dialect_name != "postgresql":
+        return CognitiveLayerStatsOut(
+            flags=flags,
+            total_stamped_alphas=0,
+            by_layer=[],
+            window_days=int(days),
+        )
 
     rows = (await db.execute(_text("""
         SELECT

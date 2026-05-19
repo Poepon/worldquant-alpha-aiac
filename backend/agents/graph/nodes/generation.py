@@ -374,6 +374,11 @@ async def _node_hypothesis_inject_consumed(
         # downstream nodes already handle None gracefully.
         "current_hypothesis_id": None,
         "current_hypothesis_ids": [],
+        # F4/F5 review fix: explicitly return cleared cognitive_layer_id_used
+        # so LangGraph state-merge guarantees the reset takes effect on this
+        # inject-path round (the in-place mutation at node_hypothesis entry
+        # is defense-in-depth).
+        "cognitive_layer_id_used": "",
         **trace_update,
     }
 
@@ -412,6 +417,14 @@ async def node_hypothesis(
     exploration_weight = strategy_dict.get("exploration_weight", 0.5)
 
     logger.info(f"[{node_name}] Starting | task={state.task_id} trace_len={len(experiment_trace)}")
+
+    # F4/F5 review fix (Sprint 3 R3): cross-round transient cleanup. Both
+    # paths (R1b inject + LLM exploration) must reset state.cognitive_
+    # layer_id_used so a stale layer ID from the previous round doesn't
+    # get stamped on the new alphas. Mirrors G8's g8_forest_referenced_ids
+    # reset at line 788. Done HERE (before the inject early-return) so
+    # both branches share the reset.
+    state.cognitive_layer_id_used = ""
 
     # ------------------------------------------------------------------
     # R1b.2-v2 (2026-05-18): inject path — when the prior round's
@@ -865,16 +878,27 @@ async def node_hypothesis(
     # leaves both block + id empty.
     _r8v3_block = ""
     _r8v3_layer_id = ""
-    state.cognitive_layer_id_used = ""
+    # NB: state.cognitive_layer_id_used was already reset at function entry
+    # (line ~422, F4 review fix); the in-place mutation here is a defense-
+    # in-depth alongside the dict return below (F6 review fix — LangGraph
+    # state-merge contract requires returning the field for guaranteed
+    # propagation across nodes).
     if bool(getattr(_gen_settings, "ENABLE_COGNITIVE_LAYER_PROMPT", False)):
         try:
             from backend.services import cognitive_layer_service as _r8v3_svc
             _r8v3_strategy = str(getattr(
                 _gen_settings, "COGNITIVE_LAYER_SELECT_MODE", "round_robin",
             ))
-            # Round index proxy: state.round_index when available, else
-            # 0 (single-round Phase A obs is fine with 0 → first layer).
-            _r8v3_round = int(getattr(state, "round_index", 0) or 0)
+            # F8 review fix (Sprint 3 R1): MiningState has no `round_index`
+            # field. Without a real counter, round_robin permanently picked
+            # layer[0] (macro_top_down) every round. Use experiment_trace
+            # length as a monotonic proxy — increments naturally each round
+            # via the LangGraph workflow. Combined with task_id hash as
+            # entropy so two concurrent tasks don't synchronize on the
+            # same layer.
+            _r8v3_trace_len = int(len(experiment_trace) if experiment_trace else 0)
+            _r8v3_task_seed = int(abs(hash(str(getattr(state, "task_id", "") or ""))) % 7)
+            _r8v3_round = _r8v3_trace_len + _r8v3_task_seed
             # Bandit stats stub: layer rewards persist offline (fast-
             # follow), so within-round selection uses uniform priors.
             # When the cron updates BanditState rows + node_hypothesis
@@ -1345,6 +1369,12 @@ async def node_hypothesis(
             int(h["hypothesis_id"]) for h in cross_task_hyps
             if h.get("hypothesis_id") is not None
         ],
+        # F6 review fix (Sprint 3 R3): explicitly return cognitive_layer_
+        # id_used so LangGraph state-merge propagates it to downstream
+        # nodes (node_evaluate reads it via getattr). In-place mutation
+        # at line ~900 is defense-in-depth but the dict-return is the
+        # documented LangGraph contract.
+        "cognitive_layer_id_used": _r8v3_layer_id,
         **trace_update
     }
 
