@@ -385,8 +385,24 @@ def extract_failures_from_alpha_failure(
     error_type = (getattr(failure, "error_type", "") or "").strip()
     if not error_type:
         return []
-    rule_id = f"sim_error:{error_type.lower()}"
     msg = getattr(failure, "error_message", "") or ""
+    # 2026-05-19 — skip BRAIN-infra failures (auth, slot acquire timeout,
+    # rate-limit) so the alpha skeleton isn't blamed for ops-layer issues.
+    # An auth-storm on task 3083 produced 142 false PITFALL rows over 90min
+    # that suppressed real skeletons via RAG. Filter against the response
+    # body markers; error_type alone is too coarse (BRAIN packs every non-2xx
+    # under generic "SIMULATION_ERROR").
+    msg_lower = msg.lower()
+    _INFRA_MARKERS = (
+        "incorrect authentication",
+        "creation failed:",         # simulate_alpha non-2xx wrapper (auth / 5xx)
+        "brain sim slot acquire timeout",  # internal slot timeout, not alpha-quality
+        "brain concurrent limit exceeded",
+        "brain 429 rate limit",
+    )
+    if any(m in msg_lower for m in _INFRA_MARKERS):
+        return []
+    rule_id = f"sim_error:{error_type.lower()}"
     failure_id = getattr(failure, "id", None)
 
     key = compute_signature_key(rule_id, skeleton, region)
