@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, update
 
-from backend.models import AlphaFailure, KnowledgeEntry, Alpha
+from backend.models import AlphaFailure, ClassifierCallLog, KnowledgeEntry, Alpha
 from backend.agents.prompts import FAILURE_ANALYSIS_SYSTEM, FAILURE_ANALYSIS_USER
 from backend.config import settings
 from backend.agents.services.llm_service import LLMService, get_llm_service
@@ -837,6 +837,7 @@ class FeedbackAgent:
         max_iterations: int = 10,
         hypothesis_ids: Optional[List[int]] = None,
         experiment_variant: Optional[str] = None,
+        task_id: Optional[int] = None,
     ) -> Dict:
         """
         Learn from a complete mining round (Successes & Failures).
@@ -1069,17 +1070,28 @@ class FeedbackAgent:
                 new_entries += 1
 
             # 2. Store New Pitfalls — drop noise (None) and stamp category.
+            # Log every classifier decision for /ops/classifier/stats.
+            classifier_logs: List[ClassifierCallLog] = []
             for p in analysis.get("new_pitfalls", []):
                 pattern_str = p.get("pattern", "")
+                raw_error_type = p.get("error_type")
                 if not pattern_str:
                     continue
                 if await self._pattern_exists(pattern_str):
                     continue
-                resolved_category = _classify_pitfall_error_type(p.get("error_type"))
+                resolved_category = _classify_pitfall_error_type(raw_error_type)
+                classifier_logs.append(ClassifierCallLog(
+                    task_id=task_id,
+                    iteration=iteration,
+                    region=region,
+                    dataset_id=dataset_id,
+                    error_type=(str(raw_error_type)[:200] if raw_error_type else None),
+                    resolved_category=resolved_category,
+                ))
                 if resolved_category is None:
                     logger.info(
                         f"[feedback_agent] skip pitfall write — error_type "
-                        f"{p.get('error_type')!r} is noise / no signal"
+                        f"{raw_error_type!r} is noise / no signal"
                     )
                     continue
                 entry = KnowledgeEntry(
@@ -1090,7 +1102,7 @@ class FeedbackAgent:
                         'round': iteration,
                         'dataset_id': dataset_id,
                         'region': region,
-                        'error_type': p.get("error_type"),
+                        'error_type': raw_error_type,
                         'category': resolved_category,
                         'recommendation': p.get("recommendation"),
                         'severity': p.get("severity", "medium"),
@@ -1103,6 +1115,8 @@ class FeedbackAgent:
                 )
                 self.db.add(entry)
                 new_entries += 1
+            if classifier_logs:
+                self.db.add_all(classifier_logs)
             
             # V-24.E (2026-05-13): FIELD_INSIGHT + HYPOTHESIS_INSIGHT writes
             # are gated behind a default-off flag. kb_hit_audit.py revealed

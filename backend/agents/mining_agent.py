@@ -1403,6 +1403,7 @@ class MiningAgent:
                 max_iterations=max_iterations,
                 hypothesis_ids=hypothesis_ids,
                 experiment_variant=experiment_variant,
+                task_id=task.id,
             )
             
             # Mark failures as analyzed

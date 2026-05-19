@@ -110,6 +110,10 @@ from backend.models.llm_call_log import LLMCallLog
 # back-fill; dedicated per same rationale)
 from backend.models.g5_crossover_log import G5CrossoverLog
 
+# Pitfall-classifier per-call decision log (feedback_agent
+# _classify_pitfall_error_type — drop vs stamp telemetry)
+from backend.models.classifier_call_log import ClassifierCallLog
+
 __all__ = [
     # Enums
     "MiningStatus",

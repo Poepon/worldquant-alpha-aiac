@@ -3296,6 +3296,120 @@ async def cost_telemetry(
 
 
 # =============================================================================
+# Pitfall classifier telemetry — follow-up Major #2 from negative-knowledge
+# KB pollution fix. Aggregates classifier_call_log: one row per LLM-supplied
+# pitfall the `_classify_pitfall_error_type` helper saw, with resolved
+# category or NULL (noise drop). Operators use this to confirm the helper
+# is actually firing post-deploy, watch drop rate trend, and surface
+# top noise error_type strings for keyword tuning.
+
+
+class ClassifierBreakdownRow(BaseModel):
+    label: str
+    total: int
+    noise_drops: int
+    threshold_stamps: int
+    robustness_stamps: int
+    static_finding_stamps: int
+    drop_rate: float
+
+
+class ClassifierTopDroppedRow(BaseModel):
+    error_type: str
+    count: int
+
+
+class ClassifierStatsOut(BaseModel):
+    window_days: int
+    headline: ClassifierBreakdownRow
+    by_region: List[ClassifierBreakdownRow]
+    by_day: List[ClassifierBreakdownRow]
+    top_dropped_error_types: List[ClassifierTopDroppedRow]
+
+
+def _build_classifier_row(
+    label: str, total: int, drops: int, t: int, r: int, s: int
+) -> ClassifierBreakdownRow:
+    return ClassifierBreakdownRow(
+        label=label,
+        total=total,
+        noise_drops=drops,
+        threshold_stamps=t,
+        robustness_stamps=r,
+        static_finding_stamps=s,
+        drop_rate=round(drops / total, 4) if total > 0 else 0.0,
+    )
+
+
+@router.get("/classifier/stats", response_model=ClassifierStatsOut)
+async def classifier_stats(
+    days: int = 7,
+    top_n: int = 20,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> ClassifierStatsOut:
+    """Pitfall-classifier drop-rate + category breakdown."""
+    from sqlalchemy import text as _text
+
+    window = f"now() - (:days || ' day')::interval"
+    _category_filters = (
+        "COUNT(*) FILTER (WHERE resolved_category IS NULL) AS drops, "
+        "COUNT(*) FILTER (WHERE resolved_category = 'threshold') AS t, "
+        "COUNT(*) FILTER (WHERE resolved_category = 'robustness') AS r, "
+        "COUNT(*) FILTER (WHERE resolved_category = 'static_finding') AS s "
+    )
+
+    head = (await db.execute(_text(
+        f"SELECT COUNT(*) AS n, {_category_filters} "
+        f"FROM classifier_call_log WHERE created_at > {window}"
+    ), {"days": str(int(days))})).one()
+    headline = _build_classifier_row(
+        "all", int(head[0] or 0), int(head[1] or 0),
+        int(head[2] or 0), int(head[3] or 0), int(head[4] or 0),
+    )
+
+    region_rows = (await db.execute(_text(
+        f"SELECT COALESCE(region, '(none)') AS lbl, COUNT(*) AS n, {_category_filters} "
+        f"FROM classifier_call_log WHERE created_at > {window} "
+        f"GROUP BY lbl ORDER BY n DESC"
+    ), {"days": str(int(days))})).all()
+    by_region = [
+        _build_classifier_row(lbl, int(n or 0), int(d or 0), int(t or 0), int(r or 0), int(s or 0))
+        for lbl, n, d, t, r, s in region_rows
+    ]
+
+    day_rows = (await db.execute(_text(
+        f"SELECT to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS d, "
+        f"COUNT(*) AS n, {_category_filters} "
+        f"FROM classifier_call_log WHERE created_at > {window} "
+        f"GROUP BY d ORDER BY d ASC"
+    ), {"days": str(int(days))})).all()
+    by_day = [
+        _build_classifier_row(d or "", int(n or 0), int(dr or 0), int(t or 0), int(r or 0), int(s or 0))
+        for d, n, dr, t, r, s in day_rows
+    ]
+
+    top_rows = (await db.execute(_text(
+        f"SELECT COALESCE(error_type, '(none)') AS et, COUNT(*) AS n "
+        f"FROM classifier_call_log "
+        f"WHERE created_at > {window} AND resolved_category IS NULL "
+        f"GROUP BY et ORDER BY n DESC LIMIT :lim"
+    ), {"days": str(int(days)), "lim": int(top_n)})).all()
+    top_dropped = [
+        ClassifierTopDroppedRow(error_type=et, count=int(n or 0))
+        for et, n in top_rows
+    ]
+
+    return ClassifierStatsOut(
+        window_days=int(days),
+        headline=headline,
+        by_region=by_region,
+        by_day=by_day,
+        top_dropped_error_types=top_dropped,
+    )
+
+
+# =============================================================================
 # G1 Phase A direction-bandit telemetry (2026-05-19)
 # =============================================================================
 # Aggregates the dedicated ``direction_bandit_log`` table over a configurable
