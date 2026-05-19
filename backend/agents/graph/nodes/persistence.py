@@ -284,8 +284,21 @@ async def _incremental_save_alphas(
                 f"(non-fatal, link kept): {_tg_e}"
             )
 
+    # P1 (2026-05-19, plan v1.3.1 §3.2.3 [V1.0-M4 / V1.1]): widen accepted
+    # statuses to include FAIL when ENABLE_FAIL_ALPHA_PERSIST ON.
+    # BRAIN-accepted FAIL alphas (alpha_id present + is_simulated + sim
+    # success) carry full metrics and a BRAIN handle — they belong in the
+    # entity store (alphas table), not the failure log.
+    from backend.config import settings as _persist_settings
+    _persist_fail = bool(
+        getattr(_persist_settings, "ENABLE_FAIL_ALPHA_PERSIST", False)
+    )
+    _accepted_statuses = {"PASS", "PASS_PROVISIONAL"}
+    if _persist_fail:
+        _accepted_statuses.add("FAIL")
+
     for alpha in pending_alphas:
-        if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+        if alpha.quality_status not in _accepted_statuses:
             continue
         # V-26.92 (2026-05-13): PASS-status alpha with no alpha_id is a
         # broken upstream contract — INSERT would store a NULL alpha_id
@@ -295,11 +308,27 @@ async def _incremental_save_alphas(
         if not alpha.alpha_id:
             skipped_no_alpha_id.append(getattr(alpha, "expression", "?")[:60])
             logger.warning(
-                f"[_incremental_save_alphas] V-26.92 skipping PASS-status "
+                f"[_incremental_save_alphas] V-26.92 skipping {alpha.quality_status}-status "
                 f"alpha with no alpha_id (likely sim returned None): "
                 f"expression={getattr(alpha, 'expression', '?')[:120]!r}"
             )
             continue
+        # P1: FAIL alpha sanity — require is_simulated + simulation_success
+        # to ensure BRAIN really accepted it. Without this, a future code
+        # path that constructs FAIL alphas with alpha_id but no real sim
+        # (e.g., test mock leak) would write a bogus row.
+        if alpha.quality_status == "FAIL":
+            if not (alpha.is_simulated and alpha.simulation_success):
+                skipped_no_alpha_id.append(
+                    getattr(alpha, "expression", "?")[:60]
+                )
+                logger.warning(
+                    f"[_incremental_save_alphas] P1 skipping FAIL alpha "
+                    f"without (is_simulated + simulation_success); "
+                    f"alpha_id={alpha.alpha_id} expression="
+                    f"{getattr(alpha, 'expression', '?')[:120]!r}"
+                )
+                continue
         # V-26.87: cross-task dedup handled by ON CONFLICT below — no more
         # pre-batch SELECT round-trip.
         metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
@@ -499,11 +528,13 @@ async def _incremental_save_alphas(
     # incremental path. V-19.2: scope to only those that actually inserted —
     # alpha_ids whose savepoint rolled back are not in DB so the UPDATE would
     # be a no-op anyway, but skipping them keeps the log tidy.
+    # P1 (2026-05-19): broaden to match the INSERT filter so FAIL alphas
+    # also get fields_used populated.
     from sqlalchemy import update as _sa_update, select
     inserted_set = set(inserted_alpha_ids)
     fields_used_updated = 0
     for alpha in pending_alphas:
-        if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+        if alpha.quality_status not in _accepted_statuses:
             continue
         if not alpha.alpha_id or not alpha.expression:
             continue
@@ -534,8 +565,17 @@ async def _incremental_save_alphas(
     # actually inserted; failed savepoints come back persisted=False so the
     # workflow's batch path (also savepoint-protected now) gets a retry —
     # at worst it logs the same error twice, never silently drops.
+    # P1 (2026-05-19): when flag ON, BRAIN-accepted FAIL alphas also appear
+    # in the result list (matching the broadened INSERT filter at line 287).
     for alpha in pending_alphas:
-        if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+        if alpha.quality_status not in _accepted_statuses:
+            continue
+        # P1: same FAIL sanity as the upstream INSERT filter — skip FAIL
+        # without is_simulated + simulation_success (otherwise the result
+        # references a row that wasn't actually INSERTed).
+        if alpha.quality_status == "FAIL" and not (
+            alpha.is_simulated and alpha.simulation_success
+        ):
             continue
         landed = bool(alpha.alpha_id and alpha.alpha_id in inserted_set)
         db_id = None
@@ -767,8 +807,28 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
     if not use_incremental:
         # Original behavior — buffer in state.generated_alphas; workflow
         # writes to DB after returning.
+        # P1 [V1.0-M4 / V1.1] (2026-05-19): BRAIN-accepted alphas all go to
+        # alphas table. QUALITY_CHECK_FAILED = BRAIN sim succeeded + alpha_id
+        # assigned + full metrics returned, only AIAC gate didn't pass —
+        # entity-store value (correlation, submit, parity) requires we keep
+        # the row. Plan ~/.claude/plans/alpha-persistence-ontology-refactor-
+        # 2026-05-19.md v1.3.1 §3.2.1.
+        from backend.config import settings as _persist_settings
+        _persist_fail = bool(
+            getattr(_persist_settings, "ENABLE_FAIL_ALPHA_PERSIST", False)
+        )
         for alpha in state.pending_alphas:
-            if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
+            _is_brain_accepted_fail = (
+                _persist_fail
+                and alpha.quality_status == "FAIL"
+                and alpha.alpha_id            # MUST have BRAIN handle
+                and alpha.is_simulated
+                and alpha.simulation_success  # exclude HTTP 200 empty/error responses
+            )
+            if (
+                alpha.quality_status in ("PASS", "PASS_PROVISIONAL")
+                or _is_brain_accepted_fail
+            ):
                 res = AlphaResult(
                     expression=alpha.expression,
                     hypothesis=alpha.hypothesis,
@@ -789,8 +849,24 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
     # Failure path — buffered the same way regardless of incremental /
     # batch mode, since AlphaFailure rows are bulk-written by
     # run_with_persistence. (Could be made incremental too in a follow-up.)
+    # P1 [V1.0-M4 / V1.1] (2026-05-19): when ENABLE_FAIL_ALPHA_PERSIST ON,
+    # BRAIN-accepted FAIL alphas were already routed to success_batch above;
+    # skip the fail_batch path for them. Plan v1.3.1 §3.2.2.
+    from backend.config import settings as _persist_settings  # noqa: E402
+    _persist_fail = bool(
+        getattr(_persist_settings, "ENABLE_FAIL_ALPHA_PERSIST", False)
+    )
     for alpha in state.pending_alphas:
         if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
+            continue
+        # P1: skip BRAIN-accepted FAIL — already in success_batch
+        if (
+            _persist_fail
+            and alpha.quality_status == "FAIL"
+            and alpha.alpha_id
+            and alpha.is_simulated
+            and alpha.simulation_success
+        ):
             continue
         # V-27.61: retryable alphas are transient BRAIN failures (HTTP 200
         # but empty/error sim), not real hypothesis evidence. Writing them as
@@ -811,8 +887,24 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
             err_type = "SIMULATION_ERROR"
             err_msg = alpha.simulation_error or "Simulation Failed"
         elif alpha.quality_status == "FAIL":
-            err_type = "QUALITY_CHECK_FAILED"
-            err_msg = "Metrics below threshold"
+            # P1 contract violation: FAIL gate without alpha_id (or with
+            # alpha_id but is_simulated=False / simulation_success=False)
+            # should not happen — gate verdict is computed only on
+            # simulated alphas. Log it explicitly when flag ON so the
+            # situation is observable but doesn't break the batch.
+            if _persist_fail:
+                logger.warning(
+                    f"[node_save_results] P1 contract violation: FAIL gate "
+                    f"without (alpha_id + is_simulated + simulation_success); "
+                    f"alpha_id={alpha.alpha_id} is_simulated={alpha.is_simulated} "
+                    f"sim_success={alpha.simulation_success} "
+                    f"expression={(alpha.expression or '')[:80]!r}"
+                )
+                err_type = "OTHER"
+                err_msg = "FAIL gate but BRAIN handle missing / sim unverified"
+            else:
+                err_type = "QUALITY_CHECK_FAILED"
+                err_msg = "Metrics below threshold"
         else:
             err_type = "OTHER"
             err_msg = "Unknown failure"

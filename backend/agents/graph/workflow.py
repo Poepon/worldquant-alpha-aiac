@@ -542,6 +542,29 @@ class MiningWorkflow:
                         f"expr={(alpha_result.expression or '')[:100]!r}"
                     )
                     continue
+                # P1 [V1.1-S7] (2026-05-19, plan v1.3.1 §3.2.4): defensive
+                # filter — block FAIL alpha_results lacking a BRAIN handle.
+                # The plan's original S7 specified is_simulated+simulation_success
+                # as the predicate, but AlphaResult (state.py:52) does NOT
+                # carry those fields — only the upstream Alpha model does
+                # (state.py:27-28). Using getattr-None would falsy-trip on
+                # every FAIL alpha. The actual invariant we care about is
+                # "BRAIN handle present" (alpha_id non-empty); node_save_results
+                # (§3.2.1) enforces is_simulated+sim_success upstream, and
+                # by the time we reach this loop, only valid FAILs have a
+                # BRAIN-assigned alpha_id. Sentinel for bypass paths.
+                if (
+                    alpha_result.quality_status == "FAIL"
+                    and not alpha_result.alpha_id
+                ):
+                    alpha_skipped += 1
+                    logger.warning(
+                        f"[MiningWorkflow] P1 defensive: skipping FAIL alpha "
+                        f"without alpha_id (BRAIN handle missing; likely "
+                        f"bypassed node_save_results filter): "
+                        f"expr={(alpha_result.expression or '')[:80]!r}"
+                    )
+                    continue
                 try:
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
                     metrics_dict = alpha_result.metrics if isinstance(alpha_result.metrics, dict) else {}
