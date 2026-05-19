@@ -1721,8 +1721,38 @@ async def node_code_gen(
                     candidate.metrics["assistant_template_fallthrough"] = True
 
             if candidate.expression and candidate.expression.strip():
+                # B4.1 G3-v2 grammar-aware validation (Sprint 4, 2026-05-20):
+                # parse the expression BEFORE persistence / simulation. On
+                # parse fail, stamp metrics + skip the candidate (no LLM
+                # retry inside this call — node_code_gen may re-fire next
+                # round with the hint in scope). Soft-fail: any exception
+                # in the validator falls through to legacy behavior.
+                if bool(getattr(_gen_settings, "ENABLE_GRAMMAR_VALIDATOR", False)):
+                    try:
+                        from backend.services import grammar_validator as _g3v2
+                        _g3v2_res = _g3v2.validate(candidate.expression)
+                        if not _g3v2_res.ok:
+                            candidate.metrics["_g3v2_parse_failed"] = True
+                            candidate.metrics["_g3v2_parse_error"] = _g3v2_res.error_msg
+                            candidate.metrics["_g3v2_parse_position"] = _g3v2_res.error_position
+                            logger.info(
+                                f"[{node_name}] G3-v2 parse fail "
+                                f"({_g3v2_res.error_msg[:80]}); "
+                                f"dropping expression={candidate.expression[:60]}"
+                            )
+                            continue  # skip candidate — no append to pending_alphas
+                        if _g3v2_res.unknown_ops:
+                            candidate.metrics["_g3v2_unknown_ops"] = list(_g3v2_res.unknown_ops)
+                            logger.debug(
+                                f"[{node_name}] G3-v2 unknown ops "
+                                f"{_g3v2_res.unknown_ops} in {candidate.expression[:60]}"
+                            )
+                    except Exception as _g3v2_ex:  # noqa: BLE001
+                        logger.warning(
+                            f"[{node_name}] G3-v2 validator failed (non-fatal): {_g3v2_ex}"
+                        )
                 pending_alphas.append(candidate)
-    
+
     _debug_log("A", "nodes.py:code_gen:result", "Alpha code generation complete", {
         "alphas_generated": len(pending_alphas),
         "target": state.num_alphas_target,

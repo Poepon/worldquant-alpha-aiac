@@ -409,6 +409,20 @@ class Settings(BaseSettings):
     ENABLE_G10_LOGIC_INJECT: bool = False
     G10_LOGIC_INJECT_TOP_K: int = 5
 
+    # ----- B4.1 G3-v2 grammar-aware validator (Sprint 4, 2026-05-20) -----
+    # lark-based parser for a subset of BRAIN DSL — catches structurally
+    # malformed alphas (unbalanced parens / unexpected tokens) BEFORE the
+    # LLM-generated text reaches G3 originality or BRAIN simulator. New
+    # path; G3 shadow code (alpha_originality.py) stays unchanged behind
+    # ENABLE_AST_ORIGINALITY_GATE @deprecated_pending_r12_decision —
+    # B4.2 in Sprint 5 conditionally retires per R12 decision.
+    # When validate() returns ok=False, retry_with_whole_output_hint
+    # gives a terse parse error → node_code_gen re-emits.
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.14
+    ENABLE_GRAMMAR_VALIDATOR: bool = False
+    GRAMMAR_VALIDATOR_RETRY_MAX: int = 2  # max LLM re-emit rounds on parse fail
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入

@@ -183,6 +183,12 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "operator 决策 promote mode shadow→soft→hard。"
             "与 R10 family-cap 互补:R10 看 operator-sequence 同族,G3 看 "
             "AST subtree 同构。Soft-fail:checker 异常永不 break round。"
+            "⚠️ @deprecated_pending_r12_decision (Sprint 4, 2026-05-20): "
+            "B4.1 Sprint 4 ships G3-v2 grammar-aware validator as the "
+            "successor path (ENABLE_GRAMMAR_VALIDATOR). G3 shadow code "
+            "stays UNCHANGED in Sprint 4 (freeze constraint preserved). "
+            "Sprint 5 B4.2 conditionally retires this shadow per R12 "
+            "decision (GO/NO-GO/PARTIAL routes per plan v5 §6.14b)."
         ),
     ),
     # --- R8 Hierarchical RAG ---
@@ -858,6 +864,31 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         description=(
             "G10 inject 到 hypothesis prompt 的 entry 上限。Default 5。"
             "考虑 token 预算 + 信号噪声,过多 entry → prompt 稀释 + LLM 选择困难。"
+        ),
+    ),
+    # --- B4.1 G3-v2 grammar-aware (Sprint 4, 2026-05-20) ---
+    "ENABLE_GRAMMAR_VALIDATOR": FlagSpec(
+        name="ENABLE_GRAMMAR_VALIDATOR",
+        flag_type="bool",
+        group="Phase4-Sprint4",
+        description=(
+            "Phase 4 B4.1 G3-v2:lark-based 语法子集 validator,catch 结构性"
+            "malformed alpha(unbalanced parens / unexpected tokens)。Default "
+            "OFF。新 code path 不动 G3 shadow code(ENABLE_AST_ORIGINALITY_GATE "
+            "@deprecated_pending_r12_decision,B4.2 Sprint 5 条件性 retire)。"
+            "validate fail → retry_with_whole_output_hint → node_code_gen 重发 "
+            "GRAMMAR_VALIDATOR_RETRY_MAX 次。lark 未安装时 degrade-open(返回 "
+            "ok=True 让 caller 走 legacy 检查)。"
+        ),
+    ),
+    "GRAMMAR_VALIDATOR_RETRY_MAX": FlagSpec(
+        name="GRAMMAR_VALIDATOR_RETRY_MAX",
+        flag_type="int",
+        group="Phase4-Sprint4",
+        description=(
+            "G3-v2 parse fail 时的最大 LLM re-emit 轮数。Default 2 — 第 1 次"
+            "重发后仍 fail 再试 1 次,3rd attempt 仍 fail 则放行(避免无限"
+            "loop 烧 LLM cost)。"
         ),
     ),
 }
