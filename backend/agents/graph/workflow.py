@@ -415,6 +415,29 @@ class MiningWorkflow:
             # (need .id which is only populated post-flush).
             can_submit_refresh_targets: list = []
 
+            # G1 follow-up (2026-05-19): buffered-path bandit-arm stamp.
+            # _incremental_save_alphas (the hot path) stamps every PASS alpha
+            # with metrics["_direction_bandit_recommended_arm"]. This buffered
+            # path (T2_INCREMENTAL_PERSISTENCE=False fallback) was previously
+            # the cold gap — alphas landing here had no arm provenance,
+            # breaking the per-arm telemetry JOIN for any disabled-flag /
+            # legacy tasks. Reading once here costs 1 SELECT per batch
+            # regardless of how many alphas; same shape as the incremental
+            # path. Soft-fail (helper returns None on any error).
+            from backend.agents.graph.nodes.persistence import (
+                _read_bandit_arm_for_round,
+            )
+            try:
+                _g1_bandit_arm = await _read_bandit_arm_for_round(
+                    self.db, task.id,
+                )
+            except Exception as _g1_e:
+                logger.debug(
+                    f"[MiningWorkflow] G1 follow-up: buffered-path bandit "
+                    f"arm read failed (non-fatal): {_g1_e}"
+                )
+                _g1_bandit_arm = None
+
             # V-19.2 (2026-05-05): per-row SAVEPOINT persistence. Pre-V-19.2
             # used a single batch commit so one row's IntegrityError rolled
             # back the entire batch (spike B5/B6 + B7 lost 7/8 tasks of
@@ -522,6 +545,16 @@ class MiningWorkflow:
                 try:
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
                     metrics_dict = alpha_result.metrics if isinstance(alpha_result.metrics, dict) else {}
+                    # G1 follow-up: stamp bandit arm provenance into the
+                    # AlphaResult.metrics so the JSONB INSERT below carries it.
+                    # Only stamps when bandit ran AND we got an arm (flag-OFF
+                    # / round 1 → _g1_bandit_arm is None → key omitted —
+                    # symmetric with _incremental_save_alphas behaviour).
+                    if _g1_bandit_arm:
+                        if not isinstance(alpha_result.metrics, dict):
+                            alpha_result.metrics = dict(metrics_dict)
+                        alpha_result.metrics["_direction_bandit_recommended_arm"] = _g1_bandit_arm
+                        metrics_dict = alpha_result.metrics
                     # V-27.45: drop the link if the hypothesis went terminal
                     # in the reuse race window.
                     _ar_hid = getattr(alpha_result, "hypothesis_id", None)
