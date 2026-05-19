@@ -2605,6 +2605,254 @@ async def cost_telemetry(
 
 
 # =============================================================================
+# G1 Phase A direction-bandit telemetry (2026-05-19)
+# =============================================================================
+# Aggregates the dedicated ``direction_bandit_log`` table over a configurable
+# window. The bandit's CURRENT posterior lives in mining_tasks.config
+# JSONB (per-task) — this endpoint exposes the cumulative cross-task signal:
+#
+#   - per-arm pulls + reward (which arm Thompson keeps picking?)
+#   - per-segment activity (which (region, dataset_category, failure_pattern)
+#     cells the bandit is actually seeing — sparse segments stay cold and
+#     fall back to global prior)
+#   - per-arm PASS rate from joining direction_bandit_log → alphas via
+#     metrics['_direction_bandit_recommended_arm'] (G1 Phase A stamp)
+#   - rough regret = mean_reward(best arm) - mean_reward(actual selections)
+#
+# Phase A semantics: bandit is in shadow-soft mode (recommendation only —
+# LLM gets a prompt hint, may override). This telemetry feeds the Phase
+# 1 R2/Q7 GO gate per plan §1.9: "≥ 1 segment with ≥ 10 selects" + reward
+# spread between arms > noise. Phase B/C may promote to a hard driving
+# signal once those gates are met.
+
+
+class DirectionBanditArmStatOut(BaseModel):
+    arm: str
+    pulls: int
+    avg_observed_reward: float
+    sample_size_for_reward: int  # rows with non-NULL observed_reward
+    cold_start_pulls: int        # pulls made from global prior (segment was cold)
+    pass_rate: Optional[float] = None  # joined from alphas table on the metric stamp
+    pass_sample_size: int = 0
+
+
+class DirectionBanditSegmentStatOut(BaseModel):
+    segment_id: str
+    region: Optional[str] = None
+    dataset_category: Optional[str] = None
+    failure_pattern: Optional[str] = None
+    total_pulls: int
+    distinct_arms: int
+
+
+class DirectionBanditTelemetryOut(BaseModel):
+    flags: Dict[str, bool]
+    window_days: int
+    total_log_rows: int
+    distinct_tasks: int
+    distinct_segments: int
+    by_arm: List[DirectionBanditArmStatOut]
+    by_segment: List[DirectionBanditSegmentStatOut]
+    best_arm: Optional[str] = None  # by avg_observed_reward (sample_size > 0)
+    best_arm_avg_reward: Optional[float] = None
+    approx_regret: Optional[float] = None  # mean(best) - mean(actual)
+    # Phase 1 R2/Q7 GO-gate readiness signal — at least one segment with
+    # ≥ DIRECTION_BANDIT_GO_GATE_MIN_PULLS observed selects.
+    go_gate_min_pulls: int
+    go_gate_segments_ready: int
+    is_healthy: bool
+
+
+@router.get(
+    "/direction-bandit/telemetry",
+    response_model=DirectionBanditTelemetryOut,
+)
+async def direction_bandit_telemetry(
+    days: int = 7,
+    top_segments: int = 10,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> DirectionBanditTelemetryOut:
+    """G1 Phase A direction-bandit telemetry — per-arm pull/reward/PASS-rate.
+
+    Aggregates ``direction_bandit_log`` over the last ``days`` window plus
+    a one-shot PASS-rate join against ``alphas.metrics``\\->>'_direction_bandit
+    _recommended_arm' (G1 Phase A stamp from persistence node).
+
+    Healthy gate (Phase A, descriptive):
+      * ``ENABLE_DIRECTION_BANDIT`` flag ON
+      * total_log_rows > 0 (the off-policy log is actually capturing)
+      * At least one segment with ≥ 10 pulls (Phase 1 GO-gate signal)
+
+    Phase A is observation-only — this endpoint never blocks task execution.
+    Operator uses the regret + per-arm reward spread to decide whether to
+    promote to Phase B/C (hard driving). Plan ref: §1.9 GO-gate.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_DIRECTION_BANDIT": bool(
+            getattr(_stg, "ENABLE_DIRECTION_BANDIT", False)
+        ),
+    }
+    go_gate_min = int(
+        getattr(_stg, "DIRECTION_BANDIT_GO_GATE_MIN_PULLS", 10)
+    )
+
+    # 1. Headline — total rows, distinct tasks, distinct segments
+    head = (await db.execute(_text(
+        "SELECT COUNT(*) AS rows, "
+        "       COUNT(DISTINCT task_id) AS tasks, "
+        "       COUNT(DISTINCT segment_id) AS segs "
+        "FROM direction_bandit_log "
+        "WHERE created_at > now() - (:days || ' day')::interval"
+    ), {"days": str(int(days))})).one()
+    rows_total, distinct_tasks, distinct_segs = head
+    rows_total = int(rows_total or 0)
+    distinct_tasks = int(distinct_tasks or 0)
+    distinct_segs = int(distinct_segs or 0)
+
+    # 2. Per-arm — pulls, avg observed_reward (over non-NULL only — round 1's
+    #    NULL reward must NOT drag the average down), cold-start fraction.
+    arm_rows = (await db.execute(_text(
+        "SELECT selected_arm, "
+        "       COUNT(*) AS pulls, "
+        "       COALESCE(AVG(observed_reward) FILTER (WHERE observed_reward IS NOT NULL), 0.0) AS avg_r, "
+        "       COUNT(*) FILTER (WHERE observed_reward IS NOT NULL) AS sample, "
+        "       COUNT(*) FILTER (WHERE cold_start = 'true') AS cold_pulls "
+        "FROM direction_bandit_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY selected_arm "
+        "ORDER BY pulls DESC"
+    ), {"days": str(int(days))})).all()
+
+    # 3. Per-arm PASS rate from the alphas table — joins on the G1 Phase A
+    #    metric stamp. Same window. Skipped if no rows (empty result).
+    pass_rate_map: Dict[str, tuple] = {}  # arm -> (pass_n, total_n)
+    try:
+        pass_rows = (await db.execute(_text(
+            "SELECT metrics->>'_direction_bandit_recommended_arm' AS arm, "
+            "       COUNT(*) AS n, "
+            "       COUNT(*) FILTER (WHERE quality_status IN ('PASS','PASS_PROVISIONAL')) AS p "
+            "FROM alphas "
+            "WHERE created_at > now() - (:days || ' day')::interval "
+            "  AND metrics ? '_direction_bandit_recommended_arm' "
+            "GROUP BY arm"
+        ), {"days": str(int(days))})).all()
+        for arm, n, p in pass_rows:
+            if arm:
+                pass_rate_map[str(arm)] = (int(p or 0), int(n or 0))
+    except Exception:
+        # If alphas table missing / migration not applied / JSONB key not
+        # populated yet (Phase A first deploy), gracefully report None per-arm.
+        pass_rate_map = {}
+
+    by_arm: List[DirectionBanditArmStatOut] = []
+    best_arm: Optional[str] = None
+    best_avg: float = -1.0
+    weighted_actual: float = 0.0
+    total_sample: int = 0
+    for arm, pulls, avg_r, sample, cold_pulls in arm_rows:
+        arm_str = str(arm or "")
+        sample_int = int(sample or 0)
+        avg_r_f = round(float(avg_r or 0.0), 6)
+        pulls_int = int(pulls or 0)
+        cold_int = int(cold_pulls or 0)
+        pass_info = pass_rate_map.get(arm_str)
+        pass_rate: Optional[float] = None
+        pass_n_total: int = 0
+        if pass_info and pass_info[1] > 0:
+            pass_rate = round(pass_info[0] / pass_info[1], 4)
+            pass_n_total = pass_info[1]
+        by_arm.append(DirectionBanditArmStatOut(
+            arm=arm_str,
+            pulls=pulls_int,
+            avg_observed_reward=avg_r_f,
+            sample_size_for_reward=sample_int,
+            cold_start_pulls=cold_int,
+            pass_rate=pass_rate,
+            pass_sample_size=pass_n_total,
+        ))
+        if sample_int > 0:
+            weighted_actual += avg_r_f * sample_int
+            total_sample += sample_int
+            if avg_r_f > best_avg:
+                best_avg = avg_r_f
+                best_arm = arm_str
+
+    best_arm_avg_reward: Optional[float] = None
+    approx_regret: Optional[float] = None
+    if best_arm is not None and total_sample > 0:
+        best_arm_avg_reward = round(best_avg, 6)
+        actual_avg = weighted_actual / total_sample
+        approx_regret = round(max(0.0, best_avg - actual_avg), 6)
+
+    # 4. Top segments by activity — useful to see whether the bandit is
+    #    seeing diverse contexts or hammering one (region, dataset, failure)
+    #    cell. We expose distinct_arms per segment to spot mono-arm segments.
+    seg_rows = (await db.execute(_text(
+        "SELECT segment_id, "
+        "       MAX(region) AS region, "
+        "       MAX(dataset_category) AS dscat, "
+        "       MAX(failure_pattern) AS fp, "
+        "       COUNT(*) AS pulls, "
+        "       COUNT(DISTINCT selected_arm) AS distinct_arms "
+        "FROM direction_bandit_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY segment_id "
+        "ORDER BY pulls DESC "
+        "LIMIT :lim"
+    ), {"days": str(int(days)), "lim": int(top_segments)})).all()
+    by_segment = [
+        DirectionBanditSegmentStatOut(
+            segment_id=str(sid or ""),
+            region=region,
+            dataset_category=dscat,
+            failure_pattern=fp,
+            total_pulls=int(pulls or 0),
+            distinct_arms=int(distinct_arms or 0),
+        )
+        for sid, region, dscat, fp, pulls, distinct_arms in seg_rows
+    ]
+
+    # 5. GO gate — how many segments have crossed the min-pulls threshold
+    #    (Phase 1 plan §1.9 R2/Q7 GO gate signal). Computed separately so it
+    #    isn't capped by top_segments LIMIT.
+    gate_row = (await db.execute(_text(
+        "SELECT COUNT(*) FROM ("
+        "  SELECT segment_id FROM direction_bandit_log "
+        "  WHERE created_at > now() - (:days || ' day')::interval "
+        "  GROUP BY segment_id "
+        "  HAVING COUNT(*) >= :minp"
+        ") sq"
+    ), {"days": str(int(days)), "minp": int(go_gate_min)})).scalar_one_or_none()
+    gate_ready = int(gate_row or 0)
+
+    healthy = (
+        bool(flags["ENABLE_DIRECTION_BANDIT"])
+        and rows_total > 0
+        and gate_ready >= 1
+    )
+
+    return DirectionBanditTelemetryOut(
+        flags=flags,
+        window_days=int(days),
+        total_log_rows=rows_total,
+        distinct_tasks=distinct_tasks,
+        distinct_segments=distinct_segs,
+        by_arm=by_arm,
+        by_segment=by_segment,
+        best_arm=best_arm,
+        best_arm_avg_reward=best_arm_avg_reward,
+        approx_regret=approx_regret,
+        go_gate_min_pulls=go_gate_min,
+        go_gate_segments_ready=gate_ready,
+        is_healthy=healthy,
+    )
+
+
+# =============================================================================
 # Phase 15-D PR2 cascade drain — DELETED post tier-system removal (2026-05-18)
 # =============================================================================
 # The /cascade-deprecation/drain endpoint (and its sibling /readiness above)

@@ -124,6 +124,50 @@ async def is_expression_persisted_in_task(
 # PR7 — Incremental persistence helpers (T2/T3)
 # =============================================================================
 
+async def _read_bandit_arm_for_round(db_session, task_id: int) -> Optional[str]:
+    """G1 Phase A (2026-05-19): read the bandit-selected arm for THIS round
+    from ``mining_tasks.config['contextual_bandit_v1']['last_select']``.
+
+    Returns the arm name string, or None when:
+      * ``ENABLE_DIRECTION_BANDIT=False`` (state never written)
+      * Round 1 of a task (bandit's ``_evolve_strategy`` cycle hasn't run yet)
+      * task.config or last_select missing / malformed
+      * any DB error (soft-fail to keep persistence hot path resilient)
+
+    Single cheap SELECT per save batch (1-4 alphas typical) — preferable to
+    threading the arm through 3 layers of LangGraph configurable / kwargs
+    just for an observability stamp.
+    """
+    try:
+        from backend.config import settings as _g1_settings
+        if not getattr(_g1_settings, "ENABLE_DIRECTION_BANDIT", False):
+            return None
+        from sqlalchemy import select as _g1_select
+        from backend.models.task import MiningTask
+        stmt = _g1_select(MiningTask.config).where(MiningTask.id == task_id).limit(1)
+        row = (await db_session.execute(stmt)).scalar_one_or_none()
+        if not isinstance(row, dict):
+            return None
+        state = row.get("contextual_bandit_v1")
+        if not isinstance(state, dict):
+            return None
+        last_select = state.get("last_select")
+        # Persisted shape: [[region, category, failure], arm_name] (per
+        # ContextualDirectionBandit.to_dict). Tolerate tuple/list variants
+        # in case of future schema drift; reject anything else as None.
+        if isinstance(last_select, (list, tuple)) and len(last_select) == 2:
+            arm = last_select[1]
+            if isinstance(arm, str) and arm:
+                return arm
+        return None
+    except Exception as _e:
+        # Hot path — log at debug, do NOT raise into the save batch.
+        logger.debug(
+            f"[_read_bandit_arm_for_round] task_id={task_id} soft-fail: {_e}"
+        )
+        return None
+
+
 async def _incremental_save_alphas(
     db_session,
     task_id: int,
@@ -163,6 +207,22 @@ async def _incremental_save_alphas(
     # V-19.2 (2026-05-05): per-row SAVEPOINT — see workflow.run_with_persistence
     # for full rationale. One bad row no longer rolls back the whole seed batch.
     from backend.agents.graph.persistence_errors import log_persistence_error
+
+    # G1 Phase A (2026-05-19): stamp every PASS alpha's metrics dict with the
+    # bandit-recommended arm for this round. ``last_select`` was persisted at
+    # the end of the PRIOR round by ``_evolve_strategy`` → bandit cycle, so it
+    # reflects "the arm Thompson sampling picked for THIS round". Reading it
+    # here (one cheap SELECT per batch — typically 1-4 alphas) means the
+    # ``alphas.metrics`` JSONB carries arm provenance, enabling per-arm PASS-
+    # rate analytics WITHOUT joining direction_bandit_log on (task_id, round).
+    #
+    # When ``ENABLE_DIRECTION_BANDIT=False`` the stamp is None (key omitted).
+    # Round 1 (cold start, no prior _evolve_strategy run) also writes None.
+    # Soft-fail: any read error leaves metrics untouched (no exception
+    # bubbles into the persistence hot path).
+    bandit_arm_for_round: Optional[str] = await _read_bandit_arm_for_round(
+        db_session, task_id
+    )
 
     # V-26.87 (2026-05-13): the original V-19.3 pre-check SELECT'd existing
     # alpha_ids to label cross-task duplicates BEFORE the savepoint INSERT.
@@ -242,6 +302,15 @@ async def _incremental_save_alphas(
         # V-26.87: cross-task dedup handled by ON CONFLICT below — no more
         # pre-batch SELECT round-trip.
         metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
+        # G1 Phase A (2026-05-19): stamp bandit-recommended arm on PASS alpha
+        # metrics. Mutates in place so the JSONB INSERT below picks it up.
+        # Only stamps when bandit ran AND we got an arm (flag-OFF / round 1
+        # → bandit_arm_for_round is None → key omitted).
+        if bandit_arm_for_round:
+            if not isinstance(alpha.metrics, dict):
+                alpha.metrics = dict(metrics_dict)
+            alpha.metrics["_direction_bandit_recommended_arm"] = bandit_arm_for_round
+            metrics_dict = alpha.metrics
         expr_hash = compute_expression_hash(alpha.expression) if alpha.expression else None
 
         # V-26.91: per-alpha snapshot_at. BRAIN's dateModified is ISO-string

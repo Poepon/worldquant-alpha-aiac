@@ -230,6 +230,12 @@ class Settings(BaseSettings):
         "genetic_mutation",
     ]
     DIRECTION_BANDIT_COLD_THRESHOLD: int = 5
+    # G1 Phase A (2026-05-19): per plan §1.9, the R2/Q7 GO gate fires when at
+    # least one segment has ≥ DIRECTION_BANDIT_GO_GATE_MIN_PULLS observed
+    # selects in the telemetry window. Below this, Thompson posterior is too
+    # noisy to draw arm-promotion conclusions. The /ops/direction-bandit/
+    # telemetry endpoint reports go_gate_segments_ready against this value.
+    DIRECTION_BANDIT_GO_GATE_MIN_PULLS: int = 10
 
     # ----- R3/Q8 AST subtree-isomorphism diversity dim (Phase 1, 2026-05-17) -----
     # Adds a 6th dim `ast_diversity` to DiversityScore based on Jaccard subtree
