@@ -202,6 +202,51 @@ async def test_imported_rows_split_into_success_pattern_and_anchor_metadata(
     assert by_type.get("ANCHOR_METADATA", 0) == 5, by_type
 
 
+# F5 (S1-C MUST gap): broken JSON fall-back behavior
+
+
+def test_load_entries_raises_on_corrupt_json(monkeypatch, tmp_path):
+    """Future operator editing JSON: corrupt JSON → script raises with
+    a clear error rather than crashing late inside import_curated_patterns.
+    Test pins the contract — bare ``json.loads`` raise is acceptable
+    as long as it surfaces immediately."""
+    from pathlib import Path
+    from scripts import seed_aqr_kelly_paper as seed_mod
+
+    bad = tmp_path / "corrupt.json"
+    bad.write_text("{not valid json", encoding="utf-8")
+    monkeypatch.setattr(seed_mod, "SEED_JSON", bad)
+    with pytest.raises(Exception) as exc_info:
+        seed_mod._load_entries()
+    # Either JSONDecodeError or wrapped ValueError; just need the
+    # operator to see the failure synchronously, not silently produce 0 entries
+    assert "json" in str(exc_info.value).lower() or "expecting" in str(exc_info.value).lower()
+
+
+def test_load_entries_raises_on_non_list_root(monkeypatch, tmp_path):
+    """Top-level JSON must be a list — anything else (dict, scalar, null)
+    should fail loud."""
+    from scripts import seed_aqr_kelly_paper as seed_mod
+
+    bad = tmp_path / "dict_root.json"
+    bad.write_text('{"foo": "bar"}', encoding="utf-8")
+    monkeypatch.setattr(seed_mod, "SEED_JSON", bad)
+    with pytest.raises(ValueError, match="top-level must be a list"):
+        seed_mod._load_entries()
+
+
+def test_load_entries_missing_file(monkeypatch, tmp_path):
+    """File missing → FileNotFoundError surfaces immediately, doesn't
+    silently produce 0 entries → no risk of operator accidentally
+    re-running the seed against an empty file thinking it succeeded."""
+    from scripts import seed_aqr_kelly_paper as seed_mod
+
+    missing = tmp_path / "absent.json"
+    monkeypatch.setattr(seed_mod, "SEED_JSON", missing)
+    with pytest.raises(FileNotFoundError):
+        seed_mod._load_entries()
+
+
 @pytest.mark.asyncio
 async def test_import_batch_tag_set_on_every_row(db_session):
     """Every imported row carries meta_data['import_batch'] for precise

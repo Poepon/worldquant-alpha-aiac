@@ -65,21 +65,25 @@ def _replay_per_alpha_branch(
         if composed_expression is not None
         else alpha_data.get("expression", "")
     )
+    # F1 fix: legacy in-round metadata (NOT persisted)
     metadata: dict = {
         "fields_used": alpha_data.get("fields_used", []),
         "complexity": alpha_data.get("complexity", "unknown"),
         "novelty_level": alpha_data.get("novelty_level", "unknown"),
     }
+    # F1 fix: A1.3 assistant stamps land on candidate.metrics (persisted
+    # via evaluation.py:1278 setdefault merge), NOT metadata.
+    metrics: dict = {}
     if assistant_mode_active:
-        metadata["llm_mode_used"] = "assistant"
+        metrics["llm_mode_used"] = "assistant"
         if composed_expression is not None:
-            metadata["assistant_template_id"] = composed_template_id
-            metadata["assistant_template_score"] = composed_score
-            metadata["assistant_template_fallthrough"] = False
+            metrics["assistant_template_id"] = composed_template_id
+            metrics["assistant_template_score"] = composed_score
+            metrics["assistant_template_fallthrough"] = False
         else:
-            metadata["assistant_template_fallthrough"] = True
+            metrics["assistant_template_fallthrough"] = True
 
-    return {"expression": final_expression, "metadata": metadata}
+    return {"expression": final_expression, "metadata": metadata, "metrics": metrics}
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +93,9 @@ def _replay_per_alpha_branch(
 
 def test_assistant_mode_overrides_llm_expression():
     """state.llm_mode_used='assistant' + hypothesis matches momentum
-    template → expression is REPLACED by composed DSL."""
+    template → expression is REPLACED by composed DSL.
+    F1 fix (post-S1-A): stamps land on candidate.metrics (persisted),
+    NOT candidate.metadata (transient)."""
     result = _replay_per_alpha_branch(
         llm_mode_used="assistant",
         alpha_data={
@@ -99,15 +105,19 @@ def test_assistant_mode_overrides_llm_expression():
     )
     assert result["expression"] != "definitely_should_be_overridden(x)"
     assert "ts_zscore" in result["expression"]
-    assert result["metadata"]["llm_mode_used"] == "assistant"
-    assert result["metadata"]["assistant_template_fallthrough"] is False
-    assert result["metadata"]["assistant_template_id"]
-    assert result["metadata"]["assistant_template_score"] > 0
+    # F1: stamps on metrics, not metadata
+    assert result["metrics"]["llm_mode_used"] == "assistant"
+    assert result["metrics"]["assistant_template_fallthrough"] is False
+    assert result["metrics"]["assistant_template_id"]
+    assert result["metrics"]["assistant_template_score"] > 0
+    # metadata 不持有 A1.3 stamps (legacy only)
+    assert "llm_mode_used" not in result["metadata"]
+    assert "assistant_template_id" not in result["metadata"]
 
 
 def test_author_mode_byte_identical_to_llm_expression():
     """state.llm_mode_used='author' → expression NOT touched + no
-    assistant-mode metadata stamps."""
+    assistant-mode stamps on metrics or metadata."""
     result = _replay_per_alpha_branch(
         llm_mode_used="author",
         alpha_data={
@@ -116,14 +126,15 @@ def test_author_mode_byte_identical_to_llm_expression():
         },
     )
     assert result["expression"] == "rank(ts_corr(close, volume, 20))"
-    # No assistant-mode metadata in author mode
+    # No assistant-mode stamps in author mode
+    assert "llm_mode_used" not in result["metrics"]
+    assert "assistant_template_id" not in result["metrics"]
     assert "llm_mode_used" not in result["metadata"]
-    assert "assistant_template_id" not in result["metadata"]
 
 
 def test_assistant_mode_no_match_falls_through_to_llm_expression():
     """assistant mode + hypothesis with zero overlap → expression stays
-    LLM's; metadata records the fallthrough."""
+    LLM's; metrics records the fallthrough."""
     result = _replay_per_alpha_branch(
         llm_mode_used="assistant",
         alpha_data={
@@ -132,11 +143,10 @@ def test_assistant_mode_no_match_falls_through_to_llm_expression():
         },
     )
     assert result["expression"] == "rank(ts_delta(close, 10))"
-    assert result["metadata"]["llm_mode_used"] == "assistant"
-    assert result["metadata"]["assistant_template_fallthrough"] is True
-    # The template_id field must be ABSENT when fallthrough True (not
-    # stamped with None — that would be ambiguous)
-    assert "assistant_template_id" not in result["metadata"]
+    assert result["metrics"]["llm_mode_used"] == "assistant"
+    assert result["metrics"]["assistant_template_fallthrough"] is True
+    # The template_id field must be ABSENT when fallthrough True
+    assert "assistant_template_id" not in result["metrics"]
 
 
 def test_assistant_mode_with_pillar_hint_prefers_that_pillar():
@@ -149,10 +159,9 @@ def test_assistant_mode_with_pillar_hint_prefers_that_pillar():
             "pillar": "value",
         },
     )
-    # Should compose a value-pillar expression
     assert "rank" in result["expression"] or "group_neutralize" in result["expression"]
     assert "book_to_market" in result["expression"]
-    assert result["metadata"]["assistant_template_fallthrough"] is False
+    assert result["metrics"]["assistant_template_fallthrough"] is False
 
 
 def test_assistant_mode_empty_hypothesis_falls_through():
@@ -162,7 +171,7 @@ def test_assistant_mode_empty_hypothesis_falls_through():
         alpha_data={"expression": "rank(close)", "hypothesis": ""},
     )
     assert result["expression"] == "rank(close)"
-    assert result["metadata"]["assistant_template_fallthrough"] is True
+    assert result["metrics"]["assistant_template_fallthrough"] is True
 
 
 def test_assistant_mode_handles_hypothesis_tested_alias():
@@ -176,4 +185,4 @@ def test_assistant_mode_handles_hypothesis_tested_alias():
         },
     )
     assert "group_neutralize" in result["expression"]
-    assert result["metadata"]["assistant_template_fallthrough"] is False
+    assert result["metrics"]["assistant_template_fallthrough"] is False

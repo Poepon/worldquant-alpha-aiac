@@ -1135,7 +1135,15 @@ class RestoreSentinelOut(BaseModel):
     sentinel_for: str
     restored_flags: List[str]
     skipped: List[str]
+    # F3 (S1-B fix): reason per skipped flag — typically
+    # 'operator_manual_intervention' when restore deferred to keep
+    # operator's manual override after the cascade fired.
+    skipped_reasons: Dict[str, str] = Field(default_factory=dict)
     audit_rows: int
+    # F2 (S1-A Seam 1 fix): how many RUNNING/PAUSED/PENDING tasks had
+    # their cross-mode residue keys drained (g5_pending_offspring etc).
+    drained_tasks: int = 0
+    drained_keys_total: int = 0
     actor: Optional[str] = None
 
 
@@ -1301,7 +1309,10 @@ async def llm_mode_restore_sentinel(
         sentinel_for=result["sentinel_for"],
         restored_flags=result["restored_flags"],
         skipped=result["skipped"],
+        skipped_reasons=result.get("skipped_reasons", {}),
         audit_rows=result["audit_rows"],
+        drained_tasks=result.get("drained_tasks", 0),
+        drained_keys_total=result.get("drained_keys_total", 0),
         actor=actor,
     )
 

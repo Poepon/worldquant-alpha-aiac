@@ -207,6 +207,120 @@ async def test_list_audit_include_sentinel_shows_all(db_session):
 
 
 @pytest.mark.asyncio
+async def test_restore_sentinel_skips_retired_flag_gracefully(db_session):
+    """F5 + S1-C MUST: retired SUPPORTED_FLAGS skip path was docstring-
+    declared but never tested. Patch SUPPORTED_FLAGS to drop one of the
+    sentinel flags, then verify restore_sentinel skips it (records in
+    `skipped` list) while restoring the other 5."""
+    from backend.models import FeatureFlagAudit, FeatureFlagOverride
+    from backend.services.feature_flag_service import (
+        FeatureFlagService, SUPPORTED_FLAGS,
+    )
+    from sqlalchemy import select
+
+    svc = FeatureFlagService(db_session)
+    await svc.set("ENABLE_LLM_ASSISTANT_MODE", True, actor="test_op")
+
+    # Simulate retirement of one sentinel flag: pop from SUPPORTED_FLAGS
+    # for the duration of this test, then restore after.
+    retired_flag = "ENABLE_R1B_HYPOTHESIS_MUTATE"
+    saved_spec = SUPPORTED_FLAGS.pop(retired_flag, None)
+    try:
+        result = await svc.restore_sentinel(actor="restore_op")
+    finally:
+        if saved_spec is not None:
+            SUPPORTED_FLAGS[retired_flag] = saved_spec
+
+    # Retired flag → in `skipped`, others → in `restored_flags`
+    assert retired_flag in result["skipped"]
+    assert len(result["restored_flags"]) == 5  # 6 - 1 retired
+    # Sentinel audit row for retired flag still gets restored_at stamp
+    # (otherwise repeated restore_sentinel would loop on it forever)
+    retired_audit = (await db_session.execute(
+        select(FeatureFlagAudit).where(
+            FeatureFlagAudit.flag_name == retired_flag,
+            FeatureFlagAudit.action == "sentinel_set",
+        )
+    )).scalar_one_or_none()
+    assert retired_audit is not None
+    assert retired_audit.restored_at is not None
+
+
+@pytest.mark.asyncio
+async def test_restore_sentinel_preserves_operator_manual_set(db_session):
+    """F3 (S1-B race fix): cascade fires, operator manually sets a
+    sentinel flag, then restore is called. The operator's intent must
+    win — restore SKIPS the manually-overridden flag + records reason."""
+    import asyncio
+    from backend.models import FeatureFlagOverride
+    from backend.services.feature_flag_service import FeatureFlagService
+    from sqlalchemy import select
+
+    svc = FeatureFlagService(db_session)
+    # 1. Cascade: R8_L0 forced to False (via R12 = True)
+    await svc.set("ENABLE_LLM_ASSISTANT_MODE", True, actor="cascade_op")
+    # 2. Need a tiny delay so created_at differs (SQLite timestamp resolution)
+    await asyncio.sleep(0.01)
+    # 3. Operator manually re-enables R8_L0 to debug something
+    await svc.set("ENABLE_R8_L0", True, actor="operator_jane")
+    # 4. Restore is called — should preserve operator_jane's intent
+    result = await svc.restore_sentinel(actor="restore_op")
+
+    # R8_L0 should be in skipped, not restored
+    assert "ENABLE_R8_L0" in result["skipped"], result
+    assert result["skipped_reasons"].get("ENABLE_R8_L0") == "operator_manual_intervention"
+    # The actual override row still has operator's True
+    row = (await db_session.execute(
+        select(FeatureFlagOverride).where(
+            FeatureFlagOverride.flag_name == "ENABLE_R8_L0"
+        )
+    )).scalar_one_or_none()
+    assert row is not None
+    import json
+    assert row.flag_value == json.dumps(True)
+    # Other 5 sentinel flags should still be reverted
+    assert len(result["restored_flags"]) == 5
+
+
+@pytest.mark.asyncio
+async def test_restore_sentinel_drains_active_task_residue(db_session):
+    """F2 (S1-A Seam 1 fix): after restore, RUNNING tasks have their
+    cross-mode residue keys drained from task.config so re-enabled
+    flag-gated consumers don't read stale payload (silent zombie)."""
+    from backend.models import MiningTask
+    from backend.services.feature_flag_service import FeatureFlagService
+    from sqlalchemy import select
+
+    svc = FeatureFlagService(db_session)
+    # Seed: a RUNNING task with residue keys
+    task = MiningTask(
+        task_name="t_zombie",
+        region="USA",
+        universe="TOP3000",
+        status="RUNNING",
+        config={
+            "g5_pending_offspring": [{"expr": "stale"}],
+            "__r1b_consumed_pending_hypothesis": {"statement": "stale"},
+            "brain_role_snapshot": {"role": "consultant"},  # MUST be preserved
+        },
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    await svc.set("ENABLE_LLM_ASSISTANT_MODE", True, actor="cascade_op")
+    result = await svc.restore_sentinel(actor="restore_op")
+
+    assert result["drained_tasks"] >= 1
+    assert result["drained_keys_total"] >= 2  # ≥ 2 residue keys cleared
+
+    # Verify the task's config: residue gone, but brain_role_snapshot kept
+    await db_session.refresh(task)
+    assert "g5_pending_offspring" not in task.config
+    assert "__r1b_consumed_pending_hypothesis" not in task.config
+    assert task.config["brain_role_snapshot"]["role"] == "consultant"
+
+
+@pytest.mark.asyncio
 async def test_cache_writethrough_on_cascade_and_restore(db_session):
     """_flag_override_cache reflects post-cascade + post-restore values."""
     from backend.services.feature_flag_service import FeatureFlagService

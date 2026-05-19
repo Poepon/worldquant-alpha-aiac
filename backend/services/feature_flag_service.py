@@ -1145,7 +1145,10 @@ class FeatureFlagService(BaseService):
                 "restored_flags": [],
                 "audit_rows": 0,
                 "skipped": [],
+                "skipped_reasons": {},
                 "sentinel_for": sentinel_for,
+                "drained_tasks": 0,
+                "drained_keys_total": 0,
             }
 
         # Group by flag_name + pick the LATEST row per flag (already
@@ -1154,10 +1157,79 @@ class FeatureFlagService(BaseService):
         for row in rows:
             latest_per_flag.setdefault(row.flag_name, row)
 
+        # F3 fix (S1-B A1.2 race): for each sentinel flag check whether
+        # the operator manually set/cleared the flag AFTER the cascade
+        # fired. If yes, the operator's manual action is the latest
+        # authority — skip restoring this flag + record the reason on
+        # the skipped list so the response surfaces the deliberate
+        # operator intervention (not silently revert it).
+        manual_override_after: Dict[str, "FeatureFlagAudit"] = {}
+        flag_names_in_batch = list(latest_per_flag.keys())
+        if flag_names_in_batch:
+            manual_stmt = (
+                select(FeatureFlagAudit)
+                .where(
+                    FeatureFlagAudit.flag_name.in_(flag_names_in_batch),
+                    FeatureFlagAudit.action.in_(("set", "clear")),
+                )
+                .order_by(FeatureFlagAudit.flag_name, desc(FeatureFlagAudit.created_at))
+            )
+            for mrow in (await self.db.execute(manual_stmt)).scalars().all():
+                # Keep only the LATEST manual action per flag. Use ROW ID
+                # (strictly monotonic auto-increment) rather than created_at
+                # — SQLite `func.now()` is second-resolution and can tie
+                # cascade-time with operator-time in fast test runs.
+                if mrow.flag_name not in manual_override_after:
+                    sentinel_set_id = latest_per_flag[mrow.flag_name].id
+                    if (
+                        mrow.id is not None
+                        and sentinel_set_id is not None
+                        and mrow.id > sentinel_set_id
+                    ):
+                        manual_override_after[mrow.flag_name] = mrow
+
         now = datetime.utcnow()
         restored: List[str] = []
         skipped: List[str] = []
+        skipped_reasons: Dict[str, str] = {}
         for flag_name, audit_row in latest_per_flag.items():
+            # F3: operator manually intervened after cascade → skip revert
+            if flag_name in manual_override_after:
+                manual_row = manual_override_after[flag_name]
+                logger.warning(
+                    "[ff restore_sentinel] flag %r had operator manual %s "
+                    "(actor=%s) at %s AFTER sentinel_set at %s — preserving "
+                    "operator intent, skipping revert",
+                    flag_name, manual_row.action, manual_row.actor,
+                    manual_row.created_at, audit_row.created_at,
+                )
+                skipped.append(flag_name)
+                skipped_reasons[flag_name] = "operator_manual_intervention"
+                # Still stamp restored_at on the cascade audit row so a
+                # repeat restore_sentinel call won't re-trip on it; also
+                # write a forensic row marking the skip decision.
+                for r in rows:
+                    if r.flag_name == flag_name and r.restored_at is None:
+                        r.restored_at = now
+                        r.restored_by = actor
+                self.db.add(FeatureFlagAudit(
+                    flag_name=flag_name,
+                    old_value=audit_row.new_value,  # still the sentinel-set False
+                    new_value=manual_row.new_value,  # operator's value preserved
+                    action="sentinel_restore",
+                    actor=actor,
+                    note=(
+                        f"sentinel_restore SKIPPED for {flag_name}: "
+                        f"operator manual {manual_row.action} by "
+                        f"{manual_row.actor} at {manual_row.created_at} "
+                        f"overrides earlier sentinel cascade"
+                    ),
+                    sentinel_trigger_for=sentinel_for,
+                    restored_at=now,
+                    restored_by=actor,
+                ))
+                continue
+
             spec = SUPPORTED_FLAGS.get(flag_name)
             if spec is None:
                 # Sentinel flag retired since cascade; stamp + skip UPSERT
@@ -1230,13 +1302,55 @@ class FeatureFlagService(BaseService):
                 restored_by=actor,
             ))
 
+        # F2 fix (S1-A Seam 1): drain cross-mode residue from active
+        # tasks AFTER restoring flags. While the sentinel cascade had
+        # the 6 flags OFF, R1b mutate / G5 crossover / etc. were
+        # flag-gated off → no new residue was added. But STALE residue
+        # from BEFORE the cascade (g5_pending_offspring,
+        # __r1b_consumed_pending_hypothesis, etc.) is still sitting in
+        # task.config; now that flags are back ON, the next round would
+        # consume that stale residue and inject silent zombie payload.
+        # Drain unconditionally — losing 1 round of cross-round
+        # accumulation is cheaper than a zombie inject.
+        drained_tasks = 0
+        drained_keys_total = 0
+        try:
+            from backend.models import MiningTask
+            from backend.services.llm_mode_service import drain_pending_residue
+            tasks_to_drain = (await self.db.execute(
+                select(MiningTask).where(
+                    MiningTask.status.in_(("RUNNING", "PAUSED", "PENDING"))
+                )
+            )).scalars().all()
+            for _task in tasks_to_drain:
+                d = drain_pending_residue(_task)
+                if isinstance(d, dict) and not d.get("_error"):
+                    if d:  # non-empty drain dict (some keys popped)
+                        drained_tasks += 1
+                        drained_keys_total += len(d)
+            if drained_tasks:
+                logger.info(
+                    "[ff restore_sentinel] drained %d residue keys across "
+                    "%d active tasks (sentinel_for=%s)",
+                    drained_keys_total, drained_tasks, sentinel_for,
+                )
+        except Exception as ex:  # noqa: BLE001
+            # Soft-fail: drain best-effort; flag restore already done.
+            logger.warning(
+                "[ff restore_sentinel] residue drain failed (non-fatal, "
+                "flags already restored): %s", ex,
+            )
+
         self._bump_redis_async_safe()
 
         return {
             "restored_flags": sorted(restored),
             "audit_rows": len(rows),
             "skipped": sorted(skipped),
+            "skipped_reasons": skipped_reasons,
             "sentinel_for": sentinel_for,
+            "drained_tasks": drained_tasks,
+            "drained_keys_total": drained_keys_total,
         }
 
     # ---- helpers ----------------------------------------------------------

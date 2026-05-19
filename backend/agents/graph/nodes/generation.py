@@ -1579,23 +1579,29 @@ async def node_code_gen(
                 expected_sharpe=sanitized_es,
             )
 
-            # Attach additional metadata for tracking
+            # Attach additional metadata for tracking (in-round routing
+            # decisions only — these fields NEVER persist to alpha.metrics
+            # because persistence.py:382 reads alpha.metrics, not metadata).
             candidate.metadata = {
                 "fields_used": alpha_data.get("fields_used", []),
                 "complexity": alpha_data.get("complexity", "unknown"),
                 "novelty_level": alpha_data.get("novelty_level", "unknown"),
             }
-            # A1.3 trace assistant-mode synth so A1.4 ops endpoint can
-            # stratify PASS rate by template_id (and to flag candidates
-            # where assistant fell through to LLM's own DSL).
+            # A1.3 trace assistant-mode synth — must land in candidate.metrics
+            # (NOT metadata) so the keys survive the validate → simulate →
+            # evaluate pipeline via evaluation.py:1278 setdefault merge into
+            # alpha.metrics. F1 fix per Sprint 1 S1-A Seam 3 review: prior
+            # writes to .metadata caused R12 GO gate to see 100% author / 0%
+            # assistant because A1.4 query_mode_pool reads row.metrics
+            # (persisted) not row.metadata (which doesn't even persist).
             if _assistant_mode_active:
-                candidate.metadata["llm_mode_used"] = "assistant"
+                candidate.metrics["llm_mode_used"] = "assistant"
                 if _composed_expression is not None:
-                    candidate.metadata["assistant_template_id"] = _composed_template_id
-                    candidate.metadata["assistant_template_score"] = _composed_score
-                    candidate.metadata["assistant_template_fallthrough"] = False
+                    candidate.metrics["assistant_template_id"] = _composed_template_id
+                    candidate.metrics["assistant_template_score"] = _composed_score
+                    candidate.metrics["assistant_template_fallthrough"] = False
                 else:
-                    candidate.metadata["assistant_template_fallthrough"] = True
+                    candidate.metrics["assistant_template_fallthrough"] = True
 
             if candidate.expression and candidate.expression.strip():
                 pending_alphas.append(candidate)

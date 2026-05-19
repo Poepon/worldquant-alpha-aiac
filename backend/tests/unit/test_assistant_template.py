@@ -24,6 +24,17 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_template_cache():
+    """Module-level _TEMPLATE_CACHE persists across tests. Tests that
+    monkeypatch _TEMPLATES_YAML to bad paths can poison subsequent tests'
+    cache. Clear before AND after each test so order-dependence dies."""
+    from backend.services import assistant_template as mod
+    mod.clear_template_cache()
+    yield
+    mod.clear_template_cache()
+
+
 # ---------------------------------------------------------------------------
 # Loading
 # ---------------------------------------------------------------------------
@@ -67,6 +78,49 @@ def test_clear_template_cache_forces_reload():
     b = get_templates(force_reload=True)
     # Should return equivalent content (no mutation in real flow)
     assert len(a) == len(b)
+
+
+# F5 (S1-C MUST gap): Soft-fail loading tests — design pillar #4 in the
+# module docstring declares YAML missing/corrupt → [] but never tested.
+
+
+def test_load_templates_empty_when_yaml_missing(monkeypatch):
+    """YAML file path missing → _load_templates returns empty list +
+    get_templates yields []. Assistant mode silently falls back to
+    author DSL per node_code_gen branch (defense in depth)."""
+    from pathlib import Path
+    from backend.services import assistant_template as mod
+
+    monkeypatch.setattr(
+        mod,
+        "_TEMPLATES_YAML",
+        Path("/nonexistent/missing-templates.yaml"),
+    )
+    mod.clear_template_cache()
+    assert mod.get_templates() == []
+
+
+def test_load_templates_empty_when_yaml_corrupt(monkeypatch, tmp_path):
+    """Corrupt YAML → soft-fail → []. Operator survives mid-edit broken
+    YAML without code_gen crashing."""
+    from backend.services import assistant_template as mod
+
+    bad = tmp_path / "corrupt.yaml"
+    bad.write_text("- template_id: x\n  expression_skeleton: [unclosed", encoding="utf-8")
+    monkeypatch.setattr(mod, "_TEMPLATES_YAML", bad)
+    mod.clear_template_cache()
+    assert mod.get_templates() == []
+
+
+def test_load_templates_empty_when_yaml_root_not_list(monkeypatch, tmp_path):
+    """YAML root is a dict not list → soft-fail → []."""
+    from backend.services import assistant_template as mod
+
+    wrong_shape = tmp_path / "wrong_shape.yaml"
+    wrong_shape.write_text("template_id: x\nexpression_skeleton: y", encoding="utf-8")
+    monkeypatch.setattr(mod, "_TEMPLATES_YAML", wrong_shape)
+    mod.clear_template_cache()
+    assert mod.get_templates() == []
 
 
 # ---------------------------------------------------------------------------
