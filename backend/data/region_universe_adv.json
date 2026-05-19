@@ -1,0 +1,53 @@
+{
+  "_meta": {
+    "purpose": "Static (region, universe) → average daily volume (ADV in USD) + universe size — input to capacity_estimator.estimate()",
+    "source": "Order-of-magnitude estimate from WorldQuant universe documentation + public market cap data 2025 Q4",
+    "operator_responsibility": "Refresh quarterly via /ops/r11/refresh-adv-snapshot (or manual edit + restart). Stale by >180 days → /ops/r11/capacity-stats surface warning.",
+    "last_refreshed": "2026-05-20",
+    "schema": {
+      "adv_usd_per_stock": "Per-stock average daily trading volume in USD",
+      "universe_size": "Number of stocks (approximate)"
+    }
+  },
+  "USA": {
+    "TOP200":   {"adv_usd_per_stock": 5.0e8, "universe_size": 200},
+    "TOP500":   {"adv_usd_per_stock": 3.0e8, "universe_size": 500},
+    "TOP1000":  {"adv_usd_per_stock": 1.5e8, "universe_size": 1000},
+    "TOP2000":  {"adv_usd_per_stock": 5.0e7, "universe_size": 2000},
+    "TOP3000":  {"adv_usd_per_stock": 2.0e7, "universe_size": 3000},
+    "TOPSP500": {"adv_usd_per_stock": 4.0e8, "universe_size": 500},
+    "ILLIQUID_MINVOL1M": {"adv_usd_per_stock": 5.0e6, "universe_size": 500}
+  },
+  "CHN": {
+    "TOP1000": {"adv_usd_per_stock": 5.0e7, "universe_size": 1000},
+    "TOP2000": {"adv_usd_per_stock": 2.0e7, "universe_size": 2000},
+    "TOP3000": {"adv_usd_per_stock": 1.0e7, "universe_size": 3000}
+  },
+  "JPN": {
+    "TOP200":  {"adv_usd_per_stock": 1.0e8, "universe_size": 200},
+    "TOP500":  {"adv_usd_per_stock": 5.0e7, "universe_size": 500},
+    "TOP1600": {"adv_usd_per_stock": 1.5e7, "universe_size": 1600}
+  },
+  "EUR": {
+    "TOP500":  {"adv_usd_per_stock": 1.0e8, "universe_size": 500},
+    "TOP1200": {"adv_usd_per_stock": 4.0e7, "universe_size": 1200},
+    "TOP2500": {"adv_usd_per_stock": 1.5e7, "universe_size": 2500}
+  },
+  "HKG": {
+    "TOP300":  {"adv_usd_per_stock": 4.0e7, "universe_size": 300},
+    "TOP500":  {"adv_usd_per_stock": 2.0e7, "universe_size": 500}
+  },
+  "KOR": {
+    "TOP200":  {"adv_usd_per_stock": 6.0e7, "universe_size": 200},
+    "TOP600":  {"adv_usd_per_stock": 2.0e7, "universe_size": 600}
+  },
+  "TWN": {
+    "TOP200":  {"adv_usd_per_stock": 4.0e7, "universe_size": 200},
+    "TOP500":  {"adv_usd_per_stock": 1.5e7, "universe_size": 500}
+  },
+  "_default": {
+    "adv_usd_per_stock": 1.0e7,
+    "universe_size": 1000,
+    "_comment": "Fallback when (region, universe) not found; intentionally conservative to avoid over-stating capacity for unknown markets."
+  }
+}

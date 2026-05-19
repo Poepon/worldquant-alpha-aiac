@@ -105,6 +105,15 @@ class Alpha(SQLAlchemyBase):
     # True = is.checks 全无 FAIL；False = 至少 1 个 FAIL
     can_submit = Column(Boolean, nullable=True)
 
+    # B1 R11 (Sprint 2, 2026-05-20): USD capacity estimate stamped at PASS
+    # alpha persist time. NULL when ENABLE_CAPACITY_SCORE was OFF at sim
+    # time OR when (region, universe) lookup missed and estimator returned
+    # 0. Per-alpha partial index (only non-NULL rows indexed) keeps
+    # /ops/r11/capacity-stats range scans cheap without inflating the
+    # alphas table footprint.
+    # Alembic: k2b3c4d5e6f7_alpha_capacity_metadata
+    capacity_usd_estimate = Column(Float, nullable=True)
+
     # Plan v5+ §Phase 2 B1 — hypothesis link. NULL for legacy / Phase 1 alphas
     # generated before HYPOTHESIS_CENTRIC_LEVEL=2 wired up. ON DELETE SET NULL
     # so hypothesis cleanup never cascades into alpha rows.

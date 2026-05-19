@@ -300,6 +300,25 @@ class Settings(BaseSettings):
         "contextual_bandit_v1",  # mining_agent._BANDIT_CONFIG_KEY value
     ]
 
+    # ----- B1 R11 alpha_capacity_estimator (Sprint 2, 2026-05-20) -----
+    # 工业派 capacity-cap 思维(RenTec Medallion $10B cap / Bridgewater AIA
+    # $5B 软上限)— 高 sharpe 低 capacity 的 alpha 应降权。把单 alpha 估算的
+    # USD capacity 作为 composite_score 第 5 维(原 4 维:sharpe / fitness /
+    # turnover / robustness),log-scale 5 桶 normalize 到 [0,1]。
+    # Phase A 真效果(per [[feedback_按效果选择]]):flag ON 直接改 composite
+    # ranking,不是 stamp-only。Default OFF 保 byte-identical regression;
+    # ENABLE_CAPACITY_SCORE=True 时 composite normalize sum=1.0(原 4 维 weight
+    # × 0.9 + capacity × 0.10 = 1.0,见 alpha_scoring.evaluate_alpha_comprehensive)。
+    # Estimator 公式:capacity_usd = ADV(region+universe) × universe_size ×
+    #   (1 - turnover_decay_factor) — 粗估,精度优先于完美。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.8 / v2 §4.5
+    ENABLE_CAPACITY_SCORE: bool = False
+    CAPACITY_SCORE_WEIGHT: float = 0.10
+    # Log-scale buckets — alpha capacity USD 落入哪桶决定 normalize 后的值
+    # [0.0, 0.25, 0.50, 0.75, 1.0]。<$1M → 0.0,>$10B → 1.0。
+    CAPACITY_LOG_BUCKETS: list = [1e6, 1e7, 1e8, 1e9, 1e10]
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入

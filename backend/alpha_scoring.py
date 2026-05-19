@@ -342,13 +342,38 @@ def evaluate_alpha_comprehensive(
     else:
         eval_result.robustness_score = 0.0
     
-    # Composite score
-    eval_result.composite_score = (
+    # Composite score — base 4 dimensions sum to 1.0.
+    base_composite = (
         0.40 * eval_result.sharpe_score +
         0.25 * eval_result.fitness_score +
         0.15 * eval_result.turnover_score +
         0.20 * eval_result.robustness_score
     )
+
+    # B1 R11 (Sprint 2): capacity as the 5th dimension. When
+    # ENABLE_CAPACITY_SCORE is OFF (default), we leave composite
+    # byte-identical with the historical 4-dim formula — required for
+    # the regression baseline guarantee. When ON, original weights are
+    # scaled by (1 - CAPACITY_SCORE_WEIGHT) so the resulting sum stays
+    # at 1.0; capacity_norm is the log-bucket normalized capacity
+    # (see backend/services/capacity_estimator.normalize). Failures in
+    # capacity inference (missing region/universe/turnover) soft-fall
+    # to 0.0 — no exception escapes scoring.
+    try:
+        from backend.config import settings as _settings
+        if getattr(_settings, "ENABLE_CAPACITY_SCORE", False):
+            from backend.services import capacity_estimator as _cap
+            cap_w = float(getattr(_settings, "CAPACITY_SCORE_WEIGHT", 0.10))
+            cap_usd = _cap.estimate_from_alpha_dict(sim_result)
+            cap_norm = _cap.normalize(cap_usd)
+            eval_result.composite_score = (
+                base_composite * (1.0 - cap_w) + cap_norm * cap_w
+            )
+        else:
+            eval_result.composite_score = base_composite
+    except Exception as _e:
+        logger.debug(f"capacity_score path soft-fall: {_e}")
+        eval_result.composite_score = base_composite
     
     # =========================================================================
     # 使用 BRAIN 官方检查结果（如果可用）
@@ -548,6 +573,23 @@ def calculate_alpha_score(
         w['turnover_penalty'] * turnover_penalty -
         w['investability_penalty'] * investability_penalty
     )
+
+    # B1 R11 (Sprint 2): capacity bonus. ON-flag adds normalized capacity
+    # USD as a positive contribution scaled by CAPACITY_SCORE_WEIGHT.
+    # OFF-flag → byte-identical to historical formula (baseline guarantee).
+    # Custom-weights call path bypasses capacity (caller has full control
+    # over the formula).
+    if weights is None:
+        try:
+            from backend.config import settings as _settings
+            if getattr(_settings, "ENABLE_CAPACITY_SCORE", False):
+                from backend.services import capacity_estimator as _cap
+                cap_w = float(getattr(_settings, "CAPACITY_SCORE_WEIGHT", 0.10))
+                cap_usd = _cap.estimate_from_alpha_dict(sim_result)
+                cap_norm = _cap.normalize(cap_usd)
+                score += cap_w * cap_norm
+        except Exception as _e:
+            logger.debug(f"calculate_alpha_score capacity bonus soft-fall: {_e}")
     
     # _safe_float guards against None coming from BRAIN responses (see edge case
     # EC-1: 32% of historical alphas have returns < 0, and some metric fields

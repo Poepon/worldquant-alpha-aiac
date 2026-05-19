@@ -813,6 +813,37 @@ async def _evaluate_single_alpha(
                 f"{_p2c_stamp_ex}"
             )
 
+    # B1 R11 (Sprint 2): stamp capacity_usd_estimate on the alpha row +
+    # mirror to alpha.metrics so the downstream persistence path (which
+    # only persists alpha.metrics, not arbitrary attributes) carries it.
+    # Gated by ENABLE_CAPACITY_SCORE so OFF stays byte-identical with the
+    # historical alpha row shape (NULL column). Soft-fail on any error —
+    # the column is nullable.
+    try:
+        from backend.config import settings as _r11_settings
+        if getattr(_r11_settings, "ENABLE_CAPACITY_SCORE", False):
+            from backend.services import capacity_estimator as _cap_svc
+            _alpha_for_cap = {
+                "region": getattr(alpha, "region", None),
+                "universe": getattr(alpha, "universe", None),
+                "turnover": getattr(alpha, "is_turnover", None),
+            }
+            _cap_usd = _cap_svc.estimate_from_alpha_dict(_alpha_for_cap)
+            if _cap_usd > 0:
+                if not isinstance(alpha.metrics, dict):
+                    alpha.metrics = {}
+                else:
+                    alpha.metrics = dict(alpha.metrics)
+                alpha.metrics["capacity_usd_estimate"] = float(_cap_usd)
+                try:
+                    setattr(alpha, "capacity_usd_estimate", float(_cap_usd))
+                except Exception:
+                    pass
+    except Exception as _r11_stamp_ex:
+        logger.debug(
+            f"[{ctx.node_name}] R11 capacity stamp soft-fall: {_r11_stamp_ex}"
+        )
+
     return _SingleAlphaEvalResult(
         corr_check_performed=_corr_performed,
         corr_check_skipped_reason=_corr_skipped_reason,

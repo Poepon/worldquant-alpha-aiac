@@ -644,6 +644,32 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "operator 看 7d /ops/flat-region/distribution 数据后翻 ENFORCE=True。"
         ),
     ),
+    # --- B1 R11 alpha_capacity_estimator (Sprint 2, 2026-05-20) ---
+    "ENABLE_CAPACITY_SCORE": FlagSpec(
+        name="ENABLE_CAPACITY_SCORE",
+        flag_type="bool",
+        group="Phase4-Sprint2",
+        description=(
+            "Phase 4 B1 R11:工业派 capacity-cap(RenTec $10B / Bridgewater $5B "
+            "软上限)纳入 composite_score 第 5 维。Default OFF — 翻 ON 时 "
+            "evaluate_alpha_comprehensive composite normalize sum=1.0(原 4 维 × "
+            "0.9 + capacity × CAPACITY_SCORE_WEIGHT),calculate_alpha_score 加 "
+            "capacity 项。capacity_estimator.estimate(alpha) 用 ADV × universe × "
+            "(1 - turnover_decay) 粗估 USD,log-scale 5 桶 normalize [0,1]。"
+            "PASS alpha persist 前 stamp `alphas.capacity_usd_estimate`(Alembic "
+            "k2b3c4d5e6f7)。Phase A 真效果,不是 stamp-only。"
+        ),
+    ),
+    "CAPACITY_SCORE_WEIGHT": FlagSpec(
+        name="CAPACITY_SCORE_WEIGHT",
+        flag_type="float",
+        group="Phase4-Sprint2",
+        description=(
+            "R11 capacity 维度 weight。Default 0.10 — composite normalize 时原 4 "
+            "维 weight × (1 - 0.10) + capacity × 0.10 = 1.0。调高 → capacity 主导,"
+            "调低 → 接近原 4 维 baseline。验收期 obs 7d 后可 calibrate。"
+        ),
+    ),
 }
 
 
