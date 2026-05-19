@@ -2910,9 +2910,16 @@ async def node_evaluate(
     # Apply AFTER R1a/R5 hooks so per-alpha scores (composite_score / sharpe)
     # are already finalized — family cap ranks by score within each
     # (pillar, family) group. Soft-fail: any error logged but never blocks
-    # the round. Drops are marked quality_status='FAIL' +
-    # metrics["_r10_family_cap_dropped"]=True so downstream persistence /
-    # optimization queue skips them.
+    # the round.
+    #
+    # Phase 4 Sprint 2 B3 (2026-05-20): stamp-only refactor (plan v5 §6.10).
+    # Family cap previously set ``quality_status = "FAIL"`` inline here;
+    # that double-write conflicted with the R10-v2 (hard-ban) overlay,
+    # which needs both stamps to coexist on PASS rows for the 7d 互验 SQL
+    # to compute false-positive rates. New flow: stamp only, then the
+    # unified finalize pass at end of this function transitions any
+    # stamped row to FAIL. ``apply_family_cap`` already only returns
+    # drop indices (no inline mutation), so the change is local here.
     if getattr(settings, "ENABLE_FAMILY_CAP", False):
         try:
             from backend.family_classifier import apply_family_cap  # noqa: E402
@@ -2921,18 +2928,76 @@ async def node_evaluate(
             if _drop_idx:
                 for _i in _drop_idx:
                     _a = updated_alphas[_i]
-                    _a.quality_status = "FAIL"
                     _new_metrics = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
                     _new_metrics["_r10_family_cap_dropped"] = True
                     _new_metrics["_r10_family_cap_top_k"] = _top_k
                     _a.metrics = _new_metrics
                 logger.info(
-                    f"[R10] family-cap dropped {len(_drop_idx)}/{len(updated_alphas)} "
-                    f"alphas (top_k={_top_k})"
+                    f"[R10] family-cap stamped {len(_drop_idx)}/{len(updated_alphas)} "
+                    f"alphas (top_k={_top_k}) — FAIL deferred to finalize pass"
                 )
         except Exception as _r10_e:  # noqa: BLE001
             logger.warning(f"[R10] family-cap failed (non-fatal): {_r10_e}")
     # === end R10 family-cap ===
+
+    # === Phase 4 Sprint 2 B3 R10-v2 family hard-ban shadow stamp ===
+    # Pairwise PnL-correlation ≥ τ within a family → stamp
+    # _r10v2_hard_banned. Shadow mode by design: no FAIL inline.
+    # Both R10 and R10-v2 stamps survive to persistence; the互验 SQL
+    # in plan v5 §6.10 compares false-positive rates after 7d obs.
+    #
+    # Wiring deferred behind ENABLE_FAMILY_HARD_BAN flag (default OFF).
+    # Production wire pending τ calibration from scripts/calibrate_r10_
+    # pairwise_corr.py (R10-calib spike output). When flag ON and
+    # `state.r10v2_pnl_corr_matrix` was populated upstream (Phase 4
+    # follow-up), we run the hard-ban; otherwise soft-fall to no-op.
+    if getattr(settings, "ENABLE_FAMILY_HARD_BAN", False):
+        try:
+            from backend.family_classifier import apply_family_hard_ban  # noqa: E402
+            _tau = float(getattr(settings, "FAMILY_BAN_MIN_PAIRWISE_CORR", 0.65))
+            _corr_matrix = getattr(state, "r10v2_pnl_corr_matrix", None)
+            if _corr_matrix is not None:
+                _ban_idx = apply_family_hard_ban(
+                    updated_alphas, pnl_corr_matrix=_corr_matrix, threshold=_tau,
+                )
+                if _ban_idx:
+                    for _i in _ban_idx:
+                        _a = updated_alphas[_i]
+                        _new_metrics = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+                        _new_metrics["_r10v2_hard_banned"] = True
+                        _new_metrics["_r10v2_hard_ban_threshold"] = _tau
+                        _a.metrics = _new_metrics
+                    logger.info(
+                        f"[R10-v2] hard-ban stamped {len(_ban_idx)}/{len(updated_alphas)} "
+                        f"alphas (τ={_tau:.2f}) — FAIL deferred to finalize pass"
+                    )
+            else:
+                logger.debug("[R10-v2] flag ON but pnl_corr_matrix unavailable — skip")
+        except Exception as _r10v2_e:  # noqa: BLE001
+            logger.warning(f"[R10-v2] hard-ban failed (non-fatal): {_r10v2_e}")
+    # === end R10-v2 hard-ban ===
+
+    # === B3 Sprint 2 stamp → FAIL finalize pass (plan v5 §6.10) ===
+    # Both R10 family-cap and R10-v2 hard-ban stamp metrics without
+    # touching quality_status (per the 互验 design). Here we transition
+    # any stamped row to FAIL. Idempotent — rows already FAIL stay FAIL;
+    # PASS rows with stamps become FAIL; nothing else changes.
+    if updated_alphas:
+        _r10_finalize_count = 0
+        for _a in updated_alphas:
+            _m = _a.metrics if isinstance(_a.metrics, dict) else {}
+            if _m.get("_r10_family_cap_dropped") is True or _m.get("_r10v2_hard_banned") is True:
+                _current_status = getattr(_a, "quality_status", None)
+                _status_str = getattr(_current_status, "value", _current_status)
+                if _status_str != "FAIL":
+                    _a.quality_status = "FAIL"
+                    _r10_finalize_count += 1
+        if _r10_finalize_count > 0:
+            logger.info(
+                f"[R10-finalize] {_r10_finalize_count} alpha(s) transitioned to FAIL "
+                f"via stamp scan"
+            )
+    # === end finalize pass ===
 
     # === Phase 4 PR0.6 Sentinel stamp (Sprint 0, 2026-05-19) ===
     # Backfills 3 of the 6 R12-sentinel-tied stamps onto alpha.metrics so the

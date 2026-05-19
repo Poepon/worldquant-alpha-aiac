@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from backend.pillar_classifier import _extract_operators
 
@@ -158,4 +158,116 @@ def apply_family_cap(
     return sorted(drop_idx)
 
 
-__all__ = ["family_signature", "apply_family_cap"]
+def apply_family_hard_ban(
+    alphas: Sequence,
+    *,
+    pnl_corr_matrix: Optional["object"] = None,
+    threshold: float = 0.65,
+) -> List[int]:
+    """Apply Phase 4 R10-v2 family hard-ban (per plan v5 §6.10).
+
+    Within each family (same family_signature), any pair whose pairwise
+    PnL correlation ≥ threshold triggers a ban on the lower-scoring
+    member. Stamp-only — caller stamps ``metrics["_r10v2_hard_banned"]
+    = True``; FAIL classification is deferred to evaluation node's
+    finalize pass so multiple stamps coexist for the互验 SQL output.
+
+    Distinct from ``apply_family_cap`` (top-K structural cap):
+      * R10 family-cap     = same family + same pillar → keep top-K
+        (coarse-grain, ignores how *similar* the alpha's actual PnL is)
+      * R10-v2 hard-ban    = same family + pairwise PnL corr ≥ τ →
+        ban (fine-grain, real-portfolio diversification signal)
+
+    Args:
+        alphas: sequence of alpha-like objects with .expression /
+            .metrics / .quality_status. Each must additionally have
+            either ``.alpha_id`` (BRAIN id; used as pnl_corr_matrix
+            key) or ``.id`` (internal DB id).
+        pnl_corr_matrix: optional pandas.DataFrame indexed by alpha_id
+            on both axes (square, symmetric, diag=1.0). When None or
+            missing alpha rows, the function returns an empty list
+            (no ban) — caller is expected to soft-skip when matrix
+            unavailable for the round.
+        threshold: τ ∈ [0, 1]. ≥ τ → ban the lower-scoring sibling.
+            Default 0.65 (conservative; the R10-calib spike's recommend
+            output will tune this per region — see
+            scripts/calibrate_r10_pairwise_corr.py).
+
+    Returns:
+        Sorted list of integer indices (into alphas) to mark banned.
+        Caller responsibility:
+            for i in ban_idx:
+                alphas[i].metrics["_r10v2_hard_banned"] = True
+                alphas[i].metrics["_r10v2_hard_ban_reason"] = ...
+
+    Pure-function — no DB / BRAIN calls. PnL matrix must be supplied by
+    caller (typically via CorrelationService.refresh_os_alpha_cache +
+    pandas .corr).
+    """
+    if not alphas:
+        return []
+    if pnl_corr_matrix is None:
+        return []
+    if not (0.0 <= threshold <= 1.0):
+        logger.warning(
+            f"[family_hard_ban] threshold={threshold} out of [0,1] — skipping"
+        )
+        return []
+
+    # Group by family_signature (skip terminal-fail alphas; their FAIL
+    # is already accounted for and they should not occupy a sibling slot).
+    groups: dict[str, List[Tuple[float, int, str]]] = {}
+    for idx, a in enumerate(alphas):
+        status = getattr(a, "quality_status", None)
+        status_str = getattr(status, "value", status) if status is not None else None
+        if status_str in _FAMILY_CAP_EXCLUDED_STATUSES:
+            continue
+        aid = getattr(a, "alpha_id", None) or getattr(a, "id", None)
+        if aid is None:
+            continue
+        expr = getattr(a, "expression", "") or ""
+        sig = family_signature(expr)
+        if sig == "<empty>":
+            continue
+        score = _alpha_score(a)
+        groups.setdefault(sig, []).append((score, idx, str(aid)))
+
+    ban_idx: set[int] = set()
+    for sig, members in groups.items():
+        if len(members) < 2:
+            continue
+        # Sort descending by score — preserve the highest, ban siblings
+        # whose corr against the surviving set exceeds threshold.
+        members.sort(key=lambda x: x[0], reverse=True)
+        survivors: List[Tuple[float, int, str]] = []
+        for score, idx, aid in members:
+            ban_this = False
+            for _s, _i, surv_aid in survivors:
+                try:
+                    c = pnl_corr_matrix.loc[aid, surv_aid]
+                except KeyError:
+                    continue
+                except Exception:  # noqa: BLE001 — corr lookup must never break round
+                    continue
+                # pandas .at / .loc returns numpy scalar; safe float convert
+                try:
+                    cf = float(c)
+                except (TypeError, ValueError):
+                    continue
+                if cf >= threshold:
+                    ban_this = True
+                    break
+            if ban_this:
+                ban_idx.add(idx)
+            else:
+                survivors.append((score, idx, aid))
+        if len(members) - len(survivors) > 0:
+            logger.debug(
+                f"[family_hard_ban] family={sig[:8]} kept {len(survivors)}/{len(members)} "
+                f"(τ={threshold:.2f})"
+            )
+
+    return sorted(ban_idx)
+
+
+__all__ = ["family_signature", "apply_family_cap", "apply_family_hard_ban"]

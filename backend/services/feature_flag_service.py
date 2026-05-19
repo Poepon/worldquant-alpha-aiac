@@ -670,6 +670,33 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "调低 → 接近原 4 维 baseline。验收期 obs 7d 后可 calibrate。"
         ),
     ),
+    # --- B3 R10-v2 family hard-ban shadow (Sprint 2, 2026-05-20) ---
+    "ENABLE_FAMILY_HARD_BAN": FlagSpec(
+        name="ENABLE_FAMILY_HARD_BAN",
+        flag_type="bool",
+        group="Phase4-Sprint2",
+        description=(
+            "Phase 4 B3 R10-v2:同 family alpha pairwise PnL correlation ≥ "
+            "FAMILY_BAN_MIN_PAIRWISE_CORR 时 stamp metrics['_r10v2_hard_banned']"
+            "=True。Shadow mode:不直接 set FAIL,evaluation 末 finalize pass "
+            "scan stamp 后统一 set FAIL。允许 R10/R10-v2 双 stamp 共存,7d obs "
+            "后跑 plan v5 §6.10 互验 SQL 比较 false-positive rate 决定胜出者。"
+            "Default OFF — production wire pending τ 校准 + state.r10v2_pnl_corr"
+            "_matrix 上游填充路径(fast-follow)。"
+        ),
+    ),
+    "FAMILY_BAN_MIN_PAIRWISE_CORR": FlagSpec(
+        name="FAMILY_BAN_MIN_PAIRWISE_CORR",
+        flag_type="float",
+        group="Phase4-Sprint2",
+        description=(
+            "R10-v2 hard-ban pairwise PnL correlation threshold τ ∈ [0, 1]。"
+            "Default 0.65 = 保守初值;scripts/calibrate_r10_pairwise_corr.py "
+            "输出 region 内 intra-family p95/p99 中位会 calibrate 到 region-specific "
+            "(USA TOP3000 通常 0.7-0.8,emerging market 0.5-0.6)。调高 → 更宽容,"
+            "调低 → 更激进 ban。"
+        ),
+    ),
 }
 
 

@@ -319,6 +319,26 @@ class Settings(BaseSettings):
     # [0.0, 0.25, 0.50, 0.75, 1.0]。<$1M → 0.0,>$10B → 1.0。
     CAPACITY_LOG_BUCKETS: list = [1e6, 1e7, 1e8, 1e9, 1e10]
 
+    # ----- B3 R10-v2 family hard-ban shadow (Sprint 2, 2026-05-20) -----
+    # 工业派 Citadel / Bridgewater 内部 portfolio-construction 经验:同
+    # family 的 alpha 即使 sharpe 都达 PASS 阈值,若 PnL 时间序列高度相关
+    # (pairwise corr ≥ τ),纳入组合后边际贡献接近 0 → hard-ban 低分者。
+    # R10-v2 是 R10 family-cap(纯 structural top-K)的 fine-grain 补充。
+    # Shadow mode:family_classifier.apply_family_hard_ban 不直接 set FAIL,
+    # 只 stamp `metrics["_r10v2_hard_banned"]=True`;evaluation 末统一
+    # finalize 段 scan stamp → FAIL,允许 R10/R10-v2 双 stamp 共存以便
+    # plan v5 §6.10 互验 SQL 计算 false-positive rate。
+    # Default OFF + production wire pending τ 校准 — operator 先跑
+    # scripts/calibrate_r10_pairwise_corr.py 出 region-specific τ,再
+    # flip ENABLE_FAMILY_HARD_BAN + 上游 state.r10v2_pnl_corr_matrix 填充
+    # 路径接通(fast-follow)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.10
+    ENABLE_FAMILY_HARD_BAN: bool = False
+    # τ ∈ [0, 1]。default 0.65 = 保守初值;R10-calib spike 输出 p95-p99 中位
+    # 会校准到 region-specific(USA 通常较高,emerging market 较低)。
+    FAMILY_BAN_MIN_PAIRWISE_CORR: float = 0.65
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入
