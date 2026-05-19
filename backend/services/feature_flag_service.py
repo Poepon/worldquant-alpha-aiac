@@ -160,6 +160,27 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="Phase1-R3Q8",
         description="启用 DiversityScore 第 6 维 ast_diversity (1 − Jaccard subtree overlap)。Light wiring 仅记录到 ast_distance_log,不 gate 生成。Phase 2+ R10 family-cap 复用此信号。",
     ),
+    # --- G3 AST originality gate (Phase A shadow, 2026-05-19) ---
+    "ENABLE_AST_ORIGINALITY_GATE": FlagSpec(
+        name="ENABLE_AST_ORIGINALITY_GATE",
+        flag_type="bool",
+        group="G3-Originality",
+        description=(
+            "G3 AST 原创度门 (Phase A shadow):node_evaluate R10 之后调 "
+            "backend.alpha_originality.OriginalityChecker,ast_distance "
+            "(1−Jaccard subtree overlap) < AST_ORIGINALITY_MIN_DISTANCE (τ, "
+            "默认 0.15) 的 alpha 写 metrics['_g3_*'] + "
+            "['_g3_ast_originality_blocked']=True。"
+            "AST_ORIGINALITY_MODE 控制效果:'shadow' (默认,仅 log + metrics) / "
+            "'soft' (标 PASS_PROVISIONAL 仍 simulate) / 'hard' (标 FAIL 跳 "
+            "simulate)。前置:Phase 1 R3/Q8 ast_distance_log 已 light-wire,"
+            "G3 复用 backend.knowledge_extraction.ast_distance_from_expressions。"
+            "Phase B 在 /ops/g3/originality-stats 7d 数据上 calibrate τ,Phase C "
+            "operator 决策 promote mode shadow→soft→hard。"
+            "与 R10 family-cap 互补:R10 看 operator-sequence 同族,G3 看 "
+            "AST subtree 同构。Soft-fail:checker 异常永不 break round。"
+        ),
+    ),
     # --- R8 Hierarchical RAG ---
     "ENABLE_HIERARCHICAL_RAG": FlagSpec(
         name="ENABLE_HIERARCHICAL_RAG",

@@ -248,6 +248,23 @@ class Settings(BaseSettings):
     AST_DIVERSITY_MAX_DEPTH: int = 3       # OperatorNode skeleton truncation
     AST_DIVERSITY_HISTORY_K: int = 20      # compare new alpha to top-K recent attempts
 
+    # ----- G3 AST originality gate (Phase A shadow, 2026-05-19) -----
+    # Promotes Phase 1 R3/Q8 ast_distance_log → candidate-time gate in
+    # node_evaluate (after R10 family-cap). Three modes:
+    #   shadow — log warning + alpha.metrics['_g3_*'] only (Phase A default)
+    #   soft   — block flips quality_status='PASS_PROVISIONAL' (still simulates)
+    #   hard   — block flips quality_status='FAIL' (skip persistence)
+    # τ (AST_ORIGINALITY_MIN_DISTANCE) standardization: ast_distance returns
+    # 1 − Jaccard(subtree_sets), so values are bounded [0, 1]. τ=0.15 = "alpha
+    # shares ≥85% of subtree skeletons with its nearest neighbor". Calibrate
+    # via /ops/g3/originality-stats + scripts/calibrate_g3_threshold.py.
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py
+    # (per [[feedback_enable_flag_double_file]]).
+    ENABLE_AST_ORIGINALITY_GATE: bool = False
+    AST_ORIGINALITY_MODE: str = "shadow"        # shadow | soft | hard
+    AST_ORIGINALITY_MIN_DISTANCE: float = 0.15  # τ — Phase B re-calibrate
+    AST_ORIGINALITY_HISTORY_K: int = 50         # compare new alpha vs top-K recent
+
     # ----- flat-F1 Advanced: FLAT_CONTINUOUS mining mode (Phase 3, 2026-05-18) -----
     # 第二个 mining_mode = FLAT_CONTINUOUS,与 legacy CONTINUOUS_CASCADE 并行。
     # Hypothesis-driven flat session:dataset × hypothesis 元组迭代,无 T1→T2→T3

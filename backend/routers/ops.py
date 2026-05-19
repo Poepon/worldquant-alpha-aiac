@@ -1452,6 +1452,223 @@ async def r1a_telemetry(
 
 
 # =============================================================================
+# G3 AST originality gate telemetry (Phase A shadow, 2026-05-19)
+# =============================================================================
+# Surfaces the shadow-mode block rate so operators can calibrate τ before
+# promoting AST_ORIGINALITY_MODE to 'soft' / 'hard'. Reads two sources:
+#   - ast_distance_log: 7d block rate against the current τ
+#                       + min_distance histogram + top-N nearest-neighbor
+#                       + per-region distribution. (R3/Q8 Phase 1 table.)
+#   - alphas.metrics:   per-pillar block rate using the JSONB tag
+#                       _g3_ast_originality_blocked stamped by
+#                       backend.alpha_originality.apply_to_alpha (G3 Phase A).
+# Both queries soft-fall to empty buckets if the underlying tables are
+# unavailable. No HTTP self-call.
+
+
+class G3DistanceHistogramBucketOut(BaseModel):
+    # Half-open [lo, hi) buckets — 0.0..1.0 stepped by AST_ORIGINALITY_MIN_DISTANCE
+    lo: float
+    hi: float
+    count: int
+
+
+class G3NeighborBucketOut(BaseModel):
+    nearest_neighbor_hash: str
+    blocked_count: int
+
+
+class G3PillarBucketOut(BaseModel):
+    pillar: str
+    blocked: int
+    total: int
+    block_rate: float
+
+
+class G3OriginalityStatsOut(BaseModel):
+    flags: Dict[str, bool]
+    mode: str
+    threshold: float
+    window_days: int
+    # Distance log aggregate (one row per code-gen candidate, R3/Q8)
+    total_candidates: int          # rows in ast_distance_log window
+    blocked_candidates: int        # rows where ast_distance_min < τ
+    block_rate: float              # blocked_candidates / total_candidates
+    # min_distance histogram for τ calibration
+    distance_histogram: List[G3DistanceHistogramBucketOut]
+    # Top-N nearest-neighbor hashes (shows the "换皮 magnet" alphas)
+    top_neighbors: List[G3NeighborBucketOut]
+    # Per-pillar block rate from alphas.metrics (post-gate signal)
+    by_pillar: List[G3PillarBucketOut]
+
+
+@router.get("/g3/originality-stats", response_model=G3OriginalityStatsOut)
+async def g3_originality_stats(
+    days: int = 7,
+    histogram_bins: int = 10,
+    top_neighbors: int = 10,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> G3OriginalityStatsOut:
+    """G3 Phase A shadow-mode stats — read before promoting τ / mode.
+
+    KPIs answered:
+      - block_rate vs the *current* τ: would the gate reject too many
+        alphas if flipped to soft/hard?
+      - min_distance histogram: where does the natural cluster sit?
+        (operator targets a τ that catches the bottom ~5-10%)
+      - top_neighbors: which historical alphas are getting "copied" the
+        most — those are the AST-isomorphism magnets
+      - by_pillar: which pillar is most saturated? (high block rate =
+        next pillar to push diversity in)
+
+    Soft-fails to empty buckets when ast_distance_log is empty (Phase 1
+    flag was OFF) or when alphas.metrics has no _g3_* tags yet (Phase A
+    flag was OFF / freshly flipped).
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    threshold = float(getattr(_stg, "AST_ORIGINALITY_MIN_DISTANCE", 0.15))
+    mode = str(getattr(_stg, "AST_ORIGINALITY_MODE", "shadow") or "shadow")
+    bins = max(2, min(int(histogram_bins), 50))   # clamp to sane range
+    top_n = max(1, min(int(top_neighbors), 100))
+    flags = {
+        "ENABLE_AST_ORIGINALITY_GATE": bool(getattr(_stg, "ENABLE_AST_ORIGINALITY_GATE", False)),
+        "ENABLE_AST_DIVERSITY_DIM": bool(getattr(_stg, "ENABLE_AST_DIVERSITY_DIM", False)),
+    }
+
+    # --- 1. Distance log: total + blocked at current τ ---
+    total_candidates = 0
+    blocked_candidates = 0
+    try:
+        row = (await db.execute(_text(
+            "SELECT "
+            "  COUNT(*) AS total, "
+            "  COUNT(*) FILTER (WHERE ast_distance_min < :tau) AS blocked "
+            "FROM ast_distance_log "
+            "WHERE created_at > now() - (:days || ' day')::interval "
+            "  AND ast_distance_min IS NOT NULL"
+        ), {"tau": threshold, "days": str(int(days))})).one()
+        total_candidates = int(row[0] or 0)
+        blocked_candidates = int(row[1] or 0)
+    except Exception:
+        # Soft-fail — table missing or driver issue. Leave at zero.
+        pass
+
+    block_rate = (
+        round(blocked_candidates / total_candidates, 4)
+        if total_candidates > 0 else 0.0
+    )
+
+    # --- 2. min_distance histogram ---
+    # bin width = 1.0/bins (distance is bounded [0,1]). Use generate_series
+    # so empty buckets still appear (operator wants a continuous histogram).
+    distance_histogram: List[G3DistanceHistogramBucketOut] = []
+    try:
+        hist_rows = (await db.execute(_text(
+            "WITH bins AS ( "
+            "  SELECT generate_series(0, :bins - 1) AS i "
+            ") "
+            "SELECT "
+            "  (i * (1.0 / :bins))::float AS lo, "
+            "  ((i + 1) * (1.0 / :bins))::float AS hi, "
+            "  COALESCE(( "
+            "    SELECT COUNT(*) FROM ast_distance_log "
+            "    WHERE ast_distance_min IS NOT NULL "
+            "      AND ast_distance_min >= (i * (1.0 / :bins)) "
+            "      AND (CASE WHEN i = :bins - 1 "
+            "                THEN ast_distance_min <= ((i + 1) * (1.0 / :bins)) "
+            "                ELSE ast_distance_min <  ((i + 1) * (1.0 / :bins)) END) "
+            "      AND created_at > now() - (:days || ' day')::interval "
+            "  ), 0) AS c "
+            "FROM bins ORDER BY i"
+        ), {"bins": int(bins), "days": str(int(days))})).all()
+        for lo, hi, c in hist_rows:
+            distance_histogram.append(G3DistanceHistogramBucketOut(
+                lo=round(float(lo or 0.0), 4),
+                hi=round(float(hi or 0.0), 4),
+                count=int(c or 0),
+            ))
+    except Exception:
+        # Fallback: equal-width empty histogram so the response shape stays
+        # consistent for the frontend.
+        step = 1.0 / bins
+        for i in range(bins):
+            distance_histogram.append(G3DistanceHistogramBucketOut(
+                lo=round(i * step, 4),
+                hi=round((i + 1) * step, 4),
+                count=0,
+            ))
+
+    # --- 3. Top-N nearest_neighbor (the AST-isomorphism magnets) ---
+    top_neighbors_out: List[G3NeighborBucketOut] = []
+    try:
+        nn_rows = (await db.execute(_text(
+            "SELECT nearest_neighbor_hash, COUNT(*) AS n "
+            "FROM ast_distance_log "
+            "WHERE created_at > now() - (:days || ' day')::interval "
+            "  AND ast_distance_min IS NOT NULL "
+            "  AND ast_distance_min < :tau "
+            "  AND nearest_neighbor_hash IS NOT NULL "
+            "GROUP BY nearest_neighbor_hash "
+            "ORDER BY n DESC "
+            "LIMIT :lim"
+        ), {"days": str(int(days)), "tau": threshold, "lim": top_n})).all()
+        for nh, n in nn_rows:
+            top_neighbors_out.append(G3NeighborBucketOut(
+                nearest_neighbor_hash=str(nh),
+                blocked_count=int(n or 0),
+            ))
+    except Exception:
+        pass
+
+    # --- 4. Per-pillar block rate (from alphas.metrics G3 tag) ---
+    # Uses the JSONB tag _g3_ast_originality_blocked stamped by
+    # backend.alpha_originality.apply_to_alpha. Pillar lives at
+    # metrics->>'pillar' (LLM-emit, set by hypothesis nodes). Use ->>
+    # extraction + GROUP BY to avoid the @> path which would require a
+    # GIN index that the alphas table doesn't have today.
+    by_pillar: List[G3PillarBucketOut] = []
+    try:
+        pill_rows = (await db.execute(_text(
+            "SELECT "
+            "  COALESCE(metrics->>'pillar', 'unknown') AS pillar, "
+            "  COUNT(*) FILTER (WHERE (metrics->>'_g3_ast_originality_blocked')::text = 'true') AS blocked, "
+            "  COUNT(*) AS total "
+            "FROM alphas "
+            "WHERE created_at > now() - (:days || ' day')::interval "
+            "  AND metrics ? '_g3_verdict' "
+            "GROUP BY 1 "
+            "ORDER BY total DESC"
+        ), {"days": str(int(days))})).all()
+        for pillar, blocked, total in pill_rows:
+            t = int(total or 0)
+            b = int(blocked or 0)
+            by_pillar.append(G3PillarBucketOut(
+                pillar=str(pillar or "unknown"),
+                blocked=b,
+                total=t,
+                block_rate=round((b / t), 4) if t > 0 else 0.0,
+            ))
+    except Exception:
+        pass
+
+    return G3OriginalityStatsOut(
+        flags=flags,
+        mode=mode,
+        threshold=threshold,
+        window_days=int(days),
+        total_candidates=total_candidates,
+        blocked_candidates=blocked_candidates,
+        block_rate=block_rate,
+        distance_histogram=distance_histogram,
+        top_neighbors=top_neighbors_out,
+        by_pillar=by_pillar,
+    )
+
+
+# =============================================================================
 # R8 hierarchical RAG telemetry (2026-05-18) — KB shape visibility
 # =============================================================================
 # Unlike R1a/R1b which write to dedicated log tables, R8 does NOT persist

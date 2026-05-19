@@ -2915,6 +2915,72 @@ async def node_evaluate(
             logger.warning(f"[R10] family-cap failed (non-fatal): {_r10_e}")
     # === end R10 family-cap ===
 
+    # === G3 AST Originality Gate (Phase A shadow, 2026-05-19) ===
+    # Runs AFTER R10 family-cap (coarse operator-sequence dedup) to catch
+    # the "换皮" alphas R10 misses — same AST subtree set, different op
+    # pipeline. Phase A defaults to shadow mode: every blocked alpha gets
+    # alpha.metrics['_g3_*'] flags but quality_status stays unchanged so
+    # operators can validate τ via /ops/g3/originality-stats before
+    # promoting to soft (PROVISIONAL) or hard (REJECT).
+    # Soft-fail invariant — any exception is swallowed and downgraded to
+    # "checker disabled this round" so the evaluation loop never breaks.
+    if getattr(settings, "ENABLE_AST_ORIGINALITY_GATE", False) and updated_alphas:
+        try:
+            from backend.alpha_originality import (  # noqa: E402
+                OriginalityChecker,
+                apply_to_alpha,
+            )
+
+            _g3_checker = OriginalityChecker()
+            # History is per-task + per-region. The checker dedupes + caps
+            # at history_k internally. Falls back to empty history on DB
+            # error, in which case every verdict is "skipped" (safe default).
+            await _g3_checker.load_history(
+                task_id=getattr(state, "task_id", None),
+                region=getattr(state, "region", None),
+            )
+
+            _g3_blocked = 0
+            _g3_skipped = 0
+            _g3_errs = 0
+            for _a in updated_alphas:
+                # Skip alphas already in a terminal-fail bucket (R10 drop,
+                # validation REJECT, etc.) — they won't be persisted /
+                # simulated, so G3 numbers would be polluted.
+                _status = getattr(_a, "quality_status", None)
+                _status_str = getattr(_status, "value", _status) if _status is not None else None
+                if _status_str in {"FAIL", "REJECT"}:
+                    continue
+                try:
+                    _verdict = _g3_checker.check(getattr(_a, "expression", "") or "")
+                    apply_to_alpha(_a, _verdict)
+                    if _verdict.verdict == "blocked":
+                        _g3_blocked += 1
+                    elif _verdict.verdict == "skipped":
+                        _g3_skipped += 1
+                except Exception as _g3_inner:  # noqa: BLE001
+                    # Per-alpha soft-fail; do not pollute the round
+                    _g3_errs += 1
+                    logger.debug(
+                        "[G3] per-alpha check failed (non-fatal): %s", _g3_inner
+                    )
+
+            if _g3_blocked or _g3_errs:
+                logger.info(
+                    "[G3] mode=%s blocked=%d skipped=%d errs=%d total=%d "
+                    "history_k=%d τ=%.4f",
+                    _g3_checker.mode,
+                    _g3_blocked,
+                    _g3_skipped,
+                    _g3_errs,
+                    len(updated_alphas),
+                    _g3_checker.history_k,
+                    _g3_checker.threshold,
+                )
+        except Exception as _g3_outer:  # noqa: BLE001
+            logger.warning(f"[G3] originality gate failed (non-fatal): {_g3_outer}")
+    # === end G3 ===
+
     return {
         "pending_alphas": updated_alphas,
         **trace_update
