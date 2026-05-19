@@ -1259,11 +1259,25 @@ class BrainAdapter:
         Returns True if the session is usable afterwards.
         """
         async with self._get_auth_lock():
+            # Thundering-herd fix (2026-05-19): a sibling worker (or this
+            # worker's own prior task) may have refreshed and written a
+            # fresh cookie to Redis while we were waiting for the lock.
+            # Reload from Redis BEFORE _is_session_valid so our stale
+            # in-memory cookie doesn't trigger a redundant authenticate()
+            # that races against BRAIN's /authentication rate-limit (5/min).
+            # Without this, N concurrent workers each invalidate the
+            # Redis cache and call authenticate(), mutually nuking the
+            # freshly-written cookie of the predecessor in the lock queue
+            # — symptom: a sustained loop of "Incorrect authentication
+            # credentials" errors observed on task 3083 (~36 rows / 90min).
             try:
+                await self._load_session_from_redis()
                 if await self._is_session_valid():
                     return True
             except Exception:
                 pass
+            # Redis cookie also stale (or load/check raised) — we really
+            # are the first worker in this auth window. Invalidate + re-auth.
             await self._invalidate_session_cache()
             try:
                 return bool(await self.authenticate())
