@@ -81,6 +81,12 @@ class AlphaListItem:
     created_at: Optional[datetime]
     self_corr: Optional[float] = None
     self_corr_source: Optional[str] = None
+    # 2026-05-19: surface submit-state to AlphaList UI so 已提交/可提交/
+    # 不可提交/未检 tag 不再永远 fallback 到 "未检"。Frontend
+    # `AlphaList.jsx:78-83` 已经按 date_submitted + can_submit 过滤,但响应
+    # 体之前漏了这俩字段。
+    date_submitted: Optional[datetime] = None
+    can_submit: Optional[bool] = None
 
 
 @dataclass
@@ -252,6 +258,8 @@ class AlphaService(BaseService):
             created_at=alpha.date_created or alpha.created_at,
             self_corr=self_corr,
             self_corr_source=self_corr_source,
+            date_submitted=alpha.date_submitted,
+            can_submit=alpha.can_submit,
         )
     
     # =========================================================================
