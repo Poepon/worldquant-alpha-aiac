@@ -1007,6 +1007,65 @@ async def brain_deactivate_consultant(
     return BrainRoleSwitchOut(**result)
 
 
+# =============================================================================
+# A+ BRAIN auth circuit breaker (2026-05-19)
+# =============================================================================
+# Inspect + manually clear the BRAIN_AUTH_CIRCUIT used by simulate_alpha /
+# mining_tasks._run_one_round_inline. OPEN state means callers are
+# fast-failing — no mining LLM cost burnt until ops clears or the 300s TTL
+# auto-HALF_OPENs and the next call probes.
+
+
+class BrainAuthCircuitOut(BaseModel):
+    state: str
+    until_ts: Optional[float] = None
+    until_iso: Optional[str] = None
+    last_failure_at: Optional[float] = None
+    last_failure_iso: Optional[str] = None
+    last_failure_reason: Optional[str] = None
+    trip_count: int = 0
+    seconds_until_half_open: int = 0
+
+
+class BrainAuthCircuitClearOut(BaseModel):
+    cleared: bool
+    actor: Optional[str] = None
+
+
+@router.get("/brain/auth-circuit-status", response_model=BrainAuthCircuitOut)
+async def brain_auth_circuit_status(
+    _token: str = Depends(_require_ops_token),
+) -> BrainAuthCircuitOut:
+    """Current BRAIN auth circuit state. CLOSED = normal; OPEN = callers
+    fast-failing (no mining LLM cost burnt); HALF_OPEN = TTL elapsed, next
+    real call will probe + flip CLOSED/OPEN based on outcome.
+
+    Read from Redis-backed CircuitBreaker; soft-fails to CLOSED state on
+    any Redis error so ops console never shows misleading OPEN state due
+    to a Redis blip.
+    """
+    from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
+    return BrainAuthCircuitOut(**BRAIN_AUTH_CIRCUIT.status().to_dict())
+
+
+@router.post("/brain/auth-circuit-clear", response_model=BrainAuthCircuitClearOut)
+async def brain_auth_circuit_clear(
+    _token: str = Depends(_require_ops_token),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> BrainAuthCircuitClearOut:
+    """Force-close the BRAIN auth circuit. Use after manual BRAIN re-auth
+    (e.g. ops updated `.env` BRAIN_PASSWORD or BRAIN account was unlocked).
+    Next BRAIN call will probe; if it 401s again the circuit auto-trips.
+
+    Note: a successful authenticate() inside BrainAdapter ALSO calls
+    .clear() — this endpoint is for when ops fixed the upstream root cause
+    and wants to skip the 300s TTL wait.
+    """
+    from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
+    BRAIN_AUTH_CIRCUIT.clear(reason=f"ops_manual_by_{actor or 'unknown'}")
+    return BrainAuthCircuitClearOut(cleared=True, actor=actor)
+
+
 # ---------------------------------------------------------------------------
 # Flat session admin endpoints (post tier-system removal, 2026-05-18)
 # ---------------------------------------------------------------------------

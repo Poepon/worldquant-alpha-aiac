@@ -20,6 +20,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_brain_auth_circuit():
+    """A+ circuit breaker (2026-05-19): BRAIN_AUTH_CIRCUIT is a module-level
+    singleton — tests must ensure is_open() returns False BEFORE running so
+    the simulate_alpha fast-fail short-circuit doesn't pre-empt the actual
+    line-633 branch under test. Patch Redis to a closed (empty) state for
+    the duration of each test."""
+    fake_redis = MagicMock()
+    fake_redis.get = MagicMock(return_value=None)   # CLOSED
+    fake_redis.set = MagicMock(return_value=True)
+    fake_redis.delete = MagicMock(return_value=1)
+    with patch(
+        "backend.tasks.redis_pool.get_redis_client",
+        return_value=fake_redis,
+    ):
+        yield fake_redis
+
+
 def _make_response(status_code: int, body: str):
     r = MagicMock()
     r.status_code = status_code

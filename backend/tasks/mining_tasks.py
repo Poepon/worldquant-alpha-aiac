@@ -957,6 +957,36 @@ async def _run_one_round_inline(
 ) -> dict:
     """Run one round on the foreground session. Returns mining_agent result
     dict (or empty dict on failure)."""
+    # A+ circuit breaker (2026-05-19): if BRAIN auth is in a known-bad state,
+    # skip the entire LangGraph workflow — no hypothesis / code_gen / validate
+    # / simulate / evaluate / R5 / R1a LLM cost burnt running a round whose
+    # sim will fail. Caller (_run_flat_iteration outer loop) sees
+    # skipped=True with reason brain_auth_circuit_open and sleeps before the
+    # next iteration so we don't busy-wait.
+    try:
+        from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
+        if BRAIN_AUTH_CIRCUIT.is_open():
+            status = BRAIN_AUTH_CIRCUIT.status()
+            logger.warning(
+                f"[_run_one_round_inline] BRAIN auth circuit OPEN — "
+                f"skipping round dataset={dataset_id} reason="
+                f"{status.last_failure_reason!r} reopens_in="
+                f"{status.to_dict()['seconds_until_half_open']}s. "
+                f"NO LLM cost burnt this round."
+            )
+            return {
+                "all_alphas": [],
+                "iterations_completed": 0,
+                "skipped": True,
+                "skipped_reason": "brain_auth_circuit_open",
+                "circuit_reopens_in_sec": status.to_dict()["seconds_until_half_open"],
+            }
+    except Exception as _circ_e:
+        # Soft-fail: Redis blip etc. — DO NOT skip the round, let traffic
+        # through (the circuit's own is_open already defaults to False on
+        # error, but defend against import-time crashes too).
+        logger.debug(f"[_run_one_round_inline] circuit check skipped: {_circ_e}")
+
     # R1b.2c+v2 wire (2026-05-18): drain any cross-round pending hypothesis
     # from the prior round's hypothesis_mutate, then INJECT it into MiningState
     # via the workflow's configurable so node_hypothesis can use it directly
@@ -1248,6 +1278,23 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 # dataset cycles (and pause-resume boundaries).
                 iteration_offset=iterations,
             )
+            # A+ circuit breaker: if BRAIN auth circuit is OPEN the round
+            # was skipped — don't busy-loop hitting the same circuit-open
+            # check on every dataset. Sleep enough for the circuit's TTL to
+            # naturally probe (capped at 60s — long enough to avoid hot
+            # loop, short enough to recover quickly when ops re-auths).
+            if result.get("skipped") and result.get("skipped_reason") == "brain_auth_circuit_open":
+                _wait_sec = min(60, max(5, int(result.get("circuit_reopens_in_sec") or 30)))
+                logger.info(
+                    f"[flat] task={task.id} BRAIN auth circuit open — "
+                    f"sleeping {_wait_sec}s before next iteration (cursor "
+                    f"unchanged, iterations unchanged)"
+                )
+                await asyncio.sleep(_wait_sec)
+                # Do NOT advance flat_cursor / iterations / total_alphas —
+                # the round didn't run, so the same dataset gets retried.
+                continue
+
             round_alphas = len(result.get("all_alphas") or [])
             total_alphas += round_alphas
             iterations += 1

@@ -35,6 +35,16 @@ from backend.models import BrainAuthToken
 # Import protocol for type checking (Protocol is runtime_checkable)
 from backend.protocols.brain_protocol import BrainProtocol
 
+# A+ circuit breaker (2026-05-19): backend.circuit_breaker is intentionally
+# at the top-level (NOT under services/) to avoid the
+# adapters→services→mining_service→adapters cycle. When BRAIN auth fails
+# persistently, trip this circuit so every BrainAdapter caller fast-fails
+# (no LLM cost burnt running a round whose sim can't succeed). TTL=300s
+# gives ops a 5min window; after that the circuit auto-HALF_OPENs and the
+# next call probes. authenticate() success calls .clear().
+from backend.circuit_breaker import CircuitBreaker
+BRAIN_AUTH_CIRCUIT = CircuitBreaker("brain_auth", default_ttl_sec=300)
+
 # Singleton Client Storage (Loop-aware)
 _GLOBAL_CLIENT: Optional[httpx.AsyncClient] = None
 _GLOBAL_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -539,12 +549,21 @@ class BrainAdapter:
             
             if response.status_code == 201:
                 logger.info("BRAIN authentication successful")
-                
+
                 # Save session to Redis
                 data = response.json()
                 expiry = data.get("token", {}).get("expiry", 3600*4) # Default 4h if missing
                 await self._save_session_to_redis(expiry)
-                
+
+                # A+ circuit breaker: a successful authenticate() is the
+                # canonical recovery signal — clear the circuit so callers
+                # resume sim/poll/pnl immediately (even if the TTL hasn't
+                # elapsed). Safe no-op when circuit is already CLOSED.
+                try:
+                    BRAIN_AUTH_CIRCUIT.clear(reason="authenticate_success")
+                except Exception:
+                    pass
+
                 return True
             elif response.status_code == 429:
                 retry_after = response.headers.get("Retry-After")
@@ -564,6 +583,26 @@ class BrainAdapter:
     # I will replicate them below, ensuring they use self.client and handle errors.
     
     async def simulate_alpha(self, expression: str, region: str = "USA", universe: str = "TOP3000", delay: int = 1, decay: int = 4, neutralization: str = "SUBINDUSTRY", truncation: float = 0.08, test_period: str = "P2Y0M") -> Dict:
+        # A+ circuit breaker (2026-05-19): fast-fail when BRAIN auth is in
+        # known-bad state. Saves us from burning a sim slot acquire + 3 retry
+        # attempts + a 401 response just to discover what the LAST sim already
+        # told us. Caller's `retryable=True` path holds the alpha at PENDING
+        # (V-27.61) and the round-entry check in mining_tasks._run_one_round_inline
+        # short-circuits the whole LangGraph workflow so no LLM cost is burnt.
+        if BRAIN_AUTH_CIRCUIT.is_open():
+            status = BRAIN_AUTH_CIRCUIT.status()
+            return {
+                "success": False,
+                "error": (
+                    f"BRAIN auth circuit OPEN — fast-fail (reason="
+                    f"{status.last_failure_reason!r}, "
+                    f"reopens_in={max(0, int((status.until_ts or 0) - time.time()))}s)"
+                ),
+                "retryable": True,
+                "retry_after_sec": max(30, int((status.until_ts or time.time() + 60) - time.time())),
+                "error_kind": "brain_auth_circuit_open",
+            }
+
         # Construct payload
         sim_payload = {
             "type": "REGULAR",
@@ -652,14 +691,25 @@ class BrainAdapter:
                             f"[BrainAdapter] simulate POST persists auth-error "
                             f"after _request reauth+2x-retry — task likely "
                             f"hit BRAIN session expiry or account lock. "
-                            f"Returning retryable to prevent silent-burn. "
+                            f"Tripping BRAIN_AUTH_CIRCUIT to prevent silent-burn. "
                             f"Status={response.status_code} body={response.text[:200]}"
                         )
+                        # A+ circuit breaker: trip so subsequent calls fast-fail
+                        # without going through reauth+retry again. authenticate()
+                        # success (manual ops trigger or natural retry after TTL)
+                        # will clear the circuit.
+                        try:
+                            BRAIN_AUTH_CIRCUIT.trip(
+                                reason=f"simulate_post_auth_fail_{response.status_code}",
+                                ttl_sec=300,
+                            )
+                        except Exception:
+                            pass
                         return {
                             "success": False,
                             "error": f"BRAIN auth failure: {response.text[:200]}",
                             "retryable": True,
-                            "retry_after_sec": 300,  # 5min — give ops a chance to notice
+                            "retry_after_sec": 300,
                             "error_kind": "brain_auth_failure",
                         }
                     logger.error(f"Brain Simulation Failed [{response.status_code}] | Payload: {json.dumps(sim_payload)} | Response: {response.text}")
