@@ -190,6 +190,16 @@ class MiningState(BaseModel):
     # ENABLE_G5_CROSSOVER OFF or no offspring stashed.
     g5_offspring_candidates: List[Dict] = Field(default_factory=list)
 
+    # Phase 4 Sprint 1 A1.1 (2026-05-19): LLM mode used for THIS round —
+    # "author" (LLM emits BRAIN DSL directly, AIAC v1 default) or
+    # "assistant" (LLM emits hypothesis text + GA + template library
+    # compose the expression). Resolved by
+    # backend.services.llm_mode_service.resolve_mode at round entry;
+    # round-end hook reads this to detect mid-task mode flip + drain
+    # cross-round residue keys before the next round. NOT yet wired to
+    # node_code_gen branching (A1.3); A1.1 just records the resolution.
+    llm_mode_used: str = "author"
+
     # Plan v5+ §Phase 2 B5/B6: per-hypothesis round history. Key = hypothesis_id.
     # Each entry: {round_index, alpha_count, pass_count, fail_count,
     #              syntax_fail_count, simulate_fail_count, attribution,

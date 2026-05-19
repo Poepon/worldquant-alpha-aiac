@@ -262,6 +262,44 @@ class Settings(BaseSettings):
     FLAT_CROSS_REGION_ENFORCE: bool = False
     FLAT_CROSS_REGION_LOOKBACK_DAYS: int = 30  # last-N-days window for share computation
 
+    # ----- A1.1 R12 LLM_MODE=assistant — service + state machine (Sprint 1) -----
+    # Critical path 工业派共识吸收 — "LLM 是 research assistant 不是 expression-
+    # author"(Citadel / Two Sigma / Bridgewater AIA)。A1 拆 4 sub-PR:
+    #   A1.1 (this PR)  — service + state machine + drain residue keys
+    #   A1.2            — sentinel guard 联动 6 LIVE flag + audit + restore
+    #   A1.3            — code_gen branching + assistant template library
+    #   A1.4            — ops endpoint + bootstrap CI GO gate
+    # Default OFF — task.config["llm_mode"]='assistant' opt-in 灰度。
+    # NOT yet in SUPPORTED_FLAGS (A1.2 will register + 联动)。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.1 (v3.0/v5.0 critical path)
+    ENABLE_LLM_ASSISTANT_MODE: bool = False
+    # Sentinel flags A1.2 will force OFF when ENABLE_LLM_ASSISTANT_MODE=True.
+    # Declared here so the llm_mode_service can reason about expected
+    # cross-flag state without circular import on feature_flag_service.
+    LLM_ASSISTANT_SENTINEL_FLAGS: list = [
+        "ENABLE_R1B_HYPOTHESIS_MUTATE",
+        "ENABLE_G5_CROSSOVER",
+        "ENABLE_HYPOTHESIS_FOREST_REUSE",
+        "ENABLE_R8_L0",
+        "ENABLE_AST_ORIGINALITY_GATE",
+        "ENABLE_SIMULATION_CACHE",
+    ]
+    # Task.config keys drained when LLM mode flips (per Round S0-A F-A5):
+    # 4 cross-round / inject staging keys that would carry author-mode
+    # state into an assistant-mode round (or vice versa) and produce
+    # silent zombie consumption. Kept declarative so future audits don't
+    # have to hunt them down in service code.
+    # NOT drained: brain_role_snapshot (Consultant-mode survives mode flip),
+    # stop_loss_state (R14 cross-round accumulator), flat_cursor (lives
+    # on run.runtime_state not task.config).
+    LLM_ASSISTANT_RESIDUE_KEYS: list = [
+        "g5_pending_offspring",
+        "__pending_hypothesis",
+        "__g5_consumed_offspring",
+        "__r1b_consumed_pending_hypothesis",
+        "contextual_bandit_v1",  # mining_agent._BANDIT_CONFIG_KEY value
+    ]
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入

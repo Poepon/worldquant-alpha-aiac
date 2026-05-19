@@ -312,6 +312,17 @@ class MiningWorkflow:
             )
             _g5_consumed = []
 
+        # Phase 4 Sprint 1 A1.1 (2026-05-19): resolve LLM mode for this round.
+        # NEVER raises — defaults to "author" if flag OFF, missing task.config,
+        # or any other resolution failure. NOT wired to node_code_gen yet
+        # (A1.3); A1.1 just records on state.llm_mode_used so downstream R12
+        # decision SQL can stratify and operators can observe per-round mode.
+        try:
+            from backend.services.llm_mode_service import resolve_mode as _resolve_llm_mode
+            _llm_mode = _resolve_llm_mode(task)
+        except Exception:  # noqa: BLE001 — never break workflow on mode resolve
+            _llm_mode = "author"
+
         initial_state = MiningState(
             task_id=task.id,
             region=task.region,
@@ -327,6 +338,7 @@ class MiningWorkflow:
             effective_region_universes_at_start=_role_snapshot.get("effective_region_universes"),
             r1b_consumed_pending_hypothesis=_r1b_consumed,
             g5_offspring_candidates=_g5_consumed,
+            llm_mode_used=_llm_mode,
         )
         
         # Compile and run
