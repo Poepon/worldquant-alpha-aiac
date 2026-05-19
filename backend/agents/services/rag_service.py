@@ -379,6 +379,34 @@ class RAGService:
         # Phase 3 R8 (2026-05-18): hierarchical RAG dispatch — opt-in via
         # current_expression or hypothesis_pillar. Soft-fall to legacy.
         from backend.config import settings as _stg
+
+        # G4 补强 Phase A (2026-05-19): when neither current_expression nor
+        # hypothesis_pillar is provided by the caller (e.g. node_rag_query
+        # which runs BEFORE node_hypothesis), infer hypothesis_pillar from
+        # the 7d alpha pool deficit so R8 L1 (pillar layer) can still fire.
+        # Uses the same Redis cache key as P2-B (aiac:pillar_deficit:{region}:
+        # {date}, 60s TTL) so when node_hypothesis also runs P2-B later in
+        # the same round, both nodes see identical pillar_hint. Soft-fail:
+        # any error in inference → hypothesis_pillar stays None → falls back
+        # to legacy. Only triggers when the R8 flag is ON (zero overhead
+        # when OFF). The caller's explicit hypothesis_pillar always wins.
+        if (
+            getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)
+            and not current_expression
+            and not hypothesis_pillar
+            and region
+        ):
+            try:
+                hypothesis_pillar = await self._infer_pillar_hint_from_pool(
+                    region=region,
+                )
+            except Exception as _g4_e:
+                logger.warning(
+                    f"[RAGService] G4 pillar-hint inference failed "
+                    f"(non-fatal, falling back to legacy): {_g4_e}"
+                )
+                hypothesis_pillar = None
+
         if (
             getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)
             and (current_expression or hypothesis_pillar)
@@ -469,6 +497,88 @@ class RAGService:
             region=region
         )
     
+    async def _infer_pillar_hint_from_pool(self, *, region: str) -> Optional[str]:
+        """G4 补强 Phase A (2026-05-19): infer the most-deficient pillar from
+        the recent (7d) alpha pool so RAG.query can trigger R8 L1 even when
+        the caller has no current_expression / explicit hypothesis_pillar
+        (the node_rag_query case).
+
+        Algorithm mirrors node_hypothesis P2-B exactly, including the Redis
+        cache key, so when both nodes fire in the same round they read the
+        same cached deficit map (60s TTL — short enough that fresh alphas
+        rebalance shares quickly; long enough that consecutive nodes in one
+        round share the snapshot).
+
+        Returns the pillar name with the largest deficit if it exceeds
+        ``PILLAR_BALANCE_SKEW_THRESHOLD * target_share``, else None.
+        Returns None on any error (caller treats None as "fall back to
+        legacy retrieval"). NEVER raises.
+        """
+        try:
+            import json
+            from datetime import datetime, timedelta, timezone
+            from backend.tasks.redis_pool import get_redis_client
+            from backend.models import Alpha, Hypothesis
+            from sqlalchemy import select as _sa_select, func as _sa_func
+            from backend.config import settings as _stg
+
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            cache_key = f"aiac:pillar_deficit:{region}:{today}"
+            redis = None
+            try:
+                redis = get_redis_client()
+            except Exception:
+                redis = None
+
+            counts: Optional[Dict[str, int]] = None
+            if redis is not None:
+                try:
+                    cached = redis.get(cache_key)
+                    if cached is not None:
+                        counts = json.loads(cached)
+                except Exception:
+                    counts = None
+
+            if counts is None:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).replace(tzinfo=None)
+                stmt = (
+                    _sa_select(Hypothesis.pillar, _sa_func.count(Alpha.id))
+                    .select_from(Alpha)
+                    .outerjoin(Hypothesis, Alpha.hypothesis_id == Hypothesis.id)
+                    .where(Alpha.region == region, Alpha.created_at >= cutoff)
+                    .group_by(Hypothesis.pillar)
+                )
+                rows = (await self.db.execute(stmt)).all()
+                counts = {(p or "unknown"): int(c) for p, c in rows}
+                if redis is not None:
+                    try:
+                        redis.setex(cache_key, 60, json.dumps(counts))
+                    except Exception:
+                        pass
+
+            target = getattr(_stg, "PILLAR_TARGET_DISTRIBUTION", {}) or {}
+            if not target:
+                return None
+            pillared_total = sum(c for p, c in counts.items() if p in target) or 1
+            shares = {p: counts.get(p, 0) / pillared_total for p in target}
+            deficits = {p: max(0.0, target[p] - shares.get(p, 0.0)) for p in target}
+            if not deficits:
+                return None
+            top_pillar, top_def = max(deficits.items(), key=lambda kv: kv[1])
+            skew_t = float(getattr(_stg, "PILLAR_BALANCE_SKEW_THRESHOLD", 0.4))
+            if top_def > skew_t * target.get(top_pillar, 0.2):
+                logger.info(
+                    f"[RAGService] G4 pillar-hint inferred | region={region} "
+                    f"hint={top_pillar} deficit={top_def:.3f}"
+                )
+                return top_pillar
+            return None
+        except Exception as e:
+            logger.warning(
+                f"[RAGService] G4 _infer_pillar_hint_from_pool failed: {e}"
+            )
+            return None
+
     async def _get_success_patterns_enhanced(
         self,
         dataset_id: str = None,
