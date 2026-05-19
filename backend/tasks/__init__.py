@@ -46,8 +46,6 @@ from backend.tasks.refresh_tasks import audit_iqc_marginal_for_alpha
 # V-22.12.1: beat fallback sweep — backfills audits missed by the
 # refresh_can_submit_for_alpha hook (BRAIN sync paths, broker outages, etc.)
 from backend.tasks.refresh_tasks import iqc_audit_backfill_sweep
-# Phase 3 prep T02: weekly readiness check
-from backend.tasks.phase3_tasks import run_phase3_readiness_check
 # V-19.7: persistent mining service watchdog + BRAIN quota guard
 from backend.tasks.session_watchdog import (
     watchdog_revive_dead_sessions,
