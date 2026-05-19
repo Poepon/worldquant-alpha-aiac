@@ -593,6 +593,41 @@ const api = {
     return data
   },
 
+  // G2 Phase A cost telemetry (2026-05-19) — per-call LLM cost across all callers
+  // (普通 round + R1b + macro + R5 + future). Window-aggregated by_model /
+  // by_node_key / by_pillar plus 24h hourly bucket. Healthy gate: flag ON +
+  // total_calls > 0 + error_rate ≤ 0.10.
+  getOpsCostTelemetry: async (days = 7, topN = 10) => {
+    const { data } = await client.get('/ops/cost/telemetry', {
+      params: { days, top_n: topN },
+    })
+    return data
+  },
+
+  // G1 Phase A direction-bandit telemetry (2026-05-19) — per-arm pulls /
+  // observed reward / PASS rate joined from alphas.metrics. GO-gate readiness
+  // signal exposed via go_gate_segments_ready.
+  getOpsDirectionBanditTelemetry: async (days = 7, topSegments = 10) => {
+    const { data } = await client.get('/ops/direction-bandit/telemetry', {
+      params: { days, top_segments: topSegments },
+    })
+    return data
+  },
+
+  // G3 Phase A AST originality stats (2026-05-19) — shadow-mode block rate at
+  // current τ + min_distance histogram + top-N nearest-neighbor + per-pillar
+  // block rate. Operator uses this to calibrate τ before promoting MODE.
+  getOpsG3OriginalityStats: async (days = 7, histogramBins = 10, topNeighbors = 10) => {
+    const { data } = await client.get('/ops/g3/originality-stats', {
+      params: {
+        days,
+        histogram_bins: histogramBins,
+        top_neighbors: topNeighbors,
+      },
+    })
+    return data
+  },
+
   // flat-F1 advanced kickoff (2026-05-18). Gated server-side by
   // ENABLE_FLAT_CONTINUOUS — flag OFF returns HTTP 400 with detail string.
   startFlatSession: async ({ region, universe, datasets = [] }) => {

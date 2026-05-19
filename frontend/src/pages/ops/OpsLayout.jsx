@@ -15,6 +15,9 @@ import BrainRoleSwitch from './BrainRoleSwitch'
 import SimulationCacheMonitor from './SimulationCacheMonitor'
 import LLMJudgeMonitor from './LLMJudgeMonitor'
 import DagMonitor from './DagMonitor'
+import CostMonitor from './CostMonitor'
+import DirectionBanditMonitor from './DirectionBanditMonitor'
+import G3OriginalityMonitor from './G3OriginalityMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -73,6 +76,12 @@ export default function OpsLayout() {
         <Route path="r5-judge" element={<LLMJudgeMonitor />} />
         {/* Phase 2 R6 — DAG trace telemetry (2026-05-18) */}
         <Route path="r6-dag" element={<DagMonitor />} />
+        {/* G2 Phase A — LLM cost telemetry (2026-05-19) */}
+        <Route path="cost-monitor" element={<CostMonitor />} />
+        {/* G1 Phase A — direction-bandit telemetry (2026-05-19) */}
+        <Route path="direction-bandit-monitor" element={<DirectionBanditMonitor />} />
+        {/* G3 Phase A — AST originality stats (2026-05-19) */}
+        <Route path="g3-monitor" element={<G3OriginalityMonitor />} />
       </Routes>
     </div>
   )
