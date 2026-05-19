@@ -1,0 +1,168 @@
+[
+  {
+    "_comment": "Phase 4 Sprint 1 A4 — AQR / Bryan Kelly research-paper KB seed (2026-05-19). 5 SSRN papers × 1-3 hypothesis each. Mix of concrete BRAIN DSL expressions (where the paper points at a specific factor / construction) and is_anchor_metadata=true entries (where the paper is methodological survey — operator can re-translate later via R8 RAG + LLM). All entries tagged via meta_data: import_batch='aqr_kelly_2026_05_20' for precise rollback; paper_citation + theoretical_anchor preserve provenance. See docs/aqr_kelly_seed_2026-05-20.md for sources + decision rationale.",
+
+    "_meta": "Pattern field for is_anchor_metadata=true is a hypothesis statement (NOT BRAIN DSL); R8 SQL filters these out per Q2 dual-path. Future re-translation: SELECT pattern WHERE meta_data->>'import_batch'='aqr_kelly_2026_05_20' AND meta_data->>'is_anchor_metadata'='true' → feed to LLM for DSL conversion."
+  },
+
+  {
+    "source": "paper",
+    "pattern": "group_neutralize(rank(book_to_market), sector)",
+    "description": "Sector-neutralized value (book-to-market) — Giglio/Kelly/Xiu (2022) Annual Review §4: cross-sectional value premium is robust + persistent across decades when properly neutralized for sector exposure. The factor zoo deduplication shows value cleanly survives PCA/IPCA decomposition.",
+    "category": "fundamental",
+    "confidence": 0.78,
+    "verified": false,
+    "source_title": "Factor Models, Machine Learning, and Asset Pricing (Giglio, Kelly, Xiu 2022)",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4267961",
+    "paper_citation": "Giglio, S., Kelly, B., Xiu, D. (2022). Factor Models, Machine Learning, and Asset Pricing. Annual Review of Financial Economics, 14, 337-368.",
+    "theoretical_anchor": "Giglio-Kelly-Xiu 2022"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "Cross-sectional return predictability is robust across decades — firm characteristics (size, value, momentum, profitability, investment) capture persistent alpha after sector neutralization; factor zoo deduplication via sparse PCA/IPCA collapses ~200 characteristics to ~5-10 latent factors.",
+    "description": "Anchor metadata for Giglio/Kelly/Xiu (2022) Annual Review survey conclusion §6 — methodological, not a single expression. Operator can use this as RAG context when building multi-characteristic alphas.",
+    "category": "fundamental",
+    "confidence": 0.85,
+    "verified": false,
+    "source_title": "Factor Models, Machine Learning, and Asset Pricing (Giglio, Kelly, Xiu 2022)",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4267961",
+    "is_anchor_metadata": true,
+    "paper_citation": "Giglio, S., Kelly, B., Xiu, D. (2022). Factor Models, Machine Learning, and Asset Pricing. Annual Review of Financial Economics.",
+    "theoretical_anchor": "Giglio-Kelly-Xiu 2022 factor zoo"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "signed_power(rank(ts_corr(close, volume, 20)), 2)",
+    "description": "Squared rank of price-volume correlation — Kelly/Xiu (2023) Financial ML §3.2: tree-based models (XGBoost / random forest) capture nonlinear interactions that linear regressions miss; squaring the rank approximates the tree's ability to amplify mid-rank signals relative to tails.",
+    "category": "pv",
+    "confidence": 0.75,
+    "verified": false,
+    "source_title": "Financial Machine Learning (Kelly, Xiu 2023)",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4501707",
+    "paper_citation": "Kelly, B. T., Xiu, D. (2023). Financial Machine Learning. Foundations and Trends in Finance.",
+    "theoretical_anchor": "Kelly-Xiu 2023 nonlinear"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "multiply(rank(ts_delta(close, 20)), rank(ts_std_dev(returns, 60)))",
+    "description": "Momentum × volatility interaction — Kelly/Xiu (2023) §4: neural networks consistently extract alpha from interactions between firm characteristics; the multiplicative form captures the OOS uplift from non-additive feature engineering reported in their Table 5.",
+    "category": "pv",
+    "confidence": 0.72,
+    "verified": false,
+    "source_title": "Financial Machine Learning (Kelly, Xiu 2023)",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4501707",
+    "paper_citation": "Kelly, B. T., Xiu, D. (2023). Financial Machine Learning. Foundations and Trends in Finance.",
+    "theoretical_anchor": "Kelly-Xiu 2023 interactions"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "Test-period regularization (lookahead-free split) is critical for OOS performance — apparent in-sample R² > 5% routinely collapses to <1% OOS when training/validation/test splits are time-aware rather than i.i.d.",
+    "description": "Anchor metadata for Kelly/Xiu (2023) §5 methodological warning — relevant to AIAC's own backtest discipline. Operator decision support: when interpreting any new mining alpha's IS metrics, mentally apply Kelly's adjustment downward.",
+    "category": "other",
+    "confidence": 0.95,
+    "verified": false,
+    "source_title": "Financial Machine Learning (Kelly, Xiu 2023)",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4501707",
+    "is_anchor_metadata": true,
+    "paper_citation": "Kelly, B. T., Xiu, D. (2023). Financial Machine Learning. §5 OOS discipline.",
+    "theoretical_anchor": "Kelly-Xiu 2023 OOS discipline"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "group_neutralize(ts_zscore(returns, 60), industry)",
+    "description": "Industry-neutralized 60-day return zscore — Gu/Kelly/Xiu Autoencoder Asset Pricing Models §3: the residual after subtracting industry-level common factor exposure carries the autoencoder's primary alpha signal. Standard recipe: 60-day window aligns with quarterly rebalance cadence in their backtest.",
+    "category": "pv",
+    "confidence": 0.8,
+    "verified": false,
+    "source_title": "Autoencoder Asset Pricing Models (Gu, Kelly, Xiu)",
+    "source_url": "https://www.aqr.com/Insights/Research/Working-Paper/Autoencoder-Asset-Pricing-Models",
+    "paper_citation": "Gu, S., Kelly, B. T., Xiu, D. Autoencoder Asset Pricing Models. AQR Working Paper.",
+    "theoretical_anchor": "Gu-Kelly-Xiu autoencoder"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "Autoencoder factors (deep nonlinear latent factor recovery) fit OOS Sharpe substantially better than Fama-French 5-factor — conditional autoencoder allows time-varying factor loadings that capture regime-dependent risk premia. The recovered latent factors are interpretable: closely aligned with industry, size, and value despite no human supervision.",
+    "description": "Anchor metadata for Gu/Kelly/Xiu autoencoder paper key finding — methodological. Operator decision support: residual returns after sector + size + value neutralization should be exploitable.",
+    "category": "fundamental",
+    "confidence": 0.85,
+    "verified": false,
+    "source_title": "Autoencoder Asset Pricing Models (Gu, Kelly, Xiu)",
+    "source_url": "https://www.aqr.com/Insights/Research/Working-Paper/Autoencoder-Asset-Pricing-Models",
+    "is_anchor_metadata": true,
+    "paper_citation": "Gu, S., Kelly, B. T., Xiu, D. Autoencoder Asset Pricing Models. AQR Working Paper.",
+    "theoretical_anchor": "Gu-Kelly-Xiu autoencoder regime"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "ts_decay_linear(group_neutralize(ts_zscore(returns, 252), industry), 20)",
+    "description": "Industry-neutralized annual return with linear decay — Kelly et al. Large and Deep Factor Models §4: deeper networks + more latent factors both improve fit when properly regularized; the 252-day horizon (annual) + linear decay smooths the regime-dependent loadings that the conditional autoencoder recovers.",
+    "category": "pv",
+    "confidence": 0.78,
+    "verified": false,
+    "source_title": "Large (and Deep) Factor Models (Kelly et al.)",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4679269",
+    "paper_citation": "Kelly, B. T. et al. Large (and Deep) Factor Models. SSRN 4679269.",
+    "theoretical_anchor": "Kelly large+deep"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "More latent factors AND deeper neural network depth BOTH improve OOS Sharpe when properly regularized via spectral normalization + early stopping; depth dominates breadth past 4 layers.",
+    "description": "Anchor metadata for Kelly et al. Large and Deep Factor Models §5 ablation — methodological. Operator decision: when ML factor models seem to overfit, depth regularization (spectral norm) often unlocks the remaining alpha.",
+    "category": "other",
+    "confidence": 0.8,
+    "verified": false,
+    "source_title": "Large (and Deep) Factor Models (Kelly et al.)",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4679269",
+    "is_anchor_metadata": true,
+    "paper_citation": "Kelly, B. T. et al. Large (and Deep) Factor Models. SSRN 4679269.",
+    "theoretical_anchor": "Kelly large+deep ablation"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "ts_zscore(analyst_count, 60)",
+    "description": "Analyst coverage z-score as sentiment proxy — Chen/Kelly/Xiu Expected Returns and LLMs §3: LLM-derived sentiment from 10-K MD&A text predicts cross-section of returns; in AIAC's BRAIN data lacking direct sentiment fields, analyst-coverage burstiness (z-scored) is the closest available proxy for the 'buzz/coverage' channel the LLM-ER paper documents.",
+    "category": "analyst",
+    "confidence": 0.7,
+    "verified": false,
+    "source_title": "Expected Returns and Large Language Models (Chen, Kelly, Xiu)",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4416687",
+    "paper_citation": "Chen, A. Y., Kelly, B. T., Xiu, D. Expected Returns and Large Language Models. SSRN 4416687.",
+    "theoretical_anchor": "Chen-Kelly-Xiu LLM-ER"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "LLM embeddings of management discussion (10-K MD&A, earnings call transcripts) carry cross-sectional return predictive content — embedding cosine similarity between firms captures hidden risk-factor exposures missed by structured firm characteristics. The expected-return channel survives controls for the standard factor zoo.",
+    "description": "Anchor metadata for Chen/Kelly/Xiu LLM-ER core finding — methodological. Operator decision: future AIAC could ingest LLM-extracted text features for new BRAIN datasets if such fields become available; until then, analyst-coverage / news-count proxies above are the actionable embodiment.",
+    "category": "analyst",
+    "confidence": 0.82,
+    "verified": false,
+    "source_title": "Expected Returns and Large Language Models (Chen, Kelly, Xiu)",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4416687",
+    "is_anchor_metadata": true,
+    "paper_citation": "Chen, A. Y., Kelly, B. T., Xiu, D. Expected Returns and Large Language Models. SSRN 4416687.",
+    "theoretical_anchor": "Chen-Kelly-Xiu LLM-ER core"
+  },
+
+  {
+    "source": "paper",
+    "pattern": "ts_corr(ts_delta(eps_est, 20), returns, 60)",
+    "description": "60-day correlation between 20-day EPS-estimate momentum and contemporaneous returns — combines the Giglio/Kelly/Xiu 'characteristic-based predictability is robust' finding with Chen/Kelly/Xiu's LLM-ER mechanism: when forward EPS revisions correlate with returns, the analyst-LLM consensus carries information beyond the levels of either.",
+    "category": "analyst",
+    "confidence": 0.72,
+    "verified": false,
+    "source_title": "Composite — Giglio/Kelly/Xiu 2022 + Chen/Kelly/Xiu LLM-ER",
+    "source_url": "https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4267961",
+    "paper_citation": "Composite: Giglio-Kelly-Xiu 2022 + Chen-Kelly-Xiu LLM-ER.",
+    "theoretical_anchor": "Composite-AQR Kelly EPS-LLM"
+  }
+]
