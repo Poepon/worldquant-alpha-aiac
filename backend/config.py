@@ -181,6 +181,12 @@ class Settings(BaseSettings):
         "JPN": "TOP1600",
         "EUR": "TOP2500",
     }
+    # BRAIN 账号级并发 simulation 槽上限(USER=3 / CONSULTANT=80)。
+    # endpoint 选择能力分类(CLAUDE.md 方向 C)— 走全局 ENABLE_BRAIN_CONSULTANT_MODE
+    # 而非 task 启动快照,切回 USER 即时降回 3 避免 USER 状态撞 BRAIN 429
+    # CONCURRENT_SIMULATION_LIMIT_EXCEEDED。brain_adapter._acquire_sim_slot 读这里。
+    BRAIN_SIM_SLOT_LIMIT_USER: int = 3
+    BRAIN_SIM_SLOT_LIMIT_CONSULTANT: int = 80
 
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把

@@ -81,13 +81,15 @@ class BrainAdapter:
     _NO_MULTISIM_PROBE_LOCK_TTL: int = 120  # re-probe coordination window (s)
     _SINGLE_SIM_FALLBACK_CONCURRENCY: int = 3
 
-    # BRAIN server-side hard limit: <= 3 sims in-flight per account, *across all
+    # BRAIN server-side hard limit on in-flight sims per account, *across all
     # processes*. Per-process asyncio.Semaphore is insufficient when multiple
     # celery workers run on the same account — each had its own counter and the
-    # account would overflow with N_workers × 3 in-flight, triggering 429
+    # account would overflow with N_workers × limit in-flight, triggering 429
     # CONCURRENT_SIMULATION_LIMIT_EXCEEDED. The slot is held from POST
     # /simulations through to terminal status, mirroring BRAIN's accounting.
-    _BRAIN_GLOBAL_SIM_LIMIT: int = 3
+    # Limit is role-aware (USER=3, CONSULTANT=80) — read at acquire-time via
+    # _current_sim_slot_limit() so ENABLE_BRAIN_CONSULTANT_MODE flips take
+    # effect immediately (settings.__getattribute__ hooks FeatureFlagOverride).
     _SLOT_COUNTER_KEY: str = "brain:concurrent_sims"
     # 2026-05-08 fix: shorten TTL from 30 min to 10 min so that orphaned slots
     # (worker force-killed mid-simulate, _release_sim_slot never reached) clear
@@ -143,19 +145,38 @@ class BrainAdapter:
         return cls._redis_client
 
     @classmethod
+    def _current_sim_slot_limit(cls) -> int:
+        """Return the in-flight slot ceiling for the current BRAIN role.
+
+        Reads ENABLE_BRAIN_CONSULTANT_MODE via settings each call so an ops
+        flip (FeatureFlagOverride) takes effect on the very next acquire —
+        no restart. Falls back to the USER ceiling on any error so a Redis
+        / settings hiccup degrades safely toward the more restrictive bound.
+        """
+        try:
+            if getattr(settings, "ENABLE_BRAIN_CONSULTANT_MODE", False):
+                return int(getattr(settings, "BRAIN_SIM_SLOT_LIMIT_CONSULTANT", 80))
+            return int(getattr(settings, "BRAIN_SIM_SLOT_LIMIT_USER", 3))
+        except Exception:
+            return 3
+
+    @classmethod
     async def _acquire_sim_slot(cls) -> bool:
-        """Atomically acquire one of the {_BRAIN_GLOBAL_SIM_LIMIT} slots.
+        """Atomically acquire one of the role-aware concurrent sim slots.
 
         Returns True when a slot is held; loops with sleep until acquired or
         deadline. The TTL on the counter prevents a dead worker from starving
-        the pool forever.
+        the pool forever. The ceiling is resolved per acquire so a USER→
+        CONSULTANT flip mid-flight expands capacity for the next waiter
+        instead of blocking on the old 3-slot bound.
         """
         r = await cls._get_slot_redis()
         deadline = asyncio.get_event_loop().time() + cls._SLOT_ACQUIRE_TIMEOUT
         warned = False
         while True:
+            limit = cls._current_sim_slot_limit()
             count = await r.incr(cls._SLOT_COUNTER_KEY)
-            if count <= cls._BRAIN_GLOBAL_SIM_LIMIT:
+            if count <= limit:
                 # Refresh expiry as a safety net
                 await r.expire(cls._SLOT_COUNTER_KEY, cls._SLOT_TTL_SEC)
                 return True
@@ -163,7 +184,7 @@ class BrainAdapter:
             await r.decr(cls._SLOT_COUNTER_KEY)
             if not warned:
                 logger.info(
-                    f"[BrainAdapter] BRAIN sim slot full ({count-1}/{cls._BRAIN_GLOBAL_SIM_LIMIT}); waiting"
+                    f"[BrainAdapter] BRAIN sim slot full ({count-1}/{limit}); waiting"
                 )
                 warned = True
             if asyncio.get_event_loop().time() > deadline:
