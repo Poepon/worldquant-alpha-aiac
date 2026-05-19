@@ -200,6 +200,21 @@ class Settings(BaseSettings):
     LLM_API_CIRCUIT_FAIL_WINDOW_SEC: int = 60  # 失败计数器 TTL
     LLM_API_CIRCUIT_COOLDOWN_SEC: int = 300    # 跳闸冷却(同 BRAIN_AUTH_CIRCUIT)
 
+    # ----- Sprint 0 spike calibration (2026-05-19) -----
+    # Production baseline (last 30d, scripts/sprint0_baseline_spike.py):
+    #   - finalized_n=8,658  pass_n=131  author_pass_rate_30d=0.0151 (1.51%)
+    #   - hypothesis_round_stats 28 rounds: p5=0.0000 / p10=0.0000 / p50=0.0000
+    # → Half of all rounds yield ZERO PASS, so an EMA-style PASS_RATE_FLOOR
+    #   at 5% would auto-pause virtually every task. The dominant R14 trigger
+    #   in production will be CONSECUTIVE_FAIL_ROUNDS (3 consecutive
+    #   zero-PASS rounds), not EMA floor. Keep floor very low so EMA only
+    #   fires on truly degenerate distributions, not normal noise.
+    # R12 GO gate (Sprint 末): assistant_pass_rate >= 0.0151 * 0.90 = 0.01359
+    #   with bootstrap 80% CI not crossing 0. Given the ~131 PASS over 30d
+    #   spread across author/assistant, sample size is the binding constraint
+    #   — expect the GO gate to need 30d *minimum* and likely 45-60d to
+    #   accumulate enough samples for a tight CI.
+
     # ----- PR0.5 ENABLE_R8_L0 sub-flag (Sprint 0,Phase 4 R12 sentinel 前置) -----
     # 默认 True(R8 hierarchical RAG 已 LIVE,L0 是 4 层之一)。R12 sentinel ON
     # 时全局 set False,跳过 L0(exact pattern_hash match)进 L1 pillar/L2 family/L3 field。

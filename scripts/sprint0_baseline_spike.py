@@ -68,18 +68,21 @@ SQL_AUTHOR_PASS_RATE = text("""
 
 # (2) Round-level PASS rate per (task, round) for the last 30d, then
 # 5th percentile across rounds — R14 PASS_RATE_FLOOR default candidate.
+# Fix (post-run 2026-05-19): `alphas` has no `round_num` column; round
+# info lives in `hypothesis_round_stats` (per-hypothesis per-round counts).
+# Group by task_id + round_index summing across hypotheses to get the
+# per-task per-round aggregate that R14 stop-loss actually cares about.
 SQL_R14_FLOOR = text("""
     WITH round_stats AS (
         SELECT
             task_id,
-            round_num,
-            COUNT(*) FILTER (WHERE quality_status = 'PASS') AS pass_n,
-            COUNT(*) AS total_n
-        FROM alphas
+            round_index,
+            SUM(pass_count) AS pass_n,
+            SUM(alpha_count) AS total_n
+        FROM hypothesis_round_stats
         WHERE created_at > NOW() - INTERVAL '30 days'
-          AND round_num IS NOT NULL
-        GROUP BY task_id, round_num
-        HAVING COUNT(*) >= 3  -- discard rounds with <3 alphas (not meaningful)
+        GROUP BY task_id, round_index
+        HAVING SUM(alpha_count) >= 3  -- discard rounds with <3 alphas
     )
     SELECT
         COUNT(*) AS round_n,
@@ -121,48 +124,53 @@ SQL_SENTINEL_STAMP_PRESENCE = text("""
 """)
 
 
+async def _run_one_sql(sql, parse_row):
+    """Run a single SQL in its own session so a Postgres
+    InFailedSQLTransactionError on one query does not poison the others."""
+    try:
+        async with AsyncSessionLocal() as db:
+            row = (await db.execute(sql)).first()
+            return parse_row(row) if row is not None else {"error": "no rows"}
+    except Exception as ex:
+        return {"error": str(ex)[:300]}
+
+
 async def _run() -> dict:
     out: dict = {
         "run_at_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    async with AsyncSessionLocal() as db:
-        # (1) author baseline
-        try:
-            row = (await db.execute(SQL_AUTHOR_PASS_RATE)).first()
-            out["author"] = {
-                "pass_n": int(row.pass_n or 0),
-                "finalized_n": int(row.finalized_n or 0),
-                "author_pass_rate_30d": float(row.author_pass_rate_30d or 0.0),
-            }
-        except Exception as ex:
-            out["author"] = {"error": str(ex)}
 
-        # (2) R14 floor
-        try:
-            row = (await db.execute(SQL_R14_FLOOR)).first()
-            out["r14"] = {
-                "round_n": int(row.round_n or 0),
-                "p5": float(row.r14_floor_p5 or 0.0),
-                "p10": float(row.r14_floor_p10 or 0.0),
-                "p50": float(row.r14_floor_p50 or 0.0),
-            }
-        except Exception as ex:
-            out["r14"] = {"error": str(ex)}
+    out["author"] = await _run_one_sql(
+        SQL_AUTHOR_PASS_RATE,
+        lambda row: {
+            "pass_n": int(row.pass_n or 0),
+            "finalized_n": int(row.finalized_n or 0),
+            "author_pass_rate_30d": float(row.author_pass_rate_30d or 0.0),
+        },
+    )
 
-        # (3) Sentinel stamp presence
-        try:
-            row = (await db.execute(SQL_SENTINEL_STAMP_PRESENCE)).first()
-            out["stamps_7d"] = {
-                "r10_family_cap_dropped": int(row.r10_stamp_n or 0),
-                "g3_ast_originality_blocked": int(row.g3_stamp_n or 0),
-                "g5_crossover_parent_ids": int(row.g5_stamp_n or 0),
-                "r1b_mutation_triggered": int(row.r1b_stamp_n or 0),
-                "hypothesis_forest_reference": int(row.forest_stamp_n or 0),
-                "simulation_cache_hit": int(row.cache_stamp_n or 0),
-                "total_alpha": int(row.total_alpha_n or 0),
-            }
-        except Exception as ex:
-            out["stamps_7d"] = {"error": str(ex)}
+    out["r14"] = await _run_one_sql(
+        SQL_R14_FLOOR,
+        lambda row: {
+            "round_n": int(row.round_n or 0),
+            "p5": float(row.r14_floor_p5 or 0.0),
+            "p10": float(row.r14_floor_p10 or 0.0),
+            "p50": float(row.r14_floor_p50 or 0.0),
+        },
+    )
+
+    out["stamps_7d"] = await _run_one_sql(
+        SQL_SENTINEL_STAMP_PRESENCE,
+        lambda row: {
+            "r10_family_cap_dropped": int(row.r10_stamp_n or 0),
+            "g3_ast_originality_blocked": int(row.g3_stamp_n or 0),
+            "g5_crossover_parent_ids": int(row.g5_stamp_n or 0),
+            "r1b_mutation_triggered": int(row.r1b_stamp_n or 0),
+            "hypothesis_forest_reference": int(row.forest_stamp_n or 0),
+            "simulation_cache_hit": int(row.cache_stamp_n or 0),
+            "total_alpha": int(row.total_alpha_n or 0),
+        },
+    )
 
     return out
 
