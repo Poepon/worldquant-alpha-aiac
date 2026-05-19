@@ -74,6 +74,49 @@ ORDER BY days_on DESC;
 
 Anything with `days_on ≥ 14` is a candidate. Cross-check each row against the originating plan's GO gate before promoting.
 
+## Phase 4 flag inventory (added 2026-05-20)
+
+14 new ENABLE_* flags + tuning sub-knobs shipped across Sprints 0-4.
+All default OFF (Tier 1). Promotion paths summarized below; details
+in `docs/phase4_a_b_plan_v5_2026-05-19.md`.
+
+### Sprint 0 (kill switches, default ON exception)
+- `ENABLE_LLM_API_CIRCUIT` — default **ON** (kill-switch class); flip OFF only if circuit breaker misbehaves
+- `ENABLE_R8_L0` — sub-flag of `ENABLE_HIERARCHICAL_RAG`; default OFF currently, promote to Tier 2 once L0 exact-hit rate ≥ 5% per `/ops/r8/query-stats`
+
+### Sprint 1 (R12 critical + P0 risks)
+- `ENABLE_LLM_ASSISTANT_MODE` — pending R12 decision **2026-07-04 ± 5d**; if GO, Tier 2 promotion + 6 sentinel cleanup in Sprint 5
+- `ENABLE_TASK_STOP_LOSS` + `TASK_STOP_LOSS_*` tuning — Tier 1→Tier 2 after ≥14d production-ON with zero false-trigger
+- `FLAT_CROSS_REGION_QUOTA` + `FLAT_CROSS_REGION_ENFORCE` — `ENFORCE` flag is the Tier 1→2 gate (default `False` warn-only → flip `True` real reject)
+
+### Sprint 2 (eval + risk)
+- `ENABLE_CAPACITY_SCORE` + `CAPACITY_SCORE_WEIGHT` — Tier 1→Tier 2 after `/ops/r11/capacity-stats` 7d obs + composite-score distribution shift acceptable
+- `ENABLE_FAMILY_HARD_BAN` + `FAMILY_BAN_MIN_PAIRWISE_CORR` — ⚠️ **DOA pending Sprint 5 upstream wire** (no `state.r10v2_pnl_corr_matrix` producer yet, per Sprint 2 F9 review)
+- `ENABLE_FACTOR_LENS` + `FACTOR_LENS_MODE` (`shadow`→`soft`→`hard` rollout) + `FACTOR_LENS_RESIDUAL_SHARPE_MIN` — three-stage rollout per `/ops/r13/factor-residuals` 7d obs
+
+### Sprint 3 (SOTA Part 1)
+- `ENABLE_COGNITIVE_LAYER_PROMPT` + `COGNITIVE_LAYER_SELECT_MODE` (`round_robin`→`bandit`→`deficit_aware`) + `COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET` — promote to `bandit` after ≥7d round_robin seeding via `/ops/r8-v3/cognitive-layer-stats`
+- `ENABLE_G10_LOGIC_DISTILL` + `LOGIC_DISTILL_MAX_COST_USD_PER_WEEK` + 4 tuning sub-knobs — Tier 1→Tier 2 after weekly cron has ≥4 successful runs without cost overrun
+
+### Sprint 4 (SOTA Part 2)
+- `ENABLE_G10_LOGIC_INJECT` + `G10_LOGIC_INJECT_TOP_K` — Tier 1→Tier 2 after `/ops/g10/logic-library` shows ≥20 active entries + hypothesis prompt round-latency ≤ +500ms acceptable
+- `ENABLE_GRAMMAR_VALIDATOR` + `GRAMMAR_VALIDATOR_RETRY_MAX` — Tier 1→Tier 2 after parse-fail rate ≤ 2% on production round samples (telemetry endpoint deferred)
+
+### 6 R12 sentinel flags (status pending R12 decision)
+
+Following ENABLE_* are forced OFF when `ENABLE_LLM_ASSISTANT_MODE=True`. The R12 decision determines whether they retire permanently (GO), restore (NO-GO), or partial (per counterfactual SQL):
+
+| Flag | Group | Sentinel reason |
+|------|-------|-----------------|
+| `ENABLE_R1B_HYPOTHESIS_MUTATE` | R1b-CoSTEER | author-mode mutation |
+| `ENABLE_G5_CROSSOVER` | G5-Crossover | author-mode trajectory |
+| `ENABLE_HYPOTHESIS_FOREST_REUSE` | G8-Forest | author-mode reuse |
+| `ENABLE_R8_L0` | Phase3-R8 (sub-flag) | author-mode L0 hits |
+| `ENABLE_AST_ORIGINALITY_GATE` | G3-Originality | ⚠️ @deprecated_pending_r12_decision (Sprint 4 B4.1 ships G3-v2 successor) |
+| `ENABLE_SIMULATION_CACHE` | Phase3-R9 | author-mode cache hits |
+
+Sprint 5 B4.2 retires `ENABLE_AST_ORIGINALITY_GATE` (G3 shadow code) conditionally per R12 decision.
+
 ## Recent retirements
 
 - **2026-05-19 batch**:

@@ -35,6 +35,26 @@
 
 R1b CoSTEER retry loop is gated by `ENABLE_R1A_HOOK` (downstream) — same observability covers both.
 
+### Phase 4 additions (2026-05-20, Sprints 0-4)
+
+14 new ENABLE_* flags, all default OFF. Operator flips ON via FeatureFlagOverride one-at-a-time across the 30d Sprint 1-5 observation window. R12 decision date 2026-07-04 ± 5d determines sentinel-flag fate (see flag_lifecycle.md §"6 R12 sentinel flags").
+
+| # | Flag | Subsystem | Primary observability | Default-state |
+|---|------|-----------|----------------------|---------------|
+| 21 | `ENABLE_LLM_API_CIRCUIT` | Sprint 0 LLM kill-switch | LLMService.call WARNING on circuit open | **ON** (kill-switch class) |
+| 22 | `ENABLE_TASK_STOP_LOSS` + 3 tuning | Sprint 1 A2 R14 | `task_stop_loss_events` rows + `/ops/task-stop-loss/recent` | OFF |
+| 23 | `ENABLE_LLM_ASSISTANT_MODE` (+6 sentinel cascade) | Sprint 1 A1 R12 | `feature_flag_audit` sentinel_trigger_for + `/ops/llm-mode/comparison` | OFF · ⚠️ R12 decision 7/4 ± 5d |
+| 24 | `FLAT_CROSS_REGION_ENFORCE` (+ quota dict) | Sprint 1 A3 flat-F4 | `/ops/flat-region/distribution` | warn-only (False) |
+| 25 | `ENABLE_CAPACITY_SCORE` + weight | Sprint 2 B1 R11 | `/ops/r11/capacity-stats` + alpha.capacity_usd_estimate distribution | OFF |
+| 26 | `ENABLE_FAMILY_HARD_BAN` + τ | Sprint 2 B3 R10-v2 | alpha.metrics['_r10v2_hard_banned'] count + 互验 SQL | OFF · ⚠️ DOA pending Sprint 5 wire |
+| 27 | `ENABLE_FACTOR_LENS` + `FACTOR_LENS_MODE` shadow/soft/hard | Sprint 2 B2 R13 | `factor_lens_residuals` rows + `/ops/r13/factor-residuals` (deferred) | OFF (shadow) |
+| 28 | `ENABLE_COGNITIVE_LAYER_PROMPT` + select_mode + token_budget | Sprint 3 B5 R8-v3 | `/ops/r8-v3/cognitive-layer-stats` per-layer fire+PASS count | OFF |
+| 29 | `ENABLE_G10_LOGIC_DISTILL` + 5 tuning | Sprint 3 A5.1 G10 PR1 | weekly Sunday 03:00 SH cron result dict + `/ops/g10/logic-library` | OFF |
+| 30 | `ENABLE_G10_LOGIC_INJECT` + top_k | Sprint 4 A5.2 G10 PR2 | hypothesis prompt grep for distilled_logic_block + alpha.metrics['_g10_*'] (fast-follow) | OFF |
+| 31 | `ENABLE_GRAMMAR_VALIDATOR` + retry_max | Sprint 4 B4.1 G3-v2 | alpha.metrics['_g3v2_parse_failed'] count (telemetry endpoint fast-follow) | OFF |
+
+Total production flag inventory after Sprint 4 ship: **20 (v1.3 baseline) + 14 (Phase 4 new) = 34** ENABLE_* flags. 6 sentinel flags pending R12 decision route (deprecate / restore / partial).
+
 ---
 
 ## §2 Pre-canary baseline snapshot (T-0)
