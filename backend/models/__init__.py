@@ -106,6 +106,10 @@ from backend.models.r8_query_log import R8QueryLog
 # boundary; dedicated per [[feedback_r1a_dedicated_log_table]])
 from backend.models.llm_call_log import LLMCallLog
 
+# G5 Phase A trajectory crossover log (per-LLM-call row + outcome alpha
+# back-fill; dedicated per same rationale)
+from backend.models.g5_crossover_log import G5CrossoverLog
+
 __all__ = [
     # Enums
     "MiningStatus",

@@ -181,6 +181,15 @@ class MiningState(BaseModel):
     # is OFF or no rows qualified — stamp key omitted in that case.
     g8_forest_referenced_ids: List[int] = Field(default_factory=list)
 
+    # G5 Phase A (2026-05-19): crossover offspring candidates carried from the
+    # PRIOR round via task.config["g5_pending_offspring"] consume. Each entry:
+    # {expression, combination_strategy, rationale, parent_a_alpha_id,
+    #  parent_b_alpha_id, parent_a_sharpe, parent_b_sharpe}. node_code_gen
+    # prepends these to pending_alphas so they walk the full validate →
+    # simulate → evaluate → save_results pipeline. Empty when
+    # ENABLE_G5_CROSSOVER OFF or no offspring stashed.
+    g5_offspring_candidates: List[Dict] = Field(default_factory=list)
+
     # Plan v5+ §Phase 2 B5/B6: per-hypothesis round history. Key = hypothesis_id.
     # Each entry: {round_index, alpha_count, pass_count, fail_count,
     #              syntax_fail_count, simulate_fail_count, attribution,

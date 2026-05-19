@@ -1561,6 +1561,58 @@ async def node_code_gen(
         response.error if hasattr(response, 'error') else None
     )
     
+    # G5 Phase A (2026-05-19): prepend crossover offspring (carried from prior
+    # round via state.g5_offspring_candidates). Each becomes a fresh
+    # AlphaCandidate with parent ids stamped on metrics so the persistence
+    # layer can write _g5_crossover_parent_ids without needing more plumbing.
+    # Soft-fail: malformed entries are dropped silently.
+    g5_offspring = getattr(state, "g5_offspring_candidates", None) or []
+    if g5_offspring:
+        from backend.agents.graph.state import AlphaCandidate as _G5AC
+        _g5_prepended: List = []
+        for off in g5_offspring:
+            if not isinstance(off, dict):
+                continue
+            expr = (off.get("expression") or "").strip()
+            if not expr:
+                continue
+            try:
+                parent_ids = [
+                    int(x) for x in (
+                        off.get("parent_a_alpha_id"),
+                        off.get("parent_b_alpha_id"),
+                    ) if x is not None
+                ]
+                cand = _G5AC(
+                    expression=expr,
+                    hypothesis=(
+                        "G5 crossover: combine alpha "
+                        f"{off.get('parent_a_alpha_id', '?')} + "
+                        f"{off.get('parent_b_alpha_id', '?')} via "
+                        f"{off.get('combination_strategy', '?')}"
+                    ),
+                    explanation=(off.get("rationale") or "")[:200],
+                    parent_alpha_id=parent_ids[0] if parent_ids else None,
+                    metrics={
+                        "_g5_crossover_parent_ids": parent_ids,
+                        "_g5_combination_strategy": off.get(
+                            "combination_strategy", "unspecified"
+                        ),
+                    },
+                )
+                _g5_prepended.append(cand)
+            except Exception as _g5_ex:
+                logger.warning(
+                    f"[{node_name}] G5 offspring AlphaCandidate build failed "
+                    f"(non-fatal, dropping): {_g5_ex}"
+                )
+        if _g5_prepended:
+            logger.info(
+                f"[{node_name}] G5 prepended {len(_g5_prepended)} offspring "
+                f"to pending_alphas (parent ids carried in metrics)"
+            )
+            pending_alphas = _g5_prepended + pending_alphas
+
     return {
         "pending_alphas": pending_alphas,
         "current_alpha_index": 0,

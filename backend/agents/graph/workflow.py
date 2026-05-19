@@ -288,6 +288,30 @@ class MiningWorkflow:
             )
             _r1b_consumed = None
 
+        # G5 Phase A (2026-05-19): same one-shot pattern for crossover offspring.
+        # _run_one_round_inline stashed prior-round's offspring on
+        # task.config["__g5_consumed_offspring"]; pop + clear here so node_code_gen
+        # can read state.g5_offspring_candidates and prepend to pending_alphas.
+        _g5_consumed: List[Dict] = []
+        try:
+            if isinstance(task.config, dict) and task.config.get("__g5_consumed_offspring"):
+                _raw = task.config.get("__g5_consumed_offspring") or []
+                if isinstance(_raw, list):
+                    _g5_consumed = list(_raw)
+                _cleared = dict(task.config)
+                _cleared.pop("__g5_consumed_offspring", None)
+                task.config = _cleared
+                try:
+                    from sqlalchemy.orm.attributes import flag_modified as _flag_modified
+                    _flag_modified(task, "config")
+                except Exception:
+                    pass
+        except Exception as _ex:
+            logger.warning(
+                f"[MiningWorkflow] G5 consumed-slot read failed (no inject): {_ex}"
+            )
+            _g5_consumed = []
+
         initial_state = MiningState(
             task_id=task.id,
             region=task.region,
@@ -302,6 +326,7 @@ class MiningWorkflow:
             effective_sharpe_submit_min=_role_snapshot.get("effective_sharpe_submit_min"),
             effective_region_universes_at_start=_role_snapshot.get("effective_region_universes"),
             r1b_consumed_pending_hypothesis=_r1b_consumed,
+            g5_offspring_candidates=_g5_consumed,
         )
         
         # Compile and run

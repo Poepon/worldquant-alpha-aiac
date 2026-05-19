@@ -892,6 +892,26 @@ class Settings(BaseSettings):
     # tunable — no feature flag.
     LLM_CALL_LOG_RETENTION_DAYS: int = 90
 
+    # ----- G5 Phase A — Trajectory crossover (2026-05-19) -----
+    # QuantaAlpha arxiv 2602.07085 (2026-02). Combine 2 high-reward PASS
+    # alpha "siblings" into hybrid offspring via LLM. Offspring persist on
+    # task.config["g5_pending_offspring"] via R1b.2-v2 same mechanism; next
+    # round consumes + injects into MiningState.g5_offspring_candidates;
+    # node_code_gen prepends them to pending_alphas so they walk full
+    # validate → simulate → evaluate → save_results pipeline.
+    # OFF byte-for-byte legacy. Soft-fail全链 — crossover 异常永不 block round。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_G5_CROSSOVER: bool = False
+    # 选 sibling pair 的过滤 — 要求两个 parent 都 PASS sharpe ≥ X 才 trigger。
+    # Lookback 是 SQL window(最近 X round 内本 task PASS alpha 池)。
+    # max_pair_pillar_overlap True 时不允许两 parent 同 pillar(强制 diversity)。
+    G5_CROSSOVER_MIN_PARENT_SHARPE: float = 1.25
+    G5_CROSSOVER_LOOKBACK_ROUNDS: int = 10
+    G5_CROSSOVER_TOP_K_OFFSPRING: int = 2
+    G5_CROSSOVER_REQUIRE_DIFFERENT_PILLAR: bool = True
+    # LLM model override — None / "" uses LLMService default。同 LLM_MUTATE_MODEL 模式
+    LLM_CROSSOVER_MODEL: str = ""
+
     # ----- G8 Phase A — Hypothesis forest cross-task reference (2026-05-19) -----
     # RD-Agent NeurIPS 2025 假设森林。当前 Hypothesis 表 region-scoped
     # 无 task_id,本就全局共享;但 node_hypothesis 只做 V-22.13 cross-round

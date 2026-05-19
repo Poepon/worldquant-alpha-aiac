@@ -1000,6 +1000,42 @@ async def _run_one_round_inline(
             f"[r1b_wire] task={task.id} consume_pending_hypothesis failed (round unaffected): {_r1b_ex}"
         )
 
+    # G5 Phase A (2026-05-19): consume offspring stashed by prior round's
+    # mining_agent._maybe_run_g5_crossover. Mirror R1b.2-v2 plumbing — stash
+    # consumed list on task.config["__g5_consumed_offspring"], workflow.run
+    # pops + clears + injects into MiningState.g5_offspring_candidates.
+    # Flag-gated; soft-fail全链.
+    try:
+        from backend.config import settings as _g5_settings
+        if bool(getattr(_g5_settings, "ENABLE_G5_CROSSOVER", False)):
+            from backend.agents.graph.nodes.g5_persistence import (
+                consume_pending_offspring,
+            )
+            _g5_consumed = await consume_pending_offspring(task, db)
+            if _g5_consumed:
+                logger.info(
+                    f"[g5_wire] task={task.id} round-entry consumed "
+                    f"{len(_g5_consumed)} pending offspring"
+                )
+                try:
+                    _cfg = dict(getattr(task, "config", None) or {})
+                    _cfg["__g5_consumed_offspring"] = _g5_consumed
+                    task.config = _cfg
+                    try:
+                        from sqlalchemy.orm.attributes import flag_modified
+                        flag_modified(task, "config")
+                    except Exception:
+                        pass
+                    await db.commit()
+                except Exception as _stash_ex:
+                    logger.warning(
+                        f"[g5_wire] task={task.id} stash consumed failed: {_stash_ex}"
+                    )
+    except Exception as _g5_ex:
+        logger.warning(
+            f"[g5_wire] task={task.id} consume_pending_offspring failed: {_g5_ex}"
+        )
+
     # R1b.4b: route to typed AlphaMiningPipeline when the task opts in via
     # hypothesis_centric_variant=3 + ENABLE_R1B_TYPED_PIPELINE flag.
     typed_result = await _maybe_run_typed_pipeline_round(

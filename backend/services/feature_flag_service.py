@@ -315,6 +315,26 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "(soft cap, no fail)."
         ),
     ),
+    # --- G5 Phase A — Trajectory crossover ---
+    "ENABLE_G5_CROSSOVER": FlagSpec(
+        name="ENABLE_G5_CROSSOVER",
+        flag_type="bool",
+        group="G5-Crossover",
+        description=(
+            "G5 Phase A (2026-05-19, QuantaAlpha arxiv 2602.07085):mining_agent "
+            "round 末选 2 个 PASS alpha → llm_crossover_alpha 产 ≤"
+            "G5_CROSSOVER_TOP_K_OFFSPRING 个 hybrid expression → persist 到 "
+            "task.config['g5_pending_offspring'](R1b.2-v2 同模式)→ 下一 round "
+            "_run_one_round_inline consume → state.g5_offspring_candidates → "
+            "node_code_gen prepend pending_alphas → 真走 validate/simulate/"
+            "evaluate/save_results 全 pipeline → offspring alpha.metrics 标 "
+            "_g5_crossover_parent_ids=[id_a, id_b] 反向 attribution。"
+            "每 call 写 g5_crossover_log。Soft-fail:LLM 异常 → 空 list → 下一 "
+            "round 正常进行。前置:同 task 内 ≥2 PASS alpha 且 sharpe ≥ "
+            "G5_CROSSOVER_MIN_PARENT_SHARPE。Phase B 看数据后决定 promote 到 "
+            "Phase C(可能加 R6 DAG sibling 加权或与 R1b retry 双轨)。"
+        ),
+    ),
     # --- G8 Phase A — Hypothesis forest cross-task reference ---
     "ENABLE_HYPOTHESIS_FOREST_REUSE": FlagSpec(
         name="ENABLE_HYPOTHESIS_FOREST_REUSE",
