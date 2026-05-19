@@ -1127,6 +1127,64 @@ async def llm_api_circuit_clear(
 
 
 # ---------------------------------------------------------------------------
+# Phase 4 Sprint 1 A1.2 — R12 LLM_MODE sentinel restore endpoint (2026-05-20)
+# ---------------------------------------------------------------------------
+
+
+class RestoreSentinelOut(BaseModel):
+    sentinel_for: str
+    restored_flags: List[str]
+    skipped: List[str]
+    audit_rows: int
+    actor: Optional[str] = None
+
+
+@router.post("/llm-mode/restore-sentinel", response_model=RestoreSentinelOut)
+async def llm_mode_restore_sentinel(
+    _token: str = Depends(_require_ops_token),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+    flag_service: FeatureFlagService = Depends(get_feature_flag_service),
+) -> RestoreSentinelOut:
+    """Reverse the most-recent R12 sentinel cascade.
+
+    When ``ENABLE_LLM_ASSISTANT_MODE`` was set True, the feature flag
+    service forced the 6 ``LLM_ASSISTANT_SENTINEL_FLAGS`` (R1b mutate,
+    G5 crossover, G8 forest reuse, R8 L0, G3 originality, R9 sim cache)
+    to False so author-mode mechanisms wouldn't fire under an
+    assistant-mode hypothesis. This endpoint reads
+    ``feature_flag_audit.sentinel_trigger_for='ENABLE_LLM_ASSISTANT_MODE' AND
+    restored_at IS NULL`` and reverts each forced flip to its prior state
+    (DELETE the override if there was none before, UPSERT back to the
+    prior value otherwise) in a single transaction.
+
+    Idempotent — stamps ``restored_at`` on the matched audit rows so a
+    second call returns audit_rows=0.
+
+    Operator runbook:
+      - Use this after deciding R12 assistant mode obs window failed and
+        you want to immediately restore the 6 sentinel flags to their
+        pre-R12 production state.
+      - Setting ``ENABLE_LLM_ASSISTANT_MODE=False`` via the regular
+        /ops/flags PATCH endpoint does NOT auto-restore — that just
+        turns off the kill switch. This endpoint is the explicit
+        "give me my sentinel flags back" lever.
+    """
+    actor_str = actor or "ops_console"
+    result = await flag_service.restore_sentinel(
+        sentinel_for="ENABLE_LLM_ASSISTANT_MODE",
+        actor=actor_str,
+        note=f"ops endpoint restore by {actor_str}",
+    )
+    return RestoreSentinelOut(
+        sentinel_for=result["sentinel_for"],
+        restored_flags=result["restored_flags"],
+        skipped=result["skipped"],
+        audit_rows=result["audit_rows"],
+        actor=actor,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Flat session admin endpoints (post tier-system removal, 2026-05-18)
 # ---------------------------------------------------------------------------
 # Post tier-system removal cascade is permanently retired — the prior

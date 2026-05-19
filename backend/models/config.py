@@ -121,9 +121,26 @@ class FeatureFlagAudit(SQLAlchemyBase):
     flag_name = Column(String(80), nullable=False, index=True)
     old_value = Column(Text)                                # JSON-encoded; null on first-set
     new_value = Column(Text, nullable=False)                # JSON-encoded
-    action = Column(String(20), nullable=False)             # set | clear
+    # Phase 4 A1.2 (2026-05-20): widened action enum —
+    #   'set' | 'clear'                       (legacy, unchanged)
+    #   'sentinel_set' | 'sentinel_restore'   (NEW — R12 sentinel cascade)
+    action = Column(String(20), nullable=False)
     actor = Column(String(64), nullable=False, default="ops_console")
     note = Column(Text)
     created_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)
+
+    # Phase 4 A1.2 (2026-05-20): R12 LLM_MODE=assistant sentinel cascade.
+    # When ENABLE_LLM_ASSISTANT_MODE is set True, feature_flag_service
+    # forces the 6 LLM_ASSISTANT_SENTINEL_FLAGS to False in the same
+    # transaction. Each forced flip writes an audit row with
+    # sentinel_trigger_for='ENABLE_LLM_ASSISTANT_MODE' so restore_sentinel()
+    # can reverse the cascade later via a single WHERE clause.
+    # NULL on regular set/clear rows (legacy semantics preserved).
+    sentinel_trigger_for = Column(String(64), nullable=True)
+    # Stamped when restore_sentinel() reverts the row's override; lets
+    # repeated restore_sentinel calls idempotently skip already-restored
+    # rows via "WHERE sentinel_trigger_for=X AND restored_at IS NULL".
+    restored_at = Column(DateTime, nullable=True)
+    restored_by = Column(String(64), nullable=True)
 
 

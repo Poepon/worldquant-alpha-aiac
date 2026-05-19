@@ -604,6 +604,22 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "(EMA floor 因 p50=0 受 noise 干扰大)。调高 → 更宽松,调低 → 更早 pause。"
         ),
     ),
+    # --- A1.2 R12 LLM_MODE=assistant (Sprint 1, 2026-05-20) ---
+    "ENABLE_LLM_ASSISTANT_MODE": FlagSpec(
+        name="ENABLE_LLM_ASSISTANT_MODE",
+        flag_type="bool",
+        group="Phase4-Sprint1",
+        description=(
+            "Phase 4 R12:工业 8 家共识(Citadel/Two Sigma/Bridgewater AIA)— "
+            "LLM 做 research assistant 不做 expression-author。Default OFF。"
+            "Set True 时联动 6 LLM_ASSISTANT_SENTINEL_FLAGS 强制 False "
+            "(R1b mutate / G5 crossover / G8 forest reuse / R8 L0 / G3 / R9 cache)"
+            ",audit 留 sentinel_trigger_for 标识便于 restore。OFF 仅关 kill "
+            "switch — sentinel flag 不会自动恢复,需 POST /ops/llm-mode/"
+            "restore-sentinel 显式回滚。task.config['llm_mode']='assistant' 控制 "
+            "per-task opt-in。"
+        ),
+    ),
     # --- A3 flat-F4 cross-region quota (Sprint 1, 2026-05-19) ---
     "FLAT_CROSS_REGION_QUOTA": FlagSpec(
         name="FLAT_CROSS_REGION_QUOTA",
@@ -856,12 +872,27 @@ class FeatureFlagService(BaseService):
         _flag_override_cache.update(new_cache)
         return dict(new_cache)
 
-    async def list_audit(self, limit: int = 50) -> List[FeatureFlagAudit]:
-        """Most recent flip / clear records for the audit Drawer."""
+    async def list_audit(
+        self,
+        limit: int = 50,
+        *,
+        include_sentinel: bool = False,
+    ) -> List[FeatureFlagAudit]:
+        """Most recent flip / clear records for the audit Drawer.
+
+        Phase 4 A1.2 (2026-05-20): default filters out R12 sentinel
+        cascade rows (sentinel_trigger_for IS NOT NULL) so the ops
+        Timeline isn't flooded by the 6-row burst on every R12 flip.
+        Operator can pass ``include_sentinel=True`` to see them — useful
+        when debugging "why did flag X go to False" right after R12 was
+        flipped on.
+        """
+        stmt = select(FeatureFlagAudit)
+        if not include_sentinel:
+            stmt = stmt.where(FeatureFlagAudit.sentinel_trigger_for.is_(None))
         stmt = (
-            select(FeatureFlagAudit)
-            .order_by(desc(FeatureFlagAudit.created_at))
-            .limit(min(max(limit, 1), 500))
+            stmt.order_by(desc(FeatureFlagAudit.created_at))
+                .limit(min(max(limit, 1), 500))
         )
         return list((await self.db.execute(stmt)).scalars().all())
 
@@ -926,6 +957,79 @@ class FeatureFlagService(BaseService):
         # immediately even before the next refresher tick.
         _flag_override_cache[name] = value
 
+        # Phase 4 A1.2 (2026-05-20): R12 LLM_MODE=assistant sentinel cascade.
+        # When ENABLE_LLM_ASSISTANT_MODE is set True, force the 6
+        # LLM_ASSISTANT_SENTINEL_FLAGS to False in the SAME transaction so
+        # author-mode mechanisms (R1b mutate, G5 crossover, G8 forest
+        # reuse, R8 L0, G3 originality, R9 sim cache) don't fire under an
+        # assistant-mode hypothesis. Each forced flip writes an audit row
+        # with sentinel_trigger_for=name so restore_sentinel() can reverse
+        # the cascade later via a single WHERE clause.
+        # Idempotent: setting False (or any value other than True) does
+        # NOT cascade.
+        if name == "ENABLE_LLM_ASSISTANT_MODE" and value is True:
+            from backend.config import settings as _stg
+            sentinel_list = list(
+                getattr(_stg, "LLM_ASSISTANT_SENTINEL_FLAGS", []) or []
+            )
+            for sentinel_name in sentinel_list:
+                sentinel_spec = SUPPORTED_FLAGS.get(sentinel_name)
+                if sentinel_spec is None:
+                    # Skip silently — sentinel list may include a flag
+                    # that's been retired since A1.1 declared the list.
+                    # The restore_sentinel path also handles partial cascades.
+                    logger.warning(
+                        "[ff sentinel] %s in LLM_ASSISTANT_SENTINEL_FLAGS "
+                        "but not in SUPPORTED_FLAGS — skipping",
+                        sentinel_name,
+                    )
+                    continue
+                sentinel_encoded_off = _encode_value(False, sentinel_spec.flag_type)
+                sentinel_existing = (await self.db.execute(
+                    select(FeatureFlagOverride).where(
+                        FeatureFlagOverride.flag_name == sentinel_name
+                    )
+                )).scalar_one_or_none()
+                sentinel_old_encoded = (
+                    sentinel_existing.flag_value if sentinel_existing else None
+                )
+                # No-op when sentinel already at False — but still write
+                # an audit row so restore_sentinel can find + revert it.
+                # restore_sentinel reads old_value=None as "no prior
+                # override existed; restore = DELETE the row we just made".
+                if sentinel_existing is None:
+                    self.db.add(FeatureFlagOverride(
+                        flag_name=sentinel_name,
+                        flag_value=sentinel_encoded_off,
+                        flag_type=sentinel_spec.flag_type,
+                        updated_by=actor,
+                        note=(
+                            f"sentinel_cascade from ENABLE_LLM_ASSISTANT_MODE "
+                            f"by {actor}"
+                        ),
+                    ))
+                else:
+                    sentinel_existing.flag_value = sentinel_encoded_off
+                    sentinel_existing.flag_type = sentinel_spec.flag_type
+                    sentinel_existing.updated_by = actor
+                    sentinel_existing.note = (
+                        f"sentinel_cascade from ENABLE_LLM_ASSISTANT_MODE "
+                        f"by {actor}"
+                    )
+                self.db.add(FeatureFlagAudit(
+                    flag_name=sentinel_name,
+                    old_value=sentinel_old_encoded,
+                    new_value=sentinel_encoded_off,
+                    action="sentinel_set",
+                    actor=actor,
+                    note=(
+                        f"R12 sentinel cascade: forced False by "
+                        f"ENABLE_LLM_ASSISTANT_MODE=True"
+                    ),
+                    sentinel_trigger_for="ENABLE_LLM_ASSISTANT_MODE",
+                ))
+                _flag_override_cache[sentinel_name] = False
+
         # Cross-process invalidation hint (best-effort)
         self._bump_redis_async_safe()
 
@@ -988,6 +1092,152 @@ class FeatureFlagService(BaseService):
             effective_value=env_default,
             source="env" if env_default is not None else "default",
         )
+
+    # ---- A1.2 R12 sentinel restore ---------------------------------------
+
+    @transactional
+    async def restore_sentinel(
+        self,
+        sentinel_for: str = "ENABLE_LLM_ASSISTANT_MODE",
+        *,
+        actor: str = "ops_console",
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Reverse the most-recent R12 sentinel cascade.
+
+        Reads every feature_flag_audit row WHERE
+        sentinel_trigger_for=:sentinel_for AND restored_at IS NULL,
+        groups by flag_name, picks the latest row per flag (by created_at),
+        and restores each sentinel flag to its `old_value` snapshot.
+
+        Restoration rules per row:
+          - old_value=None (encoded "null") → DELETE the override (the
+            sentinel set was the first time a row existed; restore =
+            remove it so reads fall through to env default)
+          - old_value="false" / "true" / etc → UPSERT override back to
+            that JSON-encoded value
+
+        Idempotent: stamps `restored_at`, `restored_by` on every audit row
+        in the matched batch so a second call skips them. Also writes a
+        new audit row with action='sentinel_restore' for forensic clarity.
+
+        Returns ``{"restored_flags": [list of flag names], "audit_rows": int,
+        "skipped": int}``.
+
+        Soft-fail philosophy:
+          If a sentinel flag has been retired from SUPPORTED_FLAGS since
+          the cascade fired, we still stamp restored_at on the audit row
+          (so it doesn't loop forever) but skip the actual UPSERT.
+        """
+        # SELECT the still-unrestored sentinel audit rows for this trigger
+        stmt = (
+            select(FeatureFlagAudit)
+            .where(
+                FeatureFlagAudit.sentinel_trigger_for == sentinel_for,
+                FeatureFlagAudit.restored_at.is_(None),
+                FeatureFlagAudit.action == "sentinel_set",
+            )
+            .order_by(FeatureFlagAudit.flag_name, desc(FeatureFlagAudit.created_at))
+        )
+        rows = list((await self.db.execute(stmt)).scalars().all())
+        if not rows:
+            return {
+                "restored_flags": [],
+                "audit_rows": 0,
+                "skipped": [],
+                "sentinel_for": sentinel_for,
+            }
+
+        # Group by flag_name + pick the LATEST row per flag (already
+        # ordered by created_at DESC within flag_name, so first wins).
+        latest_per_flag: Dict[str, FeatureFlagAudit] = {}
+        for row in rows:
+            latest_per_flag.setdefault(row.flag_name, row)
+
+        now = datetime.utcnow()
+        restored: List[str] = []
+        skipped: List[str] = []
+        for flag_name, audit_row in latest_per_flag.items():
+            spec = SUPPORTED_FLAGS.get(flag_name)
+            if spec is None:
+                # Sentinel flag retired since cascade; stamp + skip UPSERT
+                logger.warning(
+                    "[ff restore_sentinel] flag %r no longer in "
+                    "SUPPORTED_FLAGS — stamping restored_at but skipping "
+                    "UPSERT (already untouchable from ops UI)",
+                    flag_name,
+                )
+                skipped.append(flag_name)
+            else:
+                # Restore prior state
+                existing_override = (await self.db.execute(
+                    select(FeatureFlagOverride).where(
+                        FeatureFlagOverride.flag_name == flag_name
+                    )
+                )).scalar_one_or_none()
+                if audit_row.old_value is None:
+                    # Sentinel set created the override row; restore = delete
+                    if existing_override is not None:
+                        await self.db.delete(existing_override)
+                    _flag_override_cache.pop(flag_name, None)
+                else:
+                    # Sentinel set replaced an existing override; restore = revert
+                    if existing_override is None:
+                        self.db.add(FeatureFlagOverride(
+                            flag_name=flag_name,
+                            flag_value=audit_row.old_value,
+                            flag_type=spec.flag_type,
+                            updated_by=actor,
+                            note=(
+                                f"sentinel_restore from {sentinel_for} by {actor}"
+                            ),
+                        ))
+                    else:
+                        existing_override.flag_value = audit_row.old_value
+                        existing_override.flag_type = spec.flag_type
+                        existing_override.updated_by = actor
+                        existing_override.note = (
+                            f"sentinel_restore from {sentinel_for} by {actor}"
+                        )
+                    # Best-effort decode for cache write-through
+                    try:
+                        _flag_override_cache[flag_name] = _decode_value(
+                            audit_row.old_value, spec.flag_type,
+                        )
+                    except Exception:  # noqa: BLE001
+                        _flag_override_cache.pop(flag_name, None)
+                restored.append(flag_name)
+
+            # Stamp restored_at on every row in this flag's batch (not
+            # just the latest — operator should see the full cascade
+            # marked as reverted, otherwise repeated restore calls would
+            # tag earlier rows on each invocation).
+            for r in rows:
+                if r.flag_name == flag_name and r.restored_at is None:
+                    r.restored_at = now
+                    r.restored_by = actor
+
+            # Forensic audit row for the restore itself
+            self.db.add(FeatureFlagAudit(
+                flag_name=flag_name,
+                old_value=_encode_value(False, "bool"),  # sentinel state
+                new_value=(audit_row.old_value or _encode_value(None, "json")),
+                action="sentinel_restore",
+                actor=actor,
+                note=note or f"sentinel_restore from {sentinel_for}",
+                sentinel_trigger_for=sentinel_for,
+                restored_at=now,
+                restored_by=actor,
+            ))
+
+        self._bump_redis_async_safe()
+
+        return {
+            "restored_flags": sorted(restored),
+            "audit_rows": len(rows),
+            "skipped": sorted(skipped),
+            "sentinel_for": sentinel_for,
+        }
 
     # ---- helpers ----------------------------------------------------------
 
