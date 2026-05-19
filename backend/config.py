@@ -243,6 +243,25 @@ class Settings(BaseSettings):
     TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS: int = 3  # 主 trigger
     TASK_STOP_LOSS_EXCLUDE_CB_SKIPPED: bool = True   # race fix (defense-in-depth)
 
+    # ----- A3 flat-F4 cross-region quota (Sprint 1) -----
+    # Millennium 320 pods / Citadel 5 业务线 multi-strategy 启示 — AIAC 当前
+    # region 严重偏 USA(production 数据印证)。flat-F4 在 POST 时校验新 task
+    # 加入后的 region 分布是否越过 FLAT_CROSS_REGION_QUOTA。
+    # ENFORCE=True → POST 拒绝越界(400);ENFORCE=False(default)→ 仅 warn log。
+    # Phase A 真效果(per [[feedback_按效果选择]]):default ENFORCE=False 配合
+    # warn 阶段先观察 7d,然后翻 ENFORCE=True 真改 mining 决策。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.3
+    FLAT_CROSS_REGION_QUOTA: dict = {
+        "USA": 0.30,
+        "CHN": 0.20,
+        "JPN": 0.15,
+        "EUR": 0.20,
+        "HKG": 0.15,
+    }
+    FLAT_CROSS_REGION_ENFORCE: bool = False
+    FLAT_CROSS_REGION_LOOKBACK_DAYS: int = 30  # last-N-days window for share computation
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入

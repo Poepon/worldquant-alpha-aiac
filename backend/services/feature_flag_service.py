@@ -604,6 +604,30 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "(EMA floor 因 p50=0 受 noise 干扰大)。调高 → 更宽松,调低 → 更早 pause。"
         ),
     ),
+    # --- A3 flat-F4 cross-region quota (Sprint 1, 2026-05-19) ---
+    "FLAT_CROSS_REGION_QUOTA": FlagSpec(
+        name="FLAT_CROSS_REGION_QUOTA",
+        flag_type="json",
+        group="Phase4-Sprint1",
+        description=(
+            "Phase 4 A3 flat-F4:每 region 的 active task share 上限(0-1)。"
+            "POST /ops/start-flat-session 前查 last-N-day active task by region,"
+            "新加入 task 后是否越过 quota — 越过则按 FLAT_CROSS_REGION_ENFORCE 决定 "
+            "reject 还是 warn。default: USA 0.30 / CHN 0.20 / JPN 0.15 / EUR 0.20 / "
+            "HKG 0.15(对 Millennium 320-pod 多策略启示的实操化)。"
+        ),
+    ),
+    "FLAT_CROSS_REGION_ENFORCE": FlagSpec(
+        name="FLAT_CROSS_REGION_ENFORCE",
+        flag_type="bool",
+        group="Phase4-Sprint1",
+        description=(
+            "Phase 4 A3:default False = warn-only 阶段观察 7d 数据;翻 True = POST "
+            "时越过 quota 直接 reject 400。Phase A 真效果(per "
+            "[[feedback_按效果选择]]):observation-only 是 fallback,不是 default — "
+            "operator 看 7d /ops/flat-region/distribution 数据后翻 ENFORCE=True。"
+        ),
+    ),
 }
 
 

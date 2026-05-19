@@ -1164,12 +1164,20 @@ async def start_flat_session(
     payload: StartFlatSessionIn,
     _token: str = Depends(_require_ops_token),
     svc: TaskService = Depends(get_task_service_ops),
+    db: AsyncSession = Depends(get_db),
     actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
 ) -> FlatSessionOut:
     """Create a new flat mining session and dispatch its worker.
 
     Gated by ``settings.ENABLE_FLAT_CONTINUOUS`` — returns 400 when flag is
     OFF so the caller knows to flip the flag first.
+
+    Phase 4 Sprint 1 A3 (2026-05-19): flat-F4 cross-region quota guard.
+    Before dispatching, computes last-N-day region share + checks whether
+    adding this new task would push ``payload.region`` over its
+    FLAT_CROSS_REGION_QUOTA cap. ENFORCE=True → reject with 400; ENFORCE=
+    False (default) → warn-log only and proceed (observation window).
+    Soft-fail: any DB error → skip the check + warn log + proceed.
     """
     from backend.config import settings  # local import — settings hot-reads flag overrides
     if not getattr(settings, "ENABLE_FLAT_CONTINUOUS", False):
@@ -1177,6 +1185,44 @@ async def start_flat_session(
             status_code=400,
             detail="ENABLE_FLAT_CONTINUOUS flag is OFF — flip via PATCH /ops/flags/ENABLE_FLAT_CONTINUOUS first",
         )
+
+    # ---- A3 flat-F4 cross-region quota guard ----
+    try:
+        from backend.services.flat_region_quota import (
+            compute_region_share as _compute_share,
+            check_quota as _check_quota,
+        )
+        _quota = dict(getattr(settings, "FLAT_CROSS_REGION_QUOTA", {}) or {})
+        _enforce = bool(getattr(settings, "FLAT_CROSS_REGION_ENFORCE", False))
+        _lookback = int(getattr(settings, "FLAT_CROSS_REGION_LOOKBACK_DAYS", 30))
+        # Quota empty → operator hasn't configured caps; nothing to guard against.
+        if _quota:
+            _share_now = await _compute_share(db, lookback_days=_lookback)
+            _decision = _check_quota(
+                new_region=payload.region,
+                current_share=_share_now,
+                quota=_quota,
+            )
+            if _decision.get("would_exceed"):
+                _msg = (
+                    f"flat-F4 quota check: region={payload.region} "
+                    f"projected_share={_decision['projected_share']:.3f} "
+                    f"> quota={_decision['quota']:.3f} "
+                    f"(current_count={_decision['current_count']}, "
+                    f"projected_total={_decision['projected_total']})"
+                )
+                if _enforce:
+                    raise HTTPException(status_code=400, detail=_msg)
+                from loguru import logger as _f4_logger
+                _f4_logger.warning("[flat-F4 warn-only] {}", _msg)
+    except HTTPException:
+        raise  # ENFORCE=True trip propagates
+    except Exception as _f4_ex:  # noqa: BLE001
+        from loguru import logger as _f4_logger
+        _f4_logger.warning(
+            "[flat-F4] quota check failed (non-fatal, proceeding): {}", _f4_ex,
+        )
+
     try:
         info = await svc.start_flat_session(
             region=payload.region,
@@ -1191,6 +1237,50 @@ async def start_flat_session(
         universe=info.universe,
         status=info.status,
         runtime_state_inherited=False,
+    )
+
+
+# ----- A3 flat-F4 distribution endpoint -----
+class FlatRegionStatus(BaseModel):
+    region: str
+    count: int
+    share: float
+    quota: Optional[float] = None
+    status: str  # ok / warn / exceeded / no_quota
+
+
+class FlatRegionDistributionOut(BaseModel):
+    total_active_tasks: int
+    regions: List[FlatRegionStatus]
+    enforce: bool
+    lookback_days: int
+
+
+@router.get("/flat-region/distribution", response_model=FlatRegionDistributionOut)
+async def flat_region_distribution(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> FlatRegionDistributionOut:
+    """A3 flat-F4: per-region active-task share + configured quota with
+    over-quota / warn / ok chips. Powers the frontend FlatRegionMonitor
+    page (defer to next session) and the operator decision to flip
+    FLAT_CROSS_REGION_ENFORCE from warn → reject.
+    """
+    from backend.config import settings
+    from backend.services.flat_region_quota import (
+        compute_region_share as _compute_share,
+        build_distribution_summary as _summary,
+    )
+    _quota = dict(getattr(settings, "FLAT_CROSS_REGION_QUOTA", {}) or {})
+    _enforce = bool(getattr(settings, "FLAT_CROSS_REGION_ENFORCE", False))
+    _lookback = int(getattr(settings, "FLAT_CROSS_REGION_LOOKBACK_DAYS", 30))
+    _share = await _compute_share(db, lookback_days=_lookback)
+    _summary_dict = _summary(_share, _quota)
+    return FlatRegionDistributionOut(
+        total_active_tasks=int(_summary_dict["total_active_tasks"]),
+        regions=[FlatRegionStatus(**r) for r in _summary_dict["regions"]],
+        enforce=_enforce,
+        lookback_days=_lookback,
     )
 
 
