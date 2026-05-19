@@ -102,10 +102,16 @@ class CalibOutput:
 
 async def load_top_n_pass_alphas(region: str, top_n: int) -> List[Dict]:
     """SELECT top-N PASS alpha by sharpe, return [{id, alpha_id, sharpe,
-    expression, family_signature}, ...]."""
+    expression, family_signature}, ...].
+
+    F10 review fix: ``family_signature`` is NOT a column on ``alphas`` —
+    it's a pure-function output of ``family_classifier.family_signature``
+    over the expression text. Compute Python-side after the SELECT.
+    """
     try:
         from sqlalchemy import text as _text
         from backend.database import AsyncSessionLocal
+        from backend.family_classifier import family_signature as _fam_sig
     except Exception as e:
         logger.error("DB import failed: %s", e)
         return []
@@ -114,18 +120,23 @@ async def load_top_n_pass_alphas(region: str, top_n: int) -> List[Dict]:
     async with AsyncSessionLocal() as s:
         try:
             r = await s.execute(_text("""
-                SELECT id, alpha_id, is_sharpe, expression, family_signature
+                SELECT id, alpha_id, is_sharpe, expression
                 FROM alphas
                 WHERE region = :region
                   AND quality_status = 'PASS'
                   AND alpha_id IS NOT NULL
-                  AND family_signature IS NOT NULL
                   AND is_sharpe IS NOT NULL
-                ORDER BY is_sharpe DESC NULLS LAST
+                ORDER BY is_sharpe DESC
                 LIMIT :top_n
             """), {"region": region, "top_n": top_n})
             for row in r.mappings():
-                rows.append(dict(row))
+                d = dict(row)
+                # Derive family_signature Python-side
+                d["family_signature"] = _fam_sig(d.get("expression") or "")
+                # Skip rows whose signature can't be computed
+                if d["family_signature"] == "<empty>":
+                    continue
+                rows.append(d)
         except Exception as e:
             logger.error("Top-N PASS query failed: %s", e)
     logger.info(f"Loaded {len(rows)} PASS alphas for region={region}")

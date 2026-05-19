@@ -163,46 +163,44 @@ def apply_family_hard_ban(
     *,
     pnl_corr_matrix: Optional["object"] = None,
     threshold: float = 0.65,
+    min_coverage_ratio: float = 0.7,
 ) -> List[int]:
     """Apply Phase 4 R10-v2 family hard-ban (per plan v5 §6.10).
 
-    Within each family (same family_signature), any pair whose pairwise
-    PnL correlation ≥ threshold triggers a ban on the lower-scoring
-    member. Stamp-only — caller stamps ``metrics["_r10v2_hard_banned"]
-    = True``; FAIL classification is deferred to evaluation node's
-    finalize pass so multiple stamps coexist for the互验 SQL output.
+    Within each (pillar, family_signature) bucket, sort members by
+    score descending and greedily build a survivor set: each new member
+    is BANNED if it correlates ≥ threshold with ANY surviving member.
+    Mirrors ``apply_family_cap``'s (pillar, sig) grouping so R10 and
+    R10-v2 ban the same population (F8 review fix — pillar-blind sig
+    grouping let R10-v2 cross-pillar-ban, polluting互验 SQL false-
+    positive rates with design conflicts).
 
-    Distinct from ``apply_family_cap`` (top-K structural cap):
-      * R10 family-cap     = same family + same pillar → keep top-K
-        (coarse-grain, ignores how *similar* the alpha's actual PnL is)
-      * R10-v2 hard-ban    = same family + pairwise PnL corr ≥ τ →
-        ban (fine-grain, real-portfolio diversification signal)
+    Stamp-only — caller stamps ``metrics["_r10v2_hard_banned"] = True``;
+    FAIL classification deferred to evaluation node's finalize pass so
+    R10 + R10-v2 stamps coexist for the互验 SQL output.
+
+    F7 review fix — coverage guard. Pairs where either side is missing
+    from the corr matrix index are not "no ban needed" — they're
+    "we don't have data to decide". For each (pillar, family) bucket,
+    if the actual fraction of cross-member lookups that succeeded
+    falls below ``min_coverage_ratio``, the whole bucket is skipped
+    (no bans returned for it). Prevents partial-coverage data from
+    silently letting half a family bypass the ban.
 
     Args:
         alphas: sequence of alpha-like objects with .expression /
-            .metrics / .quality_status. Each must additionally have
-            either ``.alpha_id`` (BRAIN id; used as pnl_corr_matrix
-            key) or ``.id`` (internal DB id).
-        pnl_corr_matrix: optional pandas.DataFrame indexed by alpha_id
-            on both axes (square, symmetric, diag=1.0). When None or
-            missing alpha rows, the function returns an empty list
-            (no ban) — caller is expected to soft-skip when matrix
-            unavailable for the round.
+            .metrics / .quality_status / .alpha_id. ``.id`` fallback
+            removed (F-N1 review): the matrix is keyed by BRAIN string
+            alpha_id; falling back to DB int id silently mis-matches.
+        pnl_corr_matrix: pandas.DataFrame indexed by alpha_id on both
+            axes (square, symmetric, diag=1.0). None → return [].
         threshold: τ ∈ [0, 1]. ≥ τ → ban the lower-scoring sibling.
-            Default 0.65 (conservative; the R10-calib spike's recommend
-            output will tune this per region — see
-            scripts/calibrate_r10_pairwise_corr.py).
+        min_coverage_ratio: per-bucket coverage floor (F7). 0 disables.
 
     Returns:
         Sorted list of integer indices (into alphas) to mark banned.
-        Caller responsibility:
-            for i in ban_idx:
-                alphas[i].metrics["_r10v2_hard_banned"] = True
-                alphas[i].metrics["_r10v2_hard_ban_reason"] = ...
 
-    Pure-function — no DB / BRAIN calls. PnL matrix must be supplied by
-    caller (typically via CorrelationService.refresh_os_alpha_cache +
-    pandas .corr).
+    Pure-function — no DB / BRAIN calls.
     """
     if not alphas:
         return []
@@ -214,42 +212,73 @@ def apply_family_hard_ban(
         )
         return []
 
-    # Group by family_signature (skip terminal-fail alphas; their FAIL
-    # is already accounted for and they should not occupy a sibling slot).
-    groups: dict[str, List[Tuple[float, int, str]]] = {}
+    # Pre-compute matrix index set for fast membership tests
+    try:
+        _matrix_index = set(pnl_corr_matrix.index.astype(str))
+    except Exception:  # noqa: BLE001
+        _matrix_index = set()
+
+    # F8 review fix: group by (pillar, family_signature) — mirrors
+    # apply_family_cap so R10 + R10-v2 ban on the same partition.
+    # F-N1 review fix: skip rows without alpha_id (matrix is BRAIN-id
+    # keyed; falling back to DB int id silently mis-matches).
+    groups: dict[Tuple[str, str], List[Tuple[float, int, str]]] = {}
     for idx, a in enumerate(alphas):
         status = getattr(a, "quality_status", None)
         status_str = getattr(status, "value", status) if status is not None else None
         if status_str in _FAMILY_CAP_EXCLUDED_STATUSES:
             continue
-        aid = getattr(a, "alpha_id", None) or getattr(a, "id", None)
+        aid = getattr(a, "alpha_id", None)
         if aid is None:
             continue
         expr = getattr(a, "expression", "") or ""
         sig = family_signature(expr)
         if sig == "<empty>":
             continue
+        pillar = _alpha_pillar(a)
         score = _alpha_score(a)
-        groups.setdefault(sig, []).append((score, idx, str(aid)))
+        groups.setdefault((pillar, sig), []).append((score, idx, str(aid)))
 
     ban_idx: set[int] = set()
-    for sig, members in groups.items():
+    _low_coverage_skips = 0
+    for (pillar, sig), members in groups.items():
         if len(members) < 2:
             continue
+        # F7: coverage check — count members whose alpha_id is in the
+        # matrix index. If < min_coverage_ratio, skip this bucket
+        # entirely (lack of data ≠ "no ban needed").
+        if min_coverage_ratio > 0:
+            covered = sum(1 for _s, _i, aid in members if aid in _matrix_index)
+            if covered < int(len(members) * min_coverage_ratio + 0.999):
+                _low_coverage_skips += 1
+                logger.debug(
+                    f"[family_hard_ban] (pillar={pillar} sig={sig[:8]}) "
+                    f"coverage {covered}/{len(members)} < min_ratio "
+                    f"{min_coverage_ratio:.2f} — skip bucket"
+                )
+                continue
+
         # Sort descending by score — preserve the highest, ban siblings
         # whose corr against the surviving set exceeds threshold.
         members.sort(key=lambda x: x[0], reverse=True)
         survivors: List[Tuple[float, int, str]] = []
         for score, idx, aid in members:
             ban_this = False
+            if aid not in _matrix_index:
+                # This member has no PnL data — can't decide. Treat as
+                # "survives" but log; F7 coverage check above should
+                # have caught the systemic case already.
+                survivors.append((score, idx, aid))
+                continue
             for _s, _i, surv_aid in survivors:
+                if surv_aid not in _matrix_index:
+                    continue
                 try:
                     c = pnl_corr_matrix.loc[aid, surv_aid]
                 except KeyError:
                     continue
-                except Exception:  # noqa: BLE001 — corr lookup must never break round
+                except Exception:  # noqa: BLE001
                     continue
-                # pandas .at / .loc returns numpy scalar; safe float convert
                 try:
                     cf = float(c)
                 except (TypeError, ValueError):
@@ -263,9 +292,15 @@ def apply_family_hard_ban(
                 survivors.append((score, idx, aid))
         if len(members) - len(survivors) > 0:
             logger.debug(
-                f"[family_hard_ban] family={sig[:8]} kept {len(survivors)}/{len(members)} "
-                f"(τ={threshold:.2f})"
+                f"[family_hard_ban] (pillar={pillar} sig={sig[:8]}) kept "
+                f"{len(survivors)}/{len(members)} (τ={threshold:.2f})"
             )
+
+    if _low_coverage_skips > 0:
+        logger.info(
+            f"[family_hard_ban] {_low_coverage_skips} bucket(s) skipped due "
+            f"to coverage < {min_coverage_ratio:.2f}"
+        )
 
     return sorted(ban_idx)
 

@@ -359,12 +359,32 @@ def evaluate_alpha_comprehensive(
     # (see backend/services/capacity_estimator.normalize). Failures in
     # capacity inference (missing region/universe/turnover) soft-fall
     # to 0.0 — no exception escapes scoring.
+    # F3 (Sprint 2 review fix): BRAIN sim_result has no top-level `region` —
+    # it lives under sim_result["settings"]["region"]. The previous call
+    # passed sim_result directly to estimate_from_alpha_dict; the region
+    # lookup missed, cap_norm fell to 0.0, and flag-ON simply applied a
+    # blanket -10% discount to every alpha's composite. Build the lookup
+    # dict explicitly from this function's `region` parameter (caller
+    # always knows it — see _get_completed_alpha_details + node_evaluate)
+    # plus universe / turnover from settings/is.
     try:
         from backend.config import settings as _settings
         if getattr(_settings, "ENABLE_CAPACITY_SCORE", False):
             from backend.services import capacity_estimator as _cap
             cap_w = float(getattr(_settings, "CAPACITY_SCORE_WEIGHT", 0.10))
-            cap_usd = _cap.estimate_from_alpha_dict(sim_result)
+            _sim_settings = sim_result.get("settings") if isinstance(sim_result, dict) else None
+            _cap_universe = (
+                sim_result.get("universe")
+                if isinstance(sim_result, dict) else None
+            )
+            if not _cap_universe and isinstance(_sim_settings, dict):
+                _cap_universe = _sim_settings.get("universe")
+            cap_lookup = {
+                "region": region,
+                "universe": _cap_universe,
+                "turnover": turnover,
+            }
+            cap_usd = _cap.estimate_from_alpha_dict(cap_lookup)
             cap_norm = _cap.normalize(cap_usd)
             eval_result.composite_score = (
                 base_composite * (1.0 - cap_w) + cap_norm * cap_w
@@ -585,7 +605,28 @@ def calculate_alpha_score(
             if getattr(_settings, "ENABLE_CAPACITY_SCORE", False):
                 from backend.services import capacity_estimator as _cap
                 cap_w = float(getattr(_settings, "CAPACITY_SCORE_WEIGHT", 0.10))
-                cap_usd = _cap.estimate_from_alpha_dict(sim_result)
+                # F3 (Sprint 2 review fix): sim_result has no top-level
+                # region/universe; pull from settings sub-dict or fall back
+                # to sim_result top-level for hand-built test dicts.
+                _sim_settings = sim_result.get("settings") if isinstance(sim_result, dict) else None
+                _cap_region = (
+                    sim_result.get("region")
+                    if isinstance(sim_result, dict) else None
+                )
+                if not _cap_region and isinstance(_sim_settings, dict):
+                    _cap_region = _sim_settings.get("region")
+                _cap_universe = (
+                    sim_result.get("universe")
+                    if isinstance(sim_result, dict) else None
+                )
+                if not _cap_universe and isinstance(_sim_settings, dict):
+                    _cap_universe = _sim_settings.get("universe")
+                _cap_lookup = {
+                    "region": _cap_region,
+                    "universe": _cap_universe,
+                    "turnover": turnover,
+                }
+                cap_usd = _cap.estimate_from_alpha_dict(_cap_lookup)
                 cap_norm = _cap.normalize(cap_usd)
                 score += cap_w * cap_norm
         except Exception as _e:

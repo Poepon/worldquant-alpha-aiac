@@ -490,8 +490,10 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "(operator-sequence signature) 只保留 top-K=2 by score。"
             "防止一个 op pipeline 在 evaluation batch 刷榜挤掉异质 alpha。"
             "evaluation node R5 hook 之后调 family_classifier.apply_family_cap,"
-            "超出 K 的标 quality_status='FAIL' + metrics['_r10_family_cap_dropped']=True。"
-            "误杀时 flag flip OFF (0 工程量) 或 FAMILY_CAP_TOP_K=5 放宽。"
+            "超出 K 的只 stamp metrics['_r10_family_cap_dropped']=True;FAIL "
+            "transition 走 evaluation node 末尾的 finalize pass(B3 Sprint 2 重构 — "
+            "R10 + R10-v2 stamps 合并 → quality_status=FAIL,允许 7d 互验 SQL 分别"
+            "计算两机制 false-positive rate)。误杀时 flag flip OFF 或 FAMILY_CAP_TOP_K=5 放宽。"
         ),
     ),
     # --- Phase 2 R5: Hypothesis-Alignment Dual-Bridge LLM Judge ---
@@ -676,13 +678,18 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         flag_type="bool",
         group="Phase4-Sprint2",
         description=(
-            "Phase 4 B3 R10-v2:同 family alpha pairwise PnL correlation ≥ "
+            "Phase 4 B3 R10-v2:同 (pillar, family) alpha pairwise PnL correlation ≥ "
             "FAMILY_BAN_MIN_PAIRWISE_CORR 时 stamp metrics['_r10v2_hard_banned']"
             "=True。Shadow mode:不直接 set FAIL,evaluation 末 finalize pass "
             "scan stamp 后统一 set FAIL。允许 R10/R10-v2 双 stamp 共存,7d obs "
             "后跑 plan v5 §6.10 互验 SQL 比较 false-positive rate 决定胜出者。"
-            "Default OFF — production wire pending τ 校准 + state.r10v2_pnl_corr"
-            "_matrix 上游填充路径(fast-follow)。"
+            "⚠️ Default OFF + **DOA without Sprint 3 follow-up wire**:"
+            "  apply_family_hard_ban 读 state.r10v2_pnl_corr_matrix (Optional[pd."
+            "DataFrame]),但 producer 还没写 — flag ON 时 evaluation 块仅 DEBUG-"
+            "log skip。Sprint 3 follow-up:在 node_correlation_check / "
+            "node_evaluate 上游加 batch fetch + pandas .corr 写到该字段。"
+            "operator 先把 τ 用 calibrate_r10_pairwise_corr.py 校准 region-"
+            "specific 之后再 flip。"
         ),
     ),
     "FAMILY_BAN_MIN_PAIRWISE_CORR": FlagSpec(

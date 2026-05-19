@@ -111,7 +111,7 @@ class Alpha(SQLAlchemyBase):
     # 0. Per-alpha partial index (only non-NULL rows indexed) keeps
     # /ops/r11/capacity-stats range scans cheap without inflating the
     # alphas table footprint.
-    # Alembic: k2b3c4d5e6f7_alpha_capacity_metadata
+    # Alembic: k6e8b2a9f3d1_alpha_capacity_metadata
     capacity_usd_estimate = Column(Float, nullable=True)
 
     # Plan v5+ §Phase 2 B1 — hypothesis link. NULL for legacy / Phase 1 alphas

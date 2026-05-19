@@ -200,6 +200,19 @@ class MiningState(BaseModel):
     # node_code_gen branching (A1.3); A1.1 just records the resolution.
     llm_mode_used: str = "author"
 
+    # F9 (Sprint 2 review fix): R10-v2 hard-ban DOA placeholder.
+    # apply_family_hard_ban reads state.r10v2_pnl_corr_matrix at
+    # evaluation node tail. The actual populator (a node_correlation_check
+    # / node_evaluate upstream hook that batches PnL fetches + computes
+    # pandas.DataFrame.corr()) is Sprint 3 follow-up. Until then, this
+    # field stays None and the R10-v2 block soft-skips with a DEBUG log.
+    # Declared here so producers wiring the upstream populator have a
+    # known target field name, and so static type-checks don't flag
+    # `getattr(state, "r10v2_pnl_corr_matrix", None)` as an ad-hoc attr.
+    # Type Any (pd.DataFrame at runtime) to avoid pandas import in the
+    # state module.
+    r10v2_pnl_corr_matrix: Optional[Any] = None
+
     # Plan v5+ §Phase 2 B5/B6: per-hypothesis round history. Key = hypothesis_id.
     # Each entry: {round_index, alpha_count, pass_count, fail_count,
     #              syntax_fail_count, simulate_fail_count, attribution,

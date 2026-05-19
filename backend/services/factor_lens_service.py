@@ -191,13 +191,30 @@ def decompose(
     y_hat = X_aug @ beta_aug
     residuals = y - y_hat
 
-    # Annualized residual sharpe = mean(residuals) / std(residuals) × sqrt(252)
-    res_mean = float(np.mean(residuals))
-    res_std = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else 0.0
+    # F1 (Sprint 2 review fix): with an intercept column in X_aug, the OLS
+    # normal equations enforce X_aug.T @ residuals = 0 ⇒ sum(residuals) = 0
+    # ⇒ mean(residuals) ≈ machine epsilon ⇒ a "residual_sharpe = mean/std"
+    # formula always returns ~0 regardless of the alpha. The factor-neutral
+    # edge is captured by the INTERCEPT (Jensen's alpha): annualize the
+    # intercept and divide by the annualized residual std.
+    #
+    #   annualized intercept   = intercept × 252  (per-day → per-year mean return)
+    #   annualized residual σ  = std(residuals) × √252
+    #   residual_sharpe        = (intercept × 252) / (std × √252) = intercept × √252 / std
+    #
+    # Use ddof = X_aug.shape[1] (correct OLS d.f., not the sample d.f.).
+    # Standard factor-attribution practice.
+    n_obs = len(residuals)
+    df_correction = X_aug.shape[1]
+    if n_obs - df_correction > 1:
+        res_std = float(np.std(residuals, ddof=df_correction))
+    else:
+        res_std = float(np.std(residuals, ddof=1)) if n_obs > 1 else 0.0
+
     if res_std <= 1e-12:
         residual_sharpe = 0.0
     else:
-        residual_sharpe = res_mean / res_std * float(np.sqrt(252))
+        residual_sharpe = intercept * float(np.sqrt(252)) / res_std
 
     # R²
     ss_res = float(np.sum(residuals ** 2))

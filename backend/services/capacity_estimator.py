@@ -28,14 +28,19 @@ Formula
 
 Log-scale normalization
 -----------------------
-``normalize(capacity_usd)`` maps capacity onto [0, 1] via 5 log buckets
-(``CAPACITY_LOG_BUCKETS = [1e6, 1e7, 1e8, 1e9, 1e10]``):
+``normalize(capacity_usd)`` maps capacity onto [0, 1] using 5 boundary
+values (``CAPACITY_LOG_BUCKETS = [1e6, 1e7, 1e8, 1e9, 1e10]``) defining
+**6 bands**:
 
-  - <$1M       → 0.00
-  - $1M–$10M   → 0.25
-  - $10M–$100M → 0.50
-  - $100M–$1B  → 0.75
-  - >$1B       → 1.00
+  - <$1M           → 0.0
+  - $1M–$10M       → 0.2
+  - $10M–$100M     → 0.4
+  - $100M–$1B      → 0.6
+  - $1B–$10B       → 0.8
+  - ≥$10B          → 1.0
+
+(F11 review fix — earlier docstring claimed 5 bands at 0.25/0.50/0.75
+spacing; actual implementation has 6 bands at 0.2 spacing.)
 
 Composite score adds this as the 5th dimension at
 ``CAPACITY_SCORE_WEIGHT`` (default 0.10); the original 4 weights are
@@ -229,17 +234,22 @@ def normalize(
 ) -> float:
     """Map a USD capacity onto [0, 1] using log-scale buckets.
 
-    Default buckets [1e6, 1e7, 1e8, 1e9, 1e10] correspond to:
-      - <$1M           → 0.00
-      - $1M–$10M       → 0.25
-      - $10M–$100M     → 0.50
-      - $100M–$1B      → 0.75
-      - >$1B           → 1.00
+    Default buckets [1e6, 1e7, 1e8, 1e9, 1e10] = 5 boundaries → 6 bands:
+      - <$1M           → 0.0
+      - $1M–$10M       → 0.2
+      - $10M–$100M     → 0.4
+      - $100M–$1B      → 0.6
+      - $1B–$10B       → 0.8
+      - ≥$10B          → 1.0
 
-    Operator may pass a custom 4-element sorted list to shift the curve
-    (e.g. for emerging-market task where $100M is "huge"). When
-    ``buckets is None`` we read ``settings.CAPACITY_LOG_BUCKETS`` —
-    lazy import to keep this module Pydantic-free in test envs.
+    F11 review fix: corrected from prior docstring that claimed 5 bands
+    at 0.25 spacing — that does not match the (i+1)/n formula on a
+    5-boundary list.
+
+    Operator may pass a custom sorted list to shift the curve (e.g. for
+    emerging-market task where $100M is "huge"). When ``buckets is None``
+    we read ``settings.CAPACITY_LOG_BUCKETS`` — lazy import to keep this
+    module Pydantic-free in test envs.
     """
     if buckets is None:
         try:

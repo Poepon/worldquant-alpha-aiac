@@ -397,6 +397,17 @@ async def _incremental_save_alphas(
             fields_used=fields_used_for_insert,
             # Phase 2 B4: typed Hypothesis link
             hypothesis_id=hypothesis_id,
+            # F2 (Sprint 2 review fix): B1 R11 added the column + stamp in
+            # evaluation, but the previous INSERT path skipped it → column
+            # always NULL, /ops/r11/capacity-stats range scans found nothing.
+            # The value lives in alpha.metrics['capacity_usd_estimate'] when
+            # ENABLE_CAPACITY_SCORE was ON at sim time. Promote to the
+            # column so both paths surface (column for indexed range scans,
+            # metrics JSONB for forward-compat).
+            capacity_usd_estimate=(
+                alpha.metrics.get("capacity_usd_estimate")
+                if isinstance(alpha.metrics, dict) else None
+            ),
         )
         try:
             async with db_session.begin_nested():

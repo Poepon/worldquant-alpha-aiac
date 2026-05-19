@@ -3002,10 +3002,11 @@ async def node_evaluate(
     # === B2 Sprint 2 R13 factor_lens shadow stamp (plan v5 §6.9) ===
     # OLS decompose each PASS alpha's daily PnL against the region's
     # static factor-returns snapshot. shadow mode (default): stamp only;
-    # soft/hard modes transition quality_status when residual < τ.
-    # Default OFF → byte-identical round behavior. Each PASS alpha adds
-    # ~0.5-1s of BRAIN /alphas/{id}/recordsets/pnl latency; only fires
-    # when snapshot file exists for the region (soft-skip otherwise).
+    # soft mode: residual<τ → PASS_PROVISIONAL (transition inline OK —
+    # PROV is reversible). hard mode: stamp `_r13_hard_failed=True`,
+    # FAIL transition deferred to the finalize pass below (consistent
+    # with B3 stamp-only refactor pattern — F13 review fix).
+    # Default OFF → byte-identical round behavior.
     if (
         updated_alphas
         and getattr(settings, "ENABLE_FACTOR_LENS", False)
@@ -3017,17 +3018,52 @@ async def node_evaluate(
                 CorrelationService as _CorrSvc,
                 _series_to_returns as _to_returns,
             )
+            # F6 review fix: short-circuit when BRAIN auth circuit is open.
+            # /alphas/{id}/recordsets/pnl shares the same auth path as
+            # simulate; without this check, an expired session burns
+            # ~5×60s retry × N PASS alpha = potentially hours of round
+            # latency per stamp pass.
+            from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
 
             _r13_mode = getattr(settings, "FACTOR_LENS_MODE", "shadow")
             _r13_tau = float(getattr(settings, "FACTOR_LENS_RESIDUAL_SHARPE_MIN", 0.5))
-            _r13_factors = list(getattr(settings, "FACTOR_LENS_FACTORS", []) or None)
+            # F5 review fix: `list([] or None)` → `list(None) → TypeError`
+            # silent kill. Use explicit truthiness then list(); preserve
+            # None semantics so decompose_alpha falls back to DEFAULT_FACTORS.
+            _r13_factors_raw = getattr(settings, "FACTOR_LENS_FACTORS", None)
+            _r13_factors = list(_r13_factors_raw) if _r13_factors_raw else None
             _r13_min_overlap = int(getattr(settings, "FACTOR_LENS_MIN_OVERLAP_DAYS", 60))
+
+            # F14 review fix: snapshot availability cache. Probe per-region
+            # ONCE per node invocation so we don't pay BRAIN PnL fetch
+            # latency for every PASS alpha in a region that has no
+            # snapshot (current production state — only README exists).
+            _r13_snapshot_probe: Dict[str, bool] = {}
+            def _has_snapshot(_region: str) -> bool:
+                if _region in _r13_snapshot_probe:
+                    return _r13_snapshot_probe[_region]
+                _df = _r13_svc.load_factor_returns(_region, factors=_r13_factors)
+                _ok = _df is not None and not _df.empty
+                _r13_snapshot_probe[_region] = _ok
+                if not _ok:
+                    logger.info(
+                        f"[R13] no snapshot for region={_region} — "
+                        f"R13 stamps disabled for this region until snapshot deployed"
+                    )
+                return _ok
 
             _corr_svc = _CorrSvc(brain)
             _r13_stamped = 0
             _r13_soft_pp = 0
-            _r13_hard_fail = 0
+            _r13_hard_stamped = 0
+            _r13_circuit_breaks = 0
             for _a in updated_alphas:
+                # F6: re-check the breaker every iteration so a mid-loop
+                # auth drop doesn't waste the remaining alphas.
+                if BRAIN_AUTH_CIRCUIT.is_open():
+                    _r13_circuit_breaks += 1
+                    break
+
                 _status = getattr(_a, "quality_status", None)
                 _status_str = getattr(_status, "value", _status)
                 # Only decompose PASS alphas (FAIL already excluded from
@@ -3037,6 +3073,9 @@ async def node_evaluate(
                 _alpha_id = getattr(_a, "alpha_id", None)
                 _region = getattr(_a, "region", None)
                 if not _alpha_id or not _region:
+                    continue
+                # F14: skip BRAIN PnL fetch entirely when snapshot absent
+                if not _has_snapshot(_region):
                     continue
                 try:
                     _pnl_series = await _corr_svc._fetch_pnl_series(
@@ -3055,11 +3094,16 @@ async def node_evaluate(
                 _residual = _r13_svc.decompose_alpha(
                     alpha_returns=_daily_returns,
                     region=_region,
-                    factors=_r13_factors or None,
+                    factors=_r13_factors,
                     min_overlap_days=_r13_min_overlap,
                 )
-                if _residual.mode_used == "skipped" or _residual.mode_used == "no_snapshot":
-                    # Snapshot missing or insufficient overlap — soft-skip
+                # F4 review fix: positive filter — only act on real OLS
+                # output. Previous filter only excluded 2 of 8 empty-
+                # residual reasons (skipped / no_snapshot), letting
+                # insufficient_overlap / lstsq_failed / bad_alpha_shape /
+                # etc. leak through with residual_sharpe=0.0 < τ=0.5 →
+                # spurious PROVISIONAL/FAIL in soft/hard mode.
+                if _residual.mode_used != "ols_daily":
                     continue
 
                 _new_m = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
@@ -3072,25 +3116,53 @@ async def node_evaluate(
                 _a.metrics = _new_m
                 _r13_stamped += 1
 
-                # Mode-specific quality_status transitions
+                # F13 review fix: hard-mode transition now goes through
+                # the same finalize pass as R10/R10-v2 — stamp only here.
+                # PROV transition stays inline (PROV is reversible and
+                # doesn't collide with R10 stamps).
                 if _r13_mode == "soft" and _residual.residual_sharpe < _r13_tau:
                     if _status_str == "PASS":
                         _a.quality_status = "PASS_PROVISIONAL"
                         _r13_soft_pp += 1
                 elif _r13_mode == "hard" and _residual.residual_sharpe < _r13_tau:
-                    _a.quality_status = "FAIL"
                     _new_m["_r13_hard_failed"] = True
+                    _new_m["_r13_residual_sharpe_at_fail"] = float(_residual.residual_sharpe)
                     _a.metrics = _new_m
-                    _r13_hard_fail += 1
+                    _r13_hard_stamped += 1
 
-            if _r13_stamped > 0:
+            if _r13_stamped > 0 or _r13_circuit_breaks > 0:
                 logger.info(
                     f"[R13] factor_lens stamped {_r13_stamped} alpha(s) "
-                    f"(mode={_r13_mode}, soft_pp={_r13_soft_pp}, hard_fail={_r13_hard_fail})"
+                    f"(mode={_r13_mode}, soft_pp={_r13_soft_pp}, "
+                    f"hard_stamped={_r13_hard_stamped}, "
+                    f"circuit_break={_r13_circuit_breaks})"
                 )
         except Exception as _r13_e:  # noqa: BLE001
+            # F5 review fix: bump to WARNING so silent kills are visible.
             logger.warning(f"[R13] factor_lens shadow failed (non-fatal): {_r13_e}")
     # === end R13 factor_lens ===
+
+    # === F13 Sprint 2 R13 hard-mode stamp → FAIL finalize (review fix) ===
+    # Mirrors the R10/R10-v2 stamp → FAIL pattern: R13 hard mode no longer
+    # transitions quality_status inline (avoids the same anti-pattern B3
+    # just refactored away from R10). Sweep one more time picking up the
+    # `_r13_hard_failed` stamp.
+    if updated_alphas:
+        _r13_finalize_count = 0
+        for _a in updated_alphas:
+            _m = _a.metrics if isinstance(_a.metrics, dict) else {}
+            if _m.get("_r13_hard_failed") is True:
+                _current_status = getattr(_a, "quality_status", None)
+                _status_str = getattr(_current_status, "value", _current_status)
+                if _status_str != "FAIL":
+                    _a.quality_status = "FAIL"
+                    _r13_finalize_count += 1
+        if _r13_finalize_count > 0:
+            logger.info(
+                f"[R13-finalize] {_r13_finalize_count} alpha(s) transitioned to FAIL "
+                f"via _r13_hard_failed stamp scan"
+            )
+    # === end R13 finalize pass ===
 
     # === Phase 4 PR0.6 Sentinel stamp (Sprint 0, 2026-05-19) ===
     # Backfills 3 of the 6 R12-sentinel-tied stamps onto alpha.metrics so the
