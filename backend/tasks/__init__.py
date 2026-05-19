@@ -73,6 +73,8 @@ from backend.tasks.r1b_tasks import run_failure_tree_pruner
 from backend.tasks.r8_tasks import run_r8_query_log_pruner
 # Canary monitoring (2026-05-18): every-6h red-flag check post v1.3 ship
 from backend.tasks.canary_tasks import run_canary_redflag_check
+# Phase 4 Sprint 3 A5.1 G10 (2026-05-20): Sunday 03:00 SH weekly logic distill
+from backend.tasks.logic_distill_tasks import run_weekly_logic_distill
 
 __all__ = [
     # Utilities

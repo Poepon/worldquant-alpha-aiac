@@ -778,6 +778,65 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "删除上下文块。cognitive_layer 块绝不删(R8-v3 的核心)。"
         ),
     ),
+    # --- A5.1 G10 logic-as-asset PR1 (Sprint 3, 2026-05-20) ---
+    "ENABLE_G10_LOGIC_DISTILL": FlagSpec(
+        name="ENABLE_G10_LOGIC_DISTILL",
+        flag_type="bool",
+        group="Phase4-Sprint3",
+        description=(
+            "Phase 4 A5.1:Sunday 03:00 SH 周末 cron — 过去 7d PASS alpha "
+            "按 (pillar, region) 分组,LLM 蒸馏成 1-3 句 logic 总结,写 "
+            "distilled_logic_library 表(Alembic n5e6f7g8h9i0)。Default OFF。"
+            "PR2 (Sprint 4) 注入回 hypothesis prompt 形成正反馈;PR1 只建库。"
+            "Cost cap LOGIC_DISTILL_MAX_COST_USD_PER_WEEK $5。"
+        ),
+    ),
+    "LOGIC_DISTILL_MAX_COST_USD_PER_WEEK": FlagSpec(
+        name="LOGIC_DISTILL_MAX_COST_USD_PER_WEEK",
+        flag_type="float",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 周末蒸馏 LLM cost 上限。Default $5/周。超过即停止 dispatch "
+            "新 bucket,fallback 是保留上周残余条目(staleness 在 "
+            "/ops/g10/logic-library 显示)。"
+        ),
+    ),
+    "LOGIC_DISTILL_TOP_K_PER_GROUP": FlagSpec(
+        name="LOGIC_DISTILL_TOP_K_PER_GROUP",
+        flag_type="int",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 每 (pillar, region) bucket 取 sharpe DESC top-K alpha 进 "
+            "distill prompt。Default 10 — LLM context size 与 distill 质量 "
+            "trade-off,调大 → 上下文丰富但 cost 高。"
+        ),
+    ),
+    "LOGIC_DISTILL_MIN_PASS_COUNT": FlagSpec(
+        name="LOGIC_DISTILL_MIN_PASS_COUNT",
+        flag_type="int",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 bucket < N PASS alpha 时 skip 蒸馏(数据不足以画出 pattern)。"
+            "Default 3 — production validate 后可调。"
+        ),
+    ),
+    "LOGIC_DISTILL_LOOKBACK_DAYS": FlagSpec(
+        name="LOGIC_DISTILL_LOOKBACK_DAYS",
+        flag_type="int",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 distill 回溯天数。Default 7(weekly cadence)。"
+        ),
+    ),
+    "LOGIC_DISTILL_SIMILARITY_THRESHOLD": FlagSpec(
+        name="LOGIC_DISTILL_SIMILARITY_THRESHOLD",
+        flag_type="float",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 PR2 refine 阶段判断 logic entry 与上周是否近重复的 Jaccard "
+            "阈值。Default 0.70 — token 集合 70% 重叠就视为 stale 不写。"
+        ),
+    ),
 }
 
 

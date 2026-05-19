@@ -123,6 +123,10 @@ from backend.models.task_stop_loss_event import TaskStopLossEvent
 # (Two Sigma 18-factor lens / AQR autoencoder asset pricing pattern)
 from backend.models.factor_lens_residual import FactorLensResidual
 
+# Phase 4 Sprint 3 A5.1 G10 — distilled_logic_library (LLM weekly summary
+# of common logic across past 7d PASS alphas grouped by pillar, region)
+from backend.models.distilled_logic import DistilledLogic
+
 __all__ = [
     # Enums
     "MiningStatus",

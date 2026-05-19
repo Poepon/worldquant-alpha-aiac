@@ -2638,6 +2638,145 @@ async def r8v3_cognitive_layer_stats(
 
 
 # =============================================================================
+# Phase 4 Sprint 3 A5.1 G10 — distilled logic library (2026-05-20)
+# =============================================================================
+# /ops/g10/logic-library lists recent distilled_logic_library rows, filtered
+# by region / pillar / active(retired_at IS NULL) for operator inspection
+# + Sprint 4 PR2 retrieval validation.
+
+
+class G10DistilledLogicEntry(BaseModel):
+    id: int
+    logic_text: str
+    pillar: Optional[str]
+    region: str
+    distilled_at_week: Optional[datetime] = None
+    source_alpha_count: int
+    llm_cost_usd: Optional[float]
+    similarity_jaccard_to_prev_week: Optional[float]
+    llm_model: Optional[str]
+    is_active: bool
+
+
+class G10LogicLibraryOut(BaseModel):
+    flags: Dict[str, bool]
+    total_active: int
+    total_retired: int
+    weekly_total_cost_usd: float
+    by_region: Dict[str, int]
+    entries: List[G10DistilledLogicEntry]
+    window_days: int
+
+
+@router.get("/g10/logic-library", response_model=G10LogicLibraryOut)
+async def g10_logic_library(
+    days: int = 28,
+    region: Optional[str] = None,
+    pillar: Optional[str] = None,
+    active_only: bool = True,
+    limit: int = 100,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> G10LogicLibraryOut:
+    """G10 logic library: list distilled-logic rows within ``days``.
+
+    Filters:
+      - ``region``  : narrow to one region
+      - ``pillar``  : narrow to one pillar
+      - ``active_only`` : default True — exclude retired rows (Sprint 4
+        PR2 retires superseded rows)
+
+    Aggregates the same window for:
+      - total_active / total_retired across all (region, pillar)
+      - weekly_total_cost_usd across active rows in window
+      - by_region row count
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_G10_LOGIC_DISTILL": bool(
+            getattr(_stg, "ENABLE_G10_LOGIC_DISTILL", False)
+        ),
+    }
+
+    where_clauses = ["created_at > now() - (:days || ' day')::interval"]
+    params: Dict[str, Any] = {"days": str(int(days)), "limit": int(limit)}
+    if region:
+        where_clauses.append("region = :region")
+        params["region"] = region
+    if pillar:
+        where_clauses.append("pillar = :pillar")
+        params["pillar"] = pillar
+    if active_only:
+        where_clauses.append("retired_at IS NULL")
+    where_sql = " AND ".join(where_clauses)
+
+    rows = (await db.execute(_text(f"""
+        SELECT
+          id, logic_text, pillar, region, distilled_at_week,
+          source_alpha_ids, llm_cost_usd,
+          similarity_jaccard_to_prev_week, llm_model, retired_at
+        FROM distilled_logic_library
+        WHERE {where_sql}
+        ORDER BY distilled_at_week DESC, id DESC
+        LIMIT :limit
+    """), params)).all()
+
+    entries: List[G10DistilledLogicEntry] = []
+    for (
+        row_id, logic_text, p, r, week, source_ids,
+        cost, sim, model, retired_at,
+    ) in rows:
+        if isinstance(source_ids, list):
+            src_count = len(source_ids)
+        else:
+            src_count = 0
+        entries.append(G10DistilledLogicEntry(
+            id=int(row_id),
+            logic_text=str(logic_text),
+            pillar=str(p) if p else None,
+            region=str(r),
+            distilled_at_week=week,
+            source_alpha_count=src_count,
+            llm_cost_usd=float(cost) if cost is not None else None,
+            similarity_jaccard_to_prev_week=float(sim) if sim is not None else None,
+            llm_model=str(model) if model else None,
+            is_active=retired_at is None,
+        ))
+
+    # Window-level aggregates (independent of active_only / pillar filter
+    # so operator sees the full picture).
+    agg_row = (await db.execute(_text("""
+        SELECT
+          COUNT(*) FILTER (WHERE retired_at IS NULL) AS active,
+          COUNT(*) FILTER (WHERE retired_at IS NOT NULL) AS retired,
+          COALESCE(SUM(llm_cost_usd) FILTER (WHERE retired_at IS NULL), 0.0) AS cost_sum
+        FROM distilled_logic_library
+        WHERE created_at > now() - (:days || ' day')::interval
+    """), {"days": str(int(days))})).one()
+
+    by_region_rows = (await db.execute(_text("""
+        SELECT region, COUNT(*) AS n
+        FROM distilled_logic_library
+        WHERE created_at > now() - (:days || ' day')::interval
+          AND retired_at IS NULL
+        GROUP BY region
+        ORDER BY n DESC
+    """), {"days": str(int(days))})).all()
+
+    return G10LogicLibraryOut(
+        flags=flags,
+        total_active=int(agg_row[0] or 0),
+        total_retired=int(agg_row[1] or 0),
+        weekly_total_cost_usd=round(float(agg_row[2] or 0.0), 4),
+        by_region={str(r): int(n) for r, n in by_region_rows},
+        entries=entries,
+        window_days=int(days),
+    )
+
+
+# =============================================================================
 # Phase 3 R9 — simulation cache telemetry (2026-05-18)
 # =============================================================================
 # Reads simulation_cache table aggregates. hit/miss has no dedicated counter;

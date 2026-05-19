@@ -381,6 +381,25 @@ class Settings(BaseSettings):
     COGNITIVE_LAYER_SELECT_MODE: str = "round_robin"  # bandit | round_robin | deficit_aware
     COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET: int = 8000
 
+    # ----- A5.1 G10 logic-as-asset (Sprint 3, 2026-05-20) -----
+    # RD-Agent NeurIPS 2025 "logic-as-asset" + Citadel internal "research
+    # diary" — past 7d PASS alpha 周末 LLM 蒸馏成 1-3 句话的 logic 总结,
+    # 写 distilled_logic_library 表。PR2 (Sprint 4) 注入回 hypothesis
+    # prompt 形成正反馈;PR1 (本次) 只蒸馏 + 建库。
+    # Cost guard:LOGIC_DISTILL_MAX_COST_USD_PER_WEEK $5 上限,LLM call
+    # cost 累计超过即停;Top-K alpha per (pillar, region) bucket 限制
+    # prompt 大小;< min_pass_count alpha 的 bucket skip。
+    # Schedule:Sunday 03:00 Asia/Shanghai (off-peak,与其他 weekly cron
+    # 错开)。Alembic n5e6f7g8h9i0_distilled_logic.
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.12 / v4 §6.12
+    ENABLE_G10_LOGIC_DISTILL: bool = False
+    LOGIC_DISTILL_MAX_COST_USD_PER_WEEK: float = 5.00
+    LOGIC_DISTILL_TOP_K_PER_GROUP: int = 10
+    LOGIC_DISTILL_MIN_PASS_COUNT: int = 3
+    LOGIC_DISTILL_LOOKBACK_DAYS: int = 7
+    LOGIC_DISTILL_SIMILARITY_THRESHOLD: float = 0.70
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入

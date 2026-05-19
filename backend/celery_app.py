@@ -223,6 +223,16 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_r8_query_log_pruner",
         "schedule": crontab(hour=4, minute=30, day_of_week=0),
     },
+    # Phase 4 Sprint 3 A5.1 G10 (2026-05-20): Sunday 03:00 SH weekly distill
+    # of past 7d PASS alphas into distilled_logic_library. flag-gated by
+    # ENABLE_G10_LOGIC_DISTILL (default OFF → task fires but no-ops).
+    # Cost-capped at LOGIC_DISTILL_MAX_COST_USD_PER_WEEK ($5 default).
+    # Scheduled 1h before r1b-failure-tree-pruner (04:00) so DB writes
+    # finish before the pruner sweep.
+    "g10-weekly-logic-distill": {
+        "task": "backend.tasks.run_weekly_logic_distill",
+        "schedule": crontab(hour=3, minute=0, day_of_week=0),
+    },
     # Canary monitoring (2026-05-18): every-6h red-flag check post v1.3
     # ship. Runs the 5 SQL checks from docs/production_canary_sop_2026_05_18.md
     # §4 against the trailing 6h window. Red rows ERROR-log with rollback
