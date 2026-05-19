@@ -2363,6 +2363,248 @@ async def r6_dag_stats(
 
 
 # =============================================================================
+# G2 Phase A — per-call LLM cost telemetry (2026-05-19)
+# =============================================================================
+# Reads llm_call_log written by cost_tracker.flush_round_async at round
+# boundary. Healthy deploy: ENABLE_COST_TELEMETRY=True AND total_calls > 0
+# (采集实际生效) AND error_rate < 0.10 (LLM API/provider 健康)。avg_cost_per_call
+# 故意不卡硬上限 — Phase A 是描述性,operator 用此 endpoint 建 cost 基线再
+# 决定 Phase C cost-ceiling 值。pillar 维度仅在 mining_agent begin_round
+# 注入 strategy.regime 时非空,因此当前主要分布在 momentum / value / 等
+# regime 标签下;未来 Phase B 可改成真 hypothesis pillar(需要 round 内事后
+# 回填,推下一 PR)。
+
+
+class CostByGroup(BaseModel):
+    label: str
+    calls: int
+    tokens_total: int
+    cost_usd: float
+    avg_latency_ms: float
+    success_rate: float
+
+
+class CostHourBucket(BaseModel):
+    hour_utc: str
+    calls: int
+    tokens_total: int
+    cost_usd: float
+
+
+class CostTaskRow(BaseModel):
+    task_id: Optional[int] = None
+    calls: int
+    tokens_total: int
+    cost_usd: float
+
+
+class CostTelemetryOut(BaseModel):
+    flags: Dict[str, bool]
+    window_days: int
+    total_calls: int
+    successful_calls: int
+    failed_calls: int
+    error_rate: float
+    total_tokens: int
+    total_cost_usd: float
+    avg_cost_per_call: float
+    avg_tokens_per_call: float
+    by_model: List[CostByGroup]
+    by_node_key: List[CostByGroup]
+    by_pillar: List[CostByGroup]
+    top_tasks_by_cost: List[CostTaskRow]
+    hourly_last_24h: List[CostHourBucket]
+    healthy_gates: Dict[str, float]
+    is_healthy: bool
+
+
+@router.get("/cost/telemetry", response_model=CostTelemetryOut)
+async def cost_telemetry(
+    days: int = 7,
+    top_n: int = 10,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> CostTelemetryOut:
+    """G2 Phase A cost telemetry — per-call LLM cost across all callers.
+
+    Aggregates ``llm_call_log`` over the last ``days`` window. Covers普通
+    round (hypothesis / code_gen / self_correct / distill / mutate) +
+    R1b retry/mutate + macro narrative batch + R5 judge + any future LLM
+    caller — same path goes through ``LLMService.call``.
+
+    Healthy gate (Phase A, descriptive):
+      * ENABLE_COST_TELEMETRY ON
+      * total_calls > 0 (flag is actually capturing)
+      * error_rate <= 0.10 (LLM provider healthy)
+
+    avg_cost_per_call intentionally has no upper bound here — Phase A is
+    establishing the baseline, not enforcing it. Phase C (≥7d observation
+    later) introduces COST_CEILING_USD_PER_TASK_DAY with auto-throttling.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_COST_TELEMETRY": bool(getattr(_stg, "ENABLE_COST_TELEMETRY", False)),
+    }
+
+    # Headline aggregate
+    head = (await db.execute(_text(
+        "SELECT "
+        "  COUNT(*) AS calls, "
+        "  COUNT(*) FILTER (WHERE success = true) AS ok, "
+        "  COUNT(*) FILTER (WHERE success = false) AS bad, "
+        "  COALESCE(SUM(tokens_total), 0) AS toks, "
+        "  COALESCE(SUM(cost_usd), 0.0) AS cost "
+        "FROM llm_call_log "
+        "WHERE created_at > now() - (:days || ' day')::interval"
+    ), {"days": str(int(days))})).one()
+    calls, ok, bad, toks, cost = head
+    calls_int = int(calls or 0)
+    ok_int = int(ok or 0)
+    bad_int = int(bad or 0)
+    toks_int = int(toks or 0)
+    cost_f = float(cost or 0.0)
+    error_rate = round(bad_int / calls_int, 4) if calls_int > 0 else 0.0
+    avg_cost = round(cost_f / calls_int, 6) if calls_int > 0 else 0.0
+    avg_toks = round(toks_int / calls_int, 2) if calls_int > 0 else 0.0
+
+    # by_model — group across all calls
+    model_rows = (await db.execute(_text(
+        "SELECT model, COUNT(*) AS n, COALESCE(SUM(tokens_total),0) AS toks, "
+        "       COALESCE(SUM(cost_usd),0.0) AS cost, "
+        "       COALESCE(AVG(latency_ms),0.0) AS lat, "
+        "       COUNT(*) FILTER (WHERE success=true) AS ok "
+        "FROM llm_call_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY model ORDER BY cost DESC"
+    ), {"days": str(int(days))})).all()
+    by_model = [
+        CostByGroup(
+            label=m or "(unknown)",
+            calls=int(n or 0),
+            tokens_total=int(tt or 0),
+            cost_usd=round(float(c or 0.0), 4),
+            avg_latency_ms=round(float(lat or 0.0), 1),
+            success_rate=round(int(okm or 0) / int(n or 1), 4),
+        )
+        for m, n, tt, c, lat, okm in model_rows
+    ]
+
+    node_rows = (await db.execute(_text(
+        "SELECT COALESCE(node_key,'(none)') AS nk, COUNT(*) AS n, "
+        "       COALESCE(SUM(tokens_total),0) AS toks, "
+        "       COALESCE(SUM(cost_usd),0.0) AS cost, "
+        "       COALESCE(AVG(latency_ms),0.0) AS lat, "
+        "       COUNT(*) FILTER (WHERE success=true) AS ok "
+        "FROM llm_call_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY nk ORDER BY cost DESC"
+    ), {"days": str(int(days))})).all()
+    by_node_key = [
+        CostByGroup(
+            label=nk,
+            calls=int(n or 0),
+            tokens_total=int(tt or 0),
+            cost_usd=round(float(c or 0.0), 4),
+            avg_latency_ms=round(float(lat or 0.0), 1),
+            success_rate=round(int(okm or 0) / int(n or 1), 4),
+        )
+        for nk, n, tt, c, lat, okm in node_rows
+    ]
+
+    pillar_rows = (await db.execute(_text(
+        "SELECT COALESCE(pillar,'(none)') AS p, COUNT(*) AS n, "
+        "       COALESCE(SUM(tokens_total),0) AS toks, "
+        "       COALESCE(SUM(cost_usd),0.0) AS cost, "
+        "       COALESCE(AVG(latency_ms),0.0) AS lat, "
+        "       COUNT(*) FILTER (WHERE success=true) AS ok "
+        "FROM llm_call_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "GROUP BY p ORDER BY cost DESC"
+    ), {"days": str(int(days))})).all()
+    by_pillar = [
+        CostByGroup(
+            label=p,
+            calls=int(n or 0),
+            tokens_total=int(tt or 0),
+            cost_usd=round(float(c or 0.0), 4),
+            avg_latency_ms=round(float(lat or 0.0), 1),
+            success_rate=round(int(okm or 0) / int(n or 1), 4),
+        )
+        for p, n, tt, c, lat, okm in pillar_rows
+    ]
+
+    task_rows = (await db.execute(_text(
+        "SELECT task_id, COUNT(*) AS n, "
+        "       COALESCE(SUM(tokens_total),0) AS toks, "
+        "       COALESCE(SUM(cost_usd),0.0) AS cost "
+        "FROM llm_call_log "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "  AND task_id IS NOT NULL "
+        "GROUP BY task_id ORDER BY cost DESC LIMIT :lim"
+    ), {"days": str(int(days)), "lim": int(top_n)})).all()
+    top_tasks = [
+        CostTaskRow(
+            task_id=int(tid) if tid is not None else None,
+            calls=int(n or 0),
+            tokens_total=int(tt or 0),
+            cost_usd=round(float(c or 0.0), 4),
+        )
+        for tid, n, tt, c in task_rows
+    ]
+
+    hour_rows = (await db.execute(_text(
+        "SELECT to_char(date_trunc('hour', created_at AT TIME ZONE 'UTC'), "
+        "       'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS h, "
+        "       COUNT(*) AS n, "
+        "       COALESCE(SUM(tokens_total),0) AS toks, "
+        "       COALESCE(SUM(cost_usd),0.0) AS cost "
+        "FROM llm_call_log "
+        "WHERE created_at > now() - interval '24 hours' "
+        "GROUP BY h ORDER BY h ASC"
+    ))).all()
+    hourly = [
+        CostHourBucket(
+            hour_utc=h or "",
+            calls=int(n or 0),
+            tokens_total=int(tt or 0),
+            cost_usd=round(float(c or 0.0), 4),
+        )
+        for h, n, tt, c in hour_rows
+    ]
+
+    healthy = (
+        bool(flags["ENABLE_COST_TELEMETRY"])
+        and calls_int > 0
+        and error_rate <= 0.10
+    )
+
+    return CostTelemetryOut(
+        flags=flags,
+        window_days=int(days),
+        total_calls=calls_int,
+        successful_calls=ok_int,
+        failed_calls=bad_int,
+        error_rate=error_rate,
+        total_tokens=toks_int,
+        total_cost_usd=round(cost_f, 4),
+        avg_cost_per_call=avg_cost,
+        avg_tokens_per_call=avg_toks,
+        by_model=by_model,
+        by_node_key=by_node_key,
+        by_pillar=by_pillar,
+        top_tasks_by_cost=top_tasks,
+        hourly_last_24h=hourly,
+        healthy_gates={
+            "error_rate_max": 0.10,
+            "min_total_calls": 1.0,
+        },
+        is_healthy=healthy,
+    )
+
+
+# =============================================================================
 # Phase 15-D PR2 cascade drain — DELETED post tier-system removal (2026-05-18)
 # =============================================================================
 # The /cascade-deprecation/drain endpoint (and its sibling /readiness above)
