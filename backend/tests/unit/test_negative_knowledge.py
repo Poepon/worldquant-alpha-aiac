@@ -309,3 +309,45 @@ class TestPlanInvariants:
         )
         out2 = extract_failures_from_alpha_failure(f2, now_utc=_FROZEN_NOW)
         assert out2[0].region == "EUR"
+
+
+class TestGenericBucketSkip:
+    """2026-05-19: persistence.py packs every BRAIN non-2xx into the generic
+    SIMULATION_ERROR bucket (and OTHER / UNKNOWN as fallback), so sedimenting
+    them poisons RAG with a rule_id that matches every alpha. The extractor
+    must short-circuit these at the source."""
+
+    @pytest.mark.parametrize("generic_type", ["SIMULATION_ERROR", "OTHER", "UNKNOWN"])
+    def test_generic_buckets_return_empty(self, generic_type):
+        f = MockAlphaFailure(
+            id=42,
+            expression="ts_rank(close, 20)",
+            error_type=generic_type,
+            error_message="creation failed: 502",
+            _resolved_region="USA",
+        )
+        assert extract_failures_from_alpha_failure(f, now_utc=_FROZEN_NOW) == []
+
+    def test_lowercase_generic_still_skipped(self):
+        """error_type is case-insensitive — the upper() guard catches it."""
+        f = MockAlphaFailure(
+            id=43,
+            expression="ts_rank(close, 20)",
+            error_type="simulation_error",
+            _resolved_region="USA",
+        )
+        assert extract_failures_from_alpha_failure(f, now_utc=_FROZEN_NOW) == []
+
+    def test_real_signal_preserved(self):
+        """QUALITY_CHECK_FAILED + SYNTAX_ERROR are per-alpha signal, not
+        generic infra noise — must still produce a signature."""
+        for et in ("QUALITY_CHECK_FAILED", "SYNTAX_ERROR"):
+            f = MockAlphaFailure(
+                id=44,
+                expression="ts_rank(close, 20)",
+                error_type=et,
+                _resolved_region="USA",
+            )
+            out = extract_failures_from_alpha_failure(f, now_utc=_FROZEN_NOW)
+            assert len(out) == 1
+            assert out[0].rule_id == f"sim_error:{et.lower()}"

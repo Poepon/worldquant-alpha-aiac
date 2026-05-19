@@ -28,6 +28,64 @@ from loguru import logger
 
 
 # =============================================================================
+# Pitfall error_type → category classifier
+# =============================================================================
+# LLM emits free-form error_type, so noise surface is wider than AlphaFailure's
+# 5 fixed values (which negative_knowledge handles separately). Drop rows with
+# no per-alpha signal (dedup race / generic fallback / BRAIN infra) instead of
+# sedimenting them with NULL category and feeding them to LLM via RAG.
+
+_PITFALL_NOISE_PATTERNS = (
+    "duplicate",
+    "unknown", "constraint", "timeout",
+    "pre-simulate", "infrastructure", "api auth",
+    "no alpha id", "system failure", "cascading",
+    "simulation_error", "simulation error",
+    "database constraint", "database error",
+)
+
+_PITFALL_THRESHOLD_PATTERNS = (
+    "threshold", "performance", "metrics below", "metrics_below",
+    "low sharpe", "low fitness", "low signal",
+    "signal degradation", "low novelty",
+)
+
+_PITFALL_THRESHOLD_EXACT = {
+    "LOW_FITNESS", "LOW_SHARPE", "HIGH_TURNOVER", "NEGATIVE_SIGNAL",
+    "QUALITY_FAIL", "QUALITY_CHECK_FAILED", "LOW_SUB_UNIVERSE_SHARPE",
+}
+
+_PITFALL_ROBUSTNESS_PATTERNS = ("concentrat", "correlation")
+
+_PITFALL_STATIC_PATTERNS = ("syntax", "type error", "type mismatch", "semantic")
+
+
+def _classify_pitfall_error_type(error_type: Optional[str]) -> Optional[str]:
+    """LLM-supplied pitfall error_type → category, or None to skip.
+
+    None means the error_type is generic / infra / dedup-race noise and
+    should NOT be sedimented; the caller MUST drop the row instead of
+    writing it with NULL category."""
+    if not error_type:
+        return None
+    et = str(error_type).strip()
+    if not et:
+        return None
+    if et in _PITFALL_THRESHOLD_EXACT:
+        return "threshold"
+    et_lower = et.lower()
+    if any(m in et_lower for m in _PITFALL_NOISE_PATTERNS):
+        return None
+    if any(m in et_lower for m in _PITFALL_THRESHOLD_PATTERNS):
+        return "threshold"
+    if any(m in et_lower for m in _PITFALL_ROBUSTNESS_PATTERNS):
+        return "robustness"
+    if any(m in et_lower for m in _PITFALL_STATIC_PATTERNS):
+        return "static_finding"
+    return None
+
+
+# =============================================================================
 # Structured Failure Analysis
 # =============================================================================
 
@@ -1010,30 +1068,41 @@ class FeedbackAgent:
                 self.db.add(entry)
                 new_entries += 1
 
-            # 2. Store New Pitfalls (with error type and severity)
+            # 2. Store New Pitfalls — drop noise (None) and stamp category.
             for p in analysis.get("new_pitfalls", []):
                 pattern_str = p.get("pattern", "")
-                if pattern_str and not await self._pattern_exists(pattern_str):
-                    entry = KnowledgeEntry(
-                        entry_type='FAILURE_PITFALL',
-                        pattern=pattern_str,
-                        description=p.get("description"),
-                        meta_data={
-                            'round': iteration,
-                            'dataset_id': dataset_id,
-                            'region': region,
-                            'error_type': p.get("error_type"),
-                            'recommendation': p.get("recommendation"),
-                            'severity': p.get("severity", "medium"),
-                            'source': 'evolution_loop',
-                            # Plan v5+ §B8: typed Hypothesis lineage
-                            'hypothesis_id': primary_hid,
-                            'hypothesis_ids': hids_clean,
-                            'experiment_variant': experiment_variant,
-                        }
+                if not pattern_str:
+                    continue
+                if await self._pattern_exists(pattern_str):
+                    continue
+                resolved_category = _classify_pitfall_error_type(p.get("error_type"))
+                if resolved_category is None:
+                    logger.info(
+                        f"[feedback_agent] skip pitfall write — error_type "
+                        f"{p.get('error_type')!r} is noise / no signal"
                     )
-                    self.db.add(entry)
-                    new_entries += 1
+                    continue
+                entry = KnowledgeEntry(
+                    entry_type='FAILURE_PITFALL',
+                    pattern=pattern_str,
+                    description=p.get("description"),
+                    meta_data={
+                        'round': iteration,
+                        'dataset_id': dataset_id,
+                        'region': region,
+                        'error_type': p.get("error_type"),
+                        'category': resolved_category,
+                        'recommendation': p.get("recommendation"),
+                        'severity': p.get("severity", "medium"),
+                        'source': 'evolution_loop',
+                        # Plan v5+ §B8: typed Hypothesis lineage
+                        'hypothesis_id': primary_hid,
+                        'hypothesis_ids': hids_clean,
+                        'experiment_variant': experiment_variant,
+                    }
+                )
+                self.db.add(entry)
+                new_entries += 1
             
             # V-24.E (2026-05-13): FIELD_INSIGHT + HYPOTHESIS_INSIGHT writes
             # are gated behind a default-off flag. kb_hit_audit.py revealed
