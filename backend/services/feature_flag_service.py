@@ -99,24 +99,28 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="P2-B",
         description="hypothesis 节点根据 deficit 给出 pillar nudge",
     ),
-    # --- P2-C 市场体制 ---
-    "ENABLE_REGIME_INFERENCE": FlagSpec(
-        name="ENABLE_REGIME_INFERENCE",
+    # --- P2-C 市场体制 (Consolidated 2026-05-19: single switch + stage str) ---
+    "ENABLE_REGIME": FlagSpec(
+        name="ENABLE_REGIME",
         flag_type="bool",
         group="P2-C",
-        description="每日 10:30 SH 推断 regime + 写 Redis cache",
+        description=(
+            "P2-C 市场体制总开关。OFF 时无 regime 推断、无阈值倍率、无 style "
+            "preset 注入(byte-for-byte legacy)。ON 时按 REGIME_STAGE 决定生效"
+            "深度。Consolidated 2026-05-19 from 3 booleans into 1 + stage str。"
+        ),
     ),
-    "ENABLE_REGIME_AWARE_THRESHOLDS": FlagSpec(
-        name="ENABLE_REGIME_AWARE_THRESHOLDS",
-        flag_type="bool",
+    "REGIME_STAGE": FlagSpec(
+        name="REGIME_STAGE",
+        flag_type="str",
         group="P2-C",
-        description="按 regime 倍率应用 sharpe/fitness/turnover 阈值",
-    ),
-    "ENABLE_STYLE_PRESET_GUIDANCE": FlagSpec(
-        name="ENABLE_STYLE_PRESET_GUIDANCE",
-        flag_type="bool",
-        group="P2-C",
-        description="hypothesis 节点注入 regime style preset 投资哲学",
+        description=(
+            "Regime staged rollout 等级(类比 QLIB_PRESCREEN_MODE):"
+            "'inference' = 仅每日 10:30 SH 推断 regime + 写 Redis cache 攒数据;"
+            "'thresholds' = 推断 + 按 regime 倍率应用 sharpe/fitness/turnover;"
+            "'style' = 推断 + 倍率 + 注入投资哲学 block 进 hypothesis prompt。"
+            "Default 'inference'。需 ENABLE_REGIME=True 才生效。"
+        ),
     ),
     # --- P2-D 负向知识 ---
     "ENABLE_NEGATIVE_KNOWLEDGE_NUDGE": FlagSpec(
@@ -228,13 +232,15 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "~5d shadow → 3d soft → hard per plan §10 stage gates."
         ),
     ),
-    # --- Phase 3 R1b CoSTEER loop activation ---
+    # --- R1b CoSTEER loop (5 sub-stages — independent rollback, ordered deps) ---
+    # 设计:5 个 sub-stage 各自独立 flag。Ship 顺序 stage 1→5 但任一可 OFF 单独回滚。
+    # 依赖关系在 description 中标注;ops UI 按 group 排序看到完整 stage 列表。
     "ENABLE_R1B_RETRY_LOOP": FlagSpec(
         name="ENABLE_R1B_RETRY_LOOP",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.1 (2026-05-18): LangGraph cycle EVAL → "
+            "[stage 1/5 — no deps] R1b.1 (2026-05-18): LangGraph cycle EVAL → "
             "CODE_GEN_RETRY for IMPLEMENTATION attribution. Budget "
             "R1B_MAX_RETRIES_PER_ALPHA=3 + token ceiling "
             "R1B_TOKEN_COST_CEILING_USD_PER_ALPHA=$0.05. Soft-fall: LLM "
@@ -245,46 +251,47 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     "ENABLE_R1B_HYPOTHESIS_MUTATE": FlagSpec(
         name="ENABLE_R1B_HYPOTHESIS_MUTATE",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.2 (2026-05-18): LangGraph cycle EVAL → "
-            "HYPOTHESIS_MUTATE for HYPOTHESIS attribution. Budget "
-            "R1B_MAX_MUTATIONS_PER_DATASET_CYCLE=2. BOTH attribution → "
-            "mutate dominates retry per plan [V1.0-A2-3]. Creates "
-            "parent_hypothesis_id chain on Hypothesis."
+            "[stage 2/5 — deps: R1B_RETRY_LOOP for full BOTH-attribution effect] "
+            "R1b.2 (2026-05-18): LangGraph cycle EVAL → HYPOTHESIS_MUTATE for "
+            "HYPOTHESIS attribution. Budget R1B_MAX_MUTATIONS_PER_DATASET_CYCLE=2. "
+            "BOTH attribution → mutate dominates retry per plan [V1.0-A2-3]. "
+            "Creates parent_hypothesis_id chain on Hypothesis."
         ),
     ),
     "R1B_MAX_MUTATION_DEPTH": FlagSpec(
         name="R1B_MAX_MUTATION_DEPTH",
         flag_type="int",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.2 review MEDIUM (2026-05-18): caps cross-round "
-            "mutation chain depth. R1B_MAX_MUTATIONS_PER_DATASET_CYCLE "
-            "limits within a single round but pending → inject → mutate "
-            "could spiral across rounds. node_hypothesis_mutate now "
-            "reads parent Hypothesis.r1b_mutation_depth and refuses "
-            "when >= this cap. Default 3 = up to 3 levels of mutation "
-            "from the original RAG-seeded hypothesis."
+            "[stage 2/5 config — caps mutation chain depth across rounds] "
+            "R1b.2 review MEDIUM (2026-05-18): R1B_MAX_MUTATIONS_PER_DATASET_CYCLE "
+            "limits within a single round but pending → inject → mutate could "
+            "spiral across rounds. node_hypothesis_mutate now reads parent "
+            "Hypothesis.r1b_mutation_depth and refuses when >= this cap. "
+            "Default 3 = up to 3 levels of mutation from the original RAG-"
+            "seeded hypothesis."
         ),
     ),
     "ENABLE_R1B_FAILURE_TREE": FlagSpec(
         name="ENABLE_R1B_FAILURE_TREE",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.3 (2026-05-18): knowledge_extraction writes "
-            "failure_tree JSONB to KnowledgeEntry.meta_data; surfaced by "
-            "R8 RAG L2 for related hypothesis families. Soft-fail: KB "
-            "write error never blocks round."
+            "[stage 3/5 — deps: HYPOTHESIS_MUTATE for full failure-tree population] "
+            "R1b.3 (2026-05-18): knowledge_extraction writes failure_tree JSONB "
+            "to KnowledgeEntry.meta_data; surfaced by R8 RAG L2 for related "
+            "hypothesis families. Soft-fail: KB write error never blocks round."
         ),
     ),
     "ENABLE_R1B_TYPED_PIPELINE": FlagSpec(
         name="ENABLE_R1B_TYPED_PIPELINE",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.4 (2026-05-18): activates 3223-line DORMANT "
+            "[stage 4/5 — opt-in per task, coexists with stages 1+2] "
+            "R1b.4 (2026-05-18): activates 3223-line DORMANT "
             "agents/core/AlphaMiningPipeline for hypothesis_centric_variant=3 "
             "tasks. Bypasses LangGraph cycle; retry/mutate embedded in "
             "Experiment2Feedback. Coexists with R1b.1+R1b.2 — opt-in per task."
@@ -293,17 +300,18 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     "ENABLE_R1B_DAG_RETRY_REWARD": FlagSpec(
         name="ENABLE_R1B_DAG_RETRY_REWARD",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.5 (2026-05-18): R6 DAG UCB1 includes retry "
-            "rewards in node selection. Pre-req R1b.1+R1b.2 GO gates "
-            "PASS + ≥14d production observation per [V1.2-A2-3]."
+            "[stage 5/5 — deps: RETRY_LOOP + HYPOTHESIS_MUTATE + DAG_TRACE all ON, "
+            "≥14d obs] R1b.5 (2026-05-18): R6 DAG UCB1 includes retry rewards in "
+            "node selection. Pre-req R1b.1+R1b.2 GO gates PASS + ≥14d production "
+            "observation per [V1.2-A2-3]."
         ),
     ),
     "R1B_MAX_COST_USD_PER_ROUND": FlagSpec(
         name="R1B_MAX_COST_USD_PER_ROUND",
         flag_type="float",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
             "Phase 3 R1b.1 review LOW 2 (2026-05-18): soft cap on cumulative "
             "R1b LLM cost (retry + mutate) within a single round. Per-alpha "
@@ -367,20 +375,9 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "采集开销。Phase C ≥7d 观察后 promote 到 cost-aware throttling。"
         ),
     ),
-    # --- R8-v2 #2 Hierarchical RAG Redis cache ---
-    "ENABLE_HIERARCHICAL_RAG_CACHE": FlagSpec(
-        name="ENABLE_HIERARCHICAL_RAG_CACHE",
-        flag_type="bool",
-        group="Phase3-R8",
-        description=(
-            "Phase 3 R8-v2 #2 (2026-05-18): per-layer Redis cache for "
-            "hierarchical RAG. cache_key=sha256[:16] over (layer + sorted "
-            "params); TTL=RAG_HIER_CACHE_TTL_SEC (default 300s). 无显式 "
-            "invalidation — TTL 自然过期 (KB write 频率 3-50/h 与 5-min "
-            "stale tolerance in plan §10 GO gate)。Redis unreachable → "
-            "soft-fall direct call。Rollback < 1min via flag flip OFF。"
-        ),
-    ),
+    # Retired 2026-05-19 — ENABLE_HIERARCHICAL_RAG_CACHE + ENABLE_R5_L2_RANKING
+    # subsumed into the main ENABLE_HIERARCHICAL_RAG switch (cache always on,
+    # L2 R5 ranking always on). DB orphan override rows silently no-op.
     # phase15-D PR3c (2026-05-18): ENABLE_CASCADE_LEGACY flag retired —
     # cascade dispatch + router + watchdog probe now refuse
     # unconditionally. Removed from SUPPORTED_FLAGS so the override UI
@@ -401,19 +398,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "AsyncSession soft-fail INSERT — DB error never aborts RAG."
         ),
     ),
-    # --- R8-v2 #3 R5 L2 ranking ---
-    "ENABLE_R5_L2_RANKING": FlagSpec(
-        name="ENABLE_R5_L2_RANKING",
-        flag_type="bool",
-        group="Phase3-R8",
-        description=(
-            "Phase 3 R8-v2 #3 (2026-05-18): layer2_family SUCCESS 候选按 R5 "
-            "composite_score 历史 AVG 重排。SQL 单次 GROUP BY expression_hash "
-            "JOIN r1a_attribution_log,relevance_score = 0.45 + 0.4·avg(R5)。"
-            "前置 ENABLE_HIERARCHICAL_RAG ON + ENABLE_LLM_JUDGE ON 累计 r5 "
-            "score 非 NULL。Soft-fail SQL error → 原顺序。Rollback < 1min。"
-        ),
-    ),
     # --- R9 simulation cache ---
     "ENABLE_SIMULATION_CACHE": FlagSpec(
         name="ENABLE_SIMULATION_CACHE",
@@ -430,36 +414,42 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "Soft-fail: cache DB error → fall back to direct BRAIN call (never blocks)。"
         ),
     ),
-    # --- flat-F3: LLM-driven wrapper mutation ---
+    # --- Mining-Strategy: LLM-driven wrapper mutation (used by both flat & cascade) ---
     "ENABLE_LLM_MUTATE_ALPHA": FlagSpec(
         name="ENABLE_LLM_MUTATE_ALPHA",
         flag_type="bool",
-        group="Phase3-flatF3",
+        group="Mining-Strategy",
         description=(
-            "Phase 3 flat-F3 (master plan §4.5): wrapper-mutation 路径让 LLM "
-            "看 _failed_tests + P2-D pitfalls 选 2-3 wrappers,替代盲目穷举。"
-            "降 BRAIN sim cost ~40-75%,提 PASS rate (LLM 偏避有名失败模式)。"
-            "Soft-fail: LLM 失败 fall back to legacy enumerate。"
-            "Cost: haiku-4-5 ~$0.01/call/seed,top_k=3 variants。"
+            "[no deps — concept independent of flat/cascade] Phase 3 flat-F3 "
+            "(master plan §4.5): wrapper-mutation 路径让 LLM 看 _failed_tests + "
+            "P2-D pitfalls 选 2-3 wrappers,替代盲目穷举。降 BRAIN sim cost "
+            "~40-75%,提 PASS rate (LLM 偏避有名失败模式)。Soft-fail: LLM 失败 "
+            "fall back to legacy enumerate。Cost: haiku-4-5 ~$0.01/call/seed,"
+            "top_k=3 variants。"
         ),
     ),
-    # --- flat-F2: default flat session ---
+    # --- Flat-Mode (2 sub-flags — entry switch + default routing) ---
     "ENABLE_DEFAULT_FLAT_SESSION": FlagSpec(
         name="ENABLE_DEFAULT_FLAT_SESSION",
         flag_type="bool",
-        group="Phase3-flatF2",
+        group="Flat-Mode",
         description=(
+            "[entry routing — deps: FLAT_CONTINUOUS + DAG_TRACE both ON] "
             "Phase 3 flat-F2: POST /mining-session/start 默认创建 flat task。"
             "前置 ENABLE_FLAT_CONTINUOUS + ENABLE_DAG_TRACE 都 ON 才生效 "
             "(R6 给 flat reward-guided exploration)。"
         ),
     ),
-    # --- flat-F1 Advanced: FLAT continuous mining ---
     "ENABLE_FLAT_CONTINUOUS": FlagSpec(
         name="ENABLE_FLAT_CONTINUOUS",
         flag_type="bool",
-        group="Phase3-flatF1",
-        description="启用 FLAT 持续 session。Hypothesis-driven — dataset × hypothesis 迭代。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。",
+        group="Flat-Mode",
+        description=(
+            "[core flat session switch — no deps] Phase 3 flat-F1 Advanced: "
+            "启用 FLAT 持续 session。Hypothesis-driven — dataset × hypothesis "
+            "迭代。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume "
+            "入口。"
+        ),
     ),
     # --- Phase 2 R6: DAG Trace (MCTS-lite) ---
     "ENABLE_DAG_TRACE": FlagSpec(

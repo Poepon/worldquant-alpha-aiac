@@ -205,7 +205,6 @@ async def test_e2e_l0_exact_match_hits_first_layer(pg_session, monkeypatch):
     from backend.agents.services.rag_service import RAGService
 
     monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG", True, raising=False)
-    monkeypatch.setattr(settings, "ENABLE_R5_L2_RANKING", False, raising=False)
 
     expr = await _seed_kb(pg_session, layer="L0")
     svc = RAGService(pg_session)
@@ -236,7 +235,6 @@ async def test_e2e_l3_field_overlap_hits_when_no_higher_layer(pg_session, monkey
     from backend.agents.services.rag_service import RAGService
 
     monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG", True, raising=False)
-    monkeypatch.setattr(settings, "ENABLE_R5_L2_RANKING", False, raising=False)
 
     expr = await _seed_kb(pg_session, layer="L3")
     svc = RAGService(pg_session)
@@ -334,7 +332,6 @@ async def test_e2e_decayed_partition_shape_in_pitfalls(pg_session, monkeypatch):
     from backend.agents.services.rag_service import RAGService
 
     monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG", True, raising=False)
-    monkeypatch.setattr(settings, "ENABLE_R5_L2_RANKING", False, raising=False)
 
     decayed_pattern = f"ts_rank({_TAG}_dec_true_mom, 5)"
     fresh_pattern = f"ts_rank({_TAG}_dec_false_mom, 5)"
@@ -392,7 +389,6 @@ async def test_e2e_max_pitfalls_bound_enforced(pg_session, monkeypatch):
     from backend.agents.services.rag_service import RAGService
 
     monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG", True, raising=False)
-    monkeypatch.setattr(settings, "ENABLE_R5_L2_RANKING", False, raising=False)
 
     # Seed 10 FAILURE_PITFALL rows matching pillar=momentum
     for i in range(10):
@@ -436,7 +432,6 @@ async def test_e2e_empty_context_no_failure_pitfall(pg_session, monkeypatch):
     from sqlalchemy import text as _text
 
     monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG", True, raising=False)
-    monkeypatch.setattr(settings, "ENABLE_R5_L2_RANKING", False, raising=False)
 
     # Use a unique pillar so no other KB FAILURE_PITFALL rows can match
     # (production KB has ~1660 pitfalls under standard pillars). The

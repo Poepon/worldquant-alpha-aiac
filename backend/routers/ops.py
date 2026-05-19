@@ -1796,9 +1796,9 @@ async def r8_kb_shape(
     from sqlalchemy import text as _text
     from backend.config import settings as _stg
 
+    # (Retired ENABLE_R5_L2_RANKING 2026-05-19 — subsumed into main switch.)
     flags = {
         "ENABLE_HIERARCHICAL_RAG": bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)),
-        "ENABLE_R5_L2_RANKING": bool(getattr(_stg, "ENABLE_R5_L2_RANKING", False)),
     }
 
     # Per-entry_type with decayed split. meta_data->>'decayed' is the
@@ -1949,7 +1949,6 @@ async def costeer_deploy_recommendation(
         "ENABLE_R1A_HOOK": bool(getattr(_stg, "ENABLE_R1A_HOOK", False)),
         "ENABLE_LLM_JUDGE": bool(getattr(_stg, "ENABLE_LLM_JUDGE", False)),
         "ENABLE_HIERARCHICAL_RAG": bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)),
-        "ENABLE_R5_L2_RANKING": bool(getattr(_stg, "ENABLE_R5_L2_RANKING", False)),
         "ENABLE_R1B_RETRY_LOOP": bool(getattr(_stg, "ENABLE_R1B_RETRY_LOOP", False)),
         "ENABLE_R1B_HYPOTHESIS_MUTATE": bool(getattr(_stg, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)),
         "ENABLE_R1B_FAILURE_TREE": bool(getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False)),
@@ -2047,11 +2046,9 @@ async def costeer_deploy_recommendation(
         f"R8: SUCCESS_PATTERN active={r8_succ_active} (need ≥{g['r8_success_active_min']}) / "
         f"pillar diversity={r8_pillars} (need ≥{g['r8_pillar_diversity_min']})",
     )
-    _check(
-        "ENABLE_R5_L2_RANKING",
-        r5_rankable >= g["r8_r5_rankable_min"],
-        f"R5 ranking: rankable SUCCESS={r5_rankable} (need ≥{g['r8_r5_rankable_min']})",
-    )
+    # (Retired ENABLE_R5_L2_RANKING gate 2026-05-19 — subsumed into hierarchical
+    # RAG main switch. r5_rankable count remains exposed at r8_r5_rankable_success
+    # for forensic visibility.)
     _check(
         "ENABLE_R1B_RETRY_LOOP",
         state["ENABLE_R1A_HOOK"] and r1a_non_unknown_pct >= g["r1a_non_unknown_pct_min"]
@@ -2158,10 +2155,10 @@ async def r8_query_stats(
     from sqlalchemy import text as _text
     from backend.config import settings as _stg
 
+    # (Retired ENABLE_HIERARCHICAL_RAG_CACHE 2026-05-19 — subsumed into main switch.)
     flags = {
         "ENABLE_HIERARCHICAL_RAG": bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)),
         "ENABLE_R8_QUERY_LOG": bool(getattr(_stg, "ENABLE_R8_QUERY_LOG", False)),
-        "ENABLE_HIERARCHICAL_RAG_CACHE": bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG_CACHE", False)),
     }
 
     # Aggregate: total + cache hit + failure_tree_elevation + per-layer

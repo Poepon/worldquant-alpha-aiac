@@ -330,15 +330,14 @@ class Settings(BaseSettings):
     RAG_HIER_CROSS_REGION_DECAY: float = 0.7  # 跨 region 命中 score 折扣
 
     # R8-v2 #3 (2026-05-18): R5 composite_score ranking for L2 SUCCESS。
-    # ENABLE_R5_L2_RANKING=True 时,layer2_family fetched 候选会 JOIN
-    # r1a_attribution_log.r5_composite_score AVG GROUP BY expression_hash
-    # (sha256[:64] of KB pattern,匹配 evaluation.py:2631 R1a hook 写入
-    # 约定),按 R5 mean score 降序重排;有样本 row 用 0.45+0.4*avg 折算
-    # relevance_score (range [0.45,0.85] 高 R5 sort 在前)。零样本 row 保
-    # 原 0.65 默认。Soft-fail SQL error → 原顺序。前置 R5 ENABLE_LLM_JUDGE
+    # layer2_family fetched 候选会 JOIN r1a_attribution_log.r5_composite_score
+    # AVG GROUP BY expression_hash (sha256[:64] of KB pattern,匹配
+    # evaluation.py:2631 R1a hook 写入约定),按 R5 mean score 降序重排;有样
+    # 本 row 用 0.45+0.4*avg 折算 relevance_score (range [0.45,0.85])。零样本
+    # row 保原 0.65 默认。Soft-fail SQL error → 原顺序。前置 R5 ENABLE_LLM_JUDGE
     # ON 累积 r1a_attribution_log r5_composite_score 非 NULL。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    ENABLE_R5_L2_RANKING: bool = False
+    # (Retired ENABLE_R5_L2_RANKING flag 2026-05-19 — hard-wired ON;subsumed
+    #  into ENABLE_HIERARCHICAL_RAG main switch.)
     R5_L2_RANKING_MIN_SAMPLES: int = 1   # 至少 N r1a sample 才参与重排
     R5_L2_RANKING_LOOKBACK_DAYS: int = 30  # AVG 窗口
 
@@ -417,8 +416,8 @@ class Settings(BaseSettings):
     # cache_key = sha256[:16](layer + sorted params),TTL = RAG_HIER_CACHE_TTL_SEC
     # (default 300s)。无显式 invalidation — KB 写入频率 3-50/h,5-min stale window
     # 在 plan §10 GO gate 容忍范围。redis 不可用 → soft-fall direct layer call。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    ENABLE_HIERARCHICAL_RAG_CACHE: bool = False
+    # (Retired ENABLE_HIERARCHICAL_RAG_CACHE flag 2026-05-19 — hard-wired ON;
+    #  subsumed into ENABLE_HIERARCHICAL_RAG main switch.)
 
     # ----- R8 query-level telemetry (2026-05-18 follow-up) -----
     # Per-call layer_hits + cache_hit + had_failure_tree_elevation row in
@@ -589,12 +588,9 @@ class Settings(BaseSettings):
     # PR5 — T1 sign-flip retry. When a T1 candidate FAILs but |sharpe| ≥
     # T1_FLIP_RETRY_SHARPE (default 0.5), evaluation re-simulates the negated
     # expression (`multiply(-1, expr)`) and re-evaluates against the same
-    # gate. This catches alphas where the LLM picked the right field/op
-    # but the wrong sign convention (e.g. quality factors that should be
-    # ranked descending). Bounded by T1_FLIP_RETRY_CAP per round to keep
-    # BRAIN budget under control. Set ENABLE_T1_SIGN_FLIP_RETRY=False to
-    # disable globally.
-    ENABLE_T1_SIGN_FLIP_RETRY: bool = True
+    # gate. Catches alphas where the LLM picked the right field/op but the
+    # wrong sign convention. Bounded by T1_FLIP_RETRY_CAP per round.
+    # (Retired ENABLE_T1_SIGN_FLIP_RETRY flag 2026-05-19 — hard-wired ON.)
     T1_FLIP_RETRY_SHARPE: float = 0.5  # min |sharpe| to trigger flip; below = noise
     T1_FLIP_RETRY_CAP: int = 5  # max flips per round
 
@@ -680,16 +676,19 @@ class Settings(BaseSettings):
 
     # P2-C (2026-05-16): regime-aware threshold gating + style preset encoding.
     # 来源: docs/alphagbm_skills_research_2026-05-15.md skills vix-status /
-    # duan-analysis. All three flags default OFF (S1 + P2-A/B/D 惯例).
-    # regime_at_eval stamp 仅当 strategy.regime 被注入时触发 (任一 effect
-    # flag 为 True 即可,即 ENABLE_REGIME_AWARE_THRESHOLDS 或
-    # ENABLE_STYLE_PRESET_GUIDANCE 之一). 推荐启用顺序:
-    #   1. ENABLE_REGIME_INFERENCE=True 攒 1-2 天 docs/regime_state/<sh-date>.json
-    #   2. ENABLE_REGIME_AWARE_THRESHOLDS=True 让倍率生效 + 数据采集 stamp
-    #   3. ENABLE_STYLE_PRESET_GUIDANCE=True 注入投资哲学 block 进 hypothesis prompt
-    ENABLE_REGIME_INFERENCE: bool = False
-    ENABLE_REGIME_AWARE_THRESHOLDS: bool = False
-    ENABLE_STYLE_PRESET_GUIDANCE: bool = False
+    # duan-analysis. Default OFF (S1 + P2-A/B/D 惯例). regime_at_eval stamp
+    # 仅当 strategy.regime 被注入时触发(stage ≥ "thresholds" 即可)。
+    #
+    # Consolidated 2026-05-19 — single switch ENABLE_REGIME + REGIME_STAGE str
+    # replaces the previous 3 booleans (ENABLE_REGIME_INFERENCE /
+    # ENABLE_REGIME_AWARE_THRESHOLDS / ENABLE_STYLE_PRESET_GUIDANCE). The 3
+    # legacy names remain as read-only @property derivations so all callers
+    # keep working byte-for-byte. Staged rollout (mirrors Q10/G3):
+    #   - REGIME_STAGE="inference"  → 攒 1-2 天 docs/regime_state/<sh-date>.json
+    #   - REGIME_STAGE="thresholds" → 倍率生效 + 数据采集 stamp
+    #   - REGIME_STAGE="style"      → 注入投资哲学 block 进 hypothesis prompt
+    ENABLE_REGIME: bool = False
+    REGIME_STAGE: str = "inference"  # one of: inference / thresholds / style
     REGIME_INFERENCE_WINDOW_DAYS: int = 7
     REGIME_EWMA_ALPHA: float = 0.3
     REGIME_CACHE_TTL_SECONDS: int = 86400   # 24h
@@ -728,8 +727,9 @@ class Settings(BaseSettings):
     TRIGGER_DETAIL_MAX_ENTRIES: int = 50            # trigger_detail FIFO cap
 
     # LLM scoring controls
-    ENABLE_LLM_THESIS_SCORE_ON_PROMOTED: bool = True
-    ENABLE_LLM_THESIS_SCORE_ON_TRIGGER: bool = True
+    # (Retired ENABLE_LLM_THESIS_SCORE_ON_PROMOTED + ENABLE_LLM_THESIS_SCORE_ON_TRIGGER
+    #  flags 2026-05-19 — hard-wired ON. ON_PROMOTED had no reader; ON_TRIGGER
+    #  was a degenerate guard alongside `if self.llm is None`.)
     # Per-RUN(not per-day)token budget — counter resets every Celery beat
     # invocation. Renamed in P2 review fix; the old "DAILY" name was misleading
     # because nothing tracked spend across runs.
@@ -750,30 +750,24 @@ class Settings(BaseSettings):
     # T1 tasks already persist per round.
     T2_INCREMENTAL_PERSISTENCE: bool = True
 
-    # PR7 — wrapper-aware simulation settings. When True, node_simulate buckets
-    # expressions by per-alpha settings (chosen via smart_simulation_settings
-    # based on expression form + field category) and calls simulate_batch per
-    # bucket. Defaults to True after backfill found 0% of mining-produced
-    # alphas can submit — root cause is double-neutralization (group_*
-    # wrapper + BRAIN neut=SUBINDUSTRY) and decay-vs-trade_when conflicts.
-    # Toggle off if a future task shows PASS-rate regression.
-    ENABLE_SMART_SIM_SETTINGS: bool = True
+    # PR7 — wrapper-aware simulation settings. node_simulate buckets expressions
+    # by per-alpha settings (chosen via smart_simulation_settings based on
+    # expression form + field category) and calls simulate_batch per bucket.
+    # Root cause for the flip: backfill found 0% of mining-produced alphas can
+    # submit — double-neutralization (group_* wrapper + BRAIN neut=SUBINDUSTRY)
+    # and decay-vs-trade_when conflicts.
+    # (Retired ENABLE_SMART_SIM_SETTINGS flag 2026-05-19 — hard-wired ON.)
 
-    # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier toggle.
-    # When True, node_simulate runs each candidate through the trained
-    # sklearn LogisticRegression and skips alphas with P(PASS) < threshold
-    # BEFORE BRAIN simulate. Saves BRAIN concurrent-slot time on
-    # likely-fails. Model: AUC=0.813 on 2737 historical alphas (451 PASS).
-    #
-    # V-24.B (2026-05-13): default flipped ON with conservative threshold
-    # 0.10. Threshold table from training run:
+    # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier filter.
+    # node_simulate runs each candidate through the trained sklearn
+    # LogisticRegression and skips alphas with P(PASS) < threshold BEFORE BRAIN
+    # simulate. Saves BRAIN concurrent-slot time on likely-fails.
+    # Model: AUC=0.813 on 2737 historical alphas (451 PASS).
+    # V-24.B (2026-05-13): conservative threshold 0.10:
     #   0.05  → 98.9% PASS recall, skips  2.2% FAIL (negligible savings)
     #   0.10  → 98.0% PASS recall, skips  7.1% FAIL  ← current default
-    #   0.15  → 96.5% PASS recall, skips 17.0% FAIL  ← recommended
-    # Picking 0.10 trades 2pp PASS recall for 7% BRAIN simulate savings
-    # — a safer first rollout than 0.15. Run a week of metrics
-    # (scripts/pre_simulate_filter_audit.py) before bumping to 0.15.
-    ENABLE_PRE_SIMULATE_FILTER: bool = True
+    #   0.15  → 96.5% PASS recall, skips 17.0% FAIL  ← recommended after audit
+    # (Retired ENABLE_PRE_SIMULATE_FILTER flag 2026-05-19 — hard-wired ON.)
     PRE_SIMULATE_FILTER_THRESHOLD: float = 0.10
 
     # V-24.E (2026-05-13): FIELD_INSIGHT / HYPOTHESIS_INSIGHT writes gated.
@@ -1115,6 +1109,30 @@ class Settings(BaseSettings):
         if self.ENABLE_BRAIN_CONSULTANT_MODE:
             return dict(self.CONSULTANT_REGION_UNIVERSES)
         return {"USA": "TOP3000"}
+
+    # ---- Regime staged-rollout derivations (post 2026-05-19 consolidation) ----
+    # 3 legacy ENABLE_REGIME_* names kept as read-only properties so existing
+    # callers (mining_agent / generation / evaluation / regime_infer) and
+    # tests stay byte-for-byte. New single switch lives in ENABLE_REGIME +
+    # REGIME_STAGE; stage progression: inference → thresholds → style.
+    # The Settings.__getattribute__ hook is bypassed for these names because
+    # they are not in SUPPORTED_FLAGS (no override row); fall-through hits
+    # the @property descriptor below.
+    @property
+    def ENABLE_REGIME_INFERENCE(self) -> bool:
+        return bool(self.ENABLE_REGIME) and self.REGIME_STAGE in (
+            "inference", "thresholds", "style",
+        )
+
+    @property
+    def ENABLE_REGIME_AWARE_THRESHOLDS(self) -> bool:
+        return bool(self.ENABLE_REGIME) and self.REGIME_STAGE in (
+            "thresholds", "style",
+        )
+
+    @property
+    def ENABLE_STYLE_PRESET_GUIDANCE(self) -> bool:
+        return bool(self.ENABLE_REGIME) and self.REGIME_STAGE == "style"
 
     class Config:
         case_sensitive = True

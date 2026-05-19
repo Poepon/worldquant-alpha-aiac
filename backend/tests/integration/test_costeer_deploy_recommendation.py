@@ -60,7 +60,7 @@ def _isolate_flag_state():
     from backend.config import settings as _stg
     keys = [
         "ENABLE_R1A_HOOK", "ENABLE_LLM_JUDGE",
-        "ENABLE_HIERARCHICAL_RAG", "ENABLE_R5_L2_RANKING",
+        "ENABLE_HIERARCHICAL_RAG",
         "ENABLE_R1B_RETRY_LOOP", "ENABLE_R1B_HYPOTHESIS_MUTATE",
         "ENABLE_R1B_FAILURE_TREE", "ENABLE_R1B_TYPED_PIPELINE",
         "ENABLE_R1B_DAG_RETRY_REWARD",
@@ -104,7 +104,6 @@ async def test_empty_db_blocks_on_r1a_sample_size(client_factory):
         flags={
             "ENABLE_R1A_HOOK": False,
             "ENABLE_HIERARCHICAL_RAG": False,
-            "ENABLE_R5_L2_RANKING": False,
             "ENABLE_R1B_RETRY_LOOP": False,
             "ENABLE_R1B_HYPOTHESIS_MUTATE": False,
             "ENABLE_R1B_FAILURE_TREE": False,
@@ -280,7 +279,6 @@ async def test_all_flags_on_returns_hold_verdict(client_factory):
             "ENABLE_R1A_HOOK": True,
             "ENABLE_LLM_JUDGE": True,
             "ENABLE_HIERARCHICAL_RAG": True,
-            "ENABLE_R5_L2_RANKING": True,
             "ENABLE_R1B_RETRY_LOOP": True,
             "ENABLE_R1B_HYPOTHESIS_MUTATE": True,
             "ENABLE_R1B_FAILURE_TREE": True,

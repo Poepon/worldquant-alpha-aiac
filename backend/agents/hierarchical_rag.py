@@ -950,16 +950,11 @@ async def query_hierarchical(
 
     layer_budgets = layer_budgets or {"L0": 5, "L1": 5, "L2": 5, "L3": 5}
 
-    # R8-v2 #2: read cache flag + TTL once per query (saves N×settings reads
-    # across the 4 layer calls).
-    _cache_on = False
-    _cache_ttl = 300
-    try:
-        from backend.config import settings as _stg
-        _cache_on = bool(getattr(_stg, "ENABLE_HIERARCHICAL_RAG_CACHE", False))
-        _cache_ttl = int(getattr(_stg, "RAG_HIER_CACHE_TTL_SEC", 300))
-    except Exception:
-        pass
+    # R8-v2 #2: per-layer Redis cache always on (retired ENABLE_HIERARCHICAL_RAG_CACHE
+    # 2026-05-19 — subsumed into the main ENABLE_HIERARCHICAL_RAG switch).
+    # Redis unreachable → _layer_call soft-falls direct fetcher call.
+    from backend.config import settings as _stg
+    _cache_ttl = int(getattr(_stg, "RAG_HIER_CACHE_TTL_SEC", 300))
 
     # R8 cache-hit telemetry (2026-05-18 follow-up): track per-layer cache
     # hits so the r8_query_log row at end-of-query knows whether ANY layer
@@ -970,19 +965,18 @@ async def query_hierarchical(
     _cache_hits_in_query: List[int] = [0]
 
     async def _layer_call(layer_name: str, cache_params: Dict[str, Any], fetcher):
-        """Wrap a layer call with optional Redis cache. ``fetcher`` is an
-        async no-arg callable returning ``(succ, fail)``. Cache miss / disabled
-        → call fetcher + write-through."""
-        if _cache_on:
-            key = _make_layer_cache_key(layer_name, cache_params)
-            cached = await _cache_get(key)
-            if cached is not None:
-                _cache_hits_in_query[0] += 1
-                return cached
-            s_, f_ = await fetcher()
-            await _cache_set(key, s_, f_, _cache_ttl)
-            return s_, f_
-        return await fetcher()
+        """Wrap a layer call with Redis cache. ``fetcher`` is an async no-arg
+        callable returning ``(succ, fail)``. Cache miss → call fetcher +
+        write-through. Redis unreachable → _cache_get/_set soft-fall and
+        fetcher still runs."""
+        key = _make_layer_cache_key(layer_name, cache_params)
+        cached = await _cache_get(key)
+        if cached is not None:
+            _cache_hits_in_query[0] += 1
+            return cached
+        s_, f_ = await fetcher()
+        await _cache_set(key, s_, f_, _cache_ttl)
+        return s_, f_
 
     def _consume(succ: List[RAGEntry], fail: List[RAGEntry], layer_key: str) -> None:
         nonlocal remaining_pat, remaining_fail
@@ -1037,29 +1031,22 @@ async def query_hierarchical(
         result.total_queries += 1
         _consume(s, f, "L1")
 
-    # L2 — family_signature (R8-v2 #3 R5 ranking forwarded from settings)
+    # L2 — family_signature (R8-v2 #3 R5 ranking always on — retired
+    # ENABLE_R5_L2_RANKING 2026-05-19, subsumed into main hierarchical switch).
     if current_expression and (remaining_pat > 0 or remaining_fail > 0):
-        _r5_rank_on = False
-        _r5_min_samples = 1
-        _r5_lookback_days = 30
-        try:
-            from backend.config import settings as _stg
-            _r5_rank_on = bool(getattr(_stg, "ENABLE_R5_L2_RANKING", False))
-            _r5_min_samples = int(getattr(_stg, "R5_L2_RANKING_MIN_SAMPLES", 1))
-            _r5_lookback_days = int(getattr(_stg, "R5_L2_RANKING_LOOKBACK_DAYS", 30))
-        except Exception:
-            pass
+        _r5_min_samples = int(getattr(_stg, "R5_L2_RANKING_MIN_SAMPLES", 1))
+        _r5_lookback_days = int(getattr(_stg, "R5_L2_RANKING_LOOKBACK_DAYS", 30))
         _l2_budget = layer_budgets.get("L2", 5)
         s, f = await _layer_call(
             "L2",
             {"expr": current_expression, "region": region,
-             "budget": _l2_budget, "r5_rank": _r5_rank_on,
+             "budget": _l2_budget,
              "r5_min": _r5_min_samples, "r5_lb": _r5_lookback_days,
              "hyp": current_hypothesis or ""},
             lambda: layer2_family(
                 db, current_expression=current_expression, region=region,
                 budget=_l2_budget,
-                enable_r5_ranking=_r5_rank_on,
+                enable_r5_ranking=True,
                 r5_min_samples=_r5_min_samples,
                 r5_lookback_days=_r5_lookback_days,
                 current_hypothesis=current_hypothesis,

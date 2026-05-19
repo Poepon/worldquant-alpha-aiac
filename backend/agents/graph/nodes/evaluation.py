@@ -1088,43 +1088,40 @@ async def node_simulate(
             logger.warning(f"[{node_name}] Q10 prescreen block failed (proceed full BRAIN): {_q10_e}")
 
     # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier filter.
-    # When ENABLE_PRE_SIMULATE_FILTER=True, predict P(PASS) per candidate
-    # and skip very-likely-fails BEFORE sending to BRAIN simulate. Default
-    # OFF; opt-in via .env. Conservative threshold 0.05 keeps 99% PASS
-    # recall on the training-set CV (AUC=0.813).
-    if getattr(settings, "ENABLE_PRE_SIMULATE_FILTER", False):
-        try:
-            from backend.agents.services.pre_simulate_filter import filter_candidates
-            threshold = float(getattr(settings, "PRE_SIMULATE_FILTER_THRESHOLD", 0.05))
-            cand_exprs = [state.pending_alphas[i].expression for i in indices_to_simulate]
-            keep_local, skip_local, probas = filter_candidates(
-                cand_exprs, threshold=threshold,
-            )
-            if skip_local:
-                # Translate skip_local positions back to original indices_to_simulate
-                pre_sim_skipped: list = []
-                for local_idx in skip_local:
-                    orig_idx = indices_to_simulate[local_idx]
-                    p_pass = probas[local_idx]
-                    pre_sim_skipped.append(orig_idx)
-                    a = state.pending_alphas[orig_idx]
-                    a.simulation_error = (
-                        f"pre-simulate filter skip: P(PASS)={p_pass:.3f} < {threshold}"
-                    )
-                    a.is_simulated = True
-                    a.simulation_success = False
-                # Reduce indices_to_simulate to keepers only
-                indices_to_simulate = [
-                    indices_to_simulate[i] for i in keep_local
-                ]
-                logger.info(
-                    f"[{node_name}] pre-simulate filter: skipped={len(pre_sim_skipped)} "
-                    f"keep={len(indices_to_simulate)} threshold={threshold}"
+    # Predict P(PASS) per candidate and skip very-likely-fails BEFORE
+    # sending to BRAIN simulate. Threshold 0.10 keeps ≥98% PASS recall.
+    try:
+        from backend.agents.services.pre_simulate_filter import filter_candidates
+        threshold = float(getattr(settings, "PRE_SIMULATE_FILTER_THRESHOLD", 0.05))
+        cand_exprs = [state.pending_alphas[i].expression for i in indices_to_simulate]
+        keep_local, skip_local, probas = filter_candidates(
+            cand_exprs, threshold=threshold,
+        )
+        if skip_local:
+            # Translate skip_local positions back to original indices_to_simulate
+            pre_sim_skipped: list = []
+            for local_idx in skip_local:
+                orig_idx = indices_to_simulate[local_idx]
+                p_pass = probas[local_idx]
+                pre_sim_skipped.append(orig_idx)
+                a = state.pending_alphas[orig_idx]
+                a.simulation_error = (
+                    f"pre-simulate filter skip: P(PASS)={p_pass:.3f} < {threshold}"
                 )
-        except Exception as _filter_e:
-            logger.warning(
-                f"[{node_name}] pre-simulate filter failed (proceed with all): {_filter_e}"
+                a.is_simulated = True
+                a.simulation_success = False
+            # Reduce indices_to_simulate to keepers only
+            indices_to_simulate = [
+                indices_to_simulate[i] for i in keep_local
+            ]
+            logger.info(
+                f"[{node_name}] pre-simulate filter: skipped={len(pre_sim_skipped)} "
+                f"keep={len(indices_to_simulate)} threshold={threshold}"
             )
+    except Exception as _filter_e:
+        logger.warning(
+            f"[{node_name}] pre-simulate filter failed (proceed with all): {_filter_e}"
+        )
 
     if not indices_to_simulate:
         logger.warning(
@@ -1149,154 +1146,109 @@ async def node_simulate(
     
     # A1: smart simulation settings — per-expression settings choice based on
     # structural form (group_neutralize → neut=NONE, trade_when → decay=0,
-    # etc.) and field category. When enabled, bucket expressions by their
-    # chosen settings tuple and call simulate_batch per bucket; results are
-    # merged back to original index order.
-    smart_enabled = getattr(settings, "ENABLE_SMART_SIM_SETTINGS", False)
+    # etc.) and field category. Bucket expressions by their chosen settings
+    # tuple and call simulate_batch per bucket; results are merged back to
+    # original index order.
+    # (Retired ENABLE_SMART_SIM_SETTINGS flag 2026-05-19 — hard-wired ON;
+    #  legacy single-batch fallback branch deleted.)
     smart_settings_per_idx: Dict[int, Dict] = {}  # local_index → settings dict
     smart_reasons_per_idx: Dict[int, str] = {}
 
-    if smart_enabled:
-        from backend.sim_settings import settings_reason, smart_simulation_settings
+    from backend.sim_settings import settings_reason, smart_simulation_settings
 
-        SETTINGS_KEYS = ("region", "universe", "delay", "decay", "neutralization", "truncation", "test_period")
-        buckets: Dict[Tuple, List[int]] = {}
-        for local_i, idx in enumerate(indices_to_simulate):
-            expr = state.pending_alphas[idx].expression
-            smart = smart_simulation_settings(
-                expr,
-                region=state.region,
-                universe=state.universe,
-                # P3-Brain: 从 task-startup snapshot 传 test_period(plan §8.4)
-                # 避免 Consultant 切换中途 simulate 不同 alpha 用不同 test_period。
-                test_period=getattr(state, "effective_default_test_period", None),
-            )
-            smart_settings_per_idx[local_i] = smart
-            smart_reasons_per_idx[local_i] = settings_reason(expr)
-            key = tuple(smart.get(k) for k in SETTINGS_KEYS)
-            buckets.setdefault(key, []).append(local_i)
-
-        logger.info(
-            f"[{node_name}] smart-settings: {len(buckets)} bucket(s) for "
-            f"{len(indices_to_simulate)} expressions"
+    SETTINGS_KEYS = ("region", "universe", "delay", "decay", "neutralization", "truncation", "test_period")
+    buckets: Dict[Tuple, List[int]] = {}
+    for local_i, idx in enumerate(indices_to_simulate):
+        expr = state.pending_alphas[idx].expression
+        smart = smart_simulation_settings(
+            expr,
+            region=state.region,
+            universe=state.universe,
+            # P3-Brain: 从 task-startup snapshot 传 test_period(plan §8.4)
+            # 避免 Consultant 切换中途 simulate 不同 alpha 用不同 test_period。
+            test_period=getattr(state, "effective_default_test_period", None),
         )
+        smart_settings_per_idx[local_i] = smart
+        smart_reasons_per_idx[local_i] = settings_reason(expr)
+        key = tuple(smart.get(k) for k in SETTINGS_KEYS)
+        buckets.setdefault(key, []).append(local_i)
 
-        results = [None] * len(indices_to_simulate)
-        for settings_key, local_indices in buckets.items():
-            bucket_kwargs = dict(zip(SETTINGS_KEYS, settings_key))
-            bucket_exprs = [expressions[li] for li in local_indices]
-            # V-26.66 (2026-05-13): one batch-level retry with a short
-            # backoff before declaring the whole bucket failed. Most
-            # bucket-wide failures are transient (BRAIN auth blip, sim
-            # slot starvation, transport timeout). Retrying once recovers
-            # ~70-80% of these without doubling worst-case latency.
-            bucket_results = None
-            for _attempt in range(2):
-                try:
-                    # R9 (Phase 3, 2026-05-18): cached BRAIN sim wrapper when
-                    # ENABLE_SIMULATION_CACHE ON; OFF or import error → direct
-                    # brain.simulate_batch (byte-equivalent legacy). Soft-fall.
-                    if getattr(settings, "ENABLE_SIMULATION_CACHE", False):
-                        try:
-                            from backend.agents.sim_cache import cached_simulate_batch
-                            from backend.database import AsyncSessionLocal as _R9_SessionLocal
-                            async with _R9_SessionLocal() as _r9_db:
-                                bucket_results = await cached_simulate_batch(
-                                    _r9_db, brain,
-                                    expressions=bucket_exprs,
-                                    **bucket_kwargs,
-                                )
-                        except Exception as _r9_e:
-                            logger.warning(
-                                f"[{node_name}] R9 cached_simulate_batch failed "
-                                f"(falling back to direct BRAIN): {_r9_e}"
+    logger.info(
+        f"[{node_name}] smart-settings: {len(buckets)} bucket(s) for "
+        f"{len(indices_to_simulate)} expressions"
+    )
+
+    results = [None] * len(indices_to_simulate)
+    for settings_key, local_indices in buckets.items():
+        bucket_kwargs = dict(zip(SETTINGS_KEYS, settings_key))
+        bucket_exprs = [expressions[li] for li in local_indices]
+        # V-26.66 (2026-05-13): one batch-level retry with a short
+        # backoff before declaring the whole bucket failed. Most
+        # bucket-wide failures are transient (BRAIN auth blip, sim
+        # slot starvation, transport timeout). Retrying once recovers
+        # ~70-80% of these without doubling worst-case latency.
+        bucket_results = None
+        for _attempt in range(2):
+            try:
+                # R9 (Phase 3, 2026-05-18): cached BRAIN sim wrapper when
+                # ENABLE_SIMULATION_CACHE ON; OFF or import error → direct
+                # brain.simulate_batch (byte-equivalent legacy). Soft-fall.
+                if getattr(settings, "ENABLE_SIMULATION_CACHE", False):
+                    try:
+                        from backend.agents.sim_cache import cached_simulate_batch
+                        from backend.database import AsyncSessionLocal as _R9_SessionLocal
+                        async with _R9_SessionLocal() as _r9_db:
+                            bucket_results = await cached_simulate_batch(
+                                _r9_db, brain,
+                                expressions=bucket_exprs,
+                                **bucket_kwargs,
                             )
-                            bucket_results = await brain.simulate_batch(
-                                expressions=bucket_exprs, **bucket_kwargs,
-                            )
-                    else:
-                        bucket_results = await brain.simulate_batch(
-                            expressions=bucket_exprs,
-                            **bucket_kwargs,
-                        )
-                    break
-                except Exception as e:
-                    if _attempt == 0:
+                    except Exception as _r9_e:
                         logger.warning(
-                            f"[{node_name}] V-26.66 bucket sim error ({settings_key}) — "
-                            f"retrying once: {e}"
+                            f"[{node_name}] R9 cached_simulate_batch failed "
+                            f"(falling back to direct BRAIN): {_r9_e}"
                         )
-                        await asyncio.sleep(2.0)
-                        continue
-                    logger.error(
-                        f"[{node_name}] V-26.66 bucket sim failed after retry "
-                        f"({settings_key}): {e}"
+                        bucket_results = await brain.simulate_batch(
+                            expressions=bucket_exprs, **bucket_kwargs,
+                        )
+                else:
+                    bucket_results = await brain.simulate_batch(
+                        expressions=bucket_exprs,
+                        **bucket_kwargs,
                     )
-                    bucket_results = [
-                        {"success": False, "error": f"sim_batch_fail_after_retry: {e}"}
-                        for _ in bucket_exprs
-                    ]
-            # V-26.71 (2026-05-13): alert when BRAIN returns fewer results
-            # than requested. Pre-fix silently filled the missing tail with
-            # `{success: False, error: "Missing"}` so the caller never
-            # noticed the asymmetry. Now we logger.error so the operator
-            # can investigate (truncated BRAIN response, bucket payload
-            # encoding drift, etc.) — the silent fill is preserved so the
-            # workflow still makes forward progress.
-            if len(bucket_results) < len(local_indices):
-                logger.error(
-                    f"[{node_name}] V-26.71 BRAIN returned "
-                    f"{len(bucket_results)} results for {len(local_indices)} "
-                    f"expressions (bucket={settings_key}); padding tail with "
-                    f"Missing failures"
-                )
-            for j, li in enumerate(local_indices):
-                results[li] = bucket_results[j] if j < len(bucket_results) else {"success": False, "error": "Missing"}
-    else:
-        try:
-            # V-26.65 (2026-05-13): sim defaults pulled from settings.
-            # R9 (Phase 3, 2026-05-18): cached wrapper when flag ON; soft-fall.
-            # Bug-#8 fix (2026-05-18): pass all 7 SETTINGS_KEYS explicitly
-            # (region, universe, delay, decay, neutralization, truncation,
-            # test_period) so the R9 cache key matches what an explicit-args
-            # caller would compute. Previously truncation/test_period were
-            # implicit BrainAdapter/wrapper defaults (0.08 / "P2Y0M"), which
-            # silently tied this branch's cache key to wrapper-side constants
-            # and would collide with a future caller passing different values.
-            # P3-Brain: prefer task-startup snapshot `effective_default_test_period`
-            # when present (mirrors smart-settings branch at line ~1054).
-            _fallback_test_period = (
-                getattr(state, "effective_default_test_period", None) or "P2Y0M"
-            )
-            _sim_kwargs = dict(
-                expressions=expressions,
-                region=state.region,
-                universe=state.universe,
-                delay=_v16_settings.SIM_DEFAULT_DELAY,
-                decay=_v16_settings.SIM_DEFAULT_DECAY,
-                neutralization=_v16_settings.SIM_DEFAULT_NEUTRALIZATION,
-                truncation=0.08,
-                test_period=_fallback_test_period,
-            )
-            if getattr(settings, "ENABLE_SIMULATION_CACHE", False):
-                try:
-                    from backend.agents.sim_cache import cached_simulate_batch
-                    from backend.database import AsyncSessionLocal as _R9_SessionLocal
-                    async with _R9_SessionLocal() as _r9_db:
-                        results = await cached_simulate_batch(
-                            _r9_db, brain, **_sim_kwargs,
-                        )
-                except Exception as _r9_e:
+                break
+            except Exception as e:
+                if _attempt == 0:
                     logger.warning(
-                        f"[{node_name}] R9 cached_simulate_batch failed "
-                        f"(falling back to direct BRAIN): {_r9_e}"
+                        f"[{node_name}] V-26.66 bucket sim error ({settings_key}) — "
+                        f"retrying once: {e}"
                     )
-                    results = await brain.simulate_batch(**_sim_kwargs)
-            else:
-                results = await brain.simulate_batch(**_sim_kwargs)
-        except Exception as e:
-            logger.error(f"[{node_name}] Batch Simulate Loop Error: {e}")
-            results = [{"success": False, "error": str(e)} for _ in expressions]
+                    await asyncio.sleep(2.0)
+                    continue
+                logger.error(
+                    f"[{node_name}] V-26.66 bucket sim failed after retry "
+                    f"({settings_key}): {e}"
+                )
+                bucket_results = [
+                    {"success": False, "error": f"sim_batch_fail_after_retry: {e}"}
+                    for _ in bucket_exprs
+                ]
+        # V-26.71 (2026-05-13): alert when BRAIN returns fewer results
+        # than requested. Pre-fix silently filled the missing tail with
+        # `{success: False, error: "Missing"}` so the caller never
+        # noticed the asymmetry. Now we logger.error so the operator
+        # can investigate (truncated BRAIN response, bucket payload
+        # encoding drift, etc.) — the silent fill is preserved so the
+        # workflow still makes forward progress.
+        if len(bucket_results) < len(local_indices):
+            logger.error(
+                f"[{node_name}] V-26.71 BRAIN returned "
+                f"{len(bucket_results)} results for {len(local_indices)} "
+                f"expressions (bucket={settings_key}); padding tail with "
+                f"Missing failures"
+            )
+        for j, li in enumerate(local_indices):
+            results[li] = bucket_results[j] if j < len(bucket_results) else {"success": False, "error": "Missing"}
     
     duration_ms = int((time.time() - start_time) * 1000)
     
@@ -1661,10 +1613,8 @@ async def node_evaluate(
     flip_retry_count = 0
     flip_retry_pass = 0
     flip_retry_prov = 0
-    if (
-        brain is not None
-        and getattr(settings, "ENABLE_T1_SIGN_FLIP_RETRY", True)
-    ):
+    # (Retired ENABLE_T1_SIGN_FLIP_RETRY 2026-05-19 — hard-wired ON.)
+    if brain is not None:
         flip_threshold = getattr(settings, "T1_FLIP_RETRY_SHARPE", 0.5)
         flip_cap = getattr(settings, "T1_FLIP_RETRY_CAP", 5)
 
@@ -1689,8 +1639,8 @@ async def node_evaluate(
 
         from backend.agents.graph.state import AlphaCandidate
 
-        # A2: flip-retry single-alpha sim → smart settings (zero bucketing cost)
-        flip_use_smart = getattr(settings, "ENABLE_SMART_SIM_SETTINGS", False)
+        # A2: flip-retry single-alpha sim → smart settings (zero bucketing cost).
+        # (Retired ENABLE_SMART_SIM_SETTINGS 2026-05-19 — hard-wired ON.)
 
         # V-19.3 (2026-05-06): pre-dedup flipped expressions across the WHOLE
         # alphas table. Sign-flip historically bypassed node_simulate's
@@ -1767,31 +1717,20 @@ async def node_evaluate(
             for orig in flip_candidates:
                 flipped_expr = f"multiply(-1, {orig.expression})"
                 try:
-                    if flip_use_smart:
-                        from backend.sim_settings import smart_simulation_settings
-                        smart = smart_simulation_settings(
-                            flipped_expr,
-                            region=state.region,
-                            universe=state.universe,
-                            # P3-Brain: flip-retry 同 round 内必须保持 test_period
-                            # 一致(否则 sharpe 不可比)。从 task snapshot 传。
-                            test_period=getattr(state, "effective_default_test_period", None),
-                        )
-                        _flip_sim_settings = dict(smart)
-                        sim_result = await brain.simulate_alpha(
-                            expression=flipped_expr,
-                            **smart,
-                        )
-                    else:
-                        _flip_sim_settings = {
-                            "region": state.region,
-                            "universe": state.universe,
-                        }
-                        sim_result = await brain.simulate_alpha(
-                            expression=flipped_expr,
-                            region=state.region,
-                            universe=state.universe,
-                        )
+                    from backend.sim_settings import smart_simulation_settings
+                    smart = smart_simulation_settings(
+                        flipped_expr,
+                        region=state.region,
+                        universe=state.universe,
+                        # P3-Brain: flip-retry 同 round 内必须保持 test_period
+                        # 一致(否则 sharpe 不可比)。从 task snapshot 传。
+                        test_period=getattr(state, "effective_default_test_period", None),
+                    )
+                    _flip_sim_settings = dict(smart)
+                    sim_result = await brain.simulate_alpha(
+                        expression=flipped_expr,
+                        **smart,
+                    )
                 except Exception as e:
                     logger.warning(f"[{node_name}] flip-retry sim failed: {e}")
                     continue

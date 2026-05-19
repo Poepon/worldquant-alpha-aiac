@@ -96,8 +96,8 @@ class TestRegimeInferTask:
         )
 
         from backend.config import settings
-        original = settings.ENABLE_REGIME_INFERENCE
-        settings.ENABLE_REGIME_INFERENCE = True
+        original = settings.ENABLE_REGIME
+        settings.ENABLE_REGIME = True
         try:
             with patch(
                 "backend.tasks.redis_pool.get_redis_client",
@@ -105,7 +105,7 @@ class TestRegimeInferTask:
             ):
                 result = await _run_async()
         finally:
-            settings.ENABLE_REGIME_INFERENCE = original
+            settings.ENABLE_REGIME = original
 
         assert result["status"] == "ok"
         assert "USA" in result["regions"]
@@ -132,12 +132,12 @@ class TestRegimeInferTask:
         )
 
         from backend.config import settings
-        original = settings.ENABLE_REGIME_INFERENCE
-        settings.ENABLE_REGIME_INFERENCE = False
+        original = settings.ENABLE_REGIME
+        settings.ENABLE_REGIME = False
         try:
             result = await _run_async()
         finally:
-            settings.ENABLE_REGIME_INFERENCE = original
+            settings.ENABLE_REGIME = original
 
         assert result["status"] == "skipped"
         # No archive emitted

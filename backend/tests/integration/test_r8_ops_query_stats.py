@@ -87,7 +87,7 @@ async def test_query_stats_empty_log_returns_zero_rates(client_factory):
 
 
 @pytest.mark.asyncio
-async def test_query_stats_exposes_3_flags(client_factory):
+async def test_query_stats_exposes_flags(client_factory):
     client = await client_factory((0, 0, 0, 0, 0, 0, 0), [])
     async with client as ac:
         r = await ac.get("/api/v1/ops/r8/query-stats")
@@ -95,7 +95,6 @@ async def test_query_stats_exposes_3_flags(client_factory):
     assert set(flags.keys()) == {
         "ENABLE_HIERARCHICAL_RAG",
         "ENABLE_R8_QUERY_LOG",
-        "ENABLE_HIERARCHICAL_RAG_CACHE",
     }
 
 
