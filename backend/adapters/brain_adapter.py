@@ -631,6 +631,37 @@ class BrainAdapter:
                         "retry_after_sec": retry_after_sec,
                     }
                 if response.status_code not in [200, 201, 202]:
+                    # 2026-05-19 silent-burn fix: _request already attempted
+                    # _coalesced_reauth + 2x retry above. If the response is
+                    # STILL an auth error (401 or "Incorrect authentication
+                    # credentials" body marker), this is a transient BRAIN
+                    # session / account issue, NOT a per-alpha quality fail.
+                    # The pre-fix path returned ordinary {"success": False,
+                    # "error": "Creation failed: ..."} which made the caller
+                    # node_simulate write the alpha to alpha_failures, then
+                    # workflow continued through evaluate / hypothesis_feedback
+                    # / round_summary burning LLM cost — observed 121× /24h
+                    # "Incorrect authentication credentials" rows while other
+                    # workflow stages reported SUCCESS. Mark retryable +
+                    # error_kind so node_simulate (V-27.61) holds the alpha
+                    # at PENDING (not alpha_failures), tally classifies as
+                    # transient, and the round can soft-abort instead of
+                    # burning the rest of the LLM pipeline.
+                    if self._is_auth_error(response):
+                        logger.error(
+                            f"[BrainAdapter] simulate POST persists auth-error "
+                            f"after _request reauth+2x-retry — task likely "
+                            f"hit BRAIN session expiry or account lock. "
+                            f"Returning retryable to prevent silent-burn. "
+                            f"Status={response.status_code} body={response.text[:200]}"
+                        )
+                        return {
+                            "success": False,
+                            "error": f"BRAIN auth failure: {response.text[:200]}",
+                            "retryable": True,
+                            "retry_after_sec": 300,  # 5min — give ops a chance to notice
+                            "error_kind": "brain_auth_failure",
+                        }
                     logger.error(f"Brain Simulation Failed [{response.status_code}] | Payload: {json.dumps(sim_payload)} | Response: {response.text}")
                     return {"success": False, "error": f"Creation failed: {response.text}"}
 
