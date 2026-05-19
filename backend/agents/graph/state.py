@@ -173,6 +173,14 @@ class MiningState(BaseModel):
     current_hypothesis_id: Optional[int] = None
     current_hypothesis_ids: List[int] = Field(default_factory=list)
 
+    # G8 Phase A follow-up (2026-05-19): hypothesis IDs that node_hypothesis
+    # surfaced to the LLM via the cross-task forest reference block. Stamped
+    # into alpha.metrics["_g8_forest_referenced_ids"] by _incremental_save_alphas
+    # for reverse attribution analytics ("which alphas were generated under
+    # what forest prompt context"). Empty when ENABLE_HYPOTHESIS_FOREST_REUSE
+    # is OFF or no rows qualified — stamp key omitted in that case.
+    g8_forest_referenced_ids: List[int] = Field(default_factory=list)
+
     # Plan v5+ §Phase 2 B5/B6: per-hypothesis round history. Key = hypothesis_id.
     # Each entry: {round_index, alpha_count, pass_count, fail_count,
     #              syntax_fail_count, simulate_fail_count, attribution,

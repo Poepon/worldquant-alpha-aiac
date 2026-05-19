@@ -1267,6 +1267,13 @@ async def node_hypothesis(
         # Phase 2: typed Hypothesis link IDs. None when level<2 / no hypotheses.
         "current_hypothesis_id": current_hypothesis_id,
         "current_hypothesis_ids": current_hypothesis_ids,
+        # G8 Phase A follow-up: surface forest reference IDs to state so
+        # persistence can stamp them onto alpha.metrics for reverse
+        # attribution (empty when flag OFF / no rows).
+        "g8_forest_referenced_ids": [
+            int(h["hypothesis_id"]) for h in cross_task_hyps
+            if h.get("hypothesis_id") is not None
+        ],
         **trace_update
     }
 

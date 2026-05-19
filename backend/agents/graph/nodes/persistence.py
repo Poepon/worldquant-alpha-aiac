@@ -177,6 +177,7 @@ async def _incremental_save_alphas(
     dataset_id: str,
     pending_alphas: List,
     hypothesis_id: Optional[int] = None,
+    g8_forest_referenced_ids: Optional[List[int]] = None,
 ) -> List["AlphaResult"]:
     """Write PASS / PASS_PROVISIONAL Alpha rows directly to DB at save_results
     time rather than buffering in state.generated_alphas until workflow returns.
@@ -310,6 +311,15 @@ async def _incremental_save_alphas(
             if not isinstance(alpha.metrics, dict):
                 alpha.metrics = dict(metrics_dict)
             alpha.metrics["_direction_bandit_recommended_arm"] = bandit_arm_for_round
+            metrics_dict = alpha.metrics
+        # G8 Phase A follow-up (2026-05-19): stamp forest-referenced hypothesis
+        # IDs so reverse attribution analytics ("alphas generated under what
+        # forest context") can join without re-reading prompt state. Empty
+        # list / None → key omitted (flag OFF / no rows qualified).
+        if g8_forest_referenced_ids:
+            if not isinstance(alpha.metrics, dict):
+                alpha.metrics = dict(metrics_dict)
+            alpha.metrics["_g8_forest_referenced_ids"] = list(g8_forest_referenced_ids)
             metrics_dict = alpha.metrics
         expr_hash = compute_expression_hash(alpha.expression) if alpha.expression else None
 
@@ -621,6 +631,9 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                 dataset_id=state.dataset_id,
                 pending_alphas=state.pending_alphas,
                 hypothesis_id=current_hypothesis_id,
+                g8_forest_referenced_ids=getattr(
+                    state, "g8_forest_referenced_ids", None,
+                ) or None,
             )
             for alpha in state.pending_alphas:
                 if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):

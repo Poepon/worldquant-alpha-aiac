@@ -2580,6 +2580,221 @@ async def r6_dag_stats(
 
 
 # =============================================================================
+# G8 Phase A follow-up — hypothesis forest telemetry (2026-05-19)
+# =============================================================================
+# Reads hypotheses table (forest pool) + alphas.metrics (reverse attribution
+# via _g8_forest_referenced_ids stamp written by _incremental_save_alphas).
+# Healthy deploy: ENABLE_HYPOTHESIS_FOREST_REUSE=True AND eligible_count > 0
+# (forest has qualified rows to surface) AND reference_count > 0 (≥1 alpha
+# generated under a forest-referenced context, i.e. the prompt block actually
+# influenced production). reference_pass_rate is descriptive — Phase B
+# decides whether to harden into a gate.
+
+
+class ForestEntry(BaseModel):
+    hypothesis_id: int
+    statement: str
+    pillar: Optional[str] = None
+    region: str
+    sharpe_avg: Optional[float] = None
+    pass_count: int = 0
+    alpha_count: int = 0
+    status: Optional[str] = None
+    times_referenced: int = 0
+
+
+class ForestPillarBreakdown(BaseModel):
+    pillar: str
+    eligible_count: int
+    avg_sharpe: float
+    total_pass: int
+
+
+class HypothesisForestOut(BaseModel):
+    flags: Dict[str, bool]
+    window_days: int
+    region: Optional[str] = None
+    eligible_count: int
+    total_referenced_alphas: int
+    reference_pass_count: int
+    reference_pass_rate: float
+    top_entries: List[ForestEntry]
+    pillar_breakdown: List[ForestPillarBreakdown]
+    healthy_gates: Dict[str, float]
+    is_healthy: bool
+
+
+@router.get("/hypothesis/forest", response_model=HypothesisForestOut)
+async def hypothesis_forest(
+    region: Optional[str] = None,
+    days: int = 7,
+    top_n: int = 10,
+    min_pass_count: int = 2,
+    min_sharpe_avg: float = 1.0,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> HypothesisForestOut:
+    """G8 Phase A follow-up — hypothesis forest telemetry.
+
+    Reads three things:
+      1. Eligible forest pool: PROMOTED/ACTIVE hypotheses in the region
+         (or all regions when ``region`` omitted) with pass_count ≥
+         ``min_pass_count`` AND sharpe_avg ≥ ``min_sharpe_avg``. These are
+         what HypothesisService.fetch_cross_task_promoted surfaces to LLM.
+      2. Reverse attribution: count alphas in the last ``days`` window
+         whose ``metrics['_g8_forest_referenced_ids']`` is non-empty —
+         the prompt-block having actual influence on production.
+      3. Per-pillar breakdown of the forest pool for ops to see which
+         pillars are over- / under-represented in the reference pool.
+
+    Healthy gate (Phase A descriptive only):
+      - flag ON
+      - eligible_count > 0 (pool actually has qualifying rows)
+      - total_referenced_alphas > 0 (prompt block reaching alpha persistence)
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {
+        "ENABLE_HYPOTHESIS_FOREST_REUSE": bool(
+            getattr(_stg, "ENABLE_HYPOTHESIS_FOREST_REUSE", False)
+        ),
+    }
+
+    where_region = "AND region = :region" if region else ""
+
+    head = (await db.execute(_text(
+        "SELECT COUNT(*) AS n "
+        "FROM hypotheses "
+        "WHERE is_active = TRUE "
+        "  AND status IN ('ACTIVE', 'PROMOTED') "
+        "  AND pass_count >= :min_pass "
+        "  AND sharpe_avg IS NOT NULL "
+        "  AND sharpe_avg >= :min_sharpe "
+        f"  {where_region}"
+    ), {
+        "min_pass": int(min_pass_count),
+        "min_sharpe": float(min_sharpe_avg),
+        "region": region,
+    })).one()
+    eligible_count = int(head[0] or 0)
+
+    top_rows = (await db.execute(_text(
+        "SELECT id, statement, pillar, region, sharpe_avg, pass_count, "
+        "       alpha_count, status "
+        "FROM hypotheses "
+        "WHERE is_active = TRUE "
+        "  AND status IN ('ACTIVE', 'PROMOTED') "
+        "  AND pass_count >= :min_pass "
+        "  AND sharpe_avg IS NOT NULL "
+        "  AND sharpe_avg >= :min_sharpe "
+        f"  {where_region} "
+        "ORDER BY sharpe_avg DESC, pass_count DESC, updated_at DESC "
+        "LIMIT :lim"
+    ), {
+        "min_pass": int(min_pass_count),
+        "min_sharpe": float(min_sharpe_avg),
+        "region": region,
+        "lim": int(top_n),
+    })).all()
+
+    times_ref_map: Dict[int, int] = {}
+    if top_rows:
+        ids = [int(r[0]) for r in top_rows]
+        for hid in ids:
+            cnt_row = (await db.execute(_text(
+                "SELECT COUNT(*) FROM alphas "
+                "WHERE created_at > now() - (:days || ' day')::interval "
+                "  AND metrics ? '_g8_forest_referenced_ids' "
+                "  AND metrics->'_g8_forest_referenced_ids' @> :hid_json"
+            ), {
+                "days": str(int(days)),
+                "hid_json": f"[{hid}]",
+            })).one()
+            times_ref_map[hid] = int(cnt_row[0] or 0)
+
+    top_entries = [
+        ForestEntry(
+            hypothesis_id=int(hid),
+            statement=(stmt or "")[:200],
+            pillar=pillar,
+            region=reg,
+            sharpe_avg=float(sh) if sh is not None else None,
+            pass_count=int(pc or 0),
+            alpha_count=int(ac or 0),
+            status=st,
+            times_referenced=times_ref_map.get(int(hid), 0),
+        )
+        for hid, stmt, pillar, reg, sh, pc, ac, st in top_rows
+    ]
+
+    refed = (await db.execute(_text(
+        "SELECT "
+        "  COUNT(*) AS total, "
+        "  COUNT(*) FILTER (WHERE quality_status IN ('PASS','PASS_PROVISIONAL')) AS ok "
+        "FROM alphas "
+        "WHERE created_at > now() - (:days || ' day')::interval "
+        "  AND metrics ? '_g8_forest_referenced_ids' "
+        f"  {('AND region = :region' if region else '')}"
+    ), {"days": str(int(days)), "region": region})).one()
+    total_ref = int(refed[0] or 0)
+    pass_ref = int(refed[1] or 0)
+    pass_rate_ref = round(pass_ref / total_ref, 4) if total_ref > 0 else 0.0
+
+    pillar_rows = (await db.execute(_text(
+        "SELECT COALESCE(pillar, '(none)') AS p, "
+        "       COUNT(*) AS n, "
+        "       COALESCE(AVG(sharpe_avg), 0.0) AS avg_sh, "
+        "       COALESCE(SUM(pass_count), 0) AS tot_pass "
+        "FROM hypotheses "
+        "WHERE is_active = TRUE "
+        "  AND status IN ('ACTIVE', 'PROMOTED') "
+        "  AND pass_count >= :min_pass "
+        "  AND sharpe_avg IS NOT NULL "
+        "  AND sharpe_avg >= :min_sharpe "
+        f"  {where_region} "
+        "GROUP BY p "
+        "ORDER BY n DESC"
+    ), {
+        "min_pass": int(min_pass_count),
+        "min_sharpe": float(min_sharpe_avg),
+        "region": region,
+    })).all()
+    pillar_breakdown = [
+        ForestPillarBreakdown(
+            pillar=p,
+            eligible_count=int(n or 0),
+            avg_sharpe=round(float(avg_sh or 0.0), 4),
+            total_pass=int(tot or 0),
+        )
+        for p, n, avg_sh, tot in pillar_rows
+    ]
+
+    healthy = (
+        bool(flags["ENABLE_HYPOTHESIS_FOREST_REUSE"])
+        and eligible_count > 0
+        and total_ref > 0
+    )
+
+    return HypothesisForestOut(
+        flags=flags,
+        window_days=int(days),
+        region=region,
+        eligible_count=eligible_count,
+        total_referenced_alphas=total_ref,
+        reference_pass_count=pass_ref,
+        reference_pass_rate=pass_rate_ref,
+        top_entries=top_entries,
+        pillar_breakdown=pillar_breakdown,
+        healthy_gates={
+            "min_eligible_count": 1.0,
+            "min_total_referenced": 1.0,
+        },
+        is_healthy=healthy,
+    )
+
+
+# =============================================================================
 # G2 Phase A — per-call LLM cost telemetry (2026-05-19)
 # =============================================================================
 # Reads llm_call_log written by cost_tracker.flush_round_async at round
