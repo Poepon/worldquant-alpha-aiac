@@ -374,10 +374,21 @@ async def _quota_guard_async() -> dict:
         # sim-fail expressions, the guard would not trigger until 130%
         # actual usage — long past the threshold. Adding alpha_failures
         # closes the gap.
+        # Bug A follow-up (2026-05-20): only count mining-direct alphas
+        # (task_id NOT NULL). sync_user_alphas imports HISTORICAL BRAIN alphas
+        # with created_at = insert-time (today), but they consumed BRAIN quota
+        # historically, not today — counting them spikes the daily denominator
+        # (e.g. a sync of 1040 historical rows looked like 1040 sims "today")
+        # and would falsely pause live mining. Sync-imported rows have
+        # task_id=NULL; mining-direct (the ones that actually burned today's
+        # quota) always carry task_id.
         alpha_cnt = (
             await db.execute(
                 select(func.count(Alpha.id))
-                .where(Alpha.created_at >= today_start)
+                .where(
+                    Alpha.created_at >= today_start,
+                    Alpha.task_id.isnot(None),
+                )
             )
         ).scalar() or 0
         # Bug A fix (2026-05-20): exclude pre-BRAIN skip rows. These never
