@@ -601,6 +601,11 @@ class Settings(BaseSettings):
     RAG_HIER_TOTAL_CAP: int = 20      # orchestrator hard cap
     RAG_HIER_CACHE_TTL_SEC: int = 300 # Redis cache TTL per layer query
     RAG_HIER_CROSS_REGION_DECAY: float = 0.7  # 跨 region 命中 score 折扣
+    # 2026-05-21: L1 candidate pool size for relevance-first selection. The
+    # over-fetched pool is scored by dataset-category overlap + quality, then
+    # truncated to the layer budget. Kill-switch: set == budget to degenerate
+    # back to recency-only behavior with no code change.
+    RAG_HIER_L1_CANDIDATE_CAP: int = 40
 
     # R8-v2 #3 (2026-05-18): R5 composite_score ranking for L2 SUCCESS。
     # layer2_family fetched 候选会 JOIN r1a_attribution_log.r5_composite_score

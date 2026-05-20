@@ -26,14 +26,39 @@ from backend.config import settings as _settings
 from backend.knowledge_extraction import extract_operator_chain as _extract_operator_chain
 
 
-# Dataset category mapping for intelligent pattern matching
+# Dataset category mapping for intelligent pattern matching.
+#
+# 2026-05-21: vocabulary unified with the BRAIN ``datafields.category`` catalog
+# (the pattern-side signal — see ``resolve_field_categories``) so query-side and
+# pattern-side categories overlap. Added option/socialmedia/sentiment/model;
+# split socialmedia OUT of news (datafields has them as distinct categories →
+# socialmedia8 must NOT collapse onto news18). ORDER MATTERS: first keyword hit
+# wins, so socialmedia precedes news (news's "media" would otherwise swallow
+# "socialmedia8"), and news precedes sentiment (keep "news_sentiment"→news).
 DATASET_CATEGORY_MAPPING = {
     "pv": ["pv", "price", "volume", "trade", "ohlc", "vwap"],
     "analyst": ["analyst", "anl", "estimate", "forecast", "recommendation", "eps", "target"],
     "fundamental": ["fundamental", "fnd", "fin", "balance", "income", "cash", "ratio", "margin"],
-    "news": ["news", "sentiment", "headline", "article", "media", "social", "oth635"],
+    "option": ["option", "opt"],
+    "socialmedia": ["socialmedia", "social"],
+    "news": ["news", "headline", "article", "media", "oth635"],
+    "sentiment": ["sentiment", "snt"],
+    "model": ["model", "mdl"],
     "other": ["other", "oth", "misc", "alternative"],
 }
+
+# Canonical dataset-category vocabulary == the distinct ``datafields.category``
+# values (USA catalog) plus "other". Both the query side (infer_dataset_category)
+# and the pattern side (resolve_field_categories) speak this so set-overlap works.
+_CANONICAL_CATEGORIES = {
+    "pv", "analyst", "fundamental", "news",
+    "option", "socialmedia", "sentiment", "model", "other",
+}
+
+# Local field-token regex (mirrors hierarchical_rag._FIELD_TOKEN_RE). Kept here so
+# resolve_field_categories has no cross-module dependency; operator/constant
+# tokens that slip through simply fail the datafields lookup → harmlessly dropped.
+_FIELD_TOKEN_RE_RESOLVE = re.compile(r"\b([a-z][a-z0-9_]*)\b")
 
 
 # =============================================================================
@@ -109,13 +134,74 @@ def infer_dataset_category(dataset_id: str) -> str:
         return "other"
     
     dataset_lower = dataset_id.lower()
-    
+
     for category, keywords in DATASET_CATEGORY_MAPPING.items():
         for keyword in keywords:
             if keyword in dataset_lower:
                 return category
-    
+
     return "other"
+
+
+def _canonical_category(raw: Optional[str]) -> str:
+    """Normalize a raw ``datafields.category`` value to the canonical vocab.
+
+    datafields.category is already clean (pv/fundamental/analyst/news/option/
+    socialmedia/sentiment/model), so this is mostly lower-casing; anything
+    outside the canonical set collapses to "other" (it could never overlap a
+    query category anyway).
+    """
+    c = (raw or "").strip().lower()
+    return c if c in _CANONICAL_CATEGORIES else "other"
+
+
+async def resolve_field_categories(expression_or_fields, region: str, db) -> List[str]:
+    """Resolve the SET of dataset-categories an alpha's fields touch.
+
+    This is the real retrieval key (2026-05-21 redesign): an alpha is identified
+    by the field set it uses — which can span multiple datasets/categories — not
+    by a single "anchor" dataset_id. We extract field tokens and look each up in
+    the BRAIN ``datafields`` catalog (``field_id`` → ``category``); the union of
+    canonical categories is returned.
+
+    Args:
+        expression_or_fields: a concrete alpha expression (str) OR a pre-extracted
+            list of field tokens (e.g. ``alphas.fields_used``).
+        region: BRAIN region (e.g. "USA"). The datafields catalog is currently
+            USA-only — non-USA regions resolve to ``[]`` (acknowledged gap; backfills
+            as sync extends regions).
+        db: an AsyncSession.
+
+    Returns:
+        Sorted unique canonical categories, e.g. ``["fundamental", "pv"]``.
+        ``[]`` when region unsupported, no tokens, or nothing resolves. Operator/
+        constant tokens that slip through extraction fail the catalog lookup and
+        are dropped, so the result reflects only real fields.
+    """
+    if not region or not expression_or_fields:
+        return []
+    if isinstance(expression_or_fields, str):
+        tokens = {
+            t for t in _FIELD_TOKEN_RE_RESOLVE.findall(expression_or_fields.lower())
+            if not t.isdigit()
+        }
+    else:
+        tokens = {str(f).strip().lower() for f in expression_or_fields if f}
+    if not tokens:
+        return []
+    try:
+        from backend.models.metadata import DataField
+        rows = (await db.execute(
+            select(DataField.category)
+            .where(DataField.region == region.upper())
+            .where(func.lower(DataField.field_id).in_(list(tokens)))
+            .where(DataField.category.isnot(None))
+            .distinct()
+        )).scalars().all()
+    except Exception as ex:
+        logger.debug(f"[resolve_field_categories] datafields lookup failed: {ex}")
+        return []
+    return sorted({_canonical_category(c) for c in rows if c})
 
 
 class RAGResult:
@@ -407,9 +493,13 @@ class RAGService:
                 )
                 hypothesis_pillar = None
 
+        # 2026-05-21: dispatch on dataset_id too. At step-1 the G4 pillar hint is
+        # noisy/often None, but dataset_id (the task anchor) is usually present —
+        # the redesigned L1 retrieves by the query's dataset-CATEGORY set even
+        # without a pillar, so hierarchical must fire on dataset_id alone.
         if (
             getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)
-            and (current_expression or hypothesis_pillar)
+            and (current_expression or hypothesis_pillar or dataset_id)
         ):
             try:
                 from backend.agents.hierarchical_rag import query_hierarchical
@@ -1272,6 +1362,13 @@ class RAGService:
                 # Check if similar pattern already exists
                 existing = await self._find_similar_pitfall(skeleton, region, db=kb_db)
 
+                # 2026-05-21: field-derived category SET (see record_success_pattern).
+                # Failure rows rarely carry resolvable fields, so this is often [];
+                # acceptable — failure pitfalls are largely universal "avoid" hints.
+                dataset_categories_used = await resolve_field_categories(
+                    expression, region, kb_db
+                )
+
                 if existing:
                     # Update existing pattern's failure count
                     existing.meta_data = existing.meta_data or {}
@@ -1287,6 +1384,10 @@ class RAGService:
                         if hypothesis_id not in hids:
                             hids.append(hypothesis_id)
                         existing.meta_data['hypothesis_ids'] = hids
+                    if dataset_categories_used:
+                        _cats = set(existing.meta_data.get('dataset_categories_used') or [])
+                        _cats |= set(dataset_categories_used)
+                        existing.meta_data['dataset_categories_used'] = sorted(_cats)
                     # F-5: variant tag preserved as-is on first record (don't
                     # overwrite — different variants get different KB entries
                     # via _find_similar_pitfall already returning per-skeleton).
@@ -1321,6 +1422,7 @@ class RAGService:
                             'region': region,
                             'dataset': dataset_id,
                             'dataset_category': category,
+                            'dataset_categories_used': dataset_categories_used,
                             'error_type': error_type,
                             'severity': severity,
                             'operator_chain': op_chain[:5] if op_chain else [],
@@ -1390,6 +1492,14 @@ class RAGService:
                 # Check if similar pattern exists
                 existing = await self._find_similar_success(skeleton, region, db=kb_db)
 
+                # 2026-05-21: the real retrieval key — the SET of dataset-categories
+                # this expression's fields touch (an alpha is multi-dataset; the
+                # single dataset_id is the task anchor, not the expression's truth).
+                # Computed from the FULL expression before the [:200] truncation.
+                dataset_categories_used = await resolve_field_categories(
+                    expression, region, kb_db
+                )
+
                 if existing:
                     # Update existing pattern
                     existing.usage_count += 1
@@ -1432,6 +1542,13 @@ class RAGService:
                     if source not in _srcs:
                         _srcs.append(source)
                     existing.meta_data['sources'] = _srcs
+                    # 2026-05-21: accumulate the union of category-sets across every
+                    # expression that reinforced this skeleton (same skeleton can be
+                    # instantiated with fields from different datasets).
+                    if dataset_categories_used:
+                        _cats = set(existing.meta_data.get('dataset_categories_used') or [])
+                        _cats |= set(dataset_categories_used)
+                        existing.meta_data['dataset_categories_used'] = sorted(_cats)
                     from sqlalchemy.orm.attributes import flag_modified
                     flag_modified(existing, 'meta_data')
                     logger.info(f"[RAGService] Updated success pattern | skeleton={skeleton[:50]}")
@@ -1467,6 +1584,11 @@ class RAGService:
                             'dataset': dataset_id,
                             'dataset_category': category,
                             'dataset_categories': [category],
+                            # 2026-05-21: the real retrieval key (field-derived
+                            # category SET; can span datasets). Empty when fields
+                            # don't resolve (non-USA / unknown) — retrieval degrades
+                            # gracefully via the 0-candidate fallback.
+                            'dataset_categories_used': dataset_categories_used,
                             'operator_chain': op_chain[:5] if op_chain else [],
                             'example_expression': expression[:200],
                             'alpha_id': alpha_id,

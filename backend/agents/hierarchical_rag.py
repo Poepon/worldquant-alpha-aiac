@@ -308,6 +308,26 @@ def _warn_on_op_drift() -> None:
         _OP_DRIFT_WARNED = True  # don't retry on import errors
 
 
+def _effective_known_ops() -> Set[str]:
+    """``_KNOWN_OPS`` unioned with the operators the semantic validator has
+    loaded from DB, when available.
+
+    2026-05-21: the hardcoded ``_KNOWN_OPS`` (~50) drifted behind the 66-op
+    BRAIN registry — leaked ops (ts_scale/ts_delta/vec_avg/zscore/...) were
+    treated as fields. When the registry is populated we exclude the full set;
+    cold-start / unit tests with no registry fall back to ``_KNOWN_OPS`` (prior
+    behavior). No DB I/O — only reads the already-populated registry.
+    """
+    try:
+        from backend.alpha_semantic_validator import _operator_registry
+        reg = set(_operator_registry._operators or set())
+        if reg:
+            return _KNOWN_OPS | {str(o).lower() for o in reg}
+    except Exception:
+        pass
+    return _KNOWN_OPS
+
+
 def extract_fields_for_rag(expression: str) -> List[str]:
     """Pull field-like identifiers out of an alpha expression.
 
@@ -320,11 +340,12 @@ def extract_fields_for_rag(expression: str) -> List[str]:
     # M11: one-time drift check against AlphaSemanticValidator registry.
     # Cheap (no DB I/O) — see _warn_on_op_drift docstring.
     _warn_on_op_drift()
+    known_ops = _effective_known_ops()
     tokens = _FIELD_TOKEN_RE.findall(expression.lower())
     seen: Set[str] = set()
     out: List[str] = []
     for t in tokens:
-        if t in _KNOWN_OPS:
+        if t in known_ops:
             continue
         if t.isdigit():
             continue
@@ -564,8 +585,70 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Layer 1: pillar/theme (uses backfilled meta_data['pillar_classified'])
+# Layer 1: pillar/theme + dataset-category SET overlap
+# (2026-05-21 redesign — see plan jolly-wandering-sphinx Part B)
+#
+# An alpha is identified by the SET of dataset-categories its fields touch
+# (multi-dataset; the single dataset_id is the task anchor, not truth). At
+# step-1 (no expression) L1 is the only layer that can fire, so it must (a)
+# select candidates relevance-first (category-matching rows enter the pool
+# regardless of recency — the old newest-N window structurally excluded the
+# stamped rows), (b) rank by category-set overlap, and (c) decouple from the
+# noisy pillar hint when it's absent/"other".
 # ---------------------------------------------------------------------------
+
+def _l1_category_overlap(md: Dict[str, Any], query_categories: List[str]) -> int:
+    """Count of canonical categories shared between a pattern's field-derived
+    ``dataset_categories_used`` set and the query's category set."""
+    if not query_categories:
+        return 0
+    cats = md.get("dataset_categories_used") or []
+    if not isinstance(cats, list):
+        return 0
+    qs = {str(c).lower() for c in query_categories}
+    return len({str(c).lower() for c in cats} & qs)
+
+
+def _score_l1_success(md: Dict[str, Any], *, query_categories, dataset_id, region, settings) -> float:
+    """Composite score for a SUCCESS_PATTERN candidate. category-set overlap is
+    the cross-dataset discriminator; quality terms keep ties meaningful AND give
+    the graceful fallback when nothing matches (quality-ranked, NOT raw recency)."""
+    score = 0.0
+    entry_ds = md.get("dataset") or md.get("dataset_id") or ""
+    if dataset_id and entry_ds and str(entry_ds).lower() == str(dataset_id).lower():
+        score += getattr(settings, "RAG_SCORE_DATASET_MATCH", 100.0)
+    score += _l1_category_overlap(md, query_categories) * getattr(settings, "RAG_SCORE_CATEGORY_EXACT", 50.0)
+    if region:
+        kb_regions = md.get("regions") or ([md["region"]] if md.get("region") else [])
+        if str(region).upper() in [str(x).upper() for x in kb_regions]:
+            score += getattr(settings, "RAG_SCORE_REGION_MATCH", 20.0)
+        elif not kb_regions:
+            score += getattr(settings, "RAG_SCORE_REGION_GENERIC", 5.0)
+    try:
+        score += float(md.get("score", 0.5) or 0.5) * getattr(settings, "RAG_SCORE_BASE_MULTIPLIER", 10.0)
+    except (TypeError, ValueError):
+        pass
+    try:
+        score += min(float(md.get("expected_sharpe", 1.0) or 1.0), 2.0) * getattr(settings, "RAG_SCORE_SHARPE_MULTIPLIER", 5.0)
+    except (TypeError, ValueError):
+        pass
+    return score
+
+
+def _score_l1_pitfall(md: Dict[str, Any], *, query_categories, settings) -> float:
+    """Score for a FAILURE_PITFALL candidate. category coverage on failures is
+    low (acceptable — failures are largely universal avoid-hints), so severity
+    dominates and category overlap nudges."""
+    score = 0.0
+    score += _l1_category_overlap(md, query_categories) * getattr(settings, "RAG_PITFALL_CATEGORY_MATCH", 20.0)
+    sev = str(md.get("severity") or "").lower()
+    score += {
+        "high": getattr(settings, "RAG_PITFALL_SEVERITY_HIGH", 30),
+        "medium": getattr(settings, "RAG_PITFALL_SEVERITY_MEDIUM", 20),
+        "low": getattr(settings, "RAG_PITFALL_SEVERITY_LOW", 10),
+    }.get(sev, getattr(settings, "RAG_PITFALL_SEVERITY_DEFAULT", 15))
+    return score
+
 
 async def layer1_pillar(
     db: AsyncSession,
@@ -573,19 +656,22 @@ async def layer1_pillar(
     current_expression: Optional[str] = None,
     hypothesis_pillar: Optional[str] = None,
     region: Optional[str] = None,
+    dataset_id: Optional[str] = None,
+    query_categories: Optional[List[str]] = None,
     budget: int = 5,
 ) -> tuple[List[RAGEntry], List[RAGEntry]]:
-    """RAG#1: pillar/theme JOIN via backfilled meta_data['pillar_classified'].
+    """RAG#1: pillar/theme + dataset-category SET overlap.
 
-    Pillar resolution priority (per plan §2.3):
-      1. Explicit hypothesis_pillar arg (from LLM hypothesis dict)
-      2. infer_pillar(current_expression) fallback
-
-    Returns (success_patterns, failure_pitfalls). Q9 decayed dual-filter
-    (SUCCESS excludes, FAILURE includes per plan §2.5). Pillar="other"
-    short-circuits to empty (per [V1.0-A2-1]:"other" too broad for L1).
+    Candidate selection is relevance-first (two passes):
+      1. rows whose ``meta_data.dataset_categories_used`` overlaps the query's
+         categories (+ pillar match if a usable pillar is known) — these enter
+         the pool regardless of recency;
+      2. fill the remaining budget with newest pillar-scoped (or global) rows.
+    Then score by category-set overlap (+ exact-dataset bonus + quality) and
+    return the top ``budget``. Q9 decayed dual-filter (SUCCESS excludes, FAILURE
+    includes). Pillar="other"/absent → decouple and rank by category alone.
     """
-    # Resolve pillar
+    # Resolve pillar (None / "other" → decouple, rely on category overlap)
     pillar = None
     if hypothesis_pillar and isinstance(hypothesis_pillar, str):
         pillar = hypothesis_pillar.strip().lower()
@@ -595,91 +681,146 @@ async def layer1_pillar(
             pillar = infer_pillar(expression=current_expression)
         except Exception as ex:
             logger.debug(f"[hier_rag L1] infer_pillar failed: {ex}")
-            return [], []
+            pillar = None
+    if pillar == "other":
+        pillar = None
 
-    if not pillar or pillar == "other":
-        # "other" pillar too broad — short-circuit per [V1.0-A2-1]
+    # Resolve query categories (the cross-dataset key). Explicit query_categories
+    # are always honored. Auto-derivation from dataset_id is gated on
+    # ``not current_expression`` — i.e. ONLY the step-1 case this fix targets
+    # (no expression → L1 is the sole firing layer). When an expression exists
+    # (self-correct / later steps) L0/L2/L3 supply expression-specific retrieval
+    # and L1 stays pillar-only (its prior behavior); otherwise a broad
+    # category fill here would consume the shared pattern budget and starve
+    # the more-specific L2/L3 layers.
+    qcats = [str(c).lower() for c in (query_categories or []) if c]
+    if not qcats and dataset_id and not current_expression:
+        try:
+            from backend.agents.services.rag_service import infer_dataset_category
+            _c = infer_dataset_category(dataset_id)
+            if _c:
+                qcats = [_c.lower()]
+        except Exception as ex:
+            logger.debug(f"[hier_rag L1] infer_dataset_category failed: {ex}")
+
+    # Nothing to retrieve on
+    if not pillar and not qcats:
         return [], []
 
-    try:
-        # JOIN on backfilled meta_data->>'pillar_classified' = pillar
-        # GIN(jsonb_path_ops) supports @> containment — use that.
-        # N2 SQL-pushdown: split SUCCESS/FAILURE queries so decayed filter
-        # is in WHERE on the SUCCESS path only (FAILURE INCLUDES decayed
-        # per Q9 dual-filter — they're the "avoid this" hints).
-        pillar_match = cast({"pillar_classified": pillar}, JSONB)
-        decayed_match = cast({DECAYED_KEY: "true"}, JSONB)
+    from backend.config import settings as _stg
+    cap = max(int(budget), int(getattr(_stg, "RAG_HIER_L1_CANDIDATE_CAP", 40)))
+    decayed_match = cast({DECAYED_KEY: "true"}, JSONB)
 
-        # M10 fix: over-fetch SUCCESS so post-SQL region filter still has
-        # room to surface `budget` matching rows (mirrors L3 pattern).
-        # Region filter stays in Python due to list/str ambiguity in meta_data
-        # (knowledge_seed convention uses meta_data['regions']: List[str]
-        # OR meta_data['region']: str; missing → treat as ANY per [V1.0-A1-3]).
-        succ_rows = (await db.execute(
+    def _base(entry_type: str, with_pillar: bool):
+        q = (
             select(KnowledgeEntry)
             .where(KnowledgeEntry.is_active == True)  # noqa: E712
-            .where(KnowledgeEntry.entry_type == "SUCCESS_PATTERN")
-            .where(KnowledgeEntry.meta_data.op("@>")(pillar_match))
-            .where(not_(KnowledgeEntry.meta_data.op("@>")(decayed_match)))
-            .order_by(KnowledgeEntry.id.desc())  # newest first — surfaces fresh evidence
-            .limit(budget * 2 if region else budget)
-        )).scalars().all()
-        fail_rows = (await db.execute(
-            select(KnowledgeEntry)
-            .where(KnowledgeEntry.is_active == True)  # noqa: E712
-            .where(KnowledgeEntry.entry_type == "FAILURE_PITFALL")
-            .where(KnowledgeEntry.meta_data.op("@>")(pillar_match))
-            .order_by(KnowledgeEntry.id.desc())  # newest first
-            .limit(budget)
-        )).scalars().all()
+            .where(KnowledgeEntry.entry_type == entry_type)
+        )
+        if with_pillar and pillar:
+            q = q.where(KnowledgeEntry.meta_data.op("@>")(cast({"pillar_classified": pillar}, JSONB)))
+        return q
+
+    def _cat_filter():
+        if not qcats:
+            return None
+        # @> on a JSONB array element uses the ix_kb_meta_data_gin (jsonb_path_ops)
+        # index. OR across the query's categories = "overlaps any".
+        return or_(*[
+            KnowledgeEntry.meta_data.op("@>")(cast({"dataset_categories_used": [c]}, JSONB))
+            for c in qcats
+        ])
+
+    async def _two_pass(entry_type: str, exclude_decayed: bool):
+        acc = []
+        seen_ids: List[int] = []
+        catf = _cat_filter()
+        # Pass 1 — category-relevant rows ACROSS ALL PILLARS. At step-1 the
+        # dataset category is the PRIMARY signal; the G4-inferred pillar is a
+        # noisy single-bucket hint (~1% of the pool drives it) and applying it
+        # here would starve categories absent from that one pillar (e.g. a
+        # pv-heavy momentum pillar collapses fundamental/news/analyst queries
+        # back together). So category pass ignores pillar; pillar only steers
+        # the pass-2 fill below.
+        if catf is not None:
+            q1 = _base(entry_type, with_pillar=False).where(catf)
+            if exclude_decayed:
+                q1 = q1.where(not_(KnowledgeEntry.meta_data.op("@>")(decayed_match)))
+            q1 = q1.order_by(KnowledgeEntry.id.desc()).limit(cap)
+            for r in (await db.execute(q1)).scalars().all():
+                acc.append(r)
+                seen_ids.append(r.id)
+        # Pass 2 — fill remaining budget with newest, pillar-scoped when a pillar
+        # is known (keeps the pillar as a soft preference for the non-category
+        # fill), else global newest.
+        if len(acc) < cap:
+            q2 = _base(entry_type, with_pillar=True)
+            if exclude_decayed:
+                q2 = q2.where(not_(KnowledgeEntry.meta_data.op("@>")(decayed_match)))
+            if seen_ids:
+                q2 = q2.where(KnowledgeEntry.id.notin_(seen_ids))
+            q2 = q2.order_by(KnowledgeEntry.id.desc()).limit(cap - len(acc))
+            acc.extend((await db.execute(q2)).scalars().all())
+        return acc
+
+    try:
+        succ_rows = await _two_pass("SUCCESS_PATTERN", exclude_decayed=True)
+        fail_rows = await _two_pass("FAILURE_PITFALL", exclude_decayed=False)
 
         def _region_ok(md: Dict[str, Any]) -> bool:
-            """M10: region availability check — same logic L3 uses.
-
-            meta_data['regions'] is List[str] OR meta_data['region'] str.
-            Missing → treat as ANY (per plan [V1.0-A1-3]).
-            """
             if not region:
                 return True
-            kb_regions = md.get("regions") or (
-                [md["region"]] if md.get("region") else None
-            )
+            kb_regions = md.get("regions") or ([md["region"]] if md.get("region") else None)
             if not kb_regions:
                 return True
             normalized = [str(x).upper() for x in kb_regions]
             return region.upper() in normalized or "ANY" in normalized
 
-        succ: List[RAGEntry] = []
-        for r in succ_rows:
+        # SUCCESS: region-filtered, then ordered. With a category signal we
+        # rank by category-set overlap (+ quality) so relevant rows surface
+        # regardless of recency (the R3 fix). WITHOUT a category signal (pure
+        # pillar, no dataset) there's nothing to discriminate on, so we keep the
+        # newest-first pool order — preserves the prior "fresh evidence" behavior
+        # and avoids quality-ranking demoting freshly-recorded patterns.
+        succ_scored = []
+        for i, r in enumerate(succ_rows):
             md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
             if not _region_ok(md):
                 continue
-            succ.append(RAGEntry(
-                pattern_hash=r.pattern_hash or "",
-                pattern=r.pattern or "",
-                entry_type=r.entry_type or "",
-                description=r.description or "",
-                meta_data=md,
-                source_layer="L1_pillar",
-                relevance_score=0.75,  # mid-high specificity
-            ))
-            if len(succ) >= budget:
-                break
-        # FAILURE: per L3 convention, ignore region constraint (failures are
-        # universal "avoid this" hints).
-        fail: List[RAGEntry] = []
-        for r in fail_rows:
+            s = _score_l1_success(
+                md, query_categories=qcats, dataset_id=dataset_id,
+                region=region, settings=_stg,
+            )
+            succ_scored.append((s, i, r, md))
+        _succ_key = (lambda c: (-c[0], c[1])) if qcats else (lambda c: c[1])
+        succ_scored.sort(key=_succ_key)
+        succ = [
+            RAGEntry(
+                pattern_hash=r.pattern_hash or "", pattern=r.pattern or "",
+                entry_type=r.entry_type or "", description=r.description or "",
+                meta_data=md, source_layer="L1_pillar", relevance_score=0.75,
+            )
+            for (_s, _i, r, md) in succ_scored[:budget]
+        ]
+
+        # FAILURE: ignore region (universal avoid-hints). Same ordering rule —
+        # category-ranked when a signal exists, else newest-first.
+        fail_scored = []
+        for i, r in enumerate(fail_rows):
             md = dict(r.meta_data) if isinstance(r.meta_data, dict) else {}
-            fail.append(RAGEntry(
-                pattern_hash=r.pattern_hash or "",
-                pattern=r.pattern or "",
-                entry_type=r.entry_type or "",
-                description=r.description or "",
-                meta_data=md,
-                source_layer="L1_pillar",
-                relevance_score=0.75,
-            ))
-        return succ[:budget], fail[:budget]
+            s = _score_l1_pitfall(md, query_categories=qcats, settings=_stg)
+            fail_scored.append((s, i, r, md))
+        _fail_key = (lambda c: (-c[0], c[1])) if qcats else (lambda c: c[1])
+        fail_scored.sort(key=_fail_key)
+        fail = [
+            RAGEntry(
+                pattern_hash=r.pattern_hash or "", pattern=r.pattern or "",
+                entry_type=r.entry_type or "", description=r.description or "",
+                meta_data=md, source_layer="L1_pillar", relevance_score=0.75,
+            )
+            for (_s, _i, r, md) in fail_scored[:budget]
+        ]
+        return succ, fail
     except Exception as ex:
         logger.warning(f"[hier_rag L1] pillar query failed (return empty): {ex}")
         return [], []
@@ -1026,15 +1167,19 @@ async def query_hierarchical(
         _consume(s, f, "L0")
 
     # L1 — pillar/theme
-    if (current_expression or hypothesis_pillar) and (remaining_pat > 0 or remaining_fail > 0):
+    if (current_expression or hypothesis_pillar or dataset_id) and (remaining_pat > 0 or remaining_fail > 0):
         _l1_budget = layer_budgets.get("L1", 5)
         s, f = await _layer_call(
             "L1",
+            # 2026-05-21: "dataset" in the cache key — L1 now varies by dataset
+            # (category-set overlap). Without it two datasets sharing pillar/region
+            # would collide on one cached (succ,fail) and the fix would be masked.
             {"expr": current_expression, "pillar": hypothesis_pillar,
-             "region": region, "budget": _l1_budget},
+             "region": region, "dataset": dataset_id, "budget": _l1_budget},
             lambda: layer1_pillar(
                 db, current_expression=current_expression,
                 hypothesis_pillar=hypothesis_pillar, region=region,
+                dataset_id=dataset_id,
                 budget=_l1_budget,
             ),
         )

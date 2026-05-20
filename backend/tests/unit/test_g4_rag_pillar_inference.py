@@ -234,19 +234,24 @@ async def test_query_caller_provided_expression_skips_inference(_flag_on, _pilla
 
 
 @pytest.mark.asyncio
-async def test_query_no_region_skips_inference(_flag_on, _pillar_targets):
-    """Defensive: no region → inference NOT called → goes legacy."""
+async def test_query_no_region_skips_inference_but_dispatches_via_dataset(_flag_on, _pillar_targets):
+    """No region → G4 inference NOT called (defensive). But dataset_id present →
+    hierarchical still dispatches (pillar-decoupled, category-set retrieval)."""
     from backend.agents.services.rag_service import RAGService
 
     svc = RAGService.__new__(RAGService)
     svc.db = AsyncMock()
     svc._infer_pillar_hint_from_pool = AsyncMock(return_value=None)
-    svc._get_success_patterns_enhanced = AsyncMock(return_value=[])
-    svc._get_failure_pitfalls_enhanced = AsyncMock(return_value=[])
     svc._get_dataset_info = AsyncMock(return_value=None)
 
-    await svc.query(dataset_id="pv1")
+    qh_mock = AsyncMock(return_value=MagicMock(
+        patterns=[], pitfalls=[], layer_hits={}, total_queries=0,
+    ))
+    with patch("backend.agents.hierarchical_rag.query_hierarchical", new=qh_mock):
+        await svc.query(dataset_id="pv1")
     svc._infer_pillar_hint_from_pool.assert_not_called()
+    qh_mock.assert_awaited_once()
+    assert qh_mock.call_args.kwargs["dataset_id"] == "pv1"
 
 
 @pytest.mark.asyncio
@@ -274,37 +279,44 @@ async def test_query_inferred_pillar_dispatches_to_hierarchical(_flag_on, _pilla
 
 
 @pytest.mark.asyncio
-async def test_query_inferred_pillar_none_falls_back_to_legacy(_flag_on, _pillar_targets):
-    """Inference returns None → R8 dispatch skipped → legacy path runs."""
+async def test_query_inferred_pillar_none_dispatches_via_dataset(_flag_on, _pillar_targets):
+    """2026-05-21: inference returns None, but dataset_id present → hierarchical
+    STILL dispatches (pillar-decoupled, category-set retrieval). The G4 pillar is
+    a noisy/optional boost, not a precondition — dataset categories carry it."""
     from backend.agents.services.rag_service import RAGService
 
     svc = RAGService.__new__(RAGService)
     svc.db = AsyncMock()
     svc._infer_pillar_hint_from_pool = AsyncMock(return_value=None)
-    svc._get_success_patterns_enhanced = AsyncMock(return_value=[])
-    svc._get_failure_pitfalls_enhanced = AsyncMock(return_value=[])
     svc._get_dataset_info = AsyncMock(return_value=None)
 
-    qh_mock = AsyncMock()
+    qh_mock = AsyncMock(return_value=MagicMock(
+        patterns=[], pitfalls=[], layer_hits={}, total_queries=0,
+    ))
     with patch("backend.agents.hierarchical_rag.query_hierarchical", new=qh_mock):
         await svc.query(dataset_id="pv1", region="USA")
     svc._infer_pillar_hint_from_pool.assert_awaited_once_with(region="USA")
-    qh_mock.assert_not_called()
-    svc._get_success_patterns_enhanced.assert_awaited()
+    qh_mock.assert_awaited_once()
+    assert qh_mock.call_args.kwargs["hypothesis_pillar"] is None
+    assert qh_mock.call_args.kwargs["dataset_id"] == "pv1"
 
 
 @pytest.mark.asyncio
-async def test_query_inference_exception_falls_back_to_legacy(_flag_on, _pillar_targets):
-    """Inference raises (shouldn't but defensive) → soft-fail → legacy path."""
+async def test_query_inference_exception_still_dispatches_via_dataset(_flag_on, _pillar_targets):
+    """G4 inference raises → soft-fail leaves pillar None → dataset_id still
+    drives a hierarchical (category) dispatch. The exception must NOT force the
+    weaker legacy path when a dataset signal is available."""
     from backend.agents.services.rag_service import RAGService
 
     svc = RAGService.__new__(RAGService)
     svc.db = AsyncMock()
     svc._infer_pillar_hint_from_pool = AsyncMock(side_effect=RuntimeError("boom"))
-    svc._get_success_patterns_enhanced = AsyncMock(return_value=[])
-    svc._get_failure_pitfalls_enhanced = AsyncMock(return_value=[])
     svc._get_dataset_info = AsyncMock(return_value=None)
 
-    await svc.query(dataset_id="pv1", region="USA")
+    qh_mock = AsyncMock(return_value=MagicMock(
+        patterns=[], pitfalls=[], layer_hits={}, total_queries=0,
+    ))
+    with patch("backend.agents.hierarchical_rag.query_hierarchical", new=qh_mock):
+        await svc.query(dataset_id="pv1", region="USA")
     svc._infer_pillar_hint_from_pool.assert_awaited_once()
-    svc._get_success_patterns_enhanced.assert_awaited()
+    qh_mock.assert_awaited_once()

@@ -576,11 +576,23 @@ class ExternalKnowledgeSyncer:
             if await self._pattern_hash_exists(phash):
                 continue
 
+            # 2026-05-21: derive the field-based category SET from the CONCRETE
+            # pattern (curated imports store real expressions, not skeletons) so
+            # set-overlap retrieval works on these rows too. ext.category alone is
+            # the importer's free-text label (the split-vocab "pollution source");
+            # dataset_categories_used speaks the unified datafields vocabulary.
+            try:
+                from backend.agents.services.rag_service import resolve_field_categories
+                _cats_used = await resolve_field_categories(ext.pattern, ext_region, self.db)
+            except Exception:
+                _cats_used = []
+
             meta_data: Dict[str, Any] = {
                 'source': ext.source,
                 'source_url': ext.source_url,
                 'source_title': ext.source_title,
                 'dataset_category': ext.category,
+                'dataset_categories_used': _cats_used,
                 'confidence': ext.confidence,
                 'verified': ext.verified,
                 'score': ext.confidence,
