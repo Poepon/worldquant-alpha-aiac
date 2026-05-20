@@ -1496,6 +1496,29 @@ async def resume_flat_session(
     )
 
 
+@router.post("/flat-sessions/{task_id}/pause", response_model=FlatSessionOut)
+async def pause_flat_session(
+    task_id: int,
+    _token: str = Depends(_require_ops_token),
+    svc: TaskService = Depends(get_task_service_ops),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> FlatSessionOut:
+    """Pause a RUNNING flat session (sets status→PAUSED; worker exits at next
+    round boundary). FLAT counterpart to /tasks/{id}/intervene which refuses
+    FLAT PAUSE because it does not dispatch/manage the flat worker."""
+    try:
+        info = await svc.pause_flat_session(task_id)
+    except ValueError as ex:
+        raise HTTPException(status_code=400, detail=str(ex)) from ex
+    return FlatSessionOut(
+        task_id=info.task_id,
+        region=info.region,
+        universe=info.universe,
+        status=info.status,
+        runtime_state_inherited=True,
+    )
+
+
 # =============================================================================
 # R1b CoSTEER loop telemetry (2026-05-18) — operator decision support
 # =============================================================================

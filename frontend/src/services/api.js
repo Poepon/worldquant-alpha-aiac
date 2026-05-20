@@ -676,6 +676,11 @@ const api = {
     const { data } = await client.post(`/ops/flat-sessions/${taskId}/resume`)
     return data
   },
+
+  pauseFlatSession: async (taskId) => {
+    const { data } = await client.post(`/ops/flat-sessions/${taskId}/pause`)
+    return data
+  },
 }
 
 export default api

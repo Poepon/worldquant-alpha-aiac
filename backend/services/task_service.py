@@ -94,6 +94,9 @@ class TaskDetail:
     updated_at: Optional[datetime]
     trace_steps: List[TraceStepInfo]
     alphas_count: int
+    schedule: Optional[str] = None   # ONESHOT | FLAT — needed by frontend to
+                                     # route PAUSE/RESUME to the correct
+                                     # endpoint (FLAT uses /ops/flat-sessions/*)
 
 
 @dataclass
@@ -251,6 +254,7 @@ class TaskService(BaseService):
             updated_at=task.updated_at,
             trace_steps=[self._to_trace_info(s) for s in steps],
             alphas_count=alphas_count,
+            schedule=getattr(task, "schedule", None),
         )
     
     def _to_trace_info(self, step: TraceStep) -> TraceStepInfo:
@@ -642,6 +646,36 @@ class TaskService(BaseService):
         logger.info(
             f"[resume_flat_session] task_id={task_id} region={task.region} "
             f"PAUSED→RUNNING (runtime_state inherited)"
+        )
+        return self._to_session_info(await self.task_repo.get_by_id(task_id))
+
+    async def pause_flat_session(self, task_id: int) -> "MiningSessionInfo":
+        """Pause a RUNNING FLAT session by setting status→PAUSED.
+
+        No worker dispatch / kill needed: the running flat worker self-checks
+        task.status at every round boundary (CASCADE_PAUSE_POLL_SEC) and exits
+        cleanly on PAUSED — identical mechanism to quota_guard_pause_at_threshold
+        (session_watchdog.py:439). flat_cursor is preserved in task.config so a
+        later resume_flat_session continues where it left off.
+        """
+        task = await self.task_repo.get_by_id(task_id)
+        if not task:
+            raise ValueError(f"task_id={task_id} not found")
+        if (task.schedule or "").upper() != "FLAT":
+            raise ValueError(
+                f"task_id={task_id} is not a FLAT session (schedule={task.schedule})"
+            )
+        if task.status == "PAUSED":
+            return self._to_session_info(task)
+        if task.status != "RUNNING":
+            raise ValueError(
+                f"task_id={task_id} cannot pause from status={task.status}"
+            )
+        await self.task_repo.update_status(task_id, "PAUSED")
+        await self.commit()
+        logger.info(
+            f"[pause_flat_session] task_id={task_id} region={task.region} "
+            f"RUNNING→PAUSED (worker exits at next round boundary)"
         )
         return self._to_session_info(await self.task_repo.get_by_id(task_id))
 
