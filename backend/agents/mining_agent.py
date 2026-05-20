@@ -1436,7 +1436,11 @@ class MiningAgent:
         
         This is the Chain-of-Alpha style optimization loop.
         """
-        from backend.optimization_chain import generate_local_rewrites, generate_settings_variants
+        from backend.optimization_chain import (
+            generate_local_rewrites,
+            generate_settings_variants,
+            OptimizationContext,
+        )
         
         logger.info(f"[MiningAgent] Running optimization chain on {len(candidates)} candidates")
         
@@ -1457,12 +1461,25 @@ class MiningAgent:
                     max_variants=10
                 )
                 
-                # Generate settings variants
-                settings_variants = generate_settings_variants({
-                    "neutralization": "INDUSTRY",
-                    "decay": 4,
-                    "truncation": 0.02
-                })
+                # Generate settings variants. Pass turnover context so the
+                # turnover-targeted decay (Gap 2) is tried first on a 3-slot
+                # USER account. turnover may be flat or nested under 'is'.
+                _turnover = (
+                    metrics.get("turnover")
+                    or (metrics.get("is", {}) or {}).get("turnover")
+                    or 0.0
+                )
+                settings_variants = generate_settings_variants(
+                    {
+                        "neutralization": "INDUSTRY",
+                        "decay": 4,
+                        "truncation": 0.02,
+                    },
+                    context=OptimizationContext(
+                        expression=expression,
+                        turnover=float(_turnover or 0.0),
+                    ),
+                )
                 
                 # Simulate top variants (budget-limited)
                 await self._simulate_optimization_variants(

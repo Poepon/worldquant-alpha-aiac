@@ -480,12 +480,14 @@ def evaluate_alpha_comprehensive(
         failed_tests.append(f"HIGH_PROD_CORR (pc={prod_corr:.2f} > {thresholds.prod_corr_max:.2f})")
         recommendations.append("Try different fields or operators for more novelty")
     
-    # 新增：权重集中度检查
-    if long_count and short_count:
-        total_positions = long_count + short_count
-        if total_positions < 10:  # 持仓过于集中
-            failed_tests.append(f"CONCENTRATED_WEIGHT (positions={total_positions})")
-            recommendations.append("Consider using rank() or grouping operators for better diversification")
+    # 权重集中度检查 (Gap 1, 2026-05-20): use (long or 0)+(short or 0) so a
+    # one-sided long-only / short-only alpha (the other count == 0, falsy) can
+    # no longer bypass the breadth floor via the old `if long_count and
+    # short_count` guard. total_positions == 0 means missing/unsimulated → skip.
+    total_positions = (long_count or 0) + (short_count or 0)
+    if 0 < total_positions < 10:  # 持仓过于集中
+        failed_tests.append(f"CONCENTRATED_WEIGHT (positions={total_positions})")
+        recommendations.append("Consider using rank() or grouping operators for better diversification")
     
     eval_result.failed_tests = failed_tests
     eval_result.recommendations = list(set(recommendations))  # 去重
