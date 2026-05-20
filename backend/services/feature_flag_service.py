@@ -1602,6 +1602,110 @@ class FeatureFlagService(BaseService):
             "drained_keys_total": drained_keys_total,
         }
 
+    async def verify_sentinel_restore(
+        self,
+        sentinel_for: str = "ENABLE_LLM_ASSISTANT_MODE",
+        *,
+        expected_flags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Sprint 5 PR2 (NO-GO route): confirm a sentinel restore is complete.
+
+        After ``restore_sentinel`` runs on the NO-GO route, the operator
+        wants proof every sentinel cascade row got reverted. This read-only
+        verifier checks:
+          1. **No dangling cascade**: zero feature_flag_audit rows with
+             ``sentinel_trigger_for=:sentinel_for AND action='sentinel_set'
+             AND restored_at IS NULL`` (every cascade row stamped restored).
+          2. **Restore audit present**: ≥1 ``action='sentinel_restore'`` row
+             exists for the trigger (the restore actually ran).
+          3. **Per-flag final state**: each expected sentinel flag's current
+             effective override value reported (operator eyeballs that none
+             is stuck at the sentinel-forced False when it should be back ON).
+
+        Args:
+            sentinel_for: the trigger flag whose cascade we verify.
+            expected_flags: sentinel flag names to report state for; defaults
+                to ``settings.LLM_ASSISTANT_SENTINEL_FLAGS``.
+
+        Returns:
+            {complete: bool, dangling_cascade_rows: int, restore_rows: int,
+             per_flag_state: {flag: {override_value, in_supported_flags}},
+             warnings: [str]}
+
+        Read-only — never mutates. Soft-fail on DB error → complete=False.
+        """
+        from backend.config import settings as _stg
+
+        if expected_flags is None:
+            expected_flags = list(
+                getattr(_stg, "LLM_ASSISTANT_SENTINEL_FLAGS", []) or []
+            )
+
+        warnings: List[str] = []
+        try:
+            dangling = list((await self.db.execute(
+                select(FeatureFlagAudit).where(
+                    FeatureFlagAudit.sentinel_trigger_for == sentinel_for,
+                    FeatureFlagAudit.action == "sentinel_set",
+                    FeatureFlagAudit.restored_at.is_(None),
+                )
+            )).scalars().all())
+            restore_rows = list((await self.db.execute(
+                select(FeatureFlagAudit).where(
+                    FeatureFlagAudit.sentinel_trigger_for == sentinel_for,
+                    FeatureFlagAudit.action == "sentinel_restore",
+                )
+            )).scalars().all())
+        except Exception as ex:  # noqa: BLE001
+            logger.warning("[ff verify_sentinel_restore] query failed: %s", ex)
+            return {
+                "complete": False,
+                "error": str(ex)[:200],
+                "dangling_cascade_rows": -1,
+                "restore_rows": -1,
+                "per_flag_state": {},
+                "warnings": ["query_failed"],
+            }
+
+        dangling_n = len(dangling)
+        restore_n = len(restore_rows)
+
+        if dangling_n > 0:
+            warnings.append(
+                f"{dangling_n} cascade row(s) still unrestored — run "
+                f"restore_sentinel('{sentinel_for}') again"
+            )
+        if restore_n == 0:
+            warnings.append(
+                "no sentinel_restore audit row found — restore never ran"
+            )
+
+        # Per-flag current override state (read-only)
+        per_flag_state: Dict[str, Any] = {}
+        for flag in expected_flags:
+            try:
+                override = (await self.db.execute(
+                    select(FeatureFlagOverride).where(
+                        FeatureFlagOverride.flag_name == flag
+                    )
+                )).scalar_one_or_none()
+                per_flag_state[flag] = {
+                    "override_value": (override.flag_value if override else None),
+                    "in_supported_flags": flag in SUPPORTED_FLAGS,
+                }
+            except Exception:  # noqa: BLE001
+                per_flag_state[flag] = {"override_value": "ERROR", "in_supported_flags": False}
+
+        complete = (dangling_n == 0 and restore_n > 0)
+        return {
+            "complete": complete,
+            "sentinel_for": sentinel_for,
+            "dangling_cascade_rows": dangling_n,
+            "restore_rows": restore_n,
+            "per_flag_state": per_flag_state,
+            "warnings": warnings,
+        }
+
     # ---- helpers ----------------------------------------------------------
 
     @staticmethod

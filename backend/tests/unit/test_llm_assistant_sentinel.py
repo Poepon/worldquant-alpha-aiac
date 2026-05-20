@@ -348,3 +348,61 @@ async def test_cache_writethrough_on_cascade_and_restore(db_session):
         assert sf not in _flag_override_cache, (
             f"cache for {sf} should have been popped on restore"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sprint 5 PR2 — verify_sentinel_restore (NO-GO route completeness check)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_verify_sentinel_restore_complete_after_restore(db_session):
+    """After set-cascade + restore_sentinel, verify reports complete=True:
+    zero dangling cascade rows + ≥1 restore audit row."""
+    from backend.services.feature_flag_service import FeatureFlagService
+
+    svc = FeatureFlagService(db_session)
+    await svc.set("ENABLE_LLM_ASSISTANT_MODE", True, actor="test_op")
+    await svc.restore_sentinel(actor="restore_op")
+
+    report = await svc.verify_sentinel_restore("ENABLE_LLM_ASSISTANT_MODE")
+    assert report["complete"] is True
+    assert report["dangling_cascade_rows"] == 0
+    assert report["restore_rows"] >= 1
+    assert report["warnings"] == []
+    # per-flag state reported for all 6 sentinels
+    from backend.config import settings
+    for sf in settings.LLM_ASSISTANT_SENTINEL_FLAGS:
+        assert sf in report["per_flag_state"]
+
+
+@pytest.mark.asyncio
+async def test_verify_sentinel_restore_incomplete_when_not_restored(db_session):
+    """Cascade fired but restore NOT run → complete=False, dangling > 0,
+    restore_rows == 0, warnings non-empty."""
+    from backend.services.feature_flag_service import FeatureFlagService
+
+    svc = FeatureFlagService(db_session)
+    await svc.set("ENABLE_LLM_ASSISTANT_MODE", True, actor="test_op")
+    # NO restore call
+
+    report = await svc.verify_sentinel_restore("ENABLE_LLM_ASSISTANT_MODE")
+    assert report["complete"] is False
+    assert report["dangling_cascade_rows"] > 0
+    assert report["restore_rows"] == 0
+    assert any("unrestored" in w or "never ran" in w for w in report["warnings"])
+
+
+@pytest.mark.asyncio
+async def test_verify_sentinel_restore_no_cascade_clean_state(db_session):
+    """Never-cascaded trigger → no dangling rows but also no restore rows.
+    complete=False (restore never ran because nothing to restore) — the
+    operator reads this as 'nothing to verify' via restore_rows==0."""
+    from backend.services.feature_flag_service import FeatureFlagService
+
+    svc = FeatureFlagService(db_session)
+    report = await svc.verify_sentinel_restore("ENABLE_LLM_ASSISTANT_MODE")
+    assert report["dangling_cascade_rows"] == 0
+    assert report["restore_rows"] == 0
+    # complete requires restore_rows > 0; clean never-cascaded state is not "complete"
+    assert report["complete"] is False
