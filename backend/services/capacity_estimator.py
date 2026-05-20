@@ -12,15 +12,21 @@ Formula
 -------
 ::
 
-    capacity_usd = ADV(region, universe) × universe_size × max_alpha_share
-                   × (1 - turnover_decay_factor)
+    capacity_usd = ADV(region, universe) × max_alpha_share
+                   × sqrt(universe_size) × (1 - turnover_decay_factor)
 
   where:
     ADV               = average daily volume per stock (USD) from
                         region_universe_adv.json
-    universe_size     = number of stocks in the universe
-    max_alpha_share   = 0.10  (single alpha cannot trade >10% of ADV
-                              before slippage erases edge — industry
+    sqrt(universe_size) = SUB-LINEAR universe scaling (Sprint 2 F6 fix).
+                        Capacity does NOT scale linearly with N stocks —
+                        position concentration + cross-sectional
+                        correlation cap realizable size. sqrt(N)
+                        approximates the Kyle / square-root market-impact
+                        law. (Linear N saturated USA TOP200 at ~$10B,
+                        physically wrong; sqrt keeps it ~$700M.)
+    max_alpha_share   = 0.10  (single alpha cannot trade >10% of per-stock
+                              ADV before slippage erases edge — industry
                               rule of thumb)
     turnover_decay    = (turnover - 0.5) / 2.0 clipped to [0, 0.5]
                         — high-turnover alphas churn the universe
@@ -179,10 +185,15 @@ def estimate(
     decay = max(0.0, min(0.5, (turnover_f - 0.5) / 2.0))
     capacity_factor = 1.0 - decay
 
+    # Sprint 2 F6 fix: sqrt(universe_size) sub-linear scaling (Kyle /
+    # square-root market impact) instead of linear N. Linear aggregation
+    # over-stated capacity by 1-2 orders for top-heavy universes (USA
+    # TOP200 → ~$10B, physically wrong) and saturated normalize() at 1.0.
+    import math
     capacity_usd = (
         adv_per_stock
-        * universe_size
         * _MAX_ALPHA_SHARE
+        * math.sqrt(max(1, universe_size))
         * capacity_factor
     )
     return float(max(capacity_usd, 0.0))

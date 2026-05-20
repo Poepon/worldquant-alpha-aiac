@@ -34,11 +34,14 @@ def _isolate_adv_cache():
 # estimate()
 # ---------------------------------------------------------------------------
 
+import math as _math
+
+
 def test_estimate_usa_top3000_basic():
-    """USA TOP3000 with 30% turnover should give ~6B (3000 × $20M × 0.10 × 1)."""
+    """USA TOP3000, 30% turnover. sqrt scaling: 2e7 × 0.10 × √3000 × 1.0 ≈ $110M."""
     c = cap.estimate(region="USA", universe="TOP3000", turnover=0.30)
-    # Expected: 2e7 × 3000 × 0.10 × 1.0 = 6e9 (decay 0 since turnover < 50%)
-    assert c == pytest.approx(6.0e9, rel=1e-3)
+    expected = 2e7 * 0.10 * _math.sqrt(3000) * 1.0  # decay 0 (turnover < 50%)
+    assert c == pytest.approx(expected, rel=1e-3)
 
 
 def test_estimate_high_turnover_decays():
@@ -52,28 +55,35 @@ def test_estimate_high_turnover_decays():
 def test_estimate_decay_clamps_at_50pct():
     """Even at infinite turnover, decay cap is 0.5 (capacity never fully collapses)."""
     c_huge = cap.estimate(region="USA", universe="TOP3000", turnover=10.0)
-    # decay clamps at 0.5 → factor 0.5
-    expected = 2e7 * 3000 * 0.10 * 0.5
+    expected = 2e7 * 0.10 * _math.sqrt(3000) * 0.5
     assert c_huge == pytest.approx(expected, rel=1e-3)
 
 
 def test_estimate_negative_turnover_treated_as_zero():
     c = cap.estimate(region="USA", universe="TOP3000", turnover=-0.5)
-    expected = 2e7 * 3000 * 0.10 * 1.0
+    expected = 2e7 * 0.10 * _math.sqrt(3000) * 1.0
     assert c == pytest.approx(expected, rel=1e-3)
 
 
 def test_estimate_unknown_region_uses_default():
-    """Region 'MARS' miss → falls through to _default (1e7 × 1000 × 0.10)."""
+    """Region 'MARS' miss → _default (1e7 ADV, 1000 stocks). sqrt scaling."""
     c = cap.estimate(region="MARS", universe="UNKNOWN", turnover=0.30)
-    # Default: 1e7 × 1000 × 0.10 = 1e9
-    assert c == pytest.approx(1.0e9, rel=1e-3)
+    expected = 1e7 * 0.10 * _math.sqrt(1000)  # ≈ $31.6M
+    assert c == pytest.approx(expected, rel=1e-3)
 
 
 def test_estimate_known_region_unknown_universe_uses_default():
     c = cap.estimate(region="USA", universe="WEIRD_UNIVERSE", turnover=0.30)
-    # Falls through to _default
-    assert c == pytest.approx(1.0e9, rel=1e-3)
+    expected = 1e7 * 0.10 * _math.sqrt(1000)
+    assert c == pytest.approx(expected, rel=1e-3)
+
+
+def test_estimate_sqrt_no_longer_saturates_top_heavy_universe():
+    """Sprint 2 F6 fix: USA TOP200 ($500M ADV) used to hit ~$10B (saturating
+    the top normalize bucket). sqrt scaling keeps it < $1B → bucket 0.6 not 1.0."""
+    c = cap.estimate(region="USA", universe="TOP200", turnover=0.20)
+    assert c < 1.0e9  # no longer saturating
+    assert cap.normalize(c) < 1.0
 
 
 def test_estimate_chn_top3000_smaller_than_usa_top3000():
@@ -116,7 +126,7 @@ def test_normalize_uses_default_buckets_when_none():
 def test_estimate_from_alpha_dict_top_level_turnover():
     d = {"region": "USA", "universe": "TOP3000", "turnover": 0.30}
     c = cap.estimate_from_alpha_dict(d)
-    assert c == pytest.approx(6.0e9, rel=1e-3)
+    assert c == pytest.approx(2e7 * 0.10 * _math.sqrt(3000), rel=1e-3)
 
 
 def test_estimate_from_alpha_dict_brain_is_stats_path():
@@ -127,7 +137,7 @@ def test_estimate_from_alpha_dict_brain_is_stats_path():
         "is": {"turnover": 0.30},
     }
     c = cap.estimate_from_alpha_dict(d)
-    assert c == pytest.approx(6.0e9, rel=1e-3)
+    assert c == pytest.approx(2e7 * 0.10 * _math.sqrt(3000), rel=1e-3)
 
 
 def test_estimate_from_alpha_dict_metrics_path():
@@ -137,7 +147,7 @@ def test_estimate_from_alpha_dict_metrics_path():
         "metrics": {"turnover": 0.30},
     }
     c = cap.estimate_from_alpha_dict(d)
-    assert c == pytest.approx(6.0e9, rel=1e-3)
+    assert c == pytest.approx(2e7 * 0.10 * _math.sqrt(3000), rel=1e-3)
 
 
 def test_estimate_from_alpha_dict_missing_region_returns_zero():
@@ -166,7 +176,7 @@ def test_adv_table_missing_file_soft_falls(monkeypatch, tmp_path):
     cap.clear_adv_table_cache()
     # Should not raise; defaults take over
     c = cap.estimate(region="USA", universe="TOP3000", turnover=0.30)
-    assert c == pytest.approx(1.0e9, rel=1e-3)  # default 1e7×1000×0.10
+    assert c == pytest.approx(1e7 * 0.10 * _math.sqrt(1000), rel=1e-3)  # default sqrt
 
 
 def test_adv_table_corrupt_json_soft_falls(monkeypatch, tmp_path):
@@ -175,7 +185,7 @@ def test_adv_table_corrupt_json_soft_falls(monkeypatch, tmp_path):
     monkeypatch.setattr(cap, "_ADV_JSON_PATH", bad)
     cap.clear_adv_table_cache()
     c = cap.estimate(region="USA", universe="TOP3000", turnover=0.30)
-    assert c == pytest.approx(1.0e9, rel=1e-3)
+    assert c == pytest.approx(1e7 * 0.10 * _math.sqrt(1000), rel=1e-3)
 
 
 # ---------------------------------------------------------------------------
@@ -189,8 +199,8 @@ def test_real_json_loads_all_regions_present():
     assert expected <= set(table.keys())
 
 
-def test_real_json_usa_top3000_estimate_in_billion_range():
-    """Sanity check: USA TOP3000 with normal turnover should give multi-B."""
+def test_real_json_usa_top3000_realistic_range():
+    """Sanity (post sqrt-scaling fix): USA TOP3000 ~$100M, the physically
+    sensible single-alpha capacity — NOT the $6B linear formula gave."""
     c = cap.estimate(region="USA", universe="TOP3000", turnover=0.20)
-    # ≥ $1B, ≤ $20B is the expected order of magnitude
-    assert 1.0e9 <= c <= 2.0e10
+    assert 1.0e7 <= c <= 1.0e9

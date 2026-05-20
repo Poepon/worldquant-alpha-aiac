@@ -93,15 +93,15 @@ def test_single_alpha_returns_no_pairs():
     assert per_family == []
 
 
-def test_recommend_tau_median_of_p95_p99(synthetic_intra_high_corr):
+def test_recommend_tau_is_p95(synthetic_intra_high_corr):
+    """Operator decision 2026-05-20: τ = intra-family p95 directly (was
+    mean(p95, p99) which sat above p95 → barely actionable)."""
     pnl_matrix, surviving = synthetic_intra_high_corr
     intra, _, _ = compute_pair_stats(pnl_matrix, surviving)
     # Augment to ≥10 pairs (synthetic fixture has 6); duplicate
     intra_aug = intra * 3
     tau = recommend_tau(intra_aug)
-    p95 = np.percentile(intra_aug, 95)
-    p99 = np.percentile(intra_aug, 99)
-    assert tau == pytest.approx((p95 + p99) / 2.0, rel=1e-6)
+    assert tau == pytest.approx(np.percentile(intra_aug, 95), rel=1e-6)
 
 
 def test_recommend_tau_insufficient_returns_nan():

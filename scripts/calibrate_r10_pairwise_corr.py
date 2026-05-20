@@ -255,17 +255,18 @@ def compute_pair_stats(
 
 
 def recommend_tau(intra: List[float]) -> float:
-    """Recommend FAMILY_BAN_MIN_PAIRWISE_CORR per plan v5 §6.7.
+    """Recommend FAMILY_BAN_MIN_PAIRWISE_CORR.
 
-    τ = median(intra_p95, intra_p99) — captures the upper tail of
-    same-family correlation while leaving room for legitimately divergent
-    alphas (different fields/windows in the same operator skeleton).
+    τ = intra-family p95 (operator decision 2026-05-20). The earlier
+    mean(p95, p99) sat ABOVE p95 → caught < 5% of intra-family pairs,
+    barely actionable (Sprint 2 R1 review). p95 directly bans the top
+    ~5% most-correlated same-family pairs while leaving legitimately
+    divergent alphas (different fields/windows on the same operator
+    skeleton) unbanned.
     """
     if len(intra) < 10:
         return float("nan")
-    p95 = np.percentile(intra, 95)
-    p99 = np.percentile(intra, 99)
-    return float((p95 + p99) / 2.0)
+    return float(np.percentile(intra, 95))
 
 
 # ---------------------------------------------------------------------------
