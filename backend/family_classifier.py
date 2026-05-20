@@ -158,6 +158,44 @@ def apply_family_cap(
     return sorted(drop_idx)
 
 
+def same_family_alpha_ids(alphas: Sequence) -> List[str]:
+    """Return alpha_ids that share a (pillar, family_signature) bucket
+    with ≥2 members — i.e. the ONLY alphas worth fetching daily PnL for
+    when building the R10-v2 pairwise-correlation matrix.
+
+    R10-v2 hard-ban only fires WITHIN a family, so a solo-family alpha
+    can never be banned and its PnL fetch would be wasted BRAIN cost.
+    Most rounds have zero same-family duplicates → this returns [] →
+    the producer skips the fetch entirely.
+
+    Skips terminal-FAIL alphas (already excluded from the ban) and rows
+    without a usable alpha_id / expression. Pure function.
+    """
+    if not alphas:
+        return []
+    groups: dict[Tuple[str, str], List[str]] = {}
+    for a in alphas:
+        status = getattr(a, "quality_status", None)
+        status_str = getattr(status, "value", status) if status is not None else None
+        if status_str in _FAMILY_CAP_EXCLUDED_STATUSES:
+            continue
+        aid = getattr(a, "alpha_id", None)
+        if aid is None:
+            continue
+        expr = getattr(a, "expression", "") or ""
+        sig = family_signature(expr)
+        if sig == "<empty>":
+            continue
+        pillar = _alpha_pillar(a)
+        groups.setdefault((pillar, sig), []).append(str(aid))
+
+    out: List[str] = []
+    for _key, ids in groups.items():
+        if len(ids) >= 2:
+            out.extend(ids)
+    return out
+
+
 def apply_family_hard_ban(
     alphas: Sequence,
     *,
@@ -305,4 +343,9 @@ def apply_family_hard_ban(
     return sorted(ban_idx)
 
 
-__all__ = ["family_signature", "apply_family_cap", "apply_family_hard_ban"]
+__all__ = [
+    "family_signature",
+    "apply_family_cap",
+    "apply_family_hard_ban",
+    "same_family_alpha_ids",
+]

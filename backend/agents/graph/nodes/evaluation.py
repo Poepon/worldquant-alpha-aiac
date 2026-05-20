@@ -2946,16 +2946,55 @@ async def node_evaluate(
     # Both R10 and R10-v2 stamps survive to persistence; the互验 SQL
     # in plan v5 §6.10 compares false-positive rates after 7d obs.
     #
-    # Wiring deferred behind ENABLE_FAMILY_HARD_BAN flag (default OFF).
-    # Production wire pending τ calibration from scripts/calibrate_r10_
-    # pairwise_corr.py (R10-calib spike output). When flag ON and
-    # `state.r10v2_pnl_corr_matrix` was populated upstream (Phase 4
-    # follow-up), we run the hard-ban; otherwise soft-fall to no-op.
+    # Tier A upstream wire (2026-05-20): the corr matrix producer. When
+    # flag ON + matrix not pre-populated, BUILD it in-round: group the
+    # round's non-FAIL alphas by (pillar, family_signature), fetch daily
+    # PnL ONLY for same-family members (solo-family alphas can never be
+    # banned → no wasted BRAIN cost; most rounds have 0 same-family
+    # duplicates → 0 fetches), and compute the pairwise corr matrix.
+    # BRAIN_AUTH_CIRCUIT short-circuit + soft-fail inside the service.
     if getattr(settings, "ENABLE_FAMILY_HARD_BAN", False):
         try:
-            from backend.family_classifier import apply_family_hard_ban  # noqa: E402
+            from backend.family_classifier import (  # noqa: E402
+                apply_family_hard_ban,
+                same_family_alpha_ids,
+            )
             _tau = float(getattr(settings, "FAMILY_BAN_MIN_PAIRWISE_CORR", 0.65))
             _corr_matrix = getattr(state, "r10v2_pnl_corr_matrix", None)
+
+            # Tier A: build the matrix if an upstream producer didn't.
+            if _corr_matrix is None and brain is not None:
+                _same_family_ids = same_family_alpha_ids(updated_alphas)
+                if len(_same_family_ids) >= 2:
+                    try:
+                        from backend.services.correlation_service import (
+                            CorrelationService as _R10v2CorrSvc,
+                        )
+                        _r10v2_svc = _R10v2CorrSvc(brain)
+                        _corr_matrix = await _r10v2_svc.compute_pairwise_corr_for_ids(
+                            _same_family_ids,
+                        )
+                        # Stash on state so re-entry within the same run reuses it
+                        try:
+                            state.r10v2_pnl_corr_matrix = _corr_matrix
+                        except Exception:  # noqa: BLE001
+                            pass
+                        logger.info(
+                            f"[R10-v2] built corr matrix for {len(_same_family_ids)} "
+                            f"same-family alpha(s) "
+                            f"(matrix={'ok' if _corr_matrix is not None else 'empty'})"
+                        )
+                    except Exception as _r10v2_build_e:  # noqa: BLE001
+                        logger.warning(
+                            f"[R10-v2] corr matrix build failed (non-fatal): "
+                            f"{_r10v2_build_e}"
+                        )
+                        _corr_matrix = None
+                else:
+                    logger.debug(
+                        "[R10-v2] no same-family alphas this round — skip corr fetch"
+                    )
+
             if _corr_matrix is not None:
                 _ban_idx = apply_family_hard_ban(
                     updated_alphas, pnl_corr_matrix=_corr_matrix, threshold=_tau,
@@ -2972,7 +3011,7 @@ async def node_evaluate(
                         f"alphas (τ={_tau:.2f}) — FAIL deferred to finalize pass"
                     )
             else:
-                logger.debug("[R10-v2] flag ON but pnl_corr_matrix unavailable — skip")
+                logger.debug("[R10-v2] flag ON but no corr matrix — skip ban")
         except Exception as _r10v2_e:  # noqa: BLE001
             logger.warning(f"[R10-v2] hard-ban failed (non-fatal): {_r10v2_e}")
     # === end R10-v2 hard-ban ===
