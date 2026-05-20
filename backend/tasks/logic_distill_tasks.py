@@ -195,9 +195,13 @@ class _DistillLLMShim:
         self.llm = llm_service
 
     def _rate_for_model(self, model: str) -> float:
+        # R1 review fix: prefix match (startswith), not substring — a
+        # substring match could resolve a routing alias like
+        # "openrouter/deepseek-chat" or a model embedding an unrelated
+        # family name to the wrong rate. Ordered list = first prefix wins.
         m = (model or "").lower()
         for prefix, rate in self._PRICE_PER_1K:
-            if prefix in m:
+            if m.startswith(prefix):
                 return rate
         return self._DEFAULT_COST_PER_1K
 

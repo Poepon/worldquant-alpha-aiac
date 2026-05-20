@@ -113,8 +113,11 @@ def _resolve_adv(region: str, universe: str) -> Tuple[float, int]:
     """Look up (adv_usd_per_stock, universe_size) for a (region, universe).
 
     Falls through to the ``_default`` entry on miss. Both ``_default`` and
-    a missing JSON give the conservative (1e7, 1000) baseline — that's
-    log-bucket 0.50, which neither helps nor hurts the unknown alpha.
+    a missing JSON give the conservative (1e7, 1000) baseline → under the
+    sqrt formula 1e7 × 0.10 × √1000 ≈ $31.6M → normalize bucket [1e7,1e8)
+    = 0.4 (slightly-below-median; there is NO 0.5 band — normalize emits
+    only {0, 0.2, 0.4, 0.6, 0.8, 1.0}). Unknown (region, universe) scores
+    mildly conservative, not neutral.
     """
     table = _load_adv_table()
     if not table:

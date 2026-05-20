@@ -77,8 +77,10 @@ async def test_e1_bandit_update_aggregates_pass_fail(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_e1_bandit_update_cumulative(monkeypatch):
-    """Second run ADDS to existing counts (posterior sharpens)."""
+async def test_e1_bandit_update_idempotent_rerun(monkeypatch):
+    """Tier A-F review fix: an immediate re-run does NOT double-count
+    (watermark advanced past the alphas). Cross-week sharpening still
+    works because each week's window is non-overlapping (watermark)."""
     from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
     from sqlalchemy.orm import sessionmaker
     from sqlalchemy.pool import StaticPool
@@ -103,7 +105,7 @@ async def test_e1_bandit_update_cumulative(monkeypatch):
 
     import backend.tasks.cognitive_layer_bandit_tasks as mod
     await mod._update_async(window_days=30)
-    await mod._update_async(window_days=30)  # second run
+    await mod._update_async(window_days=30)  # immediate re-run
 
     async with maker() as s:
         row = (await s.execute(
@@ -111,8 +113,8 @@ async def test_e1_bandit_update_cumulative(monkeypatch):
                 CognitiveLayerBanditState.layer_id == "macro_top_down"
             )
         )).scalar_one()
-    # 1 PASS counted twice (cumulative) → pass_count = 2
-    assert row.pass_count == 2
+    # 1 PASS counted ONCE — re-run is idempotent (was the double-count bug)
+    assert row.pass_count == 1
     await engine.dispose()
 
 

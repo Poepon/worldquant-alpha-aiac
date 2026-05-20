@@ -607,10 +607,21 @@ class CorrelationService:
         uniq_ids = list(dict.fromkeys(str(a) for a in alpha_ids))[:max_alphas]
         sem = asyncio.Semaphore(PNL_FETCH_CONCURRENCY)
 
+        # R2 review fix: in-round budget is tight — use max_attempts=1 (a
+        # retry's value is low here vs the latency it adds) and re-check the
+        # auth circuit before each fetch so a mid-gather auth drop fast-fails
+        # the remaining fetches instead of each one burning a retry/backoff.
+        try:
+            from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT as _BAC
+        except Exception:  # noqa: BLE001
+            _BAC = None
+
         async def _fetch(aid: str) -> Optional[pd.Series]:
             async with sem:
+                if _BAC is not None and _BAC.is_open():
+                    return None
                 try:
-                    s = await self._fetch_pnl_series(aid, max_attempts=2)
+                    s = await self._fetch_pnl_series(aid, max_attempts=1)
                     return s if (s is not None and not s.empty) else None
                 except Exception as e:  # noqa: BLE001
                     logger.debug(

@@ -2918,10 +2918,11 @@ async def r13_factor_residuals(
 ) -> R13ResidualStatsOut:
     """R13 factor-lens residual-sharpe distribution (Sprint 2 B2).
 
-    Reads ``alpha.metrics->>'_r13_residual_sharpe'`` + ``_r13_mode_used``.
-    Postgres-only (JSONB) → empty payload on non-Postgres dev DB. Use to
-    calibrate FACTOR_LENS_RESIDUAL_SHARPE_MIN before promoting
-    FACTOR_LENS_MODE shadow→soft→hard.
+    Reads ``alpha.metrics->>'_r13_residual_sharpe'`` + the per-phase key
+    ``_r13_factor_lens_phase`` (the by_mode grouping). Postgres-only
+    (JSONB) → empty payload on non-Postgres dev DB. Use to calibrate
+    FACTOR_LENS_RESIDUAL_SHARPE_MIN before promoting FACTOR_LENS_MODE
+    shadow→soft→hard.
     """
     from sqlalchemy import text as _text
     from backend.config import settings as _stg

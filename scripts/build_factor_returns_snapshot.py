@@ -112,9 +112,10 @@ def build(
     dry_run: bool,
 ) -> int:
     try:
+        import numpy as np
         import pandas as pd
     except ImportError:
-        logger.error("pandas required — pip install pandas")
+        logger.error("pandas/numpy required — pip install pandas")
         return 1
 
     if not csv_path.exists():
@@ -177,13 +178,24 @@ def build(
             n_days, _MIN_COVERAGE_DAYS,
         )
 
-    # Sanity: daily returns should be small decimals after scaling
-    abs_max = out[_TARGET_FACTORS].abs().to_numpy().max()
+    # Sanity: daily factor returns realistically have abs_max ~0.02-0.05.
+    # Symmetric check (R2 review fix) — flag BOTH over- and under-scaled:
+    nonzero = out[_TARGET_FACTORS].abs().to_numpy()
+    abs_max = float(nonzero.max()) if nonzero.size else 0.0
+    nz = nonzero[nonzero > 0]
+    median_abs = float(np.median(nz)) if nz.size else 0.0
     if abs_max > 0.5:
         logger.warning(
-            "max |daily return| = %.3f after scale=%.4g — looks like "
+            "max |daily return| = %.4g after scale=%.4g — looks like "
             "percent data not rescaled? (pass --scale 0.01 for FF percent)",
             abs_max, scale,
+        )
+    elif median_abs > 0 and median_abs < 1e-4:
+        logger.warning(
+            "median |daily return| = %.2e after scale=%.4g — looks 10-100x "
+            "too SMALL (already-decimal data double-scaled by 0.01? pass "
+            "--scale 1.0). R13 OLS betas would be silently wrong.",
+            median_abs, scale,
         )
 
     if dry_run:

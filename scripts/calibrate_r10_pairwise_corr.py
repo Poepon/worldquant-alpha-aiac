@@ -20,9 +20,9 @@ Strategy
      - cross-family p50 / p95 / p99 correlation
      - per-family pair count
 5. Recommend ``FAMILY_BAN_MIN_PAIRWISE_CORR`` τ:
-     - intra-family p95 lower bound (catch tight clusters)
-     - intra-family p99 ceiling (do not over-ban)
-     - chosen τ = median(intra_p95, intra_p99) per plan v5 §6.7
+     - chosen τ = intra-family p95 (operator decision 2026-05-20) —
+       bans the top ~5% most-correlated same-family pairs. (Was
+       mean(p95, p99), which sat above p95 → barely actionable.)
 6. Output JSON to ``--out`` for operator inspection — script NEVER
    auto-flips settings (mirrors calibrate_g3_threshold).
 

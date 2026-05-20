@@ -50,14 +50,38 @@ async def _update_async(window_days: int) -> Dict[str, Any]:
     from backend.database import AsyncSessionLocal
     from backend.models import Alpha
     from backend.models.cognitive_layer_bandit import CognitiveLayerBanditState
+    from backend.models import SystemConfig
 
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(0, window_days))).replace(tzinfo=None)
+    # R1/R2 review fix: idempotent windowing via a watermark. The upsert is
+    # cumulative (posterior sharpens weekly), so overlapping windows would
+    # double-count (manual re-run / beat double-fire / retry — the exact
+    # issue g10 fixed with a UNIQUE constraint). Bound the window by
+    # (watermark, run_started] — a re-run finds the watermark already at the
+    # prior run's edge → near-empty window → no double-count. First run
+    # falls back to (now - window_days, run_started].
+    _WM_KEY = "cognitive_layer_bandit_watermark"
+    run_started = datetime.now(timezone.utc).replace(tzinfo=None)
+    default_lower = (datetime.now(timezone.utc) - timedelta(days=max(0, window_days))).replace(tzinfo=None)
 
-    # Pull (metrics, quality_status) for alphas stamped with a layer in window.
-    # Python-side aggregation for cross-DB (JSONB ->> differs PG vs SQLite).
     async with AsyncSessionLocal() as db:
+        wm_row = (await db.execute(
+            select(SystemConfig).where(SystemConfig.config_key == _WM_KEY)
+        )).scalar_one_or_none()
+        lower = default_lower
+        if wm_row and wm_row.config_value:
+            try:
+                lower = datetime.fromisoformat(wm_row.config_value)
+                if lower.tzinfo is not None:
+                    lower = lower.astimezone(timezone.utc).replace(tzinfo=None)
+            except Exception:  # noqa: BLE001 — malformed watermark → fall back to window
+                lower = default_lower
+
+        # Window: (lower, run_started]. Bounded both edges → re-run safe.
         rows = (await db.execute(
-            select(Alpha.metrics, Alpha.quality_status).where(Alpha.created_at >= cutoff)
+            select(Alpha.metrics, Alpha.quality_status).where(
+                Alpha.created_at > lower,
+                Alpha.created_at <= run_started,
+            )
         )).all()
 
         # Aggregate window pass/fail per layer
@@ -75,11 +99,26 @@ async def _update_async(window_days: int) -> Dict[str, Any]:
             elif status_str == "FAIL":
                 bucket["fail"] += 1
 
+        # Advance the watermark to run_started even when agg is empty, so a
+        # quiet window still moves the lower bound forward (no re-scan).
+        def _advance_watermark():
+            if wm_row is None:
+                db.add(SystemConfig(
+                    config_key=_WM_KEY,
+                    config_value=run_started.isoformat(),
+                    config_type="timestamp",
+                    description="cognitive-layer bandit reward last-processed edge",
+                ))
+            else:
+                wm_row.config_value = run_started.isoformat()
+
         if not agg:
-            logger.info("[r8v3-bandit] no stamped alphas in window — nothing to update")
+            logger.info("[r8v3-bandit] no stamped alphas in window — advancing watermark")
+            _advance_watermark()
+            await db.commit()
             return {"updated_layers": 0, "window_days": window_days}
 
-        # Cumulative upsert: ADD the window counts to existing rows.
+        # Cumulative upsert: ADD the (non-overlapping) window counts.
         updated = 0
         for layer_id, counts in agg.items():
             existing = (await db.execute(
@@ -97,6 +136,7 @@ async def _update_async(window_days: int) -> Dict[str, Any]:
                 existing.pass_count = int(existing.pass_count or 0) + counts["pass"]
                 existing.fail_count = int(existing.fail_count or 0) + counts["fail"]
             updated += 1
+        _advance_watermark()
         await db.commit()
 
     logger.info(
