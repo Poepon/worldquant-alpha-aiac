@@ -17,6 +17,10 @@ import {
   CopyOutlined,
   ApartmentOutlined,
   ForkOutlined,
+  BulbOutlined,
+  FundOutlined,
+  ReadOutlined,
+  CheckSquareOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -73,6 +77,11 @@ const menuItems = [
       { key: '/ops/g5-monitor', icon: <ForkOutlined />, label: '交叉变异' },
       { key: '/ops/r9-cache', icon: <DatabaseOutlined />, label: '模拟缓存' },
       { key: '/ops/cost-monitor', icon: <DollarOutlined />, label: 'LLM 成本' },
+      { key: '/ops/r8v3-monitor', icon: <BulbOutlined />, label: '认知层 (R8-v3)' },
+      { key: '/ops/r11-capacity', icon: <FundOutlined />, label: '容量估算 (R11)' },
+      { key: '/ops/r13-factor-lens', icon: <ExperimentOutlined />, label: '因子透镜 (R13)' },
+      { key: '/ops/g10-logic', icon: <ReadOutlined />, label: '逻辑资产库 (G10)' },
+      { key: '/ops/g3v2-monitor', icon: <CheckSquareOutlined />, label: '语法校验 (G3-v2)' },
       { key: '/ops/brain-role', icon: <SwapOutlined />, label: 'BRAIN 模式' },
     ],
   },

@@ -681,6 +681,47 @@ const api = {
     const { data } = await client.post(`/ops/flat-sessions/${taskId}/pause`)
     return data
   },
+
+  // ---- Phase 4 Sprint 3-5 + Tier B/C telemetry ----
+  // R8-v3 cognitive layer per-layer fire + PASS rate (Sprint 3 B5).
+  getOpsR8v3CognitiveLayerStats: async (days = 7) => {
+    const { data } = await client.get('/ops/r8-v3/cognitive-layer-stats', {
+      params: { days },
+    })
+    return data
+  },
+  // R11 alpha-capacity log-scale histogram + PASS rate (Sprint 2 B1 / Tier B).
+  getOpsR11CapacityStats: async (days = 7) => {
+    const { data } = await client.get('/ops/r11/capacity-stats', { params: { days } })
+    return data
+  },
+  // R13 factor-lens residual-sharpe distribution (Sprint 2 B2 / Tier B).
+  getOpsR13FactorResiduals: async (days = 7) => {
+    const { data } = await client.get('/ops/r13/factor-residuals', { params: { days } })
+    return data
+  },
+  // R13 factor-returns snapshot staleness (Tier B). No DB — filesystem mtime.
+  getOpsR13SnapshotStaleCheck: async (staleDays = 90) => {
+    const { data } = await client.get('/ops/r13/snapshot-stale-check', {
+      params: { stale_days: staleDays },
+    })
+    return data
+  },
+  // G10 distilled-logic library (Sprint 3 A5.1 / Sprint 4 A5.2).
+  getOpsG10LogicLibrary: async (
+    { days = 28, region = null, pillar = null, activeOnly = true, limit = 100 } = {},
+  ) => {
+    const params = { days, active_only: activeOnly, limit }
+    if (region) params.region = region
+    if (pillar) params.pillar = pillar
+    const { data } = await client.get('/ops/g10/logic-library', { params })
+    return data
+  },
+  // G3-v2 grammar parse telemetry (Sprint 4 B4.1 / Tier B).
+  getOpsG3v2ParseStats: async (days = 7) => {
+    const { data } = await client.get('/ops/g3v2/parse-stats', { params: { days } })
+    return data
+  },
 }
 
 export default api
