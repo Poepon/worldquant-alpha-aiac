@@ -128,47 +128,107 @@ class ValidationResult:
             self.unknown_ops = []
 
 
+# D1 review fix (Tier D): thread-safe lazy build + tri-state cache.
+# Prior code cached None on ANY failure (incl. transient lark.Lark build
+# errors) → one bad build permanently disabled validation for the process
+# even after the cause cleared. Now distinguish:
+#   _UNBUILT     — not yet attempted (or last attempt was a transient
+#                  build failure → retry on next call)
+#   _LARK_MISSING — lark import failed (permanent for this process)
+#   <Lark inst>  — built OK
+import threading as _threading
+
+_UNBUILT = object()
+_LARK_MISSING = object()
+_parser_cache: object = _UNBUILT
+_PARSER_LOCK = _threading.Lock()
+_lark_missing_logged = False
+
+# D3 review fix: max expression length before we skip Earley parsing
+# (O(n³) worst case; a pathological 5000-char nested expr can take ~0.5s).
+_MAX_EXPR_LEN = 2000
+
+
+def _reset_parser_cache() -> None:
+    """Test helper — force the next _lazy_parser() to rebuild."""
+    global _parser_cache, _lark_missing_logged
+    with _PARSER_LOCK:
+        _parser_cache = _UNBUILT
+        _lark_missing_logged = False
+
+
 def _lazy_parser() -> Optional[object]:
-    """Build the lark parser lazily on first call. Cached at module
-    level. Returns None when lark import fails (degrade-open mode)."""
-    global _PARSER  # type: ignore
-    try:
-        return _PARSER
-    except NameError:
-        pass
-    try:
-        import lark  # type: ignore
-    except ImportError:
-        logger.warning(
-            "[grammar_validator] lark not installed — G3-v2 degrades open"
-        )
-        _PARSER = None  # type: ignore
-        return None
-    try:
-        _PARSER = lark.Lark(_GRAMMAR, parser="earley")  # type: ignore
-    except Exception as e:
-        logger.warning(f"[grammar_validator] lark Lark build failed: {e}")
-        _PARSER = None  # type: ignore
-    return _PARSER  # type: ignore
+    """Build the lark parser lazily (thread-safe). Returns None when lark
+    is unavailable (degrade-open) OR a transient build failure occurred
+    (retries on the next call — D1 review fix)."""
+    global _parser_cache, _lark_missing_logged
+    # Fast path: already resolved (no lock needed for a settled state)
+    if _parser_cache is not _UNBUILT:
+        return None if _parser_cache is _LARK_MISSING else _parser_cache
+
+    with _PARSER_LOCK:
+        # Double-checked: another thread may have built while we waited
+        if _parser_cache is not _UNBUILT:
+            return None if _parser_cache is _LARK_MISSING else _parser_cache
+        try:
+            import lark  # type: ignore
+        except ImportError:
+            _parser_cache = _LARK_MISSING
+            # D2 review fix: when the FLAG is ON but lark is missing, the
+            # operator believes validation runs — it does not. Emit a
+            # one-time ERROR (not a warning) so the silent degrade-open is
+            # visible. Falls back to warning when the flag is OFF.
+            try:
+                from backend.config import settings as _s
+                if getattr(_s, "ENABLE_GRAMMAR_VALIDATOR", False) and not _lark_missing_logged:
+                    logger.error(
+                        "[grammar_validator] ENABLE_GRAMMAR_VALIDATOR=ON but "
+                        "lark not installed — G3-v2 validation SILENTLY "
+                        "DISABLED (degrade-open). Install lark or flip the "
+                        "flag OFF."
+                    )
+                    _lark_missing_logged = True
+                else:
+                    logger.warning(
+                        "[grammar_validator] lark not installed — G3-v2 degrades open"
+                    )
+            except Exception:  # noqa: BLE001
+                logger.warning("[grammar_validator] lark not installed")
+            return None
+        try:
+            parser = lark.Lark(_GRAMMAR, parser="earley")  # type: ignore
+            _parser_cache = parser
+            return parser
+        except Exception as e:  # noqa: BLE001
+            # Transient build failure — leave cache _UNBUILT so a later
+            # call retries (do NOT permanently disable on a transient cause).
+            logger.warning(
+                f"[grammar_validator] lark build failed (will retry next call): {e}"
+            )
+            return None
 
 
 def _extract_op_names(tree: object) -> List[str]:
-    """Walk the parse tree, collect every OP_NAME token at call position."""
+    """Walk the parse tree, collect every OP_NAME token at call position.
+
+    D3 review fix: explicit stack-based walk (was recursive → RecursionError
+    on a ~800-deep nested expression at the default 1000-frame limit).
+    """
     out: List[str] = []
     try:
         from lark import Tree, Token  # type: ignore
     except ImportError:
         return out
 
-    def walk(node: object) -> None:
+    stack: List[object] = [tree]
+    while stack:
+        node = stack.pop()
         if isinstance(node, Tree):
             if node.data == "call" and node.children:
                 head = node.children[0]
                 if isinstance(head, Token) and head.type == "OP_NAME":
                     out.append(str(head))
-            for child in node.children:
-                walk(child)
-    walk(tree)
+            stack.extend(node.children)
     return out
 
 
@@ -190,6 +250,13 @@ def validate(expression: str) -> ValidationResult:
     """
     if not expression or not expression.strip():
         return ValidationResult(ok=False, error_msg="empty expression")
+
+    # D3 review fix: skip Earley parsing on pathologically long input
+    # (O(n³) worst case → a 5000-char nested expr can take ~0.5s; 5 of
+    # those per round = multi-second latency). Degrade-open — a genuine
+    # 2000+ char alpha is rare and better simulated than dropped.
+    if len(expression) > _MAX_EXPR_LEN:
+        return ValidationResult(ok=True, error_msg="too_long_skipped")
 
     parser = _lazy_parser()
     if parser is None:

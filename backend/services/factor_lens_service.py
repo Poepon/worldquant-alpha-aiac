@@ -273,6 +273,7 @@ def decompose_alpha(
     region: str,
     factors: Optional[List[str]] = None,
     min_overlap_days: int = 60,
+    lookback_days: Optional[int] = None,
 ) -> Residual:
     """One-call wrapper: load region snapshot + decompose.
 
@@ -291,6 +292,15 @@ def decompose_alpha(
     """
     if alpha_returns is None or not region:
         return _empty_residual("no_input")
+    # D9 review fix: honor FACTOR_LENS_OLS_LOOKBACK_DAYS — trim the
+    # return series to the last N rows before lstsq. Was previously dead
+    # config (the setting existed but nothing read it; _series_to_returns
+    # used its own 4y window). None → no trim (full series).
+    if lookback_days is not None and lookback_days > 0:
+        try:
+            alpha_returns = alpha_returns.tail(int(lookback_days))
+        except Exception:  # noqa: BLE001 — non-Series input; let decompose reject it
+            pass
     factor_df = load_factor_returns(region, factors=factors)
     if factor_df is None:
         return _empty_residual("no_snapshot")

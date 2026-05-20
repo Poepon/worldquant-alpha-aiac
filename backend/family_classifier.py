@@ -46,21 +46,43 @@ def family_signature(expression: str) -> str:
     return hashlib.sha256(op_seq.encode("utf-8")).hexdigest()[:16]
 
 
-def _alpha_score(alpha, *, score_key: str = "sharpe") -> float:
-    """Resolve an alpha's composite score for ranking inside a family.
+def _alpha_score(alpha, *, score_key: str = "sharpe", use_composite: bool = True) -> float:
+    """Resolve an alpha's score for ranking inside a family.
 
-    Tries metrics["composite_score"] first (R5 + R1a combined), then sharpe,
-    then 0.0. Negative scores acceptable (alpha could be in flip-retry).
+    D10 review fix (Tier D): the prior version preferred
+    metrics["composite_score"] (range ~0-3) but fell back to sharpe
+    (range ~-3..4) per-alpha. When SOME family members had composite
+    stamped and others didn't, the top-K race mixed two scales →
+    incorrect ranking. Callers now decide ONE basis for the whole
+    family via ``use_composite`` (see _family_uses_composite), so a
+    family is ranked entirely by composite OR entirely by sharpe.
+
+    Negative scores acceptable (alpha could be in flip-retry).
     """
     metrics = getattr(alpha, "metrics", None) or {}
     if isinstance(metrics, dict):
-        comp = metrics.get("composite_score")
-        if isinstance(comp, (int, float)):
-            return float(comp)
+        if use_composite:
+            comp = metrics.get("composite_score")
+            if isinstance(comp, (int, float)):
+                return float(comp)
         sharpe = metrics.get(score_key)
         if isinstance(sharpe, (int, float)):
             return float(sharpe)
     return 0.0
+
+
+def _family_uses_composite(members: Sequence) -> bool:
+    """Return True iff EVERY member has a numeric composite_score —
+    only then is ranking the family by composite consistent. Otherwise
+    the family ranks by sharpe (D10 review fix — no scale mixing)."""
+    for a in members:
+        metrics = getattr(a, "metrics", None) or {}
+        if not isinstance(metrics, dict):
+            return False
+        comp = metrics.get("composite_score")
+        if not isinstance(comp, (int, float)):
+            return False
+    return True
 
 
 def _alpha_pillar(alpha) -> str:
@@ -126,10 +148,11 @@ def apply_family_cap(
         logger.warning(f"[family_cap] invalid top_k={top_k}, treating as 1")
         top_k = 1
 
-    # Group: (pillar, family_sig) → list of (score, idx) tuples.
+    # Group: (pillar, family_sig) → list of (alpha, idx). Score AFTER
+    # grouping so each family picks ONE consistent scoring basis (D10).
     # M4: skip alphas already in a terminal-fail status — they must not
     # occupy a top-K slot nor be re-stamped FAIL by the caller.
-    groups: dict[Tuple[str, str], List[Tuple[float, int]]] = {}
+    groups: dict[Tuple[str, str], List[Tuple[object, int]]] = {}
     for idx, a in enumerate(alphas):
         status = getattr(a, "quality_status", None)
         # Normalize to str (handles QualityStatus enum or raw str)
@@ -139,20 +162,27 @@ def apply_family_cap(
         expr = getattr(a, "expression", "") or ""
         sig = family_signature(expr)
         pillar = _alpha_pillar(a)
-        score = _alpha_score(a, score_key=score_key)
-        groups.setdefault((pillar, sig), []).append((score, idx))
+        groups.setdefault((pillar, sig), []).append((a, idx))
 
     drop_idx: List[int] = []
     for (pillar, sig), members in groups.items():
         if len(members) <= top_k:
             continue
-        # Sort by score descending — keep highest, drop the rest
-        members.sort(key=lambda x: x[0], reverse=True)
-        for score, idx in members[top_k:]:
+        # D10: pick one scoring basis for the whole family (composite iff
+        # every member has it, else sharpe) so the top-K race never mixes
+        # composite (~0-3) with sharpe (~-3..4) scales.
+        _use_comp = _family_uses_composite([a for a, _i in members])
+        scored = [
+            (_alpha_score(a, score_key=score_key, use_composite=_use_comp), idx)
+            for a, idx in members
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for _score, idx in scored[top_k:]:
             drop_idx.append(idx)
         logger.debug(
             f"[family_cap] dropped {len(members) - top_k} from "
-            f"(pillar={pillar} sig={sig[:8]}) — kept top {top_k} by {score_key}"
+            f"(pillar={pillar} sig={sig[:8]}) — kept top {top_k} "
+            f"by {'composite' if _use_comp else score_key}"
         )
 
     return sorted(drop_idx)
@@ -260,7 +290,9 @@ def apply_family_hard_ban(
     # apply_family_cap so R10 + R10-v2 ban on the same partition.
     # F-N1 review fix: skip rows without alpha_id (matrix is BRAIN-id
     # keyed; falling back to DB int id silently mis-matches).
-    groups: dict[Tuple[str, str], List[Tuple[float, int, str]]] = {}
+    # Store (alpha, idx, aid); score AFTER grouping so each family picks
+    # one consistent scoring basis (D10).
+    raw_groups: dict[Tuple[str, str], List[Tuple[object, int, str]]] = {}
     for idx, a in enumerate(alphas):
         status = getattr(a, "quality_status", None)
         status_str = getattr(status, "value", status) if status is not None else None
@@ -274,8 +306,17 @@ def apply_family_hard_ban(
         if sig == "<empty>":
             continue
         pillar = _alpha_pillar(a)
-        score = _alpha_score(a)
-        groups.setdefault((pillar, sig), []).append((score, idx, str(aid)))
+        raw_groups.setdefault((pillar, sig), []).append((a, idx, str(aid)))
+
+    # D10: resolve scores per-family with a single basis (composite iff
+    # every member has it, else sharpe).
+    groups: dict[Tuple[str, str], List[Tuple[float, int, str]]] = {}
+    for key, raw_members in raw_groups.items():
+        _use_comp = _family_uses_composite([a for a, _i, _aid in raw_members])
+        groups[key] = [
+            (_alpha_score(a, use_composite=_use_comp), idx, aid)
+            for a, idx, aid in raw_members
+        ]
 
     ban_idx: set[int] = set()
     _low_coverage_skips = 0

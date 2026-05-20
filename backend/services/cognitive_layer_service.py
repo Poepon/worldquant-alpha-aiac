@@ -349,14 +349,31 @@ def build_cognitive_layer_block(layer: Optional[CognitiveLayer]) -> str:
 # Token-budget guard
 # ---------------------------------------------------------------------------
 
-def estimate_tokens(text: str) -> int:
-    """Cheap token estimate — 4 chars ≈ 1 token (GPT-family rule of thumb).
+import re as _re
 
-    Used by enforce_token_budget; not for billing or precise sizing.
+# CJK ranges: Chinese (4e00-9fff), Hiragana/Katakana (3040-30ff),
+# Hangul (ac00-d7af). Each CJK char ≈ 1.5-2 GPT tokens vs ~0.25 for Latin.
+_CJK_RE = _re.compile(r"[一-鿿぀-ヿ가-힯]")
+
+
+def estimate_tokens(text: str) -> int:
+    """Cheap token estimate (D7 review fix — CJK-aware).
+
+    Latin: ~4 chars/token. CJK (Chinese/Japanese/Korean): ~1.5 tokens/char
+    at the GPT-4 tokenizer. The prior flat ``len//4`` under-bid CJK prompts
+    by 5-8× → enforce_token_budget thought a CHN/JPN narrative fit when it
+    was 2-3× over budget, silently breaking the drop guard for the very
+    markets R8-v3 helps most.
+
+    Counts CJK chars at 1.5 tokens each + the rest at 0.25 tokens/char.
+    Not for billing — just budget gating.
     """
     if not text:
         return 0
-    return max(1, len(text) // 4)
+    cjk = len(_CJK_RE.findall(text))
+    latin = len(text) - cjk
+    est = cjk * 1.5 + latin * 0.25
+    return max(1, int(est))
 
 
 def enforce_token_budget(

@@ -264,13 +264,21 @@ async def distill_last_week_pass_alphas(
                 sharpe=float(sharpe or 0.0),
             ))
 
+    _calls_made = 0
     for (region, pillar), bucket_alphas in buckets.items():
         if len(bucket_alphas) < min_pass_count:
             continue
-        if spent_usd >= max_cost_usd:
+        # D5 review fix: cost cap was checked BEFORE dispatch but updated
+        # AFTER → could overshoot by one full call (a $0.50 extended-
+        # thinking call on the last bucket before the cap). Project the
+        # NEXT call's cost from the running average (conservative default
+        # before the first call) and stop if it would cross the cap.
+        _avg_cost = (spent_usd / _calls_made) if _calls_made > 0 else 0.0
+        if spent_usd + _avg_cost >= max_cost_usd:
             logger.warning(
-                f"[g10] cost cap ${max_cost_usd:.2f} reached (spent ${spent_usd:.2f}); "
-                f"skipping remaining {len(buckets) - len(out)} bucket(s)"
+                f"[g10] cost cap ${max_cost_usd:.2f} would be crossed "
+                f"(spent ${spent_usd:.4f}, est next ${_avg_cost:.4f}); "
+                f"stopping with {len(out)} bucket(s) distilled"
             )
             break
 
@@ -300,6 +308,7 @@ async def distill_last_week_pass_alphas(
 
         cost = float(resp.get("cost_usd") or 0.0)
         spent_usd += cost
+        _calls_made += 1
 
         out.append(DistilledEntry(
             pillar=pillar,
@@ -491,22 +500,31 @@ async def fetch_active_logic_entries(
 
     if len(out) < limit:
         remaining = limit - len(out)
-        seen_ids = {r["id"] for r in out}
+        seen_ids = [r["id"] for r in out]
+        # D4 review fix: exclude already-seen ids in SQL + LIMIT to the
+        # actual remaining count (was LIMIT limit*2 then Python-side
+        # dedup — the *2 cap could be exhausted by already-seen rows,
+        # leaving `out` short even when more eligible rows existed).
+        params: Dict[str, Any] = {"region": region, "remaining": int(remaining)}
+        exclude_sql = ""
+        if seen_ids:
+            ph = ", ".join(f":seen{i}" for i in range(len(seen_ids)))
+            exclude_sql = f"AND id NOT IN ({ph})"
+            for i, sid in enumerate(seen_ids):
+                params[f"seen{i}"] = int(sid)
         try:
-            rows = (await db.execute(_text("""
+            rows = (await db.execute(_text(f"""
                 SELECT id, logic_text, pillar, region, distilled_at_week,
                        source_alpha_ids, llm_model
                 FROM distilled_logic_library
                 WHERE retired_at IS NULL
                   AND region = :region
+                  {exclude_sql}
                 ORDER BY distilled_at_week DESC
-                LIMIT :limit
-            """), {"region": region, "limit": int(limit * 2)})).all()
+                LIMIT :remaining
+            """), params)).all()
             for r in rows:
-                d = _row_to_dict(r)
-                if d["id"] in seen_ids:
-                    continue
-                out.append(d)
+                out.append(_row_to_dict(r))
                 if len(out) >= limit:
                     break
         except Exception as ex:  # noqa: BLE001

@@ -167,14 +167,16 @@ async def test_fetch_falls_back_to_region_when_pillar_short():
     pillar_rows = [
         (1, "Momentum", "momentum", "USA", now, [10], "m"),
     ]
+    # D4 review fix: the region fallback now excludes seen_ids in SQL
+    # (NOT IN :seen0...), so the real query would never return id=1 again.
+    # The mock reflects that contract — fallback rows are post-exclusion.
     region_rows = [
-        (1, "Momentum", "momentum", "USA", now, [10], "m"),  # dup, will be skipped
         (2, "Value", "value", "USA", now, [20, 30], "m"),
         (3, "Quality", "quality", "USA", now - timedelta(days=14), [40], "m"),
     ]
     db = _make_fetch_db(pillar_rows, region_rows)
     out = await fetch_active_logic_entries(db, region="USA", pillar="momentum", limit=3)
-    # Should have momentum + value + quality (dedup filtered the duplicate momentum)
+    # momentum (pillar match) + value + quality (region fallback)
     assert len(out) == 3
     ids = [r["id"] for r in out]
     assert 1 in ids and 2 in ids and 3 in ids

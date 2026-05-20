@@ -3072,6 +3072,8 @@ async def node_evaluate(
             _r13_factors_raw = getattr(settings, "FACTOR_LENS_FACTORS", None)
             _r13_factors = list(_r13_factors_raw) if _r13_factors_raw else None
             _r13_min_overlap = int(getattr(settings, "FACTOR_LENS_MIN_OVERLAP_DAYS", 60))
+            # D9 review fix: wire FACTOR_LENS_OLS_LOOKBACK_DAYS (was dead config)
+            _r13_lookback = int(getattr(settings, "FACTOR_LENS_OLS_LOOKBACK_DAYS", 504))
 
             # F14 review fix: snapshot availability cache. Probe per-region
             # ONCE per node invocation so we don't pay BRAIN PnL fetch
@@ -3135,6 +3137,7 @@ async def node_evaluate(
                     region=_region,
                     factors=_r13_factors,
                     min_overlap_days=_r13_min_overlap,
+                    lookback_days=_r13_lookback,
                 )
                 # F4 review fix: positive filter — only act on real OLS
                 # output. Previous filter only excluded 2 of 8 empty-
