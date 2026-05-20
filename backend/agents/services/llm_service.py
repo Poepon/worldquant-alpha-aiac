@@ -461,7 +461,20 @@ class LLMService:
             f"[LLMService] Call started | id={call_id} json_mode={json_mode} "
             f"node={node_key or '-'} effort={effort_active}"
         )
-        
+
+        # qwen / DashScope json_mode compat (2026-05-20): the DashScope
+        # OpenAI-compatible endpoint HARD-REQUIRES the literal word "json"
+        # somewhere in the messages whenever response_format=json_object is set
+        # — otherwise it 400s ("'messages' must contain the word 'json' ... to
+        # use 'response_format' of type 'json_object'"). OpenAI/Anthropic don't
+        # enforce this, so prompts weren't guaranteed to include it. Inject a
+        # minimal instruction when json_mode is on and neither prompt mentions
+        # json. Harmless for every provider (it's just a clarifying directive).
+        if json_mode and "json" not in (system_prompt + " " + user_prompt).lower():
+            user_prompt = (
+                f"{user_prompt}\n\nRespond with a single valid JSON object."
+            )
+
         # JSON-mode parse retry: 1 extra attempt on JSONDecodeError. LLMs
         # occasionally truncate mid-string (provider hiccup / network abort);
         # cheap to reissue. Connection-level retries are handled by the
