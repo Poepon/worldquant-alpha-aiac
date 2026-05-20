@@ -380,19 +380,23 @@ async def _quota_guard_async() -> dict:
                 .where(Alpha.created_at >= today_start)
             )
         ).scalar() or 0
-        # Bug A fix (2026-05-20): exclude PRESIM_SKIP rows. Pre-BRAIN skips
-        # (pre-simulate skeleton classifier + Q10 hard reject) never consumed
-        # a BRAIN simulate slot, so counting them inflated this denominator
-        # (~20% on the news datasets) and paused sessions early. This honours
-        # the long-standing intent stated in the comment above ("every
-        # alpha_failure that wasn't a pre-sim rejection ALSO corresponds to
-        # ~1 simulate"). coalesce keeps NULL-error_type rows counted.
+        # Bug A fix (2026-05-20): exclude pre-BRAIN skip rows. These never
+        # consumed a BRAIN simulate slot, so counting them inflated this
+        # denominator and paused sessions early. Two kinds:
+        #   PRESIM_SKIP — pre-simulate skeleton classifier + Q10 hard reject
+        #   DEDUP_SKIP  — local-DB dedup (expression already simulated; the
+        #                 prior simulation consumed the slot, not this skip)
+        # Honours the long-standing comment intent above ("every alpha_failure
+        # that wasn't a pre-sim rejection ALSO corresponds to ~1 simulate").
+        # coalesce keeps NULL-error_type rows counted.
         fail_cnt = (
             await db.execute(
                 select(func.count(AlphaFailure.id))
                 .where(
                     AlphaFailure.created_at >= today_start,
-                    func.coalesce(AlphaFailure.error_type, "") != "PRESIM_SKIP",
+                    ~func.coalesce(AlphaFailure.error_type, "").in_(
+                        ["PRESIM_SKIP", "DEDUP_SKIP"]
+                    ),
                 )
             )
         ).scalar() or 0

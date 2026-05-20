@@ -899,8 +899,15 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
         # sessions early. Checked BEFORE the is_simulated branch which would
         # otherwise mislabel them SIMULATION_ERROR.
         if isinstance(alpha.metrics, dict) and alpha.metrics.get("_pre_brain_skip"):
-            err_type = "PRESIM_SKIP"
-            err_msg = alpha.simulation_error or "Pre-BRAIN skip (classifier/Q10; no quota consumed)"
+            # Bug A follow-up (2026-05-20): distinguish dedup skips (already
+            # simulated in a prior round/task — no fresh BRAIN slot) from
+            # pre-simulate/Q10 classifier skips. Both excluded from quota.
+            if alpha.metrics.get("_skip_kind") == "dedup":
+                err_type = "DEDUP_SKIP"
+                err_msg = alpha.simulation_error or "DB duplicate: already simulated (no quota consumed)"
+            else:
+                err_type = "PRESIM_SKIP"
+                err_msg = alpha.simulation_error or "Pre-BRAIN skip (classifier/Q10; no quota consumed)"
         elif alpha.is_valid is False:
             err_type = "SYNTAX_ERROR"
             err_msg = alpha.validation_error or "Syntax Error"

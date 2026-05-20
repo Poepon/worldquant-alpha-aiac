@@ -282,6 +282,33 @@ async def test_pre_brain_skip_labeled_PRESIM_SKIP(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_dedup_skip_labeled_DEDUP_SKIP(monkeypatch):
+    """A local-DB dedup skip (metrics._pre_brain_skip + _skip_kind='dedup')
+    must be labeled DEDUP_SKIP, NOT SIMULATION_ERROR — it never consumed a
+    fresh BRAIN simulate slot, so the quota guard excludes it."""
+    from backend.config import settings
+    from backend.agents.graph.nodes.persistence import node_save_results
+
+    monkeypatch.setattr(settings, "ENABLE_FAIL_ALPHA_PERSIST", True, raising=False)
+    monkeypatch.setattr(settings, "T2_INCREMENTAL_PERSISTENCE", False, raising=False)
+
+    dup = _mk_alpha(
+        quality_status="PENDING", alpha_id=None,
+        is_simulated=True, simulation_success=False,
+        metrics={"_pre_brain_skip": True, "_skip_kind": "dedup"},
+    )
+    dup.simulation_error = "DB duplicate: already simulated"
+    state = _mk_state([dup])
+
+    out = await node_save_results(state, config={"configurable": {}})
+
+    assert out["generated_alphas"] == []
+    failures = out["failures"]
+    assert len(failures) == 1
+    assert failures[0].error_type == "DEDUP_SKIP"
+
+
+@pytest.mark.asyncio
 async def test_real_sim_error_still_SIMULATION_ERROR_not_presim(monkeypatch):
     """A real BRAIN sim error (is_simulated=True + sim_success=False + NO
     _pre_brain_skip marker) stays SIMULATION_ERROR — the new branch must not

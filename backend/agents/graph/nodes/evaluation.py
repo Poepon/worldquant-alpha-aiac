@@ -928,6 +928,17 @@ async def node_simulate(
                 state.pending_alphas[idx].simulation_error = "DB duplicate: already simulated"
                 state.pending_alphas[idx].is_simulated = True
                 state.pending_alphas[idx].simulation_success = False
+                # Bug A follow-up (2026-05-20): a local-DB dedup skip never
+                # consumed a fresh BRAIN simulate slot (the prior simulation
+                # did, when the expression was first seen). Mark it so the
+                # quota guard excludes it + persistence labels DEDUP_SKIP not
+                # SIMULATION_ERROR. _skip_kind distinguishes it from the
+                # pre-simulate/Q10 classifier skips (which use PRESIM_SKIP).
+                _dup_a = state.pending_alphas[idx]
+                if not isinstance(_dup_a.metrics, dict):
+                    _dup_a.metrics = {}
+                _dup_a.metrics["_pre_brain_skip"] = True
+                _dup_a.metrics["_skip_kind"] = "dedup"
                 # Capture skeleton for next-round LLM blacklist
                 try:
                     sk = _expr_to_skel(expr or "", max_depth=3)
