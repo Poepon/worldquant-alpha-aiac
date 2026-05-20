@@ -1901,9 +1901,14 @@ class BrainAdapter:
             if search:
                 params["search"] = search
             if start_date:
-                # Brain API often uses 'startDate' for filtering creation date
-                params["startDate"] = start_date
-                
+                # 2026-05-20: BRAIN silently IGNORES 'startDate' (count is
+                # identical with/without it → the "incremental" sync was a full
+                # re-fetch every run). The working server-side filter is the
+                # range operator 'dateCreated>' with an ISO-8601 value that
+                # INCLUDES a timezone (BRAIN rejects naive: "Expected ISO 8601
+                # datetime with timezone"). Caller must pass tz-qualified ISO.
+                params["dateCreated>"] = start_date
+
             response = await self._safe_api_call("GET", "/users/self/alphas", params=params)
             
             if response.status_code == 200:

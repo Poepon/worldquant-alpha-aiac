@@ -715,14 +715,25 @@ def sync_user_alphas():
                 MIN_START_DATE = datetime(2025, 7, 5)
                 start_date_iso = None
 
+                # 2026-05-20: BRAIN's 'dateCreated>' filter requires ISO-8601
+                # WITH a timezone. date_created is stored Beijing-naive
+                # (_parse_to_beijing: BRAIN-UTC + 8h, tz stripped — see
+                # [[reference_alpha_dual_timezone]]), so we re-attach +08:00 to
+                # represent the correct instant. Prev code passed a naive
+                # 'YYYY-MM-DD' to the (silently-ignored) 'startDate' param, so
+                # every "incremental" sync was actually a full re-fetch +
+                # update of all ~9700 alphas.
+                def _iso_bj(dt):
+                    return dt.strftime("%Y-%m-%dT%H:%M:%S+08:00")
+
                 if latest_date:
                     safe_start = latest_date - timedelta(days=3)
                     if safe_start < MIN_START_DATE:
                         safe_start = MIN_START_DATE
-                    start_date_iso = safe_start.strftime("%Y-%m-%d")
+                    start_date_iso = _iso_bj(safe_start)
                     logger.info(f"Incremental Sync: Fetching alphas since {start_date_iso}")
                 else:
-                    start_date_iso = MIN_START_DATE.strftime("%Y-%m-%d")
+                    start_date_iso = _iso_bj(MIN_START_DATE)
                     logger.info(f"Full Sync: Fetching all alphas since {start_date_iso}")
 
                 # V-23.E (2026-05-13): track regions where submissions were
@@ -745,7 +756,7 @@ def sync_user_alphas():
                     # mining output) stays incremental.
                     effective_start = (
                         start_date_iso if stage == "IS"
-                        else MIN_START_DATE.strftime("%Y-%m-%d")
+                        else _iso_bj(MIN_START_DATE)
                     )
                     offset = 0
                     limit = 100
