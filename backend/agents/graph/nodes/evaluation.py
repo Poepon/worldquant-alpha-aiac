@@ -883,10 +883,24 @@ async def node_simulate(
         i for i, a in enumerate(state.pending_alphas)
         if a.is_valid and not a.simulation_success
     ]
-    
+
+    # Observability (2026-05-20): record a SIMULATE trace step on EVERY exit
+    # — including the silent early returns below (no-valid / all-deduped /
+    # all pre-sim-filtered). BRAIN sims + dedup + the pre-simulate filter were
+    # never traced, so during the multi-minute sim gap the trace/UI looked
+    # frozen at VALIDATE. record_trace persists immediately, so each exit now
+    # shows why 0 alphas reached BRAIN (the success path records the outcome).
+    async def _sim_exit_trace(reason: str, **extra) -> Dict:
+        return await record_trace(
+            state, trace_service, node_name,
+            {"pending": len(state.pending_alphas), "valid_to_simulate": len(valid_indices)},
+            {"simulated": 0, "skip_reason": reason, **extra},
+            0, "SUCCESS",
+        )
+
     if not valid_indices:
         logger.warning(f"[{node_name}] No valid alphas to simulate")
-        return {}
+        return await _sim_exit_trace("no_valid_alphas_after_validation")
     
     # DB-level deduplication check
     db_duplicates = 0
@@ -1017,6 +1031,7 @@ async def node_simulate(
         return {
             "pending_alphas": state.pending_alphas,
             "recent_dedup_skeletons": _merge_dedup_skels(),
+            **(await _sim_exit_trace("all_already_in_db", db_duplicates=db_duplicates)),
         }
 
     # Pre-simulate self-corr check (2026-05-09; V-26.77 follow-up #4
@@ -1074,6 +1089,7 @@ async def node_simulate(
                 return {
                     "pending_alphas": state.pending_alphas,
                     "recent_dedup_skeletons": _merge_dedup_skels(),
+                    **(await _sim_exit_trace("all_portfolio_deduped", portfolio_dups=skel_dups)),
                 }
     except Exception as e:
         logger.warning(f"[{node_name}] portfolio dedup failed, proceeding: {e}")
@@ -1236,6 +1252,7 @@ async def node_simulate(
         return {
             "pending_alphas": state.pending_alphas,
             "recent_dedup_skeletons": _merge_dedup_skels(),
+            **(await _sim_exit_trace("all_pre_simulate_filtered")),
         }
 
     logger.info(f"[{node_name}] Starting batch simulation | count={len(indices_to_simulate)} region={state.region}")
@@ -1406,7 +1423,11 @@ async def node_simulate(
         # and so node_evaluate's signal-vs-control dual-run can re-simulate the
         # control with the SAME settings — otherwise Δsharpe mixes signal-core
         # difference with sim-settings difference and the attribution is invalid.
-        if smart_enabled and i in smart_settings_per_idx:
+        # 2026-05-20 fix: `smart_enabled` was the retired ENABLE_SMART_SIM_SETTINGS
+        # flag (hard-wired ON since 2026-05-19) — its definition was deleted with
+        # the fallback branch but this reference was left dangling → NameError on
+        # every sim-result iteration, silently dropping the _sim_settings stamp.
+        if i in smart_settings_per_idx:
             updated.metrics = {
                 **updated.metrics,
                 "_sim_settings": smart_settings_per_idx[i],
