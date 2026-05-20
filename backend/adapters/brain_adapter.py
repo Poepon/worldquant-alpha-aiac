@@ -15,6 +15,7 @@ import asyncio
 import json
 import random
 import time
+import uuid
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta
 import httpx
@@ -63,6 +64,15 @@ class BrainAdapter:
     BASE_URL = "https://api.worldquantbrain.com"
     SESSION_BUFFER_SECONDS = 300  # Re-auth if expiring in < 5 mins
     REDIS_SESSION_KEY = "brain_session:cookies"
+    # 方向1 (2026-05-20): fleet-wide re-auth coalescing lock. See
+    # _distributed_reauth + config.BRAIN_REAUTH_* knobs.
+    REDIS_REAUTH_LOCK_KEY = "brain_auth:reauth_lock"
+    # Token-checked atomic delete (server-side) — mirrors redis_pool's release
+    # Lua so we never delete a sibling's freshly-acquired lock at the TTL edge.
+    _REAUTH_RELEASE_LUA = (
+        "if redis.call('get', KEYS[1]) == ARGV[1] "
+        "then return redis.call('del', KEYS[1]) else return 0 end"
+    )
     
     # Class-level cached credentials (to avoid DB queries on every request)
     _cached_email: Optional[str] = None
@@ -1324,10 +1334,12 @@ class BrainAdapter:
         """Serialised, cache-invalidating re-auth shared by _request and
         _safe_api_call (V-27.91).
 
-        Acquire _auth_lock → re-check session validity (another coroutine may
-        have refreshed under the lock) → invalidate the Redis session cache
-        BEFORE re-auth (V-26.24: so a failed authenticate() can't be undone by
-        a stale cache resurrection) → authenticate().
+        Acquire _auth_lock (intra-process) → re-check session validity (another
+        coroutine may have refreshed under the lock) → _distributed_reauth,
+        which adds a fleet-wide Redis lock so only ONE process re-auths per
+        token-expiry window (方向1, 2026-05-20). The actual authenticate()
+        invalidates the Redis cache first (V-26.24: a failed authenticate()
+        can't be undone by a stale cache resurrection).
 
         Before this helper existed, _safe_api_call's 401 branch was a bare
         status==401 check + bare authenticate() — it bypassed V-22.7 body-
@@ -1346,25 +1358,133 @@ class BrainAdapter:
             # Reload from Redis BEFORE _is_session_valid so our stale
             # in-memory cookie doesn't trigger a redundant authenticate()
             # that races against BRAIN's /authentication rate-limit (5/min).
-            # Without this, N concurrent workers each invalidate the
-            # Redis cache and call authenticate(), mutually nuking the
-            # freshly-written cookie of the predecessor in the lock queue
-            # — symptom: a sustained loop of "Incorrect authentication
-            # credentials" errors observed on task 3083 (~36 rows / 90min).
-            try:
-                await self._load_session_from_redis()
-                if await self._is_session_valid():
-                    return True
-            except Exception:
-                pass
-            # Redis cookie also stale (or load/check raised) — we really
-            # are the first worker in this auth window. Invalidate + re-auth.
+            if await self._reload_and_validate_quietly():
+                return True
+            # 方向1 (2026-05-20): the per-process _auth_lock above only
+            # coalesces coroutines WITHIN this process. With 3 solo Celery
+            # workers + uvicorn all sharing one BRAIN session, each process
+            # could still authenticate() simultaneously and mutually nuke
+            # the others' cookie (BRAIN single-active-session) — the
+            # "Incorrect authentication credentials" thrash observed on task
+            # 3083. _distributed_reauth adds a fleet-wide Redis lock so only
+            # ONE process re-auths per token-expiry window.
+            return await self._distributed_reauth()
+
+    async def _reload_and_validate_quietly(self) -> bool:
+        """Reload the shared session from Redis and verify it against BRAIN.
+
+        Never raises — returns False on any error. Used both as the
+        intra-process fast-path and as the waiter's "did the lock holder
+        produce a usable session?" check.
+        """
+        try:
+            await self._load_session_from_redis()
+            return await self._is_session_valid()
+        except Exception:
+            return False
+
+    async def _release_reauth_lock(self, r, token: str) -> None:
+        """Atomic token-checked release. TTL reaps it if this fails."""
+        try:
+            await r.eval(self._REAUTH_RELEASE_LUA, 1, self.REDIS_REAUTH_LOCK_KEY, token)
+        except Exception as e:
+            logger.warning(
+                f"[BrainAdapter] reauth lock release failed (TTL will reap): {e}"
+            )
+
+    async def _distributed_reauth(self) -> bool:
+        """Fleet-wide re-auth coalescing (方向1, 2026-05-20).
+
+        Only ONE process across all workers + uvicorn calls authenticate()
+        per token-expiry window. The holder writes the fresh session to Redis
+        (authenticate() already does); the rest block on the Redis lock and
+        reload that session instead of re-authing — eliminating the
+        multi-process mutual-invalidation thrash that collapsed simulate
+        throughput. Caller holds the per-process _auth_lock (inner layer).
+
+        On Redis unavailability we fall back to a plain authenticate() so a
+        single-process / Redis-down deployment still works.
+        """
+        ttl = int(getattr(settings, "BRAIN_REAUTH_LOCK_TTL_SEC", 90) or 90)
+        wait_timeout = float(getattr(settings, "BRAIN_REAUTH_WAIT_TIMEOUT_SEC", 60.0) or 60.0)
+        poll = float(getattr(settings, "BRAIN_REAUTH_POLL_INTERVAL_SEC", 1.5) or 1.5)
+        deadline = time.time() + wait_timeout
+
+        async def _plain_reauth() -> bool:
             await self._invalidate_session_cache()
             try:
                 return bool(await self.authenticate())
             except Exception as e:
-                logger.error(f"[BrainAdapter] coalesced re-auth failed: {e}")
+                logger.error(f"[BrainAdapter] plain re-auth failed: {e}")
                 return False
+
+        try:
+            r = await self._get_redis()
+        except Exception as e:
+            logger.warning(
+                f"[BrainAdapter] reauth: redis unavailable ({e}); plain authenticate"
+            )
+            return await _plain_reauth()
+
+        try:
+            while True:
+                token = uuid.uuid4().hex
+                try:
+                    got_lock = bool(await r.set(
+                        self.REDIS_REAUTH_LOCK_KEY, token, nx=True, ex=ttl,
+                    ))
+                except Exception as e:
+                    logger.warning(
+                        f"[BrainAdapter] reauth lock SET failed ({e}); plain authenticate"
+                    )
+                    return await _plain_reauth()
+
+                if got_lock:
+                    # Sole re-auther this window.
+                    try:
+                        # Predecessor may have refreshed between our 401 and
+                        # acquiring this lock — reuse rather than re-auth.
+                        if await self._reload_and_validate_quietly():
+                            return True
+                        await self._invalidate_session_cache()
+                        return bool(await self.authenticate())
+                    except Exception as e:
+                        logger.error(f"[BrainAdapter] reauth (lock holder) failed: {e}")
+                        return False
+                    finally:
+                        await self._release_reauth_lock(r, token)
+
+                # A sibling holds the lock — wait for it to free, then validate.
+                lock_freed = False
+                while time.time() < deadline:
+                    await asyncio.sleep(poll)
+                    try:
+                        still_held = await r.get(self.REDIS_REAUTH_LOCK_KEY)
+                    except Exception:
+                        still_held = None
+                    if not still_held:
+                        lock_freed = True
+                        break
+
+                if not lock_freed:
+                    logger.warning(
+                        "[BrainAdapter] reauth: waited %.0fs for sibling refresh, "
+                        "lock still held — deferring to circuit/retry", wait_timeout,
+                    )
+                    return False
+
+                # Holder released. Validate the (hopefully fresh) session once.
+                if await self._reload_and_validate_quietly():
+                    return True
+                # Holder released WITHOUT a usable session (its auth failed).
+                # Loop to try the lock ourselves — serialized, never a stampede.
+                if time.time() >= deadline:
+                    return False
+        finally:
+            try:
+                await r.aclose()
+            except Exception:
+                pass
 
     async def _safe_api_call(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
         """

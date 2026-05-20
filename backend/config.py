@@ -188,6 +188,19 @@ class Settings(BaseSettings):
     BRAIN_SIM_SLOT_LIMIT_USER: int = 3
     BRAIN_SIM_SLOT_LIMIT_CONSULTANT: int = 80
 
+    # Cross-process BRAIN re-auth coalescing (方向1, 2026-05-20). The single
+    # shared BRAIN session (Redis key brain_session:cookies) is used by 3 solo
+    # Celery workers + uvicorn; without a fleet-wide lock each process re-auths
+    # independently on a 401, and BRAIN's single-active-session invalidates the
+    # others' cookie → mutual-invalidation thrash → repeated 300s circuit trips.
+    # _distributed_reauth wraps authenticate() in a Redis lock so only one
+    # process re-auths per token-expiry window; the rest wait + reload.
+    # LOCK_TTL must exceed a normal authenticate() round-trip (a healthy auth is
+    # <5s; the retry-storm path is covered by the circuit breaker, not this).
+    BRAIN_REAUTH_LOCK_TTL_SEC: int = 90
+    BRAIN_REAUTH_WAIT_TIMEOUT_SEC: float = 60.0
+    BRAIN_REAUTH_POLL_INTERVAL_SEC: float = 1.5
+
     # ===== Phase 4 Sprint 0 (2026-05-19) =====
     # Plan: docs/phase4_a_b_plan_v5_2026-05-19.md
     # ----- PR0 LLM_API_CIRCUIT (Sprint 0) -----
