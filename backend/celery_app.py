@@ -233,6 +233,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_weekly_logic_distill",
         "schedule": crontab(hour=3, minute=0, day_of_week=0),
     },
+    # Phase 4 Tier E E1 (2026-05-20): Sunday 04:45 SH cognitive-layer bandit
+    # reward update. Aggregates _cognitive_layer_used PASS/FAIL → per-layer
+    # Beta posterior so COGNITIVE_LAYER_SELECT_MODE='bandit' works. Staggered
+    # 04:45 — after r1b-pruner (04:00) + r8-query-pruner (04:30), before the
+    # 06:00 sync jobs. flag-gated → no-op when R8-v3 OFF.
+    "r8v3-cognitive-layer-bandit-update": {
+        "task": "backend.tasks.run_cognitive_layer_bandit_update",
+        "schedule": crontab(hour=4, minute=45, day_of_week=0),
+    },
     # Canary monitoring (2026-05-18): every-6h red-flag check post v1.3
     # ship. Runs the 5 SQL checks from docs/production_canary_sop_2026_05_18.md
     # §4 against the trailing 6h window. Red rows ERROR-log with rollback

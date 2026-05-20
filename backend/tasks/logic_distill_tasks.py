@@ -169,25 +169,42 @@ class _DistillLLMShim:
     Unit tests mocked the shim's ``call``, so 16/16 PASS hid the bug
     — same lesson as [[feedback_orm_constructor_real_test]].
 
-    Cost estimate: LLMResponse exposes ``tokens_used`` but no
-    cost_usd; we estimate via a model-family per-1K-token rate table.
-    Conservative default $0.10 / 1K tokens when the model is unknown
-    so the cap fires earlier rather than later.
+    Cost estimate (E3 review fix, Tier E): LLMResponse exposes
+    ``tokens_used`` but no cost_usd; we estimate via a model-family
+    per-1K-token rate table (blended in+out rate). Unknown model →
+    conservative $0.10/1K so the cap fires earlier rather than later.
     """
 
-    # Approximate input+output cost per 1K tokens. Operator can tune
-    # via env-derived settings.LLM_PRICE_PER_1K_OVERRIDES (defer to
-    # fast-follow if precise billing matters; the cap is order-of-
-    # magnitude budget, not invoice).
-    _DEFAULT_COST_PER_1K = 0.10
+    # Blended (input+output) USD per 1K tokens by model-family prefix.
+    # Order matters — first matching prefix wins. Public list prices
+    # 2025 Q4; the cap is order-of-magnitude budget, not an invoice.
+    _PRICE_PER_1K: list = [
+        ("deepseek", 0.0014),       # DeepSeek-chat — the AIAC default
+        ("claude-opus", 0.045),     # Anthropic Opus (blended 15/75 in/out)
+        ("claude-haiku", 0.004),    # Anthropic Haiku
+        ("claude-sonnet", 0.009),   # Anthropic Sonnet
+        ("claude", 0.012),          # any other Claude
+        ("gpt-4o-mini", 0.0004),
+        ("gpt-4o", 0.0075),
+        ("gpt-4", 0.045),
+        ("gpt", 0.002),
+    ]
+    _DEFAULT_COST_PER_1K = 0.10  # unknown model → conservative
 
     def __init__(self, llm_service: Any):
         self.llm = llm_service
 
-    def _estimate_cost_usd(self, tokens_used: int) -> float:
+    def _rate_for_model(self, model: str) -> float:
+        m = (model or "").lower()
+        for prefix, rate in self._PRICE_PER_1K:
+            if prefix in m:
+                return rate
+        return self._DEFAULT_COST_PER_1K
+
+    def _estimate_cost_usd(self, tokens_used: int, model: str = "") -> float:
         if not tokens_used:
             return 0.0
-        return float(tokens_used) * self._DEFAULT_COST_PER_1K / 1000.0
+        return float(tokens_used) * self._rate_for_model(model) / 1000.0
 
     async def call(self, prompt: str) -> Dict[str, Any]:
         try:
@@ -217,6 +234,6 @@ class _DistillLLMShim:
 
         return {
             "text": resp.content or "",
-            "cost_usd": self._estimate_cost_usd(int(resp.tokens_used or 0)),
+            "cost_usd": self._estimate_cost_usd(int(resp.tokens_used or 0), resp.model or ""),
             "model": resp.model or "",
         }

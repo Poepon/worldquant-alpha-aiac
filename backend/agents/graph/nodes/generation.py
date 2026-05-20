@@ -899,11 +899,36 @@ async def node_hypothesis(
             _r8v3_trace_len = int(len(experiment_trace) if experiment_trace else 0)
             _r8v3_task_seed = int(abs(hash(str(getattr(state, "task_id", "") or ""))) % 7)
             _r8v3_round = _r8v3_trace_len + _r8v3_task_seed
-            # Bandit stats stub: layer rewards persist offline (fast-
-            # follow), so within-round selection uses uniform priors.
-            # When the cron updates BanditState rows + node_hypothesis
-            # loads them, this dict will be populated.
+            # Tier E E1: load per-layer Beta-Bernoulli posterior from
+            # cognitive_layer_bandit_state (written by the weekly cron) so
+            # COGNITIVE_LAYER_SELECT_MODE='bandit'/'deficit_aware' sample
+            # real reward — round_robin ignores stats so the load is only
+            # paid for the data-driven modes. Soft-fall to {} (uniform
+            # prior) on any error.
             _r8v3_stats: Dict[str, Any] = {}
+            if _r8v3_strategy in ("bandit", "deficit_aware"):
+                try:
+                    from backend.database import AsyncSessionLocal as _bandit_session
+                    from backend.models.cognitive_layer_bandit import (
+                        CognitiveLayerBanditState as _CLBandit,
+                    )
+                    from sqlalchemy import select as _bsel
+                    async with _bandit_session() as _bandit_db:
+                        _brows = (await _bandit_db.execute(_bsel(_CLBandit))).scalars().all()
+                    _r8v3_stats = {
+                        r.layer_id: _r8v3_svc.BanditArmStats(
+                            layer_id=r.layer_id,
+                            pass_count=int(r.pass_count or 0),
+                            fail_count=int(r.fail_count or 0),
+                        )
+                        for r in _brows
+                    }
+                except Exception as _bandit_ex:  # noqa: BLE001
+                    logger.debug(
+                        f"[{node_name}] R8-v3 bandit state load failed "
+                        f"(uniform prior): {_bandit_ex}"
+                    )
+                    _r8v3_stats = {}
             _r8v3_layer = _r8v3_svc.select_layer(
                 strategy=_r8v3_strategy,
                 stats=_r8v3_stats,

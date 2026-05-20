@@ -14,7 +14,10 @@ Contains:
 - build_distill_prompt: Builder for distillation prompt
 """
 
+import logging
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from backend.agents.prompts.base import (
     PromptContext,
@@ -277,7 +280,8 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
         f"\n{distilled_logic_text}\n" if distilled_logic_text else ""
     )
 
-    return f"""## Research Context
+    def _assemble(macro_nl: str, cross_task_nl: str) -> str:
+        return f"""## Research Context
 
 **Dataset**: {ctx.dataset_id}
 **Category**: {ctx.dataset_category or 'General'}
@@ -287,7 +291,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 ## Available Data Fields (Sample)
 
 {field_overview}
-{macro_block_with_leading_newline}{style_block_with_leading_newline}{cross_task_block_with_leading_newline}{cognitive_layer_block_with_leading_newline}{distilled_logic_block_with_leading_newline}
+{macro_nl}{style_block_with_leading_newline}{cross_task_nl}{cognitive_layer_block_with_leading_newline}{distilled_logic_block_with_leading_newline}
 {patterns_block}
 {trace_section}
 {strategy_section}
@@ -331,6 +335,44 @@ Generate 3-5 investment hypotheses for this dataset.
   }}
 }}
 ```"""
+
+    # Tier E E2: token-budget guard. enforce_token_budget was a standalone
+    # util with no caller (Sprint 3/4 review). Wire it HERE — but ONLY
+    # actively trim when ENABLE_COGNITIVE_LAYER_PROMPT is on AND the full
+    # prompt exceeds the budget. The OFF path + the under-budget path
+    # return the identical full prompt → byte-for-byte legacy preserved
+    # (the heavily-tested invariant). Drop order: cross_task_hypotheses
+    # then macro_narratives (the two droppable blocks with standalone
+    # render vars; failure_pitfalls is folded into patterns_block and is
+    # not independently trimmable here).
+    full_prompt = _assemble(
+        macro_block_with_leading_newline, cross_task_block_with_leading_newline
+    )
+    try:
+        from backend.config import settings as _hp_settings
+        if getattr(_hp_settings, "ENABLE_COGNITIVE_LAYER_PROMPT", False):
+            from backend.services.cognitive_layer_service import (
+                estimate_tokens as _est, DEFAULT_TOKEN_BUDGET as _DEF_BUDGET,
+            )
+            budget = int(getattr(
+                _hp_settings, "COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET", _DEF_BUDGET,
+            ))
+            if _est(full_prompt) > budget:
+                # Drop cross_task first
+                trimmed = _assemble(macro_block_with_leading_newline, "")
+                if _est(trimmed) > budget:
+                    # Then macro
+                    trimmed = _assemble("", "")
+                logger.info(
+                    "[hypothesis_prompt] token-budget guard trimmed prompt "
+                    "(%d→%d est tokens, budget=%d)",
+                    _est(full_prompt), _est(trimmed), budget,
+                )
+                return trimmed
+    except Exception as _hp_ex:  # noqa: BLE001 — guard must never break prompt build
+        logger.debug("[hypothesis_prompt] token-budget guard skipped: %s", _hp_ex)
+
+    return full_prompt
 
 
 def build_distill_prompt(ctx: PromptContext, field_categories: Dict[str, List[str]]) -> str:

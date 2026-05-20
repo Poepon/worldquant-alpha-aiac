@@ -396,6 +396,9 @@ class Settings(BaseSettings):
     ENABLE_COGNITIVE_LAYER_PROMPT: bool = False
     COGNITIVE_LAYER_SELECT_MODE: str = "round_robin"  # bandit | round_robin | deficit_aware
     COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET: int = 8000
+    # Tier E E1: trailing window the weekly bandit-reward cron aggregates
+    # _cognitive_layer_used PASS/FAIL over (cumulative upsert).
+    COGNITIVE_LAYER_BANDIT_WINDOW_DAYS: int = 7
 
     # ----- A5.1 G10 logic-as-asset (Sprint 3, 2026-05-20) -----
     # RD-Agent NeurIPS 2025 "logic-as-asset" + Citadel internal "research

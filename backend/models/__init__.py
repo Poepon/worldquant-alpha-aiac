@@ -127,6 +127,10 @@ from backend.models.factor_lens_residual import FactorLensResidual
 # of common logic across past 7d PASS alphas grouped by pillar, region)
 from backend.models.distilled_logic import DistilledLogic
 
+# Phase 4 Tier E E1 — cognitive_layer_bandit_state (per-layer Beta-Bernoulli
+# posterior for R8-v3 'bandit' select mode; weekly cron updates pass/fail)
+from backend.models.cognitive_layer_bandit import CognitiveLayerBanditState
+
 __all__ = [
     # Enums
     "MiningStatus",
