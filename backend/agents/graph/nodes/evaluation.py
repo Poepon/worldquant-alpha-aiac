@@ -1117,6 +1117,12 @@ async def node_simulate(
                     )
                     a.is_simulated = True
                     a.simulation_success = False
+                    # Bug A fix (2026-05-20): Q10 hard reject is also a pre-BRAIN
+                    # skip — no BRAIN slot consumed. Mark so quota guard excludes
+                    # it + persistence labels error_type=PRESIM_SKIP.
+                    if not isinstance(a.metrics, dict):
+                        a.metrics = {}
+                    a.metrics["_pre_brain_skip"] = True
                 # Build log row (all modes)
                 _q10_rows.append({
                     "task_id": _q10_task_id,
@@ -1190,6 +1196,14 @@ async def node_simulate(
                 )
                 a.is_simulated = True
                 a.simulation_success = False
+                # Bug A fix (2026-05-20): mark as a pre-BRAIN skip. These never
+                # consumed a BRAIN simulate slot, so the quota guard must NOT
+                # count them (it inflated the daily-quota denominator ~20% →
+                # premature session pause). persistence.py labels them
+                # error_type='PRESIM_SKIP' instead of SIMULATION_ERROR.
+                if not isinstance(a.metrics, dict):
+                    a.metrics = {}
+                a.metrics["_pre_brain_skip"] = True
             # Reduce indices_to_simulate to keepers only
             indices_to_simulate = [
                 indices_to_simulate[i] for i in keep_local

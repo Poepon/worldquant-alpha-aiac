@@ -891,7 +891,17 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
         err_type = "UNKNOWN"
         err_msg = "Unknown error"
 
-        if alpha.is_valid is False:
+        # Bug A fix (2026-05-20): pre-BRAIN skips (pre-simulate skeleton
+        # classifier + Q10 hard reject) set is_simulated=True for bookkeeping
+        # but NEVER consumed a BRAIN simulate slot. Label them PRESIM_SKIP so
+        # the quota guard can exclude them — otherwise they inflate the daily
+        # BRAIN-quota denominator (~20% on the news datasets) and pause mining
+        # sessions early. Checked BEFORE the is_simulated branch which would
+        # otherwise mislabel them SIMULATION_ERROR.
+        if isinstance(alpha.metrics, dict) and alpha.metrics.get("_pre_brain_skip"):
+            err_type = "PRESIM_SKIP"
+            err_msg = alpha.simulation_error or "Pre-BRAIN skip (classifier/Q10; no quota consumed)"
+        elif alpha.is_valid is False:
             err_type = "SYNTAX_ERROR"
             err_msg = alpha.validation_error or "Syntax Error"
         elif alpha.is_simulated and not alpha.simulation_success:

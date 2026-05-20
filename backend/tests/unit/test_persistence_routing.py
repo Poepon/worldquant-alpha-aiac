@@ -250,6 +250,64 @@ async def test_7_multiple_FAILs_all_routed_to_success_batch(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Bug A (2026-05-20): pre-BRAIN skip → PRESIM_SKIP, not SIMULATION_ERROR
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pre_brain_skip_labeled_PRESIM_SKIP(monkeypatch):
+    """A pre-simulate/Q10 skip (is_simulated=True + simulation_success=False +
+    metrics._pre_brain_skip=True) must be labeled PRESIM_SKIP, NOT
+    SIMULATION_ERROR — so the quota guard can exclude it (it never consumed a
+    BRAIN simulate slot)."""
+    from backend.config import settings
+    from backend.agents.graph.nodes.persistence import node_save_results
+
+    monkeypatch.setattr(settings, "ENABLE_FAIL_ALPHA_PERSIST", True, raising=False)
+    monkeypatch.setattr(settings, "T2_INCREMENTAL_PERSISTENCE", False, raising=False)
+
+    skipped = _mk_alpha(
+        quality_status="PENDING", alpha_id=None,
+        is_simulated=True, simulation_success=False,
+        metrics={"_pre_brain_skip": True, "sharpe": 0.0},
+    )
+    skipped.simulation_error = "pre-simulate filter skip: P(PASS)=0.034 < 0.1"
+    state = _mk_state([skipped])
+
+    out = await node_save_results(state, config={"configurable": {}})
+
+    assert out["generated_alphas"] == []
+    failures = out["failures"]
+    assert len(failures) == 1
+    assert failures[0].error_type == "PRESIM_SKIP"
+
+
+@pytest.mark.asyncio
+async def test_real_sim_error_still_SIMULATION_ERROR_not_presim(monkeypatch):
+    """A real BRAIN sim error (is_simulated=True + sim_success=False + NO
+    _pre_brain_skip marker) stays SIMULATION_ERROR — the new branch must not
+    swallow genuine BRAIN failures."""
+    from backend.config import settings
+    from backend.agents.graph.nodes.persistence import node_save_results
+
+    monkeypatch.setattr(settings, "ENABLE_FAIL_ALPHA_PERSIST", True, raising=False)
+    monkeypatch.setattr(settings, "T2_INCREMENTAL_PERSISTENCE", False, raising=False)
+
+    real_err = _mk_alpha(
+        quality_status="PENDING", alpha_id=None,
+        is_simulated=True, simulation_success=False,
+        metrics={"sharpe": 0.0},   # no _pre_brain_skip
+    )
+    real_err.simulation_error = "BRAIN 500 internal error"
+    state = _mk_state([real_err])
+
+    out = await node_save_results(state, config={"configurable": {}})
+
+    failures = out["failures"]
+    assert len(failures) == 1
+    assert failures[0].error_type == "SIMULATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
 # _incremental_save_alphas — FAIL acceptance (filter) test
 # ---------------------------------------------------------------------------
 # The real ORM end-to-end test sits behind @pytest.mark.requires_postgres
