@@ -44,29 +44,51 @@ logger = logging.getLogger(__name__)
 #
 # Grammar uses lark's Earley parser for forgiving (left-recursion-free)
 # behavior on arithmetic precedence.
+# F1 review fix (Sprint 4 R1+R2): the original grammar rejected 6 of 10
+# common valid BRAIN shapes — comparisons (> < >= <=), ternary (? :),
+# logical (&& ||), power (**), scientific-notation numbers (1.5e-3),
+# string literals ('sector'), and dotted field refs (fnd6.assets).
+# node_code_gen drops candidates on parse fail, so a too-narrow grammar
+# silently discards good alphas. This widened grammar accepts those forms.
+#
+# Precedence (low → high): ternary < logical-or < logical-and <
+# comparison < add/sub < mul/div < power < unary < atom.
 _GRAMMAR = r"""
 ?start: expr
-?expr: arith
-?arith: arith "+" term     -> add
-      | arith "-" term     -> sub
+?expr: ternary
+?ternary: logic_or "?" expr ":" expr  -> ternary
+        | logic_or
+?logic_or: logic_or "||" logic_and    -> lor
+         | logic_and
+?logic_and: logic_and "&&" cmp         -> land
+          | cmp
+?cmp: arith CMPOP arith                -> compare
+    | arith
+?arith: arith "+" term                 -> add
+      | arith "-" term                 -> sub
       | term
-?term: term "*" factor     -> mul
-     | term "/" factor     -> div
-     | factor
-?factor: "-" factor        -> neg
+?term: term "*" power                  -> mul
+     | term "/" power                  -> div
+     | power
+?power: factor "**" power              -> pow
+      | factor
+?factor: "-" factor                    -> neg
        | atom
-?atom: NUMBER              -> number
-     | FIELD               -> field_ref
+?atom: NUMBER                          -> number
+     | STRING                          -> string_lit
+     | FIELD                           -> field_ref
      | call
      | "(" expr ")"
 call: OP_NAME "(" args? ")"
 args: arg ("," arg)*
 ?arg: expr
-    | OP_NAME "=" expr     -> kwarg
+    | OP_NAME "=" expr                 -> kwarg
 
+CMPOP: "<=" | ">=" | "==" | "!=" | "<" | ">"
 OP_NAME: /[a-z_][a-z0-9_]*/i
-FIELD: /[A-Za-z_][A-Za-z0-9_]*/
-NUMBER: /-?\d+(\.\d+)?/
+FIELD: /[A-Za-z_][A-Za-z0-9_.]*/
+NUMBER: /-?\d+(\.\d+)?([eE][+-]?\d+)?/
+STRING: /"[^"]*"/ | /'[^']*'/
 
 %import common.WS
 %ignore WS
@@ -201,6 +223,13 @@ def retry_with_whole_output_hint(
 
     The hint is intentionally terse — just enough for the LLM to
     self-correct without re-generating from scratch.
+
+    ⚠️ RESERVED — not yet wired into production (Sprint 4 F5 review fix).
+    node_code_gen currently BUFFERS parse-fail candidates + degrades-open
+    above a 50% drop floor; it does NOT call this hint or re-emit via LLM.
+    A future PR may wire this into a bounded re-emit loop gated by
+    GRAMMAR_VALIDATOR_RETRY_MAX. Kept + tested so the future wire is a
+    drop-in. Called only from test_grammar_validator.py today.
     """
     if result.ok:
         return ""

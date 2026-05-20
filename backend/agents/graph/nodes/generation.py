@@ -931,6 +931,8 @@ async def node_hypothesis(
     # and render into a markdown block. Default OFF → block stays "" →
     # byte-for-byte legacy. Soft-fail: any error logged + block empty.
     _g10_block = ""
+    _g10_entries_n = 0
+    state.g10_injected_entries_n = 0
     if bool(getattr(_gen_settings, "ENABLE_G10_LOGIC_INJECT", False)):
         try:
             from backend.database import AsyncSessionLocal as _g10_session
@@ -947,9 +949,15 @@ async def node_hypothesis(
                     limit=_g10_top_k,
                 )
             if _g10_entries:
-                _g10_block = _g10_render(_g10_entries)
+                _g10_block = _g10_render(_g10_entries, max_entries=_g10_top_k)
+                _g10_entries_n = len(_g10_entries)
+                # F14 review fix (Sprint 4 R3): stamp injected count on
+                # state so node_code_gen can mark each candidate's metrics
+                # (these candidates ARE persisted, unlike the dropped G3-v2
+                # ones) → /ops + canary SOP can observe G10 inject coverage.
+                state.g10_injected_entries_n = _g10_entries_n
                 logger.info(
-                    f"[{node_name}] G10 inject | n={len(_g10_entries)} "
+                    f"[{node_name}] G10 inject | n={_g10_entries_n} "
                     f"region={state.region} pillar_filter={pillar_hint}"
                 )
         except Exception as _g10_ex:  # noqa: BLE001
@@ -1575,7 +1583,16 @@ async def node_code_gen(
     pending_alphas = []
     implementation_notes = ""
     alternatives_considered = []
-    
+    # F2/F3 review fix (Sprint 4 R2+R3): G3-v2 parse-fail telemetry +
+    # min-pass-rate degrade-open floor. Dropped candidates are buffered
+    # (not silently `continue`d) so (a) we can count the drop rate and
+    # degrade-open when a too-narrow grammar would zero out the round,
+    # and (b) the parse-fail count survives to a state counter for
+    # telemetry (the dropped candidate's own metrics never persist —
+    # mirror of Sprint 2 F2 / Sprint 3 F1 trap).
+    _g3v2_parse_fail_buffer = []  # candidates that failed grammar parse
+    _g3v2_total_seen = 0
+
     if response.success and response.parsed and isinstance(response.parsed, dict):
         parsed = response.parsed
         # V-26.48 (2026-05-13): validate `alphas` is actually a list of dicts
@@ -1720,16 +1737,26 @@ async def node_code_gen(
                 else:
                     candidate.metrics["assistant_template_fallthrough"] = True
 
+            # F14 review fix (Sprint 4 R3): stamp G10 inject coverage onto
+            # each candidate's metrics (reachable persist path). 0 = OFF /
+            # no rows. These flow through validate→simulate→evaluate into
+            # alpha.metrics via the setdefault merge.
+            _g10_n = int(getattr(state, "g10_injected_entries_n", 0) or 0)
+            if _g10_n > 0:
+                candidate.metrics["_g10_injected"] = True
+                candidate.metrics["_g10_entries_n"] = _g10_n
+
             if candidate.expression and candidate.expression.strip():
                 # B4.1 G3-v2 grammar-aware validation (Sprint 4, 2026-05-20):
-                # parse the expression BEFORE persistence / simulation. On
-                # parse fail, stamp metrics + skip the candidate (no LLM
-                # retry inside this call — node_code_gen may re-fire next
-                # round with the hint in scope). Soft-fail: any exception
-                # in the validator falls through to legacy behavior.
+                # parse the expression BEFORE persistence / simulation.
+                # Parse-fail candidates are BUFFERED (not silently dropped)
+                # so a min-pass-rate floor can degrade-open if the grammar
+                # is too narrow (F2/F3 review fix). Soft-fail: validator
+                # exception falls through to legacy append.
                 if bool(getattr(_gen_settings, "ENABLE_GRAMMAR_VALIDATOR", False)):
                     try:
                         from backend.services import grammar_validator as _g3v2
+                        _g3v2_total_seen += 1
                         _g3v2_res = _g3v2.validate(candidate.expression)
                         if not _g3v2_res.ok:
                             candidate.metrics["_g3v2_parse_failed"] = True
@@ -1738,9 +1765,10 @@ async def node_code_gen(
                             logger.info(
                                 f"[{node_name}] G3-v2 parse fail "
                                 f"({_g3v2_res.error_msg[:80]}); "
-                                f"dropping expression={candidate.expression[:60]}"
+                                f"buffering expression={candidate.expression[:60]}"
                             )
-                            continue  # skip candidate — no append to pending_alphas
+                            _g3v2_parse_fail_buffer.append(candidate)
+                            continue  # decision deferred to post-loop floor check
                         if _g3v2_res.unknown_ops:
                             candidate.metrics["_g3v2_unknown_ops"] = list(_g3v2_res.unknown_ops)
                             logger.debug(
@@ -1752,6 +1780,42 @@ async def node_code_gen(
                             f"[{node_name}] G3-v2 validator failed (non-fatal): {_g3v2_ex}"
                         )
                 pending_alphas.append(candidate)
+
+    # F2/F3 review fix: G3-v2 min-pass-rate degrade-open floor + telemetry.
+    # If grammar would drop > 50% of this round's candidates, a too-narrow
+    # grammar (or a lark version regression) is the likely cause — better
+    # to degrade-open (re-include the buffered candidates) than to zero out
+    # production. Always record the parse-fail count to a state counter so
+    # an operator can observe the drop rate even though the dropped
+    # candidate's own metrics never persist (it's not in pending_alphas).
+    if _g3v2_total_seen > 0 and _g3v2_parse_fail_buffer:
+        _g3v2_drop_rate = len(_g3v2_parse_fail_buffer) / _g3v2_total_seen
+        try:
+            state.g3v2_parse_fail_count = (
+                int(getattr(state, "g3v2_parse_fail_count", 0) or 0)
+                + len(_g3v2_parse_fail_buffer)
+            )
+            state.g3v2_total_validated = (
+                int(getattr(state, "g3v2_total_validated", 0) or 0)
+                + _g3v2_total_seen
+            )
+        except Exception:  # noqa: BLE001 — state attr-set must never break round
+            pass
+        if _g3v2_drop_rate > 0.5:
+            logger.warning(
+                f"[{node_name}] G3-v2 drop rate {_g3v2_drop_rate:.0%} > 50% "
+                f"({len(_g3v2_parse_fail_buffer)}/{_g3v2_total_seen}) — "
+                f"degrade-open: re-including buffered candidates (grammar "
+                f"likely too narrow; check /ops or widen _GRAMMAR)"
+            )
+            for _buffered in _g3v2_parse_fail_buffer:
+                _buffered.metrics["_g3v2_degrade_open_readmit"] = True
+                pending_alphas.append(_buffered)
+        else:
+            logger.info(
+                f"[{node_name}] G3-v2 dropped {len(_g3v2_parse_fail_buffer)}/"
+                f"{_g3v2_total_seen} ({_g3v2_drop_rate:.0%}, within floor)"
+            )
 
     _debug_log("A", "nodes.py:code_gen:result", "Alpha code generation complete", {
         "alphas_generated": len(pending_alphas),

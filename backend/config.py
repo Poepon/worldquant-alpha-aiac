@@ -284,6 +284,22 @@ class Settings(BaseSettings):
         "ENABLE_AST_ORIGINALITY_GATE",
         "ENABLE_SIMULATION_CACHE",
     ]
+    # F13 review fix (Sprint 4 R3): Sprint-4 flag sentinel-membership
+    # rationale (the next reviewer will otherwise see the asymmetry vs
+    # G8/AST-gate as an oversight):
+    #   - ENABLE_G10_LOGIC_INJECT: NOT a sentinel. It's pure prompt
+    #     information (distilled logic text); the LLM still authors the
+    #     hypothesis in assistant mode — same class as macro/style blocks
+    #     which are also not sentinel-listed. Assistant mode benefits from
+    #     the prior, so leave it ON.
+    #   - ENABLE_GRAMMAR_VALIDATOR: NOT a sentinel. It validates DSL
+    #     syntax regardless of who authored it (template library in
+    #     assistant mode OR LLM in author mode); a malformed expression is
+    #     malformed either way. Leaving it ON in assistant mode is correct
+    #     (catches broken template composition too). NB: distinct from
+    #     ENABLE_AST_ORIGINALITY_GATE (sentinel) which gates *originality*
+    #     — an author-mode-specific concern G3-v2 deliberately does NOT
+    #     duplicate.
     # Task.config keys drained when LLM mode flips (per Round S0-A F-A5):
     # 4 cross-round / inject staging keys that would carry author-mode
     # state into an assistant-mode round (or vice versa) and produce
@@ -421,7 +437,13 @@ class Settings(BaseSettings):
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.14
     ENABLE_GRAMMAR_VALIDATOR: bool = False
-    GRAMMAR_VALIDATOR_RETRY_MAX: int = 2  # max LLM re-emit rounds on parse fail
+    # F4 review fix (Sprint 4 R3): RESERVED — not yet wired. node_code_gen
+    # currently BUFFERS parse-fail candidates + degrades-open above a 50%
+    # drop floor; it does NOT re-emit via LLM. A future PR may wire
+    # retry_with_whole_output_hint into a bounded re-emit loop reading this
+    # setting. Until then this is a no-op knob (kept so the future wire
+    # doesn't need a config migration).
+    GRAMMAR_VALIDATOR_RETRY_MAX: int = 2  # RESERVED — see comment above
 
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把

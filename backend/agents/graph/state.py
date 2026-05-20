@@ -221,6 +221,23 @@ class MiningState(BaseModel):
     # fast-follow) can attribute PASS/FAIL to the layer that was active.
     cognitive_layer_id_used: str = ""
 
+    # B4.1 G3-v2 (Sprint 4 F2/F3 review fix): per-run grammar parse-fail
+    # telemetry. Dropped candidates never reach persistence (not in
+    # pending_alphas), so their _g3v2_parse_failed metric is unreachable
+    # — these state counters are the observable signal instead. The
+    # min-pass-rate floor in node_code_gen degrades-open when the drop
+    # rate exceeds 50% (suspected too-narrow grammar).
+    g3v2_parse_fail_count: int = 0
+    g3v2_total_validated: int = 0
+
+    # A5.2 G10 PR2 (Sprint 4 F14 review fix): count of distilled-logic
+    # entries injected into THIS round's hypothesis prompt. node_code_gen
+    # stamps alpha.metrics["_g10_injected"]=True + ["_g10_entries_n"]=N on
+    # each candidate (reachable persist path, unlike the dropped G3-v2
+    # candidates) so /ops + canary SOP can observe G10 coverage. 0 = OFF
+    # or no rows matched.
+    g10_injected_entries_n: int = 0
+
     # Plan v5+ §Phase 2 B5/B6: per-hypothesis round history. Key = hypothesis_id.
     # Each entry: {round_index, alpha_count, pass_count, fail_count,
     #              syntax_fail_count, simulate_fail_count, attribution,

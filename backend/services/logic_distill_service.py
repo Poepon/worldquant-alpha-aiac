@@ -392,31 +392,43 @@ async def refine_logic_library(
     retired = 0
     checked = 0
 
-    # Bucket inventory (still-active entries) grouped by region+pillar
+    # Bucket inventory (still-active entries) grouped by region+pillar.
+    # F6 review fix (Sprint 4 R1+R2): also fetch source_alpha_ids count
+    # so we only retire the OLDER entry when the NEWER one is not strictly
+    # weaker (≥ source coverage). Prevents the thrash where each week's
+    # distill re-creates a near-dup and refine blindly retires the
+    # accumulated history — the surviving entry should be the one backed
+    # by more PASS alphas, not just the newest.
     bucket_rows = (await db.execute(_text("""
-        SELECT id, region, pillar, distilled_at_week, tokens
+        SELECT id, region, pillar, distilled_at_week, tokens, source_alpha_ids
         FROM distilled_logic_library
         WHERE retired_at IS NULL
         ORDER BY region, pillar, distilled_at_week DESC
     """))).all()
 
-    # Group Python-side; tokens column is JSONB list
+    # Group Python-side; tokens + source_alpha_ids columns are JSONB lists
     groups: Dict[Tuple[str, Optional[str]], List[tuple]] = {}
-    for row_id, region, pillar, week, tokens in bucket_rows:
+    for row_id, region, pillar, week, tokens, source_ids in bucket_rows:
+        _tok = list(tokens) if isinstance(tokens, list) else []
+        _src_n = len(source_ids) if isinstance(source_ids, list) else 0
         groups.setdefault((str(region), pillar), []).append(
-            (int(row_id), week, list(tokens) if isinstance(tokens, list) else [])
+            (int(row_id), week, _tok, _src_n)
         )
 
     now = datetime.now(timezone.utc)
     for (region, pillar), members in groups.items():
         if len(members) < 2:
             continue
-        # members is already DESC by week. Compare newest [0] vs [1].
-        # If similar enough, retire [1]. Then [0] vs [2]. Etc.
+        # members is already DESC by week. Compare newest [0] vs older [i].
+        # Retire the older when (a) similar enough AND (b) the newest is
+        # not weaker (≥ source coverage). When the older entry is backed
+        # by MORE alphas, keep it (the newest is a thinner re-distillation).
+        newest_src_n = members[0][3]
         for i in range(1, min(len(members), lookback_weeks + 1)):
             checked += 1
             sim = jaccard_similarity(members[0][2], members[i][2])
-            if sim >= similarity_threshold:
+            older_src_n = members[i][3]
+            if sim >= similarity_threshold and newest_src_n >= older_src_n:
                 try:
                     await db.execute(
                         _text(
@@ -520,12 +532,17 @@ def _row_to_dict(row: tuple) -> Dict:
     }
 
 
-def build_distilled_logic_block(entries: List[Dict]) -> str:
+def build_distilled_logic_block(entries: List[Dict], *, max_entries: int = 5) -> str:
     """Render the G10 distilled-logic block for hypothesis prompt injection.
 
     Empty input → "" so the splice site collapses to byte-for-byte
     legacy when ENABLE_G10_LOGIC_INJECT is OFF or no rows exist
     (mirrors P2-A/B/C/D + G8 + R8-v3 contract).
+
+    F7 review fix (Sprint 4 R3): ``max_entries`` is now a parameter
+    (was a hard-coded [:5]). The caller passes G10_LOGIC_INJECT_TOP_K so
+    setting the flag > 5 actually renders that many entries instead of
+    silently truncating at 5.
     """
     if not entries:
         return ""
@@ -541,7 +558,7 @@ def build_distilled_logic_block(entries: List[Dict]) -> str:
         ),
         "",
     ]
-    for e in entries[:5]:
+    for e in entries[:max_entries]:
         pillar = e.get("pillar") or "general"
         src_n = e.get("source_alpha_count", 0)
         logic = (e.get("logic_text") or "").strip()

@@ -40,18 +40,38 @@ def _make_refine_db(bucket_rows: List[tuple]) -> Any:
 async def test_refine_retires_near_duplicate_older_entry():
     from backend.services.logic_distill_service import refine_logic_library
 
-    # 2 entries same (region, pillar), 95% token overlap → older retired.
+    # 2 entries same (region, pillar), ~75% token overlap → older retired.
+    # F6 review fix: 6th column = source_alpha_ids; newest must have ≥
+    # source count to retire older (here equal counts → retire allowed).
     now = datetime.now(timezone.utc)
     week_new = now
     week_old = now - timedelta(days=7)
     rows = [
-        (1, "USA", "momentum", week_new, ["momentum", "rank", "returns"]),
-        (2, "USA", "momentum", week_old, ["momentum", "rank", "returns", "z"]),  # ~75% overlap
+        (1, "USA", "momentum", week_new, ["momentum", "rank", "returns"], [10, 20]),
+        (2, "USA", "momentum", week_old, ["momentum", "rank", "returns", "z"], [30, 40]),
     ]
     db = _make_refine_db(rows)
     out = await refine_logic_library(db, similarity_threshold=0.70)
-    # 3/4 = 0.75 > 0.70 → retire older
+    # 3/4 = 0.75 > 0.70 AND newest src(2) >= older src(2) → retire older
     assert out["retired"] == 1
+    assert out["checked"] == 1
+
+
+@pytest.mark.asyncio
+async def test_refine_keeps_older_when_richer():
+    """F6 fix: older entry backed by MORE source alphas is NOT retired
+    even when similar (newest is a thinner re-distillation)."""
+    from backend.services.logic_distill_service import refine_logic_library
+    now = datetime.now(timezone.utc)
+    rows = [
+        (1, "USA", "momentum", now, ["momentum", "rank", "returns"], [10]),       # 1 source
+        (2, "USA", "momentum", now - timedelta(days=7),
+         ["momentum", "rank", "returns"], [30, 40, 50]),                          # 3 sources
+    ]
+    db = _make_refine_db(rows)
+    out = await refine_logic_library(db, similarity_threshold=0.70)
+    # Jaccard 1.0 ≥ τ BUT newest src(1) < older src(3) → keep older
+    assert out["retired"] == 0
     assert out["checked"] == 1
 
 
@@ -62,9 +82,9 @@ async def test_refine_preserves_divergent_entries():
 
     now = datetime.now(timezone.utc)
     rows = [
-        (1, "USA", "momentum", now, ["momentum", "trend"]),
+        (1, "USA", "momentum", now, ["momentum", "trend"], [10]),
         (2, "USA", "momentum", now - timedelta(days=7),
-         ["value", "earnings", "cheap"]),  # zero overlap
+         ["value", "earnings", "cheap"], [20]),  # zero overlap
     ]
     db = _make_refine_db(rows)
     out = await refine_logic_library(db, similarity_threshold=0.70)
@@ -78,7 +98,7 @@ async def test_refine_single_entry_bucket_unchanged():
 
     now = datetime.now(timezone.utc)
     rows = [
-        (1, "USA", "momentum", now, ["momentum"]),
+        (1, "USA", "momentum", now, ["momentum"], [10]),
     ]
     db = _make_refine_db(rows)
     out = await refine_logic_library(db, similarity_threshold=0.70)
@@ -94,13 +114,14 @@ async def test_refine_respects_lookback_weeks():
     rows = [
         (i, "USA", "momentum",
          now - timedelta(days=7 * i),
-         ["momentum"] if i < 3 else ["unrelated"])
+         ["momentum"] if i < 3 else ["unrelated"],
+         [100 + i])  # 1 source each → equal counts → retire allowed
         for i in range(5)
     ]
     db = _make_refine_db(rows)
     out = await refine_logic_library(db, similarity_threshold=0.70, lookback_weeks=2)
-    # 2 comparisons (idx 0 vs 1, idx 0 vs 2). Both should retire since
-    # both share "momentum" with newest (Jaccard=1.0).
+    # 2 comparisons (idx 0 vs 1, idx 0 vs 2). Both share "momentum" with
+    # newest (Jaccard=1.0) AND equal source counts → both retired.
     assert out["checked"] == 2
     assert out["retired"] == 2
 

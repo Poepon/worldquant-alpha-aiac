@@ -50,8 +50,8 @@ R1b CoSTEER retry loop is gated by `ENABLE_R1A_HOOK` (downstream) — same obser
 | 27 | `ENABLE_FACTOR_LENS` + `FACTOR_LENS_MODE` shadow/soft/hard | Sprint 2 B2 R13 | `factor_lens_residuals` rows + `/ops/r13/factor-residuals` (deferred) | OFF (shadow) |
 | 28 | `ENABLE_COGNITIVE_LAYER_PROMPT` + select_mode + token_budget | Sprint 3 B5 R8-v3 | `/ops/r8-v3/cognitive-layer-stats` per-layer fire+PASS count | OFF |
 | 29 | `ENABLE_G10_LOGIC_DISTILL` + 5 tuning | Sprint 3 A5.1 G10 PR1 | weekly Sunday 03:00 SH cron result dict + `/ops/g10/logic-library` | OFF |
-| 30 | `ENABLE_G10_LOGIC_INJECT` + top_k | Sprint 4 A5.2 G10 PR2 | hypothesis prompt grep for distilled_logic_block + alpha.metrics['_g10_*'] (fast-follow) | OFF |
-| 31 | `ENABLE_GRAMMAR_VALIDATOR` + retry_max | Sprint 4 B4.1 G3-v2 | alpha.metrics['_g3v2_parse_failed'] count (telemetry endpoint fast-follow) | OFF |
+| 30 | `ENABLE_G10_LOGIC_INJECT` + top_k | Sprint 4 A5.2 G10 PR2 | alpha.metrics['_g10_injected'] / ['_g10_entries_n'] count (these candidates ARE persisted) | OFF |
+| 31 | `ENABLE_GRAMMAR_VALIDATOR` + retry_max | Sprint 4 B4.1 G3-v2 | **grep worker logs for `[G3-v2 drop rate]` / `[G3-v2 dropped]`** — parse-fail candidates are DROPPED before persistence so alpha.metrics['_g3v2_parse_failed'] is unreachable; observe via the log lines + MiningState.g3v2_parse_fail_count instead (F2 review fix) | OFF |
 
 Total production flag inventory after Sprint 4 ship: **20 (v1.3 baseline) + 14 (Phase 4 new) = 34** ENABLE_* flags. 6 sentinel flags pending R12 decision route (deprecate / restore / partial).
 

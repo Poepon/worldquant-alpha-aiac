@@ -886,9 +886,11 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         flag_type="int",
         group="Phase4-Sprint4",
         description=(
-            "G3-v2 parse fail 时的最大 LLM re-emit 轮数。Default 2 — 第 1 次"
-            "重发后仍 fail 再试 1 次,3rd attempt 仍 fail 则放行(避免无限"
-            "loop 烧 LLM cost)。"
+            "⚠️ RESERVED — not yet wired (Sprint 4 F4 review fix). "
+            "node_code_gen 当前对 parse-fail candidate 做 BUFFER + 50% drop "
+            "floor degrade-open,**不** 走 LLM re-emit。未来 PR 可把 "
+            "retry_with_whole_output_hint 接进 bounded re-emit loop 读此值。"
+            "调它当前无行为变化。"
         ),
     ),
 }
