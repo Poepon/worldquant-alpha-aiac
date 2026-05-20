@@ -2815,6 +2815,275 @@ async def g10_logic_library(
 
 
 # =============================================================================
+# Phase 4 Tier B — obs telemetry endpoints (2026-05-20)
+# =============================================================================
+# Four endpoints making the 30d R12 obs window observable BEFORE the
+# operator flips flags. Each reads stamps/columns that Sprint 2-4 already
+# write. R11 reads the capacity_usd_estimate column (cross-dialect). R13
+# + G3-v2 read alpha.metrics JSONB → Postgres-only dialect guard
+# (degrade to empty on SQLite dev, per Sprint 3 F11 pattern).
+
+
+class R11CapacityBucket(BaseModel):
+    bucket_label: str   # e.g. "$1M-$10M"
+    count: int
+
+
+class R11CapacityStatsOut(BaseModel):
+    flags: Dict[str, bool]
+    total_with_capacity: int
+    buckets: List[R11CapacityBucket]
+    pass_count_with_capacity: int
+    capacity_pass_rate: float
+    window_days: int
+
+
+@router.get("/r11/capacity-stats", response_model=R11CapacityStatsOut)
+async def r11_capacity_stats(
+    days: int = 7,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> R11CapacityStatsOut:
+    """R11 alpha-capacity distribution (Sprint 2 B1).
+
+    Reads the ``alphas.capacity_usd_estimate`` column (column, not JSONB →
+    cross-dialect). Log-scale histogram + PASS rate among alphas that got
+    a capacity estimate. Use to confirm ENABLE_CAPACITY_SCORE is stamping
+    (non-zero total) + that the distribution isn't saturated at one bucket
+    (Sprint 2 review flagged USA TOP200 saturation risk).
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {"ENABLE_CAPACITY_SCORE": bool(getattr(_stg, "ENABLE_CAPACITY_SCORE", False))}
+
+    # Python-computed cutoff (cross-dialect — R11 reads a plain column, not
+    # JSONB, so it works on dev SQLite too unlike the JSONB endpoints below).
+    from datetime import datetime as _dt, timedelta as _td
+    cutoff = (_dt.utcnow() - _td(days=max(0, int(days))))
+    rows = (await db.execute(_text(
+        "SELECT capacity_usd_estimate, quality_status "
+        "FROM alphas "
+        "WHERE created_at >= :cutoff "
+        "  AND capacity_usd_estimate IS NOT NULL"
+    ), {"cutoff": cutoff})).all()
+
+    # Log-scale buckets aligned with CAPACITY_LOG_BUCKETS semantics.
+    edges = [1e6, 1e7, 1e8, 1e9, 1e10]
+    labels = ["<$1M", "$1M-$10M", "$10M-$100M", "$100M-$1B", "$1B-$10B", ">=$10B"]
+    counts = [0] * len(labels)
+    total = 0
+    passed = 0
+    for cap, status in rows:
+        total += 1
+        if (getattr(status, "value", status)) in ("PASS", "PASS_PROVISIONAL"):
+            passed += 1
+        c = float(cap or 0.0)
+        if c < edges[0]:
+            counts[0] += 1
+        elif c >= edges[-1]:
+            counts[-1] += 1
+        else:
+            for i in range(len(edges) - 1):
+                if edges[i] <= c < edges[i + 1]:
+                    counts[i + 1] += 1
+                    break
+
+    return R11CapacityStatsOut(
+        flags=flags,
+        total_with_capacity=total,
+        buckets=[R11CapacityBucket(bucket_label=l, count=counts[i]) for i, l in enumerate(labels)],
+        pass_count_with_capacity=passed,
+        capacity_pass_rate=round(passed / total, 4) if total > 0 else 0.0,
+        window_days=int(days),
+    )
+
+
+class R13ResidualStatsOut(BaseModel):
+    flags: Dict[str, bool]
+    factor_lens_mode: str             # shadow / soft / hard (current setting)
+    total_decomposed: int
+    by_mode: Dict[str, int]            # per-phase stamp counts
+    residual_sharpe_mean: Optional[float]
+    residual_sharpe_p50: Optional[float]
+    residual_sharpe_p95: Optional[float]
+    window_days: int
+
+
+@router.get("/r13/factor-residuals", response_model=R13ResidualStatsOut)
+async def r13_factor_residuals(
+    days: int = 7,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> R13ResidualStatsOut:
+    """R13 factor-lens residual-sharpe distribution (Sprint 2 B2).
+
+    Reads ``alpha.metrics->>'_r13_residual_sharpe'`` + ``_r13_mode_used``.
+    Postgres-only (JSONB) → empty payload on non-Postgres dev DB. Use to
+    calibrate FACTOR_LENS_RESIDUAL_SHARPE_MIN before promoting
+    FACTOR_LENS_MODE shadow→soft→hard.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {"ENABLE_FACTOR_LENS": bool(getattr(_stg, "ENABLE_FACTOR_LENS", False))}
+    _mode = str(getattr(_stg, "FACTOR_LENS_MODE", "shadow"))
+    if (db.bind.dialect.name if db.bind is not None else "") != "postgresql":
+        return R13ResidualStatsOut(
+            flags=flags, factor_lens_mode=_mode, total_decomposed=0, by_mode={},
+            residual_sharpe_mean=None, residual_sharpe_p50=None,
+            residual_sharpe_p95=None, window_days=int(days),
+        )
+
+    rows = (await db.execute(_text("""
+        SELECT
+          (metrics->>'_r13_residual_sharpe')::float AS rs,
+          metrics->>'_r13_factor_lens_phase' AS phase
+        FROM alphas
+        WHERE created_at > now() - (:days || ' day')::interval
+          AND metrics ? '_r13_residual_sharpe'
+    """), {"days": str(int(days))})).all()
+
+    sharpes = [float(rs) for rs, _p in rows if rs is not None]
+    by_mode: Dict[str, int] = {}
+    for _rs, phase in rows:
+        key = str(phase) if phase else "unknown"
+        by_mode[key] = by_mode.get(key, 0) + 1
+
+    import statistics as _stats
+    def _pct(arr, q):
+        if not arr:
+            return None
+        s = sorted(arr)
+        k = int(round((q / 100.0) * (len(s) - 1)))
+        return round(float(s[k]), 4)
+
+    return R13ResidualStatsOut(
+        flags=flags,
+        factor_lens_mode=_mode,
+        total_decomposed=len(rows),
+        by_mode=by_mode,
+        residual_sharpe_mean=round(_stats.fmean(sharpes), 4) if sharpes else None,
+        residual_sharpe_p50=_pct(sharpes, 50),
+        residual_sharpe_p95=_pct(sharpes, 95),
+        window_days=int(days),
+    )
+
+
+class R13SnapshotStaleOut(BaseModel):
+    flags: Dict[str, bool]
+    per_region: Dict[str, Any]   # region → {exists, age_days, stale}
+    any_stale: bool
+    stale_threshold_days: int
+
+
+@router.get("/r13/snapshot-stale-check", response_model=R13SnapshotStaleOut)
+async def r13_snapshot_stale_check(
+    stale_days: int = 90,
+    _token: str = Depends(_require_ops_token),
+) -> R13SnapshotStaleOut:
+    """R13 factor-returns snapshot staleness alert (Sprint 2 B2).
+
+    Checks mtime of ``backend/data/factor_returns_snapshot/{region}.parquet``
+    for the 5 target regions. Operator refreshes monthly; stale > 90d
+    means R13 residuals are computed against drifted style factors.
+    No DB — pure filesystem.
+    """
+    from pathlib import Path
+    import time
+    from backend.config import settings as _stg
+
+    flags = {"ENABLE_FACTOR_LENS": bool(getattr(_stg, "ENABLE_FACTOR_LENS", False))}
+    snap_dir = (
+        Path(__file__).resolve().parent.parent / "data" / "factor_returns_snapshot"
+    )
+    per_region: Dict[str, Any] = {}
+    any_stale = False
+    for region in ("usa", "chn", "jpn", "eur", "hkg"):
+        path = snap_dir / f"{region}.parquet"
+        if not path.exists():
+            per_region[region] = {"exists": False, "age_days": None, "stale": True}
+            any_stale = True
+            continue
+        age_days = (time.time() - path.stat().st_mtime) / 86400.0
+        stale = age_days > stale_days
+        if stale:
+            any_stale = True
+        per_region[region] = {
+            "exists": True, "age_days": round(age_days, 1), "stale": stale,
+        }
+
+    return R13SnapshotStaleOut(
+        flags=flags,
+        per_region=per_region,
+        any_stale=any_stale,
+        stale_threshold_days=int(stale_days),
+    )
+
+
+class G3v2ParseStatsOut(BaseModel):
+    flags: Dict[str, bool]
+    degrade_open_readmit_count: int     # candidates re-admitted past the floor
+    unknown_ops_alpha_count: int        # persisted alphas carrying unknown ops
+    top_unknown_ops: Dict[str, int]     # op name → frequency
+    window_days: int
+
+
+@router.get("/g3v2/parse-stats", response_model=G3v2ParseStatsOut)
+async def g3v2_parse_stats(
+    days: int = 7,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> G3v2ParseStatsOut:
+    """G3-v2 grammar telemetry (Sprint 4 B4.1 + F2 review).
+
+    NB: parse-FAIL candidates are DROPPED before persistence (Sprint 4 F2
+    — their metrics are unreachable; observe drop rate via worker logs /
+    MiningState.g3v2_parse_fail_count instead). This endpoint surfaces the
+    REACHABLE signals: degrade-open re-admits (a too-narrow grammar
+    tripped the 50% floor) + unknown-op frequency (warn-only candidates
+    that persisted). Postgres-only → empty on dev SQLite.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    flags = {"ENABLE_GRAMMAR_VALIDATOR": bool(getattr(_stg, "ENABLE_GRAMMAR_VALIDATOR", False))}
+    if (db.bind.dialect.name if db.bind is not None else "") != "postgresql":
+        return G3v2ParseStatsOut(
+            flags=flags, degrade_open_readmit_count=0,
+            unknown_ops_alpha_count=0, top_unknown_ops={}, window_days=int(days),
+        )
+
+    readmit = (await db.execute(_text("""
+        SELECT COUNT(*) FROM alphas
+        WHERE created_at > now() - (:days || ' day')::interval
+          AND COALESCE((metrics->>'_g3v2_degrade_open_readmit')::bool, false) = true
+    """), {"days": str(int(days))})).scalar() or 0
+
+    unknown_rows = (await db.execute(_text("""
+        SELECT metrics->'_g3v2_unknown_ops' AS ops
+        FROM alphas
+        WHERE created_at > now() - (:days || ' day')::interval
+          AND metrics ? '_g3v2_unknown_ops'
+    """), {"days": str(int(days))})).all()
+
+    op_freq: Dict[str, int] = {}
+    for (ops,) in unknown_rows:
+        if isinstance(ops, list):
+            for op in ops:
+                op_freq[str(op)] = op_freq.get(str(op), 0) + 1
+    top_ops = dict(sorted(op_freq.items(), key=lambda kv: kv[1], reverse=True)[:20])
+
+    return G3v2ParseStatsOut(
+        flags=flags,
+        degrade_open_readmit_count=int(readmit),
+        unknown_ops_alpha_count=len(unknown_rows),
+        top_unknown_ops=top_ops,
+        window_days=int(days),
+    )
+
+
+# =============================================================================
 # Phase 3 R9 — simulation cache telemetry (2026-05-18)
 # =============================================================================
 # Reads simulation_cache table aggregates. hit/miss has no dedicated counter;
