@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   Card,
   Table,
@@ -13,9 +13,11 @@ import {
   Button,
   Row,
   Col,
+  Popconfirm,
+  message,
   Tooltip as AntdTooltip,
 } from 'antd'
-import { EyeOutlined, ReloadOutlined } from '@ant-design/icons'
+import { EyeOutlined, ReloadOutlined, CloudSyncOutlined } from '@ant-design/icons'
 import api from '../services/api'
 import { formatRelative } from '../utils/time'
 
@@ -72,6 +74,26 @@ export default function AlphaList() {
     queryFn: () => api.getAlphas(queryParams),
     keepPreviousData: true,
     refetchInterval: 30_000,
+  })
+
+  const queryClient = useQueryClient()
+
+  // Sync alphas from WorldQuant BRAIN. Fire-and-forget — POST /alphas/sync
+  // dispatches the sync_user_alphas Celery task (IS + OS stages, ~minutes)
+  // and returns immediately. We surface a "started" toast and auto-refetch
+  // after a delay so the new rows surface without a manual refresh.
+  const syncMutation = useMutation({
+    mutationFn: () => api.syncAlphas(),
+    onSuccess: () => {
+      message.success('已启动 BRAIN 同步,后台运行中(约几分钟)。完成后列表会自动刷新')
+      // Sync runs in the background; refetch a few times as it lands rows.
+      setTimeout(() => queryClient.invalidateQueries(['alphas-list']), 30_000)
+      setTimeout(() => queryClient.invalidateQueries(['alphas-list']), 120_000)
+    },
+    onError: (err) => {
+      const detail = err?.response?.data?.detail || err.message
+      message.error(`同步启动失败: ${detail}`)
+    },
   })
 
   const rawItems = data?.items || []
@@ -227,13 +249,30 @@ export default function AlphaList() {
           <Text type="secondary">共 {total} 条 · 默认按 Sharpe 降序</Text>
         </Col>
         <Col>
-          <Button
-            icon={<ReloadOutlined />}
-            loading={isFetching}
-            onClick={() => refetch()}
-          >
-            刷新
-          </Button>
+          <Space>
+            <Popconfirm
+              title="同步 WorldQuant BRAIN Alphas"
+              description="将从 BRAIN 拉取全部 alpha(IS + OS),后台运行约几分钟。确认同步?"
+              okText="同步"
+              cancelText="取消"
+              onConfirm={() => syncMutation.mutate()}
+            >
+              <Button
+                type="primary"
+                icon={<CloudSyncOutlined />}
+                loading={syncMutation.isLoading}
+              >
+                同步 BRAIN Alphas
+              </Button>
+            </Popconfirm>
+            <Button
+              icon={<ReloadOutlined />}
+              loading={isFetching}
+              onClick={() => refetch()}
+            >
+              刷新
+            </Button>
+          </Space>
         </Col>
       </Row>
 
