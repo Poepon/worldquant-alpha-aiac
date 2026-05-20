@@ -1057,19 +1057,30 @@ class BrainAdapter:
 
                 # Handle non-2xx response with retry
                 if response.status_code // 100 != 2:
-                    logger.error(f"Simulation poll {poll_url}, Status: {response.status_code}, Retry")
-                    await asyncio.sleep(30)
                     retry_count += 1
                     if retry_count <= max_retries:
+                        logger.warning(
+                            f"Simulation poll {poll_url} status={response.status_code} "
+                            f"— retry {retry_count}/{max_retries}"
+                        )
+                        await asyncio.sleep(30)
                         continue
                     else:
                         logger.error(f"Simulation {poll_url} failed after {max_retries} retries")
                         error_flag = True
                         break
-                
+
+                # 2026-05-21: reset the budget on every SUCCESSFUL poll so it
+                # measures CONSECUTIVE failures, not lifetime failures. Without
+                # this, sporadic transient blips (e.g. stale-keepalive TLS EOF)
+                # spread across a long simulation accumulate and falsely abort
+                # an otherwise-healthy sim → the alpha is lost on the Nth blip
+                # even though each was individually recoverable.
+                retry_count = 0
+
                 # Key check: If Retry-After header is missing or 0, simulation is complete
                 retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
-                
+
                 if not retry_after or retry_after == "0":
                     # Simulation completed - check for error status
                     data = response.json()
@@ -1077,17 +1088,29 @@ class BrainAdapter:
                         error_flag = True
                         logger.error(f"Simulation error: {data}")
                     break
-                
+
                 # Still running, wait as instructed
                 await asyncio.sleep(float(retry_after))
-                
+
             except Exception as e:
-                import traceback
-                logger.error(f"Poll loop error: {e}\n{traceback.format_exc()}")
-                await asyncio.sleep(3)
                 retry_count += 1
                 if retry_count > max_retries:
+                    # Exhausted — this is the only path that loses the alpha,
+                    # so log loudly with traceback.
+                    import traceback
+                    logger.error(
+                        f"Poll loop error — giving up after {max_retries} "
+                        f"consecutive failures: {e}\n{traceback.format_exc()}"
+                    )
                     return {"success": False, "error": str(e)}
+                # Recoverable transient (TLS EOF / connection reset / timeout) —
+                # WARNING not ERROR+traceback, since the retry below typically
+                # reconnects and the sim continues.
+                logger.warning(
+                    f"Poll loop transient error (retry {retry_count}/{max_retries}): "
+                    f"{type(e).__name__}: {e}"
+                )
+                await asyncio.sleep(3)
         
         if error_flag:
             try:
