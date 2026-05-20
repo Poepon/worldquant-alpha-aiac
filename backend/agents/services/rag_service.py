@@ -1358,11 +1358,20 @@ class RAGService:
         alpha_id: str = None,
         hypothesis_id: Optional[int] = None,
         experiment_variant: Optional[str] = None,
+        source: str = "feedback_loop",
     ) -> bool:
         """
         Record a success pattern to the knowledge base.
-        
+
         Called when an alpha passes all quality thresholds.
+
+        ``source`` (2026-05-20) tags provenance into meta_data so analytics +
+        attribution can distinguish loop-generated patterns from externally
+        ingested ones. Default 'feedback_loop' = the live mining path (existing
+        callers unchanged). The sync-reconcile path passes 'sync_reconcile'.
+        Provenance is informational only — BRAIN-validated patterns are
+        legitimate RAG signal regardless of source; the real filter is skeleton
+        quality (the reconcile gates on nesting>=2), not provenance.
         """
         from backend.knowledge_extraction import expression_to_skeleton, extract_operator_chain
         from backend.database import AsyncSessionLocal
@@ -1417,6 +1426,12 @@ class RAGService:
                         if hypothesis_id not in hids:
                             hids.append(hypothesis_id)
                         existing.meta_data['hypothesis_ids'] = hids
+                    # Provenance (2026-05-20): track which sources reinforced this
+                    # pattern (mining feedback_loop vs sync_reconcile).
+                    _srcs = list(existing.meta_data.get('sources') or [])
+                    if source not in _srcs:
+                        _srcs.append(source)
+                    existing.meta_data['sources'] = _srcs
                     from sqlalchemy.orm.attributes import flag_modified
                     flag_modified(existing, 'meta_data')
                     logger.info(f"[RAGService] Updated success pattern | skeleton={skeleton[:50]}")
@@ -1445,7 +1460,8 @@ class RAGService:
                         is_active=True,
                         usage_count=1,
                         meta_data={
-                            'source': 'feedback_loop',
+                            'source': source,
+                            'sources': [source],
                             'region': region,
                             'regions': [region] if region else [],
                             'dataset': dataset_id,
