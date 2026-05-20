@@ -687,11 +687,24 @@ def sync_user_alphas():
     logger.info("Syncing user alphas from Brain...")
     
     async def _run():
+        # P2.C [V1.2-R1] (2026-05-20): skip if BRAIN auth circuit is open.
+        # The new 6h beat schedule fires regardless of BRAIN health; without
+        # this guard an auth outage makes every tick burn 5-10 sequential
+        # authenticate() retries (only simulate_alpha consulted the circuit
+        # before). Mirrors brain_adapter.simulate_alpha's fast-fail.
+        from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
+        if BRAIN_AUTH_CIRCUIT.is_open():
+            logger.warning(
+                f"[sync_user_alphas] BRAIN_AUTH_CIRCUIT open "
+                f"({BRAIN_AUTH_CIRCUIT.status()}); skipping this tick"
+            )
+            return {"status": "skipped_circuit_open"}
+
         async with AsyncSessionLocal() as db:
             async with BrainAdapter() as brain:
                 count = 0
                 updated = 0
-                
+
                 stages = ["IS", "OS"]
                 
                 # Check for latest created timestamp (Incremental Sync)
@@ -847,6 +860,32 @@ def _parse_to_beijing(iso_str):
         return None
 
 
+def _derive_quality_status_from_metrics(sharpe, fitness, turnover):
+    """P2.C [V1.1-S1/S2] (2026-05-20): derive a quality_status from BRAIN
+    metrics so sync-imported alphas land classified instead of dumped as
+    PENDING (which loses the gate signal already present in the metrics).
+
+    Mirrors the EVAL_* / EVAL_PROVISIONAL_* bands used by the runtime
+    evaluator (_eval_thresholds). Conservative: never returns full PASS
+    (composite_score isn't recomputed here) — only PASS_PROVISIONAL or FAIL.
+    Missing metrics → PENDING (can't evaluate). Provisional band has no
+    turnover lower bound (matches config: only EVAL_PROVISIONAL_TURNOVER_MAX
+    exists, no _MIN).
+    """
+    from backend.config import settings as _cfg
+    if sharpe is None or fitness is None or turnover is None:
+        return "PENDING"
+    if (sharpe >= _cfg.EVAL_SHARPE_MIN
+            and fitness >= _cfg.EVAL_FITNESS_MIN
+            and _cfg.EVAL_TURNOVER_MIN <= turnover <= _cfg.EVAL_TURNOVER_MAX):
+        return "PASS_PROVISIONAL"
+    if (sharpe >= _cfg.EVAL_PROVISIONAL_SHARPE_MIN
+            and fitness >= _cfg.EVAL_PROVISIONAL_FITNESS_MIN
+            and turnover <= _cfg.EVAL_PROVISIONAL_TURNOVER_MAX):
+        return "PASS_PROVISIONAL"
+    return "FAIL"
+
+
 def _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_metrics, date_submitted):
     """Update an existing alpha with new data.
 
@@ -881,12 +920,30 @@ def _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_met
         existing.can_submit = can_sub
 
     existing.metrics_snapshot_at = datetime.now(timezone.utc)
+    # P2.C [V1.1-M3] (2026-05-20): MERGE, don't REPLACE. The old code
+    # `existing.metrics = {**is_metrics, ...}` wiped every AIAC-stamped
+    # `_`-prefixed key on each 6h sync — _direction_bandit_recommended_arm,
+    # _g8_forest_referenced_ids, _pre_brain_skip, _reslot_thresholds, etc.
+    # Layer existing first so AIAC keys survive; BRAIN-fresh metrics + the
+    # _brain_* keys override on top.
     existing.metrics = {
+        **(existing.metrics or {}),
         **(is_metrics or {}),
         "_brain_can_submit": can_sub,
         "_brain_failed_checks": failed,
         "_brain_pending_checks": pending,
     }
+
+    # P2.C [V1.1-S2] (2026-05-20): derive quality_status from metrics, but
+    # ONLY when the row is still PENDING — never overwrite a mining-direct
+    # PASS/PASS_PROVISIONAL/OPTIMIZE/FAIL verdict (anti-pattern guard: sync
+    # is reconciliation, the mining write is authoritative).
+    if existing.quality_status == "PENDING":
+        _derived = _derive_quality_status_from_metrics(
+            is_metrics.get("sharpe"), is_metrics.get("fitness"), is_metrics.get("turnover")
+        )
+        if _derived != "PENDING":
+            existing.quality_status = _derived
 
     existing.is_margin = is_metrics.get("margin")
     existing.is_long_count = is_metrics.get("longCount")
@@ -939,6 +996,11 @@ def _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_crea
         date_created=date_created,
         date_submitted=date_submitted,
         can_submit=can_sub,
+        # P2.C [V1.1-S1] (2026-05-20): classify on import instead of dumping
+        # as PENDING — the BRAIN metrics already carry the gate signal.
+        quality_status=_derive_quality_status_from_metrics(
+            is_metrics.get("sharpe"), is_metrics.get("fitness"), is_metrics.get("turnover")
+        ),
         metrics_snapshot_at=datetime.now(timezone.utc),
         metrics={
             **(is_metrics or {}),

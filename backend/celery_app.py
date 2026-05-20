@@ -71,6 +71,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.sync_datasets",
         "schedule": crontab(hour=6, minute=0),
     },
+    # P2.C (2026-05-20): sync user alphas from BRAIN every 6h. Closes the
+    # local-vs-BRAIN parity gap that otherwise drifts (it was sync'd only on
+    # manual /alphas/sync clicks — last ran 7 days stale). Off-minute :50
+    # avoids the 06:00/06:15/06:30 daily BRAIN-touching cluster. Skips
+    # cleanly when BRAIN_AUTH_CIRCUIT is open (sync_user_alphas guard).
+    "sync-user-alphas": {
+        "task": "backend.tasks.sync_user_alphas",
+        "schedule": crontab(hour="*/6", minute=50),
+    },
     # W0.5: refresh OS-alpha PnL cache daily at 06:30 (after dataset sync)
     "refresh-os-correlation-cache": {
         "task": "backend.tasks.refresh_os_correlation_cache",
