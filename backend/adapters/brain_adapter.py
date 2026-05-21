@@ -584,15 +584,20 @@ class BrainAdapter:
             if response.status_code == 201:
                 logger.info("BRAIN authentication successful")
 
-                # 2026-05-21: collapse the jar to the newest token. BRAIN's
+                # 2026-05-21: reset the jar to THIS response's token. BRAIN's
                 # set-cookie accumulates a duplicate 't' on the long-lived global
-                # client across re-auths; left as-is it breaks _save_session_to_redis
-                # (CookieConflict → session never persisted → shared session empty
-                # → per-process login → single-active mutual eviction) and makes
-                # simulate send multiple 't='.
-                _latest = {c.name: c.value for c in self.client.cookies.jar}
-                self.client.cookies.clear()
-                self.client.cookies.update(_latest)
+                # client across re-auths; the accumulation makes
+                # dict(self.client.cookies) raise CookieConflict in
+                # _save_session_to_redis (→ session never persisted → shared
+                # session empty → per-process login → single-active eviction) and
+                # makes simulate send multiple 't='. Use THIS login's set-cookie
+                # (response.cookies = authoritative newest) instead of guessing
+                # from the accumulated jar by iteration order (which could pick a
+                # STALE token — under the very condition that triggers this).
+                _new = dict(response.cookies)
+                if _new:
+                    self.client.cookies.clear()
+                    self.client.cookies.update(_new)
 
                 # Save session to Redis
                 data = response.json()

@@ -304,3 +304,23 @@ async def test_authenticate_clears_circuit(env):
         assert not BRAIN_AUTH_CIRCUIT.is_open(), "authenticate 成功应 clear circuit"
     finally:
         await worker.client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_authenticate_keeps_only_this_responses_token(env):
+    """[review F1] authenticate 必须用本次响应的 token,而不是从累积 jar 里靠
+    迭代顺序猜 token —— 否则在'jar 累积同名 t'(正是触发 CookieConflict 的条件)
+    下可能选到 STALE token 存进 Redis / 发给 simulate → 又 401。"""
+    brain, store = env
+    a = _make_adapter(brain)
+    try:
+        # 预置一个 stale 't'(不同 path,模拟之前 re-auth 累积、不会被新 set 覆盖)
+        a.client.cookies.set("t", "STALE_OLD", domain="api.worldquantbrain.com", path="/old")
+        await a.authenticate()  # brain active=tok1; 本次响应 set-cookie t=tok1
+        toks = sorted({c.value for c in a.client.cookies.jar if c.name == "t"})
+        assert toks == ["tok1"], f"authenticate 后应只持有本次响应的新 token, 实际 {toks}"
+        # 且 simulate 用新 token 成功(没被 stale token 污染)
+        res = await a.simulate_alpha("rank(close)")
+        assert res.get("success") is True, res
+    finally:
+        await a.client.aclose()
