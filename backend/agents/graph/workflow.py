@@ -288,6 +288,41 @@ class MiningWorkflow:
             )
             _r1b_consumed = None
 
+        # G5 Phase A (2026-05-19): same one-shot pattern for crossover offspring.
+        # _run_one_round_inline stashed prior-round's offspring on
+        # task.config["__g5_consumed_offspring"]; pop + clear here so node_code_gen
+        # can read state.g5_offspring_candidates and prepend to pending_alphas.
+        _g5_consumed: List[Dict] = []
+        try:
+            if isinstance(task.config, dict) and task.config.get("__g5_consumed_offspring"):
+                _raw = task.config.get("__g5_consumed_offspring") or []
+                if isinstance(_raw, list):
+                    _g5_consumed = list(_raw)
+                _cleared = dict(task.config)
+                _cleared.pop("__g5_consumed_offspring", None)
+                task.config = _cleared
+                try:
+                    from sqlalchemy.orm.attributes import flag_modified as _flag_modified
+                    _flag_modified(task, "config")
+                except Exception:
+                    pass
+        except Exception as _ex:
+            logger.warning(
+                f"[MiningWorkflow] G5 consumed-slot read failed (no inject): {_ex}"
+            )
+            _g5_consumed = []
+
+        # Phase 4 Sprint 1 A1.1 (2026-05-19): resolve LLM mode for this round.
+        # NEVER raises — defaults to "author" if flag OFF, missing task.config,
+        # or any other resolution failure. NOT wired to node_code_gen yet
+        # (A1.3); A1.1 just records on state.llm_mode_used so downstream R12
+        # decision SQL can stratify and operators can observe per-round mode.
+        try:
+            from backend.services.llm_mode_service import resolve_mode as _resolve_llm_mode
+            _llm_mode = _resolve_llm_mode(task)
+        except Exception:  # noqa: BLE001 — never break workflow on mode resolve
+            _llm_mode = "author"
+
         initial_state = MiningState(
             task_id=task.id,
             region=task.region,
@@ -302,6 +337,8 @@ class MiningWorkflow:
             effective_sharpe_submit_min=_role_snapshot.get("effective_sharpe_submit_min"),
             effective_region_universes_at_start=_role_snapshot.get("effective_region_universes"),
             r1b_consumed_pending_hypothesis=_r1b_consumed,
+            g5_offspring_candidates=_g5_consumed,
+            llm_mode_used=_llm_mode,
         )
         
         # Compile and run
@@ -389,6 +426,29 @@ class MiningWorkflow:
             # B7: collect alpha objects to enqueue can_submit refresh after commit
             # (need .id which is only populated post-flush).
             can_submit_refresh_targets: list = []
+
+            # G1 follow-up (2026-05-19): buffered-path bandit-arm stamp.
+            # _incremental_save_alphas (the hot path) stamps every PASS alpha
+            # with metrics["_direction_bandit_recommended_arm"]. This buffered
+            # path (T2_INCREMENTAL_PERSISTENCE=False fallback) was previously
+            # the cold gap — alphas landing here had no arm provenance,
+            # breaking the per-arm telemetry JOIN for any disabled-flag /
+            # legacy tasks. Reading once here costs 1 SELECT per batch
+            # regardless of how many alphas; same shape as the incremental
+            # path. Soft-fail (helper returns None on any error).
+            from backend.agents.graph.nodes.persistence import (
+                _read_bandit_arm_for_round,
+            )
+            try:
+                _g1_bandit_arm = await _read_bandit_arm_for_round(
+                    self.db, task.id,
+                )
+            except Exception as _g1_e:
+                logger.debug(
+                    f"[MiningWorkflow] G1 follow-up: buffered-path bandit "
+                    f"arm read failed (non-fatal): {_g1_e}"
+                )
+                _g1_bandit_arm = None
 
             # V-19.2 (2026-05-05): per-row SAVEPOINT persistence. Pre-V-19.2
             # used a single batch commit so one row's IntegrityError rolled
@@ -494,9 +554,42 @@ class MiningWorkflow:
                         f"expr={(alpha_result.expression or '')[:100]!r}"
                     )
                     continue
+                # P1 [V1.1-S7] (2026-05-19, plan v1.3.1 §3.2.4): defensive
+                # filter — block FAIL alpha_results lacking a BRAIN handle.
+                # The plan's original S7 specified is_simulated+simulation_success
+                # as the predicate, but AlphaResult (state.py:52) does NOT
+                # carry those fields — only the upstream Alpha model does
+                # (state.py:27-28). Using getattr-None would falsy-trip on
+                # every FAIL alpha. The actual invariant we care about is
+                # "BRAIN handle present" (alpha_id non-empty); node_save_results
+                # (§3.2.1) enforces is_simulated+sim_success upstream, and
+                # by the time we reach this loop, only valid FAILs have a
+                # BRAIN-assigned alpha_id. Sentinel for bypass paths.
+                if (
+                    alpha_result.quality_status == "FAIL"
+                    and not alpha_result.alpha_id
+                ):
+                    alpha_skipped += 1
+                    logger.warning(
+                        f"[MiningWorkflow] P1 defensive: skipping FAIL alpha "
+                        f"without alpha_id (BRAIN handle missing; likely "
+                        f"bypassed node_save_results filter): "
+                        f"expr={(alpha_result.expression or '')[:80]!r}"
+                    )
+                    continue
                 try:
                     expr_hash = compute_expression_hash(alpha_result.expression) if alpha_result.expression else None
                     metrics_dict = alpha_result.metrics if isinstance(alpha_result.metrics, dict) else {}
+                    # G1 follow-up: stamp bandit arm provenance into the
+                    # AlphaResult.metrics so the JSONB INSERT below carries it.
+                    # Only stamps when bandit ran AND we got an arm (flag-OFF
+                    # / round 1 → _g1_bandit_arm is None → key omitted —
+                    # symmetric with _incremental_save_alphas behaviour).
+                    if _g1_bandit_arm:
+                        if not isinstance(alpha_result.metrics, dict):
+                            alpha_result.metrics = dict(metrics_dict)
+                        alpha_result.metrics["_direction_bandit_recommended_arm"] = _g1_bandit_arm
+                        metrics_dict = alpha_result.metrics
                     # V-27.45: drop the link if the hypothesis went terminal
                     # in the reuse race window.
                     _ar_hid = getattr(alpha_result, "hypothesis_id", None)
@@ -582,6 +675,12 @@ class MiningWorkflow:
                         # FK is consistent with the PASS-path Alpha.hypothesis_id.
                         # V-27.45: _f_hid is the terminal-guarded value.
                         hypothesis_id=_f_hid,
+                        # G1 follow-up (2026-05-19): bandit-arm provenance for
+                        # FAIL alphas — symmetric with Alpha.metrics on PASS
+                        # path. Same _g1_bandit_arm read once per batch above
+                        # so PASS+FAIL both reflect the round's arm. NULL
+                        # when flag OFF / round 1 / read failed (soft-fail).
+                        bandit_arm_recommended=_g1_bandit_arm,
                     )
                     async with self.db.begin_nested():
                         self.db.add(fail_record)

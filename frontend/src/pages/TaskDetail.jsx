@@ -198,13 +198,27 @@ export default function TaskDetail() {
     }
   })
 
-  // Intervene task mutation
+  // Intervene task mutation.
+  // FLAT sessions are managed via /ops/flat-sessions/* — the legacy
+  // /tasks/{id}/intervene endpoint refuses FLAT PAUSE/RESUME with 400
+  // (it does not dispatch/manage the flat worker). STOP still goes through
+  // intervene for both schedules. Branch on task.schedule accordingly.
   const interveneMutation = useMutation({
-    mutationFn: ({ id, action }) => api.interveneTask(id, action),
+    mutationFn: ({ id, action, schedule }) => {
+      const isFlat = (schedule || '').toUpperCase() === 'FLAT'
+      if (isFlat && action === 'PAUSE') return api.pauseFlatSession(id)
+      if (isFlat && action === 'RESUME') return api.resumeFlatSession(id)
+      return api.interveneTask(id, action)
+    },
     onSuccess: (_, variables) => {
       const actionMap = { PAUSE: '暂停', RESUME: '恢复', STOP: '停止' }
       message.success(`任务已${actionMap[variables.action]}`)
       queryClient.invalidateQueries(['task', id])
+    },
+    onError: (err, variables) => {
+      const actionMap = { PAUSE: '暂停', RESUME: '恢复', STOP: '停止' }
+      const detail = err?.response?.data?.detail || err.message
+      message.error(`${actionMap[variables.action]}失败: ${detail}`)
     },
   })
 
@@ -348,30 +362,30 @@ export default function TaskDetail() {
               </Button>
             )}
             {task.status === 'RUNNING' && (
-              <Button 
+              <Button
                 icon={<PauseCircleOutlined />}
                 loading={interveneMutation.isLoading}
-                onClick={() => interveneMutation.mutate({ id: task.id, action: 'PAUSE' })}
+                onClick={() => interveneMutation.mutate({ id: task.id, action: 'PAUSE', schedule: task.schedule })}
               >
                 暂停
               </Button>
             )}
             {task.status === 'PAUSED' && (
-              <Button 
+              <Button
                 type="primary"
                 icon={<PlayCircleOutlined />}
                 loading={interveneMutation.isLoading}
-                onClick={() => interveneMutation.mutate({ id: task.id, action: 'RESUME' })}
+                onClick={() => interveneMutation.mutate({ id: task.id, action: 'RESUME', schedule: task.schedule })}
               >
                 恢复
               </Button>
             )}
             {['RUNNING', 'PAUSED'].includes(task.status) && (
-              <Button 
-                danger 
+              <Button
+                danger
                 icon={<StopOutlined />}
                 loading={interveneMutation.isLoading}
-                onClick={() => interveneMutation.mutate({ id: task.id, action: 'STOP' })}
+                onClick={() => interveneMutation.mutate({ id: task.id, action: 'STOP', schedule: task.schedule })}
               >
                 停止
               </Button>

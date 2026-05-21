@@ -51,6 +51,7 @@ def _mk_state(alphas):
         r1b_retries_attempted_this_alpha=0,
         r1b_mutations_attempted_this_cycle=0,
         r1b_token_cost_this_alpha=0.0,
+        r1b_mutated_hypothesis_ids=[],
     )
 
 
@@ -71,9 +72,18 @@ def _mk_llm(new_statement, diff="changed scope"):
 
 @pytest.fixture(autouse=True)
 def _stub_log_writer():
-    """Suppress real DB writes in mutate node."""
+    """Suppress real DB writes in mutate node — both the retry_log writer
+    and the Hypothesis INSERT helper. These wire tests are about the
+    failure_tree producer-side wiring, not the orthogonal INSERT path;
+    leaving the real ``_insert_mutated_hypothesis`` in place would race
+    against the dev Postgres and pollute these tests with real
+    ``hypotheses`` rows (root cause of the 2026-05-19 bug-via-mock
+    masking the invalid ``task_id=`` kwarg)."""
     with patch.object(
         r1b_loop, "_write_r1b_retry_log_rows",
+        new=AsyncMock(return_value=None),
+    ), patch.object(
+        r1b_loop, "_insert_mutated_hypothesis",
         new=AsyncMock(return_value=None),
     ):
         yield

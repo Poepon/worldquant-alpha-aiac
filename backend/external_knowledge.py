@@ -576,11 +576,23 @@ class ExternalKnowledgeSyncer:
             if await self._pattern_hash_exists(phash):
                 continue
 
+            # 2026-05-21: derive the field-based category SET from the CONCRETE
+            # pattern (curated imports store real expressions, not skeletons) so
+            # set-overlap retrieval works on these rows too. ext.category alone is
+            # the importer's free-text label (the split-vocab "pollution source");
+            # dataset_categories_used speaks the unified datafields vocabulary.
+            try:
+                from backend.agents.services.rag_service import resolve_field_categories
+                _cats_used = await resolve_field_categories(ext.pattern, ext_region, self.db)
+            except Exception:
+                _cats_used = []
+
             meta_data: Dict[str, Any] = {
                 'source': ext.source,
                 'source_url': ext.source_url,
                 'source_title': ext.source_title,
                 'dataset_category': ext.category,
+                'dataset_categories_used': _cats_used,
                 'confidence': ext.confidence,
                 'verified': ext.verified,
                 'score': ext.confidence,
@@ -934,70 +946,3 @@ async def import_alpha158_knowledge(db: AsyncSession) -> int:
     )
 
 
-# =============================================================================
-# Scheduled Sync Job
-# =============================================================================
-
-async def run_scheduled_sync(
-    db: AsyncSession,
-    mcp_client: Any = None,
-    force: bool = False
-) -> Dict[str, Any]:
-    """
-    Run scheduled knowledge sync.
-    
-    Should be called periodically (e.g., daily) to update knowledge base.
-    
-    Args:
-        db: Database session
-        mcp_client: MCP client for BRAIN API
-        force: Force sync even if recently synced
-    
-    Returns:
-        Sync statistics
-    """
-    results = {
-        "timestamp": datetime.now().isoformat(),
-        "forum_entries": 0,
-        "academic_entries": 0,
-        "errors": [],
-    }
-    
-    # Check last sync time (if not force)
-    if not force:
-        query = select(KnowledgeEntry).where(
-            KnowledgeEntry.created_by == 'FORUM_SYNC'
-        ).order_by(KnowledgeEntry.created_at.desc()).limit(1)
-        
-        result = await db.execute(query)
-        last_sync = result.scalar_one_or_none()
-        
-        if last_sync and (datetime.now() - last_sync.created_at) < timedelta(hours=24):
-            logger.info("[ExternalKnowledge] Skipping sync - synced within 24h")
-            results["skipped"] = True
-            return results
-    
-    try:
-        # Import academic knowledge (idempotent)
-        academic = await import_academic_knowledge(db)
-        results["academic_entries"] = academic
-    except Exception as e:
-        logger.error(f"[ExternalKnowledge] Academic import failed: {e}")
-        results["errors"].append(f"Academic: {str(e)}")
-    
-    # Forum sync (if MCP available)
-    if mcp_client:
-        try:
-            syncer = ExternalKnowledgeSyncer(db, mcp_client)
-            forum = await syncer.sync_forum_posts()
-            results["forum_entries"] = forum
-        except Exception as e:
-            logger.error(f"[ExternalKnowledge] Forum sync failed: {e}")
-            results["errors"].append(f"Forum: {str(e)}")
-    
-    logger.info(
-        f"[ExternalKnowledge] Scheduled sync complete | "
-        f"academic={results['academic_entries']} forum={results['forum_entries']}"
-    )
-    
-    return results

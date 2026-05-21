@@ -203,6 +203,28 @@ class MiningAgent:
         from backend.services.alpha_service import AlphaService
         alpha_service = AlphaService(self.db)
 
+        # G2 Phase A (2026-05-19): set the cost_tracker round contextvar so
+        # every LLMService.call inside this iteration's workflow accumulates
+        # into a per-round bucket, then batch-INSERT to llm_call_log at the
+        # end (flush_round_async). flag-gated inside the tracker — when
+        # ENABLE_COST_TELEMETRY=False the contextvar set still happens but
+        # record_llm_call no-ops and flush is a no-op too (cheap idempotent).
+        from backend.cost_tracker import (
+            begin_round as _cost_begin_round,
+            end_round as _cost_end_round,
+            flush_round_async as _cost_flush_round_async,
+        )
+        _cost_token = _cost_begin_round(
+            task_id=getattr(task, "id", None),
+            run_id=run_id,
+            round_idx=iteration,
+            dataset_id=dataset_id,
+            # pillar best-effort from strategy (P2-C may have stamped it);
+            # node-level pillar_hint isn't known until node_hypothesis runs
+            # so this is a coarse approximation.
+            pillar=getattr(strategy, "regime", None),
+        )
+
         try:
             # Run workflow with strategy context
             result = await self._workflow.run_with_persistence(
@@ -242,19 +264,215 @@ class MiningAgent:
             generated_alphas = await self._collect_iteration_alphas(
                 task.id, result.get("generated_alphas", [])
             )
-            
+
             logger.info(
                 f"[MiningAgent] Iteration {iteration} complete | "
                 f"alphas={len(generated_alphas)} "
                 f"failures={len(result.get('failures', []))}"
             )
-            
+
+            # G5 Phase A (2026-05-19): round-end trajectory crossover.
+            # When ENABLE_G5_CROSSOVER ON, select 2 high-reward PASS alpha
+            # from this task's recent pool → call llm_crossover_alpha → log
+            # to g5_crossover_log + persist offspring on task.config so the
+            # NEXT round's _run_one_round_inline consumes them and node_code_gen
+            # prepends to pending_alphas. Soft-fail全链: 任何异常 → 跳过 G5
+            # → round 结果不受影响。
+            try:
+                from backend.config import settings as _g5_settings
+                if bool(getattr(_g5_settings, "ENABLE_G5_CROSSOVER", False)):
+                    await self._maybe_run_g5_crossover(
+                        task=task, run_id=run_id, iteration=iteration,
+                    )
+            except Exception as _g5_ex:
+                logger.warning(
+                    f"[MiningAgent] G5 crossover round-end hook failed "
+                    f"(non-fatal): {_g5_ex}"
+                )
+
             return generated_alphas
-            
+
         except Exception as e:
             logger.error(f"[MiningAgent] Iteration {iteration} failed: {e}")
             raise
-    
+        finally:
+            # G2 Phase A — flush whatever calls accumulated regardless of
+            # whether the iteration raised. soft-fail in tracker keeps this
+            # try/finally pattern free of secondary except.
+            try:
+                await _cost_flush_round_async(self.db)
+            finally:
+                _cost_end_round(_cost_token)
+
+    async def _maybe_run_g5_crossover(
+        self,
+        task: MiningTask,
+        run_id: Optional[int],
+        iteration: int,
+    ) -> None:
+        """G5 Phase A round-end hook (2026-05-19).
+
+        Selects 2 high-reward PASS alpha from this task's recent pool, calls
+        LLM crossover, logs every call to g5_crossover_log, and persists
+        offspring on task.config['g5_pending_offspring'] for next-round
+        consumption.
+
+        Selection rules (all gated by settings):
+          - PASS / PASS_PROVISIONAL only
+          - sharpe ≥ G5_CROSSOVER_MIN_PARENT_SHARPE
+          - same task + region (cross-task carry handled separately by G8)
+          - last G5_CROSSOVER_LOOKBACK_ROUNDS rounds
+          - distinct hypothesis_id (different signal sources, not just
+            wrappers of the same hypothesis)
+          - when G5_CROSSOVER_REQUIRE_DIFFERENT_PILLAR, exclude same-pillar
+            pairs (force diversity per Hubble v2 anti-decay)
+
+        Soft-fail全链: any exception logged but never bubbles into the
+        outer round.
+        """
+        from backend.config import settings as _g5_stg
+        from backend.models import Alpha, Hypothesis, G5CrossoverLog
+        from backend.agents.graph.nodes.g5_persistence import (
+            persist_offspring_after_round,
+        )
+        from backend.agents.llm_crossover_alpha import llm_crossover_alpha
+        from sqlalchemy import select as _sa_select, desc as _sa_desc
+
+        min_sh = float(getattr(_g5_stg, "G5_CROSSOVER_MIN_PARENT_SHARPE", 1.25))
+        lookback = int(getattr(_g5_stg, "G5_CROSSOVER_LOOKBACK_ROUNDS", 10))
+        top_k = int(getattr(_g5_stg, "G5_CROSSOVER_TOP_K_OFFSPRING", 2))
+        require_diff_pillar = bool(getattr(
+            _g5_stg, "G5_CROSSOVER_REQUIRE_DIFFERENT_PILLAR", True,
+        ))
+
+        # Pull recent PASS alphas for this task + region. limit kept loose so
+        # we have headroom to filter for distinct hypothesis_id + pillar.
+        stmt = (
+            _sa_select(Alpha, Hypothesis)
+            .outerjoin(Hypothesis, Alpha.hypothesis_id == Hypothesis.id)
+            .where(
+                Alpha.task_id == task.id,
+                Alpha.region == task.region,
+                Alpha.quality_status.in_(["PASS", "PASS_PROVISIONAL"]),
+                Alpha.is_sharpe.isnot(None),
+                Alpha.is_sharpe >= min_sh,
+            )
+            .order_by(_sa_desc(Alpha.is_sharpe))
+            .limit(20)
+        )
+        rows = (await self.db.execute(stmt)).all()
+        if len(rows) < 2:
+            logger.debug(
+                f"[MiningAgent] G5 skip: only {len(rows)} PASS alpha "
+                f"≥ sharpe {min_sh:.2f} in task {task.id}"
+            )
+            return
+
+        # Pick best pair: highest-sharpe + first one with distinct
+        # hypothesis_id (and pillar if required). Falls back to top-2 if
+        # the diversity constraint can't be satisfied.
+        alpha_a, hyp_a = rows[0]
+        alpha_b = None
+        hyp_b = None
+        for cand_alpha, cand_hyp in rows[1:]:
+            if cand_alpha.hypothesis_id is not None and (
+                cand_alpha.hypothesis_id == alpha_a.hypothesis_id
+            ):
+                continue
+            if require_diff_pillar and hyp_a is not None and cand_hyp is not None:
+                if hyp_a.pillar and cand_hyp.pillar and hyp_a.pillar == cand_hyp.pillar:
+                    continue
+            alpha_b = cand_alpha
+            hyp_b = cand_hyp
+            break
+        if alpha_b is None:
+            # Fallback to top-2 without diversity constraint
+            _alpha_b_raw, _hyp_b_raw = rows[1]
+            alpha_b = _alpha_b_raw
+            hyp_b = _hyp_b_raw
+            logger.info(
+                f"[MiningAgent] G5 diversity constraint not met, falling back "
+                f"to top-2 (task {task.id})"
+            )
+
+        # Build parent metrics dicts for the prompt
+        def _metrics_for(alpha):
+            return {
+                "sharpe": alpha.is_sharpe,
+                "fitness": alpha.is_fitness,
+                "turnover": alpha.is_turnover,
+            }
+
+        # Call LLM crossover
+        llm_service = (
+            self._workflow.llm_service if hasattr(self, "_workflow") else None
+        )
+        if llm_service is None:
+            logger.warning("[MiningAgent] G5 skip: no llm_service available")
+            return
+
+        offspring = await llm_crossover_alpha(
+            alpha_a.expression or "",
+            alpha_b.expression or "",
+            region=task.region,
+            llm_service=llm_service,
+            parent_a_metrics=_metrics_for(alpha_a),
+            parent_b_metrics=_metrics_for(alpha_b),
+            parent_a_pillar=getattr(hyp_a, "pillar", None) if hyp_a else None,
+            parent_b_pillar=getattr(hyp_b, "pillar", None) if hyp_b else None,
+            top_k=top_k,
+        )
+
+        # Always write log row — even empty offspring (visibility into LLM
+        # rejection rate). Soft-fail on DB issue.
+        try:
+            log_row = G5CrossoverLog(
+                task_id=task.id,
+                run_id=run_id,
+                round_idx=iteration,
+                region=task.region,
+                parent_a_alpha_id=alpha_a.id,
+                parent_b_alpha_id=alpha_b.id,
+                parent_a_sharpe=alpha_a.is_sharpe,
+                parent_b_sharpe=alpha_b.is_sharpe,
+                parent_a_pillar=getattr(hyp_a, "pillar", None) if hyp_a else None,
+                parent_b_pillar=getattr(hyp_b, "pillar", None) if hyp_b else None,
+                offspring_count=len(offspring),
+                offspring_expressions=offspring if offspring else None,
+                llm_model=getattr(llm_service, "model", None),
+                error_kind=None if offspring else "no_valid_offspring",
+            )
+            self.db.add(log_row)
+            await self.db.commit()
+        except Exception as _log_ex:
+            logger.warning(f"[MiningAgent] G5 log write failed (non-fatal): {_log_ex}")
+            try:
+                await self.db.rollback()
+            except Exception:
+                pass
+
+        if not offspring:
+            return
+
+        # Persist for next-round consume — annotate each with parent ids/sharpe
+        # so the consume side can stamp alpha.metrics without re-querying.
+        stash = [
+            {
+                **o,
+                "parent_a_alpha_id": alpha_a.id,
+                "parent_b_alpha_id": alpha_b.id,
+                "parent_a_sharpe": alpha_a.is_sharpe,
+                "parent_b_sharpe": alpha_b.is_sharpe,
+            }
+            for o in offspring
+        ]
+        await persist_offspring_after_round(task, self.db, stash)
+        logger.info(
+            f"[MiningAgent] G5 round-end crossover | task={task.id} "
+            f"round={iteration} parents=({alpha_a.id},{alpha_b.id}) "
+            f"offspring={len(offspring)} stashed for next round"
+        )
+
     def _apply_field_filters(
         self,
         fields: List[Dict],
@@ -1185,6 +1403,7 @@ class MiningAgent:
                 max_iterations=max_iterations,
                 hypothesis_ids=hypothesis_ids,
                 experiment_variant=experiment_variant,
+                task_id=task.id,
             )
             
             # Mark failures as analyzed
@@ -1217,7 +1436,11 @@ class MiningAgent:
         
         This is the Chain-of-Alpha style optimization loop.
         """
-        from backend.optimization_chain import generate_local_rewrites, generate_settings_variants
+        from backend.optimization_chain import (
+            generate_local_rewrites,
+            generate_settings_variants,
+            OptimizationContext,
+        )
         
         logger.info(f"[MiningAgent] Running optimization chain on {len(candidates)} candidates")
         
@@ -1238,12 +1461,25 @@ class MiningAgent:
                     max_variants=10
                 )
                 
-                # Generate settings variants
-                settings_variants = generate_settings_variants({
-                    "neutralization": "INDUSTRY",
-                    "decay": 4,
-                    "truncation": 0.02
-                })
+                # Generate settings variants. Pass turnover context so the
+                # turnover-targeted decay (Gap 2) is tried first on a 3-slot
+                # USER account. turnover may be flat or nested under 'is'.
+                _turnover = (
+                    metrics.get("turnover")
+                    or (metrics.get("is", {}) or {}).get("turnover")
+                    or 0.0
+                )
+                settings_variants = generate_settings_variants(
+                    {
+                        "neutralization": "INDUSTRY",
+                        "decay": 4,
+                        "truncation": 0.02,
+                    },
+                    context=OptimizationContext(
+                        expression=expression,
+                        turnover=float(_turnover or 0.0),
+                    ),
+                )
                 
                 # Simulate top variants (budget-limited)
                 await self._simulate_optimization_variants(

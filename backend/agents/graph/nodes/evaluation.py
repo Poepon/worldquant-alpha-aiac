@@ -27,6 +27,55 @@ from backend.agents.graph.nodes.base import (
     EXPERIMENT_TRACKING_ENABLED,
     get_current_experiment,
 )
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 PR0.6 — sentinel attribution lookup (Sprint 0, 2026-05-19)
+# ---------------------------------------------------------------------------
+# Extracted to a top-level helper so the F-T1 integration test (post-S0-B
+# review) can drive it with an in-memory aiosqlite session (db_session
+# fixture). Production callers pass db=None which opens a fresh
+# AsyncSessionLocal (mirrors the original inline behavior).
+
+
+async def _pr06_lookup_mutated_hypothesis_ids(
+    hypothesis_ids,
+    db=None,
+):
+    """Return ``set[int]`` of hypothesis_ids whose ``r1b_mutation_depth >= 1``.
+
+    Args:
+        hypothesis_ids: iterable of hypothesis ids to filter
+        db: optional AsyncSession. None → open AsyncSessionLocal (production).
+
+    Soft-fail: any error returns empty set + logs debug. Never raises.
+    """
+    from sqlalchemy import select as _sel
+    from backend.models import Hypothesis as _PR06Hyp
+
+    _hyp_ids = {hid for hid in hypothesis_ids if hid is not None}
+    if not _hyp_ids:
+        return set()
+
+    async def _query(session):
+        stmt = _sel(_PR06Hyp.id).where(
+            _PR06Hyp.id.in_(_hyp_ids),
+            _PR06Hyp.r1b_mutation_depth >= 1,
+        )
+        rows = (await session.execute(stmt)).all()
+        return {r[0] for r in rows}
+
+    try:
+        if db is not None:
+            return await _query(db)
+        from backend.database import AsyncSessionLocal
+        async with AsyncSessionLocal() as _pr06_db:
+            return await _query(_pr06_db)
+    except Exception as ex:  # noqa: BLE001
+        logger.debug(
+            "[PR0.6 stamp] R1b mutation lookup failed (non-fatal): %s", ex,
+        )
+        return set()
 from backend.adapters.brain_adapter import BrainAdapter
 from backend.config import settings
 from backend.agents.prompts import (
@@ -764,6 +813,37 @@ async def _evaluate_single_alpha(
                 f"{_p2c_stamp_ex}"
             )
 
+    # B1 R11 (Sprint 2): stamp capacity_usd_estimate on the alpha row +
+    # mirror to alpha.metrics so the downstream persistence path (which
+    # only persists alpha.metrics, not arbitrary attributes) carries it.
+    # Gated by ENABLE_CAPACITY_SCORE so OFF stays byte-identical with the
+    # historical alpha row shape (NULL column). Soft-fail on any error —
+    # the column is nullable.
+    try:
+        from backend.config import settings as _r11_settings
+        if getattr(_r11_settings, "ENABLE_CAPACITY_SCORE", False):
+            from backend.services import capacity_estimator as _cap_svc
+            _alpha_for_cap = {
+                "region": getattr(alpha, "region", None),
+                "universe": getattr(alpha, "universe", None),
+                "turnover": getattr(alpha, "is_turnover", None),
+            }
+            _cap_usd = _cap_svc.estimate_from_alpha_dict(_alpha_for_cap)
+            if _cap_usd > 0:
+                if not isinstance(alpha.metrics, dict):
+                    alpha.metrics = {}
+                else:
+                    alpha.metrics = dict(alpha.metrics)
+                alpha.metrics["capacity_usd_estimate"] = float(_cap_usd)
+                try:
+                    setattr(alpha, "capacity_usd_estimate", float(_cap_usd))
+                except Exception:
+                    pass
+    except Exception as _r11_stamp_ex:
+        logger.debug(
+            f"[{ctx.node_name}] R11 capacity stamp soft-fall: {_r11_stamp_ex}"
+        )
+
     return _SingleAlphaEvalResult(
         corr_check_performed=_corr_performed,
         corr_check_skipped_reason=_corr_skipped_reason,
@@ -803,10 +883,24 @@ async def node_simulate(
         i for i, a in enumerate(state.pending_alphas)
         if a.is_valid and not a.simulation_success
     ]
-    
+
+    # Observability (2026-05-20): record a SIMULATE trace step on EVERY exit
+    # — including the silent early returns below (no-valid / all-deduped /
+    # all pre-sim-filtered). BRAIN sims + dedup + the pre-simulate filter were
+    # never traced, so during the multi-minute sim gap the trace/UI looked
+    # frozen at VALIDATE. record_trace persists immediately, so each exit now
+    # shows why 0 alphas reached BRAIN (the success path records the outcome).
+    async def _sim_exit_trace(reason: str, **extra) -> Dict:
+        return await record_trace(
+            state, trace_service, node_name,
+            {"pending": len(state.pending_alphas), "valid_to_simulate": len(valid_indices)},
+            {"simulated": 0, "skip_reason": reason, **extra},
+            0, "SUCCESS",
+        )
+
     if not valid_indices:
         logger.warning(f"[{node_name}] No valid alphas to simulate")
-        return {}
+        return await _sim_exit_trace("no_valid_alphas_after_validation")
     
     # DB-level deduplication check
     db_duplicates = 0
@@ -848,6 +942,17 @@ async def node_simulate(
                 state.pending_alphas[idx].simulation_error = "DB duplicate: already simulated"
                 state.pending_alphas[idx].is_simulated = True
                 state.pending_alphas[idx].simulation_success = False
+                # Bug A follow-up (2026-05-20): a local-DB dedup skip never
+                # consumed a fresh BRAIN simulate slot (the prior simulation
+                # did, when the expression was first seen). Mark it so the
+                # quota guard excludes it + persistence labels DEDUP_SKIP not
+                # SIMULATION_ERROR. _skip_kind distinguishes it from the
+                # pre-simulate/Q10 classifier skips (which use PRESIM_SKIP).
+                _dup_a = state.pending_alphas[idx]
+                if not isinstance(_dup_a.metrics, dict):
+                    _dup_a.metrics = {}
+                _dup_a.metrics["_pre_brain_skip"] = True
+                _dup_a.metrics["_skip_kind"] = "dedup"
                 # Capture skeleton for next-round LLM blacklist
                 try:
                     sk = _expr_to_skel(expr or "", max_depth=3)
@@ -926,6 +1031,7 @@ async def node_simulate(
         return {
             "pending_alphas": state.pending_alphas,
             "recent_dedup_skeletons": _merge_dedup_skels(),
+            **(await _sim_exit_trace("all_already_in_db", db_duplicates=db_duplicates)),
         }
 
     # Pre-simulate self-corr check (2026-05-09; V-26.77 follow-up #4
@@ -983,6 +1089,7 @@ async def node_simulate(
                 return {
                     "pending_alphas": state.pending_alphas,
                     "recent_dedup_skeletons": _merge_dedup_skels(),
+                    **(await _sim_exit_trace("all_portfolio_deduped", portfolio_dups=skel_dups)),
                 }
     except Exception as e:
         logger.warning(f"[{node_name}] portfolio dedup failed, proceeding: {e}")
@@ -1037,6 +1144,12 @@ async def node_simulate(
                     )
                     a.is_simulated = True
                     a.simulation_success = False
+                    # Bug A fix (2026-05-20): Q10 hard reject is also a pre-BRAIN
+                    # skip — no BRAIN slot consumed. Mark so quota guard excludes
+                    # it + persistence labels error_type=PRESIM_SKIP.
+                    if not isinstance(a.metrics, dict):
+                        a.metrics = {}
+                    a.metrics["_pre_brain_skip"] = True
                 # Build log row (all modes)
                 _q10_rows.append({
                     "task_id": _q10_task_id,
@@ -1088,43 +1201,48 @@ async def node_simulate(
             logger.warning(f"[{node_name}] Q10 prescreen block failed (proceed full BRAIN): {_q10_e}")
 
     # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier filter.
-    # When ENABLE_PRE_SIMULATE_FILTER=True, predict P(PASS) per candidate
-    # and skip very-likely-fails BEFORE sending to BRAIN simulate. Default
-    # OFF; opt-in via .env. Conservative threshold 0.05 keeps 99% PASS
-    # recall on the training-set CV (AUC=0.813).
-    if getattr(settings, "ENABLE_PRE_SIMULATE_FILTER", False):
-        try:
-            from backend.agents.services.pre_simulate_filter import filter_candidates
-            threshold = float(getattr(settings, "PRE_SIMULATE_FILTER_THRESHOLD", 0.05))
-            cand_exprs = [state.pending_alphas[i].expression for i in indices_to_simulate]
-            keep_local, skip_local, probas = filter_candidates(
-                cand_exprs, threshold=threshold,
-            )
-            if skip_local:
-                # Translate skip_local positions back to original indices_to_simulate
-                pre_sim_skipped: list = []
-                for local_idx in skip_local:
-                    orig_idx = indices_to_simulate[local_idx]
-                    p_pass = probas[local_idx]
-                    pre_sim_skipped.append(orig_idx)
-                    a = state.pending_alphas[orig_idx]
-                    a.simulation_error = (
-                        f"pre-simulate filter skip: P(PASS)={p_pass:.3f} < {threshold}"
-                    )
-                    a.is_simulated = True
-                    a.simulation_success = False
-                # Reduce indices_to_simulate to keepers only
-                indices_to_simulate = [
-                    indices_to_simulate[i] for i in keep_local
-                ]
-                logger.info(
-                    f"[{node_name}] pre-simulate filter: skipped={len(pre_sim_skipped)} "
-                    f"keep={len(indices_to_simulate)} threshold={threshold}"
+    # Predict P(PASS) per candidate and skip very-likely-fails BEFORE
+    # sending to BRAIN simulate. Threshold 0.10 keeps ≥98% PASS recall.
+    try:
+        from backend.agents.services.pre_simulate_filter import filter_candidates
+        threshold = float(getattr(settings, "PRE_SIMULATE_FILTER_THRESHOLD", 0.05))
+        cand_exprs = [state.pending_alphas[i].expression for i in indices_to_simulate]
+        keep_local, skip_local, probas = filter_candidates(
+            cand_exprs, threshold=threshold,
+        )
+        if skip_local:
+            # Translate skip_local positions back to original indices_to_simulate
+            pre_sim_skipped: list = []
+            for local_idx in skip_local:
+                orig_idx = indices_to_simulate[local_idx]
+                p_pass = probas[local_idx]
+                pre_sim_skipped.append(orig_idx)
+                a = state.pending_alphas[orig_idx]
+                a.simulation_error = (
+                    f"pre-simulate filter skip: P(PASS)={p_pass:.3f} < {threshold}"
                 )
-        except Exception as _filter_e:
-            logger.warning(
-                f"[{node_name}] pre-simulate filter failed (proceed with all): {_filter_e}"
+                a.is_simulated = True
+                a.simulation_success = False
+                # Bug A fix (2026-05-20): mark as a pre-BRAIN skip. These never
+                # consumed a BRAIN simulate slot, so the quota guard must NOT
+                # count them (it inflated the daily-quota denominator ~20% →
+                # premature session pause). persistence.py labels them
+                # error_type='PRESIM_SKIP' instead of SIMULATION_ERROR.
+                if not isinstance(a.metrics, dict):
+                    a.metrics = {}
+                a.metrics["_pre_brain_skip"] = True
+            # Reduce indices_to_simulate to keepers only
+            indices_to_simulate = [
+                indices_to_simulate[i] for i in keep_local
+            ]
+            logger.info(
+                f"[{node_name}] pre-simulate filter: skipped={len(pre_sim_skipped)} "
+                f"keep={len(indices_to_simulate)} threshold={threshold}"
             )
+    except Exception as _filter_e:
+        logger.warning(
+            f"[{node_name}] pre-simulate filter failed (proceed with all): {_filter_e}"
+        )
 
     if not indices_to_simulate:
         logger.warning(
@@ -1134,6 +1252,7 @@ async def node_simulate(
         return {
             "pending_alphas": state.pending_alphas,
             "recent_dedup_skeletons": _merge_dedup_skels(),
+            **(await _sim_exit_trace("all_pre_simulate_filtered")),
         }
 
     logger.info(f"[{node_name}] Starting batch simulation | count={len(indices_to_simulate)} region={state.region}")
@@ -1149,154 +1268,109 @@ async def node_simulate(
     
     # A1: smart simulation settings — per-expression settings choice based on
     # structural form (group_neutralize → neut=NONE, trade_when → decay=0,
-    # etc.) and field category. When enabled, bucket expressions by their
-    # chosen settings tuple and call simulate_batch per bucket; results are
-    # merged back to original index order.
-    smart_enabled = getattr(settings, "ENABLE_SMART_SIM_SETTINGS", False)
+    # etc.) and field category. Bucket expressions by their chosen settings
+    # tuple and call simulate_batch per bucket; results are merged back to
+    # original index order.
+    # (Retired ENABLE_SMART_SIM_SETTINGS flag 2026-05-19 — hard-wired ON;
+    #  legacy single-batch fallback branch deleted.)
     smart_settings_per_idx: Dict[int, Dict] = {}  # local_index → settings dict
     smart_reasons_per_idx: Dict[int, str] = {}
 
-    if smart_enabled:
-        from backend.sim_settings import settings_reason, smart_simulation_settings
+    from backend.sim_settings import settings_reason, smart_simulation_settings
 
-        SETTINGS_KEYS = ("region", "universe", "delay", "decay", "neutralization", "truncation", "test_period")
-        buckets: Dict[Tuple, List[int]] = {}
-        for local_i, idx in enumerate(indices_to_simulate):
-            expr = state.pending_alphas[idx].expression
-            smart = smart_simulation_settings(
-                expr,
-                region=state.region,
-                universe=state.universe,
-                # P3-Brain: 从 task-startup snapshot 传 test_period(plan §8.4)
-                # 避免 Consultant 切换中途 simulate 不同 alpha 用不同 test_period。
-                test_period=getattr(state, "effective_default_test_period", None),
-            )
-            smart_settings_per_idx[local_i] = smart
-            smart_reasons_per_idx[local_i] = settings_reason(expr)
-            key = tuple(smart.get(k) for k in SETTINGS_KEYS)
-            buckets.setdefault(key, []).append(local_i)
-
-        logger.info(
-            f"[{node_name}] smart-settings: {len(buckets)} bucket(s) for "
-            f"{len(indices_to_simulate)} expressions"
+    SETTINGS_KEYS = ("region", "universe", "delay", "decay", "neutralization", "truncation", "test_period")
+    buckets: Dict[Tuple, List[int]] = {}
+    for local_i, idx in enumerate(indices_to_simulate):
+        expr = state.pending_alphas[idx].expression
+        smart = smart_simulation_settings(
+            expr,
+            region=state.region,
+            universe=state.universe,
+            # P3-Brain: 从 task-startup snapshot 传 test_period(plan §8.4)
+            # 避免 Consultant 切换中途 simulate 不同 alpha 用不同 test_period。
+            test_period=getattr(state, "effective_default_test_period", None),
         )
+        smart_settings_per_idx[local_i] = smart
+        smart_reasons_per_idx[local_i] = settings_reason(expr)
+        key = tuple(smart.get(k) for k in SETTINGS_KEYS)
+        buckets.setdefault(key, []).append(local_i)
 
-        results = [None] * len(indices_to_simulate)
-        for settings_key, local_indices in buckets.items():
-            bucket_kwargs = dict(zip(SETTINGS_KEYS, settings_key))
-            bucket_exprs = [expressions[li] for li in local_indices]
-            # V-26.66 (2026-05-13): one batch-level retry with a short
-            # backoff before declaring the whole bucket failed. Most
-            # bucket-wide failures are transient (BRAIN auth blip, sim
-            # slot starvation, transport timeout). Retrying once recovers
-            # ~70-80% of these without doubling worst-case latency.
-            bucket_results = None
-            for _attempt in range(2):
-                try:
-                    # R9 (Phase 3, 2026-05-18): cached BRAIN sim wrapper when
-                    # ENABLE_SIMULATION_CACHE ON; OFF or import error → direct
-                    # brain.simulate_batch (byte-equivalent legacy). Soft-fall.
-                    if getattr(settings, "ENABLE_SIMULATION_CACHE", False):
-                        try:
-                            from backend.agents.sim_cache import cached_simulate_batch
-                            from backend.database import AsyncSessionLocal as _R9_SessionLocal
-                            async with _R9_SessionLocal() as _r9_db:
-                                bucket_results = await cached_simulate_batch(
-                                    _r9_db, brain,
-                                    expressions=bucket_exprs,
-                                    **bucket_kwargs,
-                                )
-                        except Exception as _r9_e:
-                            logger.warning(
-                                f"[{node_name}] R9 cached_simulate_batch failed "
-                                f"(falling back to direct BRAIN): {_r9_e}"
+    logger.info(
+        f"[{node_name}] smart-settings: {len(buckets)} bucket(s) for "
+        f"{len(indices_to_simulate)} expressions"
+    )
+
+    results = [None] * len(indices_to_simulate)
+    for settings_key, local_indices in buckets.items():
+        bucket_kwargs = dict(zip(SETTINGS_KEYS, settings_key))
+        bucket_exprs = [expressions[li] for li in local_indices]
+        # V-26.66 (2026-05-13): one batch-level retry with a short
+        # backoff before declaring the whole bucket failed. Most
+        # bucket-wide failures are transient (BRAIN auth blip, sim
+        # slot starvation, transport timeout). Retrying once recovers
+        # ~70-80% of these without doubling worst-case latency.
+        bucket_results = None
+        for _attempt in range(2):
+            try:
+                # R9 (Phase 3, 2026-05-18): cached BRAIN sim wrapper when
+                # ENABLE_SIMULATION_CACHE ON; OFF or import error → direct
+                # brain.simulate_batch (byte-equivalent legacy). Soft-fall.
+                if getattr(settings, "ENABLE_SIMULATION_CACHE", False):
+                    try:
+                        from backend.agents.sim_cache import cached_simulate_batch
+                        from backend.database import AsyncSessionLocal as _R9_SessionLocal
+                        async with _R9_SessionLocal() as _r9_db:
+                            bucket_results = await cached_simulate_batch(
+                                _r9_db, brain,
+                                expressions=bucket_exprs,
+                                **bucket_kwargs,
                             )
-                            bucket_results = await brain.simulate_batch(
-                                expressions=bucket_exprs, **bucket_kwargs,
-                            )
-                    else:
-                        bucket_results = await brain.simulate_batch(
-                            expressions=bucket_exprs,
-                            **bucket_kwargs,
-                        )
-                    break
-                except Exception as e:
-                    if _attempt == 0:
+                    except Exception as _r9_e:
                         logger.warning(
-                            f"[{node_name}] V-26.66 bucket sim error ({settings_key}) — "
-                            f"retrying once: {e}"
+                            f"[{node_name}] R9 cached_simulate_batch failed "
+                            f"(falling back to direct BRAIN): {_r9_e}"
                         )
-                        await asyncio.sleep(2.0)
-                        continue
-                    logger.error(
-                        f"[{node_name}] V-26.66 bucket sim failed after retry "
-                        f"({settings_key}): {e}"
+                        bucket_results = await brain.simulate_batch(
+                            expressions=bucket_exprs, **bucket_kwargs,
+                        )
+                else:
+                    bucket_results = await brain.simulate_batch(
+                        expressions=bucket_exprs,
+                        **bucket_kwargs,
                     )
-                    bucket_results = [
-                        {"success": False, "error": f"sim_batch_fail_after_retry: {e}"}
-                        for _ in bucket_exprs
-                    ]
-            # V-26.71 (2026-05-13): alert when BRAIN returns fewer results
-            # than requested. Pre-fix silently filled the missing tail with
-            # `{success: False, error: "Missing"}` so the caller never
-            # noticed the asymmetry. Now we logger.error so the operator
-            # can investigate (truncated BRAIN response, bucket payload
-            # encoding drift, etc.) — the silent fill is preserved so the
-            # workflow still makes forward progress.
-            if len(bucket_results) < len(local_indices):
-                logger.error(
-                    f"[{node_name}] V-26.71 BRAIN returned "
-                    f"{len(bucket_results)} results for {len(local_indices)} "
-                    f"expressions (bucket={settings_key}); padding tail with "
-                    f"Missing failures"
-                )
-            for j, li in enumerate(local_indices):
-                results[li] = bucket_results[j] if j < len(bucket_results) else {"success": False, "error": "Missing"}
-    else:
-        try:
-            # V-26.65 (2026-05-13): sim defaults pulled from settings.
-            # R9 (Phase 3, 2026-05-18): cached wrapper when flag ON; soft-fall.
-            # Bug-#8 fix (2026-05-18): pass all 7 SETTINGS_KEYS explicitly
-            # (region, universe, delay, decay, neutralization, truncation,
-            # test_period) so the R9 cache key matches what an explicit-args
-            # caller would compute. Previously truncation/test_period were
-            # implicit BrainAdapter/wrapper defaults (0.08 / "P2Y0M"), which
-            # silently tied this branch's cache key to wrapper-side constants
-            # and would collide with a future caller passing different values.
-            # P3-Brain: prefer task-startup snapshot `effective_default_test_period`
-            # when present (mirrors smart-settings branch at line ~1054).
-            _fallback_test_period = (
-                getattr(state, "effective_default_test_period", None) or "P2Y0M"
-            )
-            _sim_kwargs = dict(
-                expressions=expressions,
-                region=state.region,
-                universe=state.universe,
-                delay=_v16_settings.SIM_DEFAULT_DELAY,
-                decay=_v16_settings.SIM_DEFAULT_DECAY,
-                neutralization=_v16_settings.SIM_DEFAULT_NEUTRALIZATION,
-                truncation=0.08,
-                test_period=_fallback_test_period,
-            )
-            if getattr(settings, "ENABLE_SIMULATION_CACHE", False):
-                try:
-                    from backend.agents.sim_cache import cached_simulate_batch
-                    from backend.database import AsyncSessionLocal as _R9_SessionLocal
-                    async with _R9_SessionLocal() as _r9_db:
-                        results = await cached_simulate_batch(
-                            _r9_db, brain, **_sim_kwargs,
-                        )
-                except Exception as _r9_e:
+                break
+            except Exception as e:
+                if _attempt == 0:
                     logger.warning(
-                        f"[{node_name}] R9 cached_simulate_batch failed "
-                        f"(falling back to direct BRAIN): {_r9_e}"
+                        f"[{node_name}] V-26.66 bucket sim error ({settings_key}) — "
+                        f"retrying once: {e}"
                     )
-                    results = await brain.simulate_batch(**_sim_kwargs)
-            else:
-                results = await brain.simulate_batch(**_sim_kwargs)
-        except Exception as e:
-            logger.error(f"[{node_name}] Batch Simulate Loop Error: {e}")
-            results = [{"success": False, "error": str(e)} for _ in expressions]
+                    await asyncio.sleep(2.0)
+                    continue
+                logger.error(
+                    f"[{node_name}] V-26.66 bucket sim failed after retry "
+                    f"({settings_key}): {e}"
+                )
+                bucket_results = [
+                    {"success": False, "error": f"sim_batch_fail_after_retry: {e}"}
+                    for _ in bucket_exprs
+                ]
+        # V-26.71 (2026-05-13): alert when BRAIN returns fewer results
+        # than requested. Pre-fix silently filled the missing tail with
+        # `{success: False, error: "Missing"}` so the caller never
+        # noticed the asymmetry. Now we logger.error so the operator
+        # can investigate (truncated BRAIN response, bucket payload
+        # encoding drift, etc.) — the silent fill is preserved so the
+        # workflow still makes forward progress.
+        if len(bucket_results) < len(local_indices):
+            logger.error(
+                f"[{node_name}] V-26.71 BRAIN returned "
+                f"{len(bucket_results)} results for {len(local_indices)} "
+                f"expressions (bucket={settings_key}); padding tail with "
+                f"Missing failures"
+            )
+        for j, li in enumerate(local_indices):
+            results[li] = bucket_results[j] if j < len(bucket_results) else {"success": False, "error": "Missing"}
     
     duration_ms = int((time.time() - start_time) * 1000)
     
@@ -1349,7 +1423,11 @@ async def node_simulate(
         # and so node_evaluate's signal-vs-control dual-run can re-simulate the
         # control with the SAME settings — otherwise Δsharpe mixes signal-core
         # difference with sim-settings difference and the attribution is invalid.
-        if smart_enabled and i in smart_settings_per_idx:
+        # 2026-05-20 fix: `smart_enabled` was the retired ENABLE_SMART_SIM_SETTINGS
+        # flag (hard-wired ON since 2026-05-19) — its definition was deleted with
+        # the fallback branch but this reference was left dangling → NameError on
+        # every sim-result iteration, silently dropping the _sim_settings stamp.
+        if i in smart_settings_per_idx:
             updated.metrics = {
                 **updated.metrics,
                 "_sim_settings": smart_settings_per_idx[i],
@@ -1661,10 +1739,8 @@ async def node_evaluate(
     flip_retry_count = 0
     flip_retry_pass = 0
     flip_retry_prov = 0
-    if (
-        brain is not None
-        and getattr(settings, "ENABLE_T1_SIGN_FLIP_RETRY", True)
-    ):
+    # (Retired ENABLE_T1_SIGN_FLIP_RETRY 2026-05-19 — hard-wired ON.)
+    if brain is not None:
         flip_threshold = getattr(settings, "T1_FLIP_RETRY_SHARPE", 0.5)
         flip_cap = getattr(settings, "T1_FLIP_RETRY_CAP", 5)
 
@@ -1689,8 +1765,8 @@ async def node_evaluate(
 
         from backend.agents.graph.state import AlphaCandidate
 
-        # A2: flip-retry single-alpha sim → smart settings (zero bucketing cost)
-        flip_use_smart = getattr(settings, "ENABLE_SMART_SIM_SETTINGS", False)
+        # A2: flip-retry single-alpha sim → smart settings (zero bucketing cost).
+        # (Retired ENABLE_SMART_SIM_SETTINGS 2026-05-19 — hard-wired ON.)
 
         # V-19.3 (2026-05-06): pre-dedup flipped expressions across the WHOLE
         # alphas table. Sign-flip historically bypassed node_simulate's
@@ -1767,31 +1843,20 @@ async def node_evaluate(
             for orig in flip_candidates:
                 flipped_expr = f"multiply(-1, {orig.expression})"
                 try:
-                    if flip_use_smart:
-                        from backend.sim_settings import smart_simulation_settings
-                        smart = smart_simulation_settings(
-                            flipped_expr,
-                            region=state.region,
-                            universe=state.universe,
-                            # P3-Brain: flip-retry 同 round 内必须保持 test_period
-                            # 一致(否则 sharpe 不可比)。从 task snapshot 传。
-                            test_period=getattr(state, "effective_default_test_period", None),
-                        )
-                        _flip_sim_settings = dict(smart)
-                        sim_result = await brain.simulate_alpha(
-                            expression=flipped_expr,
-                            **smart,
-                        )
-                    else:
-                        _flip_sim_settings = {
-                            "region": state.region,
-                            "universe": state.universe,
-                        }
-                        sim_result = await brain.simulate_alpha(
-                            expression=flipped_expr,
-                            region=state.region,
-                            universe=state.universe,
-                        )
+                    from backend.sim_settings import smart_simulation_settings
+                    smart = smart_simulation_settings(
+                        flipped_expr,
+                        region=state.region,
+                        universe=state.universe,
+                        # P3-Brain: flip-retry 同 round 内必须保持 test_period
+                        # 一致(否则 sharpe 不可比)。从 task snapshot 传。
+                        test_period=getattr(state, "effective_default_test_period", None),
+                    )
+                    _flip_sim_settings = dict(smart)
+                    sim_result = await brain.simulate_alpha(
+                        expression=flipped_expr,
+                        **smart,
+                    )
                 except Exception as e:
                     logger.warning(f"[{node_name}] flip-retry sim failed: {e}")
                     continue
@@ -2891,9 +2956,16 @@ async def node_evaluate(
     # Apply AFTER R1a/R5 hooks so per-alpha scores (composite_score / sharpe)
     # are already finalized — family cap ranks by score within each
     # (pillar, family) group. Soft-fail: any error logged but never blocks
-    # the round. Drops are marked quality_status='FAIL' +
-    # metrics["_r10_family_cap_dropped"]=True so downstream persistence /
-    # optimization queue skips them.
+    # the round.
+    #
+    # Phase 4 Sprint 2 B3 (2026-05-20): stamp-only refactor (plan v5 §6.10).
+    # Family cap previously set ``quality_status = "FAIL"`` inline here;
+    # that double-write conflicted with the R10-v2 (hard-ban) overlay,
+    # which needs both stamps to coexist on PASS rows for the 7d 互验 SQL
+    # to compute false-positive rates. New flow: stamp only, then the
+    # unified finalize pass at end of this function transitions any
+    # stamped row to FAIL. ``apply_family_cap`` already only returns
+    # drop indices (no inline mutation), so the change is local here.
     if getattr(settings, "ENABLE_FAMILY_CAP", False):
         try:
             from backend.family_classifier import apply_family_cap  # noqa: E402
@@ -2902,18 +2974,422 @@ async def node_evaluate(
             if _drop_idx:
                 for _i in _drop_idx:
                     _a = updated_alphas[_i]
-                    _a.quality_status = "FAIL"
                     _new_metrics = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
                     _new_metrics["_r10_family_cap_dropped"] = True
                     _new_metrics["_r10_family_cap_top_k"] = _top_k
                     _a.metrics = _new_metrics
                 logger.info(
-                    f"[R10] family-cap dropped {len(_drop_idx)}/{len(updated_alphas)} "
-                    f"alphas (top_k={_top_k})"
+                    f"[R10] family-cap stamped {len(_drop_idx)}/{len(updated_alphas)} "
+                    f"alphas (top_k={_top_k}) — FAIL deferred to finalize pass"
                 )
         except Exception as _r10_e:  # noqa: BLE001
             logger.warning(f"[R10] family-cap failed (non-fatal): {_r10_e}")
     # === end R10 family-cap ===
+
+    # === Phase 4 Sprint 2 B3 R10-v2 family hard-ban shadow stamp ===
+    # Pairwise PnL-correlation ≥ τ within a family → stamp
+    # _r10v2_hard_banned. Shadow mode by design: no FAIL inline.
+    # Both R10 and R10-v2 stamps survive to persistence; the互验 SQL
+    # in plan v5 §6.10 compares false-positive rates after 7d obs.
+    #
+    # Tier A upstream wire (2026-05-20): the corr matrix producer. When
+    # flag ON + matrix not pre-populated, BUILD it in-round: group the
+    # round's non-FAIL alphas by (pillar, family_signature), fetch daily
+    # PnL ONLY for same-family members (solo-family alphas can never be
+    # banned → no wasted BRAIN cost; most rounds have 0 same-family
+    # duplicates → 0 fetches), and compute the pairwise corr matrix.
+    # BRAIN_AUTH_CIRCUIT short-circuit + soft-fail inside the service.
+    if getattr(settings, "ENABLE_FAMILY_HARD_BAN", False):
+        try:
+            from backend.family_classifier import (  # noqa: E402
+                apply_family_hard_ban,
+                same_family_alpha_ids,
+            )
+            _tau = float(getattr(settings, "FAMILY_BAN_MIN_PAIRWISE_CORR", 0.65))
+            _corr_matrix = getattr(state, "r10v2_pnl_corr_matrix", None)
+
+            # Tier A: build the matrix if an upstream producer didn't.
+            if _corr_matrix is None and brain is not None:
+                _same_family_ids = same_family_alpha_ids(updated_alphas)
+                if len(_same_family_ids) >= 2:
+                    try:
+                        from backend.services.correlation_service import (
+                            CorrelationService as _R10v2CorrSvc,
+                        )
+                        _r10v2_svc = _R10v2CorrSvc(brain)
+                        _corr_matrix = await _r10v2_svc.compute_pairwise_corr_for_ids(
+                            _same_family_ids,
+                        )
+                        # Stash on state so re-entry within the same run reuses it
+                        try:
+                            state.r10v2_pnl_corr_matrix = _corr_matrix
+                        except Exception:  # noqa: BLE001
+                            pass
+                        logger.info(
+                            f"[R10-v2] built corr matrix for {len(_same_family_ids)} "
+                            f"same-family alpha(s) "
+                            f"(matrix={'ok' if _corr_matrix is not None else 'empty'})"
+                        )
+                    except Exception as _r10v2_build_e:  # noqa: BLE001
+                        logger.warning(
+                            f"[R10-v2] corr matrix build failed (non-fatal): "
+                            f"{_r10v2_build_e}"
+                        )
+                        _corr_matrix = None
+                else:
+                    logger.debug(
+                        "[R10-v2] no same-family alphas this round — skip corr fetch"
+                    )
+
+            if _corr_matrix is not None:
+                _ban_idx = apply_family_hard_ban(
+                    updated_alphas, pnl_corr_matrix=_corr_matrix, threshold=_tau,
+                )
+                if _ban_idx:
+                    for _i in _ban_idx:
+                        _a = updated_alphas[_i]
+                        _new_metrics = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+                        _new_metrics["_r10v2_hard_banned"] = True
+                        _new_metrics["_r10v2_hard_ban_threshold"] = _tau
+                        _a.metrics = _new_metrics
+                    logger.info(
+                        f"[R10-v2] hard-ban stamped {len(_ban_idx)}/{len(updated_alphas)} "
+                        f"alphas (τ={_tau:.2f}) — FAIL deferred to finalize pass"
+                    )
+            else:
+                logger.debug("[R10-v2] flag ON but no corr matrix — skip ban")
+        except Exception as _r10v2_e:  # noqa: BLE001
+            logger.warning(f"[R10-v2] hard-ban failed (non-fatal): {_r10v2_e}")
+    # === end R10-v2 hard-ban ===
+
+    # === B3 Sprint 2 stamp → FAIL finalize pass (plan v5 §6.10) ===
+    # Both R10 family-cap and R10-v2 hard-ban stamp metrics without
+    # touching quality_status (per the 互验 design). Here we transition
+    # any stamped row to FAIL. Idempotent — rows already FAIL stay FAIL;
+    # PASS rows with stamps become FAIL; nothing else changes.
+    if updated_alphas:
+        _r10_finalize_count = 0
+        for _a in updated_alphas:
+            _m = _a.metrics if isinstance(_a.metrics, dict) else {}
+            if _m.get("_r10_family_cap_dropped") is True or _m.get("_r10v2_hard_banned") is True:
+                _current_status = getattr(_a, "quality_status", None)
+                _status_str = getattr(_current_status, "value", _current_status)
+                if _status_str != "FAIL":
+                    _a.quality_status = "FAIL"
+                    _r10_finalize_count += 1
+        if _r10_finalize_count > 0:
+            logger.info(
+                f"[R10-finalize] {_r10_finalize_count} alpha(s) transitioned to FAIL "
+                f"via stamp scan"
+            )
+    # === end finalize pass ===
+
+    # === B2 Sprint 2 R13 factor_lens shadow stamp (plan v5 §6.9) ===
+    # OLS decompose each PASS alpha's daily PnL against the region's
+    # static factor-returns snapshot. shadow mode (default): stamp only;
+    # soft mode: residual<τ → PASS_PROVISIONAL (transition inline OK —
+    # PROV is reversible). hard mode: stamp `_r13_hard_failed=True`,
+    # FAIL transition deferred to the finalize pass below (consistent
+    # with B3 stamp-only refactor pattern — F13 review fix).
+    # Default OFF → byte-identical round behavior.
+    if (
+        updated_alphas
+        and getattr(settings, "ENABLE_FACTOR_LENS", False)
+        and brain is not None
+    ):
+        try:
+            from backend.services import factor_lens_service as _r13_svc
+            from backend.services.correlation_service import (
+                CorrelationService as _CorrSvc,
+                _series_to_returns as _to_returns,
+            )
+            # F6 review fix: short-circuit when BRAIN auth circuit is open.
+            # /alphas/{id}/recordsets/pnl shares the same auth path as
+            # simulate; without this check, an expired session burns
+            # ~5×60s retry × N PASS alpha = potentially hours of round
+            # latency per stamp pass.
+            from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
+
+            _r13_mode = getattr(settings, "FACTOR_LENS_MODE", "shadow")
+            _r13_tau = float(getattr(settings, "FACTOR_LENS_RESIDUAL_SHARPE_MIN", 0.5))
+            # F5 review fix: `list([] or None)` → `list(None) → TypeError`
+            # silent kill. Use explicit truthiness then list(); preserve
+            # None semantics so decompose_alpha falls back to DEFAULT_FACTORS.
+            _r13_factors_raw = getattr(settings, "FACTOR_LENS_FACTORS", None)
+            _r13_factors = list(_r13_factors_raw) if _r13_factors_raw else None
+            _r13_min_overlap = int(getattr(settings, "FACTOR_LENS_MIN_OVERLAP_DAYS", 60))
+            # D9 review fix: wire FACTOR_LENS_OLS_LOOKBACK_DAYS (was dead config)
+            _r13_lookback = int(getattr(settings, "FACTOR_LENS_OLS_LOOKBACK_DAYS", 504))
+
+            # F14 review fix: snapshot availability cache. Probe per-region
+            # ONCE per node invocation so we don't pay BRAIN PnL fetch
+            # latency for every PASS alpha in a region that has no
+            # snapshot (current production state — only README exists).
+            _r13_snapshot_probe: Dict[str, bool] = {}
+            def _has_snapshot(_region: str) -> bool:
+                if _region in _r13_snapshot_probe:
+                    return _r13_snapshot_probe[_region]
+                _df = _r13_svc.load_factor_returns(_region, factors=_r13_factors)
+                _ok = _df is not None and not _df.empty
+                _r13_snapshot_probe[_region] = _ok
+                if not _ok:
+                    logger.info(
+                        f"[R13] no snapshot for region={_region} — "
+                        f"R13 stamps disabled for this region until snapshot deployed"
+                    )
+                return _ok
+
+            _corr_svc = _CorrSvc(brain)
+            _r13_stamped = 0
+            _r13_soft_pp = 0
+            _r13_hard_stamped = 0
+            _r13_circuit_breaks = 0
+            for _a in updated_alphas:
+                # F6: re-check the breaker every iteration so a mid-loop
+                # auth drop doesn't waste the remaining alphas.
+                if BRAIN_AUTH_CIRCUIT.is_open():
+                    _r13_circuit_breaks += 1
+                    break
+
+                _status = getattr(_a, "quality_status", None)
+                _status_str = getattr(_status, "value", _status)
+                # Only decompose PASS alphas (FAIL already excluded from
+                # downstream submission; decomposition adds no value)
+                if _status_str not in ("PASS", "PASS_PROVISIONAL"):
+                    continue
+                _alpha_id = getattr(_a, "alpha_id", None)
+                _region = getattr(_a, "region", None)
+                if not _alpha_id or not _region:
+                    continue
+                # F14: skip BRAIN PnL fetch entirely when snapshot absent
+                if not _has_snapshot(_region):
+                    continue
+                try:
+                    _pnl_series = await _corr_svc._fetch_pnl_series(
+                        _alpha_id, max_attempts=2,
+                    )
+                except Exception as _fetch_e:
+                    logger.debug(
+                        f"[R13] PnL fetch failed for {_alpha_id}: {_fetch_e}"
+                    )
+                    continue
+                if _pnl_series is None or _pnl_series.empty:
+                    continue
+                _daily_returns = _to_returns(_pnl_series)
+                if _daily_returns is None or _daily_returns.empty:
+                    continue
+                _residual = _r13_svc.decompose_alpha(
+                    alpha_returns=_daily_returns,
+                    region=_region,
+                    factors=_r13_factors,
+                    min_overlap_days=_r13_min_overlap,
+                    lookback_days=_r13_lookback,
+                )
+                # F4 review fix: positive filter — only act on real OLS
+                # output. Previous filter only excluded 2 of 8 empty-
+                # residual reasons (skipped / no_snapshot), letting
+                # insufficient_overlap / lstsq_failed / bad_alpha_shape /
+                # etc. leak through with residual_sharpe=0.0 < τ=0.5 →
+                # spurious PROVISIONAL/FAIL in soft/hard mode.
+                if _residual.mode_used != "ols_daily":
+                    continue
+
+                _new_m = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+                _new_m["_r13_residual_sharpe"] = float(_residual.residual_sharpe)
+                _new_m["_r13_factor_exposures"] = _residual.factor_exposures
+                _new_m["_r13_r_squared"] = float(_residual.r_squared)
+                _new_m["_r13_ols_n_days"] = int(_residual.ols_n_days)
+                _new_m["_r13_mode_used"] = _residual.mode_used
+                _new_m["_r13_factor_lens_phase"] = _r13_mode
+                _a.metrics = _new_m
+                _r13_stamped += 1
+
+                # F13 review fix: hard-mode transition now goes through
+                # the same finalize pass as R10/R10-v2 — stamp only here.
+                # PROV transition stays inline (PROV is reversible and
+                # doesn't collide with R10 stamps).
+                if _r13_mode == "soft" and _residual.residual_sharpe < _r13_tau:
+                    if _status_str == "PASS":
+                        _a.quality_status = "PASS_PROVISIONAL"
+                        _r13_soft_pp += 1
+                elif _r13_mode == "hard" and _residual.residual_sharpe < _r13_tau:
+                    _new_m["_r13_hard_failed"] = True
+                    _new_m["_r13_residual_sharpe_at_fail"] = float(_residual.residual_sharpe)
+                    _a.metrics = _new_m
+                    _r13_hard_stamped += 1
+
+            if _r13_stamped > 0 or _r13_circuit_breaks > 0:
+                logger.info(
+                    f"[R13] factor_lens stamped {_r13_stamped} alpha(s) "
+                    f"(mode={_r13_mode}, soft_pp={_r13_soft_pp}, "
+                    f"hard_stamped={_r13_hard_stamped}, "
+                    f"circuit_break={_r13_circuit_breaks})"
+                )
+        except Exception as _r13_e:  # noqa: BLE001
+            # F5 review fix: bump to WARNING so silent kills are visible.
+            logger.warning(f"[R13] factor_lens shadow failed (non-fatal): {_r13_e}")
+    # === end R13 factor_lens ===
+
+    # === B5 R8-v3 cognitive layer stamp (Sprint 3, 2026-05-20) ===
+    # Copy the layer id used at hypothesis time onto each alpha's metrics
+    # so the offline bandit reward update (cron, Sprint 3 fast-follow)
+    # can attribute PASS/FAIL to the active layer. Soft-fail: when state
+    # has no layer id (R8-v3 OFF), nothing happens.
+    _cognitive_layer_id = getattr(state, "cognitive_layer_id_used", "") or ""
+    if _cognitive_layer_id and updated_alphas:
+        for _a in updated_alphas:
+            _new_m = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+            _new_m["_cognitive_layer_used"] = _cognitive_layer_id
+            _a.metrics = _new_m
+    # === end R8-v3 stamp ===
+
+    # === F13 Sprint 2 R13 hard-mode stamp → FAIL finalize (review fix) ===
+    # Mirrors the R10/R10-v2 stamp → FAIL pattern: R13 hard mode no longer
+    # transitions quality_status inline (avoids the same anti-pattern B3
+    # just refactored away from R10). Sweep one more time picking up the
+    # `_r13_hard_failed` stamp.
+    if updated_alphas:
+        _r13_finalize_count = 0
+        for _a in updated_alphas:
+            _m = _a.metrics if isinstance(_a.metrics, dict) else {}
+            if _m.get("_r13_hard_failed") is True:
+                _current_status = getattr(_a, "quality_status", None)
+                _status_str = getattr(_current_status, "value", _current_status)
+                if _status_str != "FAIL":
+                    _a.quality_status = "FAIL"
+                    _r13_finalize_count += 1
+        if _r13_finalize_count > 0:
+            logger.info(
+                f"[R13-finalize] {_r13_finalize_count} alpha(s) transitioned to FAIL "
+                f"via _r13_hard_failed stamp scan"
+            )
+    # === end R13 finalize pass ===
+
+    # === Phase 4 PR0.6 Sentinel stamp (Sprint 0, 2026-05-19) ===
+    # Backfills 3 of the 6 R12-sentinel-tied stamps onto alpha.metrics so the
+    # R12 decision counterfactual SQL (Sprint末) can attribute per-sentinel
+    # PASS rate margin. Sources of truth already exist:
+    #   - R1b mutation: Hypothesis.r1b_mutation_depth ≥ 1
+    #   - G8 forest reference: state.g8_forest_referenced_ids (List[int],
+    #     set in node_hypothesis after fetch_cross_task_promoted; reset on
+    #     every node entry per F-A3 fix)
+    #   - R9 cache hit: alpha.metrics["_simulation_cache_hit"]=True (planted
+    #     by sim_cache.cached_simulate_batch in result["metrics"] nested dict
+    #     which evaluation.py:1267 propagates to alpha.metrics — F-A1 fix)
+    # Soft-fail: any error skips stamping; never blocks the round.
+    if updated_alphas:
+        try:
+            _hyp_ids = {
+                getattr(a, "hypothesis_id", None) for a in updated_alphas
+                if getattr(a, "hypothesis_id", None) is not None
+            }
+            # F-T1 fix (post-review): SQL lookup extracted to top-level
+            # helper _pr06_lookup_mutated_hypothesis_ids so the integration
+            # test can drive it with an in-memory aiosqlite session.
+            _mutated_hids = await _pr06_lookup_mutated_hypothesis_ids(_hyp_ids)
+            _forest_hids: set = set(
+                getattr(state, "g8_forest_referenced_ids", None) or []
+            )
+
+            _stamp_count = {"r1b": 0, "forest": 0, "cache": 0}
+            for _a in updated_alphas:
+                try:
+                    _m = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+                    _hid = getattr(_a, "hypothesis_id", None)
+                    if _hid is not None and _hid in _mutated_hids:
+                        _m["_r1b_mutation_triggered"] = True
+                        _stamp_count["r1b"] += 1
+                    if _hid is not None and _hid in _forest_hids:
+                        _m["_hypothesis_forest_reference"] = True
+                        _stamp_count["forest"] += 1
+                    # F-A1 fix (2026-05-19 review): sim_cache stamps
+                    # `_simulation_cache_hit` directly into result["metrics"]
+                    # (the nested dict propagated to alpha.metrics in
+                    # node_simulate line ~1267). AlphaCandidate has no
+                    # `sim_result` attribute — the only carrier is metrics.
+                    if _m.get("_simulation_cache_hit") is True:
+                        _stamp_count["cache"] += 1
+                    if _m is not _a.metrics:
+                        _a.metrics = _m
+                except Exception:  # noqa: BLE001
+                    pass
+            if any(_stamp_count.values()):
+                logger.info(
+                    "[PR0.6 stamp] r1b=%d forest=%d cache=%d / total=%d",
+                    _stamp_count["r1b"], _stamp_count["forest"],
+                    _stamp_count["cache"], len(updated_alphas),
+                )
+        except Exception as _pr06_outer:  # noqa: BLE001
+            logger.debug(
+                "[PR0.6 stamp] outer block failed (non-fatal): %s", _pr06_outer
+            )
+    # === end Phase 4 PR0.6 ===
+
+    # === G3 AST Originality Gate (Phase A shadow, 2026-05-19) ===
+    # Runs AFTER R10 family-cap (coarse operator-sequence dedup) to catch
+    # the "换皮" alphas R10 misses — same AST subtree set, different op
+    # pipeline. Phase A defaults to shadow mode: every blocked alpha gets
+    # alpha.metrics['_g3_*'] flags but quality_status stays unchanged so
+    # operators can validate τ via /ops/g3/originality-stats before
+    # promoting to soft (PROVISIONAL) or hard (REJECT).
+    # Soft-fail invariant — any exception is swallowed and downgraded to
+    # "checker disabled this round" so the evaluation loop never breaks.
+    if getattr(settings, "ENABLE_AST_ORIGINALITY_GATE", False) and updated_alphas:
+        try:
+            from backend.alpha_originality import (  # noqa: E402
+                OriginalityChecker,
+                apply_to_alpha,
+            )
+
+            _g3_checker = OriginalityChecker()
+            # History is per-task + per-region. The checker dedupes + caps
+            # at history_k internally. Falls back to empty history on DB
+            # error, in which case every verdict is "skipped" (safe default).
+            await _g3_checker.load_history(
+                task_id=getattr(state, "task_id", None),
+                region=getattr(state, "region", None),
+            )
+
+            _g3_blocked = 0
+            _g3_skipped = 0
+            _g3_errs = 0
+            for _a in updated_alphas:
+                # Skip alphas already in a terminal-fail bucket (R10 drop,
+                # validation REJECT, etc.) — they won't be persisted /
+                # simulated, so G3 numbers would be polluted.
+                _status = getattr(_a, "quality_status", None)
+                _status_str = getattr(_status, "value", _status) if _status is not None else None
+                if _status_str in {"FAIL", "REJECT"}:
+                    continue
+                try:
+                    _verdict = _g3_checker.check(getattr(_a, "expression", "") or "")
+                    apply_to_alpha(_a, _verdict)
+                    if _verdict.verdict == "blocked":
+                        _g3_blocked += 1
+                    elif _verdict.verdict == "skipped":
+                        _g3_skipped += 1
+                except Exception as _g3_inner:  # noqa: BLE001
+                    # Per-alpha soft-fail; do not pollute the round
+                    _g3_errs += 1
+                    logger.debug(
+                        "[G3] per-alpha check failed (non-fatal): %s", _g3_inner
+                    )
+
+            if _g3_blocked or _g3_errs:
+                logger.info(
+                    "[G3] mode=%s blocked=%d skipped=%d errs=%d total=%d "
+                    "history_k=%d τ=%.4f",
+                    _g3_checker.mode,
+                    _g3_blocked,
+                    _g3_skipped,
+                    _g3_errs,
+                    len(updated_alphas),
+                    _g3_checker.history_k,
+                    _g3_checker.threshold,
+                )
+        except Exception as _g3_outer:  # noqa: BLE001
+            logger.warning(f"[G3] originality gate failed (non-fatal): {_g3_outer}")
+    # === end G3 ===
 
     return {
         "pending_alphas": updated_alphas,

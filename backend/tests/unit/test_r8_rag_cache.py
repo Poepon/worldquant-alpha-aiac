@@ -145,37 +145,15 @@ async def test_cache_get_swallows_redis_get_error():
 
 
 # ---------------------------------------------------------------------------
-# Orchestrator dispatch — flag OFF skips cache; flag ON consults cache
+# Orchestrator dispatch — cache always consulted; behavior depends on hit/miss
+# (Retired ENABLE_HIERARCHICAL_RAG_CACHE flag 2026-05-19 — subsumed into main
+# ENABLE_HIERARCHICAL_RAG switch.)
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_orchestrator_flag_off_does_not_consult_cache(monkeypatch):
-    """Default flag OFF → _cache_get / _cache_set never called."""
+async def test_orchestrator_cache_miss_calls_layer_and_sets(monkeypatch):
+    """Cache miss → layer called + _cache_set called per layer."""
     from backend.config import settings
-    monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG_CACHE", False, raising=False)
-
-    layer_mock = AsyncMock(return_value=([], []))
-    get_mock = AsyncMock(return_value=None)
-    set_mock = AsyncMock(return_value=None)
-    with patch("backend.agents.hierarchical_rag.layer0_exact_match", new=layer_mock), \
-         patch("backend.agents.hierarchical_rag.layer1_pillar", new=AsyncMock(return_value=([], []))), \
-         patch("backend.agents.hierarchical_rag.layer2_family", new=AsyncMock(return_value=([], []))), \
-         patch("backend.agents.hierarchical_rag.layer3_field_level", new=AsyncMock(return_value=([], []))), \
-         patch("backend.agents.hierarchical_rag._cache_get", new=get_mock), \
-         patch("backend.agents.hierarchical_rag._cache_set", new=set_mock):
-        await query_hierarchical(
-            db=None, current_expression="rank(close)", region="USA",
-        )
-    assert get_mock.await_count == 0
-    assert set_mock.await_count == 0
-    assert layer_mock.await_count == 1  # L0 still called
-
-
-@pytest.mark.asyncio
-async def test_orchestrator_flag_on_cache_miss_calls_layer_and_sets(monkeypatch):
-    """Flag ON + cache miss → layer called + _cache_set called per layer."""
-    from backend.config import settings
-    monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG_CACHE", True, raising=False)
     monkeypatch.setattr(settings, "RAG_HIER_CACHE_TTL_SEC", 60, raising=False)
 
     l0_mock = AsyncMock(return_value=([], []))
@@ -198,10 +176,9 @@ async def test_orchestrator_flag_on_cache_miss_calls_layer_and_sets(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_flag_on_cache_hit_skips_layer(monkeypatch):
-    """Flag ON + cache hit on L0 → layer0_exact_match NOT called."""
+async def test_orchestrator_cache_hit_skips_layer(monkeypatch):
+    """Cache hit on L0 → layer0_exact_match NOT called."""
     from backend.config import settings
-    monkeypatch.setattr(settings, "ENABLE_HIERARCHICAL_RAG_CACHE", True, raising=False)
     monkeypatch.setattr(settings, "RAG_HIER_CACHE_TTL_SEC", 60, raising=False)
 
     cached_entry = RAGEntry(
@@ -260,16 +237,11 @@ async def test_orchestrator_flag_on_cache_hit_skips_layer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_flag_on_layer_call_uses_cache_call_returns():
+async def test_orchestrator_layer_call_uses_cache_call_returns():
     """Sanity: cache wrapper returns layer fetch result on miss path."""
     from backend.config import settings
-    monkeypatch_attrs = {
-        "ENABLE_HIERARCHICAL_RAG_CACHE": True,
-        "RAG_HIER_CACHE_TTL_SEC": 60,
-    }
-    old_vals = {k: getattr(settings, k, None) for k in monkeypatch_attrs}
-    for k, v in monkeypatch_attrs.items():
-        setattr(settings, k, v)
+    old_ttl = getattr(settings, "RAG_HIER_CACHE_TTL_SEC", None)
+    setattr(settings, "RAG_HIER_CACHE_TTL_SEC", 60)
     try:
         entry = RAGEntry(
             pattern_hash="h", pattern="rank(open)",
@@ -288,5 +260,5 @@ async def test_orchestrator_flag_on_layer_call_uses_cache_call_returns():
             )
         assert any(p.pattern_hash == "h" for p in result.patterns)
     finally:
-        for k, v in old_vals.items():
-            setattr(settings, k, v)
+        if old_ttl is not None:
+            setattr(settings, "RAG_HIER_CACHE_TTL_SEC", old_ttl)

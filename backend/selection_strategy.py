@@ -469,59 +469,6 @@ class DiversityFilter:
 # P0-2: DB-Level Deduplication Helper
 # =============================================================================
 
-async def check_expression_exists_in_db(
-    db_session,
-    expression: str,
-    region: str = "USA",
-    universe: str = "TOP3000"
-) -> Tuple[bool, Optional[str]]:
-    """
-    Check if expression already exists in database.
-    
-    Args:
-        db_session: AsyncSession
-        expression: Alpha expression to check
-        region: Region filter
-        universe: Universe filter
-        
-    Returns:
-        (exists, existing_alpha_id)
-    """
-    from sqlalchemy import select
-    from backend.models import Alpha
-    from backend.alpha_semantic_validator import compute_expression_hash
-    
-    expr_hash = compute_expression_hash(expression)
-    
-    # Check by hash first (fast)
-    stmt = select(Alpha.alpha_id).where(
-        Alpha.expression_hash == expr_hash,
-        Alpha.region == region,
-        Alpha.universe == universe
-    ).limit(1)
-    
-    result = await db_session.execute(stmt)
-    existing = result.scalar_one_or_none()
-    
-    if existing:
-        return True, existing
-        
-    # Fallback: exact expression match (slower but catches hash collisions)
-    stmt2 = select(Alpha.alpha_id).where(
-        Alpha.expression == expression.strip(),
-        Alpha.region == region,
-        Alpha.universe == universe
-    ).limit(1)
-    
-    result2 = await db_session.execute(stmt2)
-    existing2 = result2.scalar_one_or_none()
-    
-    if existing2:
-        return True, existing2
-        
-    return False, None
-
-
 async def filter_unsimulated_expressions(
     db_session,
     expressions: List[str],

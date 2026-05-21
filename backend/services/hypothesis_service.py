@@ -235,6 +235,65 @@ class HypothesisService(BaseService):
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
 
+    async def fetch_cross_task_promoted(
+        self,
+        region: str,
+        *,
+        pillar: Optional[str] = None,
+        experiment_variant: Optional[str] = None,
+        min_pass_count: int = 2,
+        min_sharpe_avg: float = 1.0,
+        limit: int = 5,
+    ) -> List[Hypothesis]:
+        """G8 Phase A (2026-05-19): cross-task PROMOTED hypothesis pool for
+        node_hypothesis reference injection (RD-Agent hypothesis-forest mode).
+
+        Returns the top-K most-successful PROMOTED-or-ACTIVE hypotheses in
+        this region — sorted by sharpe_avg DESC so the LLM sees the strongest
+        evidence first. Excludes:
+          - ABANDONED / SUPERSEDED (status filter)
+          - is_active=False (regime-frozen)
+          - rows below min_pass_count / min_sharpe_avg thresholds
+
+        Optional pillar filter so the recall is biased toward the
+        currently under-represented pillar (paired with P2-B pillar_hint).
+        experiment_variant filter mirrors list_active for F-5 isolation.
+
+        Distinct from list_active():
+          - status filter excludes PROPOSED (PROPOSED has no track record yet)
+          - pass_count + sharpe_avg gates filter out underperformers
+          - sorted by reward (sharpe_avg DESC), not by untouched-first
+          - intended for prompt-reference, NOT for sampling
+        """
+        valid_states = [
+            HypothesisStatus.ACTIVE.value,
+            HypothesisStatus.PROMOTED.value,
+        ]
+        stmt = (
+            select(Hypothesis)
+            .where(
+                Hypothesis.region == region,
+                Hypothesis.is_active.is_(True),
+                Hypothesis.status.in_(valid_states),
+                Hypothesis.pass_count >= min_pass_count,
+                Hypothesis.sharpe_avg.isnot(None),
+                Hypothesis.sharpe_avg >= min_sharpe_avg,
+            )
+            .order_by(
+                Hypothesis.sharpe_avg.desc(),
+                Hypothesis.pass_count.desc(),
+                Hypothesis.updated_at.desc(),
+            )
+            .limit(limit)
+        )
+        if pillar is not None:
+            stmt = stmt.where(Hypothesis.pillar == pillar)
+        if experiment_variant is not None:
+            stmt = stmt.where(Hypothesis.experiment_variant == experiment_variant)
+
+        result = await self.db.execute(stmt)
+        return list(result.scalars().all())
+
     # ------------------------------------------------------------------
     # Lifecycle transitions
     # ------------------------------------------------------------------

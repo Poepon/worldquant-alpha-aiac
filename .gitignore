@@ -48,3 +48,15 @@ celerybeat-schedule.dir
 celerybeat.pid
 /.cursor/debug.log
 backups/
+/docs/alpha_health_check
+/docs/hypothesis_health_check
+/docs/llm_op_monitor
+/docs/macro_narratives
+/docs/negative_knowledge
+/docs/phase3_readiness
+/docs/pillar_balance
+/docs/regime_state
+
+# R13 factor-data vendor sources — large binaries, re-downloadable from
+# the vendor; the derived parquet + cleaned CSVs are committed instead.
+/data/AQR_*.xlsx

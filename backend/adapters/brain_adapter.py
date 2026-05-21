@@ -15,6 +15,7 @@ import asyncio
 import json
 import random
 import time
+import uuid
 from typing import Dict, List, Optional, Any, Union
 from datetime import datetime, timedelta
 import httpx
@@ -35,6 +36,16 @@ from backend.models import BrainAuthToken
 # Import protocol for type checking (Protocol is runtime_checkable)
 from backend.protocols.brain_protocol import BrainProtocol
 
+# A+ circuit breaker (2026-05-19): backend.circuit_breaker is intentionally
+# at the top-level (NOT under services/) to avoid the
+# adapters→services→mining_service→adapters cycle. When BRAIN auth fails
+# persistently, trip this circuit so every BrainAdapter caller fast-fails
+# (no LLM cost burnt running a round whose sim can't succeed). TTL=300s
+# gives ops a 5min window; after that the circuit auto-HALF_OPENs and the
+# next call probes. authenticate() success calls .clear().
+from backend.circuit_breaker import CircuitBreaker
+BRAIN_AUTH_CIRCUIT = CircuitBreaker("brain_auth", default_ttl_sec=300)
+
 # Singleton Client Storage (Loop-aware)
 _GLOBAL_CLIENT: Optional[httpx.AsyncClient] = None
 _GLOBAL_CLIENT_LOOP: Optional[asyncio.AbstractEventLoop] = None
@@ -53,6 +64,15 @@ class BrainAdapter:
     BASE_URL = "https://api.worldquantbrain.com"
     SESSION_BUFFER_SECONDS = 300  # Re-auth if expiring in < 5 mins
     REDIS_SESSION_KEY = "brain_session:cookies"
+    # 方向1 (2026-05-20): fleet-wide re-auth coalescing lock. See
+    # _distributed_reauth + config.BRAIN_REAUTH_* knobs.
+    REDIS_REAUTH_LOCK_KEY = "brain_auth:reauth_lock"
+    # Token-checked atomic delete (server-side) — mirrors redis_pool's release
+    # Lua so we never delete a sibling's freshly-acquired lock at the TTL edge.
+    _REAUTH_RELEASE_LUA = (
+        "if redis.call('get', KEYS[1]) == ARGV[1] "
+        "then return redis.call('del', KEYS[1]) else return 0 end"
+    )
     
     # Class-level cached credentials (to avoid DB queries on every request)
     _cached_email: Optional[str] = None
@@ -493,7 +513,17 @@ class BrainAdapter:
                 f"Session invalid or expiring "
                 f"(force_refresh={force_refresh}), re-authenticating..."
             )
-            await self.authenticate()
+            # 2026-05-21: route this PROACTIVE refresh through the fleet-wide
+            # coalesced re-auth instead of a bare authenticate(). 16 call-sites
+            # use `async with BrainAdapter()`, whose __aenter__ runs ensure_session
+            # every time; across 3 solo workers + uvicorn a bare authenticate()
+            # here let every process re-auth the same expiry window at once and
+            # mutually invalidate each other's cookie (BRAIN single-active-
+            # session) — the 401 thrash that stalled task 3329 ~11h. The 401
+            # paths (_request/_safe_api_call) were already routed through
+            # _coalesced_reauth by 方向1; this closes the proactive gap so only
+            # ONE process per window actually hits /authentication.
+            await self._coalesced_reauth()
 
     async def _is_session_valid(self) -> bool:
         """
@@ -539,12 +569,21 @@ class BrainAdapter:
             
             if response.status_code == 201:
                 logger.info("BRAIN authentication successful")
-                
+
                 # Save session to Redis
                 data = response.json()
                 expiry = data.get("token", {}).get("expiry", 3600*4) # Default 4h if missing
                 await self._save_session_to_redis(expiry)
-                
+
+                # A+ circuit breaker: a successful authenticate() is the
+                # canonical recovery signal — clear the circuit so callers
+                # resume sim/poll/pnl immediately (even if the TTL hasn't
+                # elapsed). Safe no-op when circuit is already CLOSED.
+                try:
+                    BRAIN_AUTH_CIRCUIT.clear(reason="authenticate_success")
+                except Exception:
+                    pass
+
                 return True
             elif response.status_code == 429:
                 retry_after = response.headers.get("Retry-After")
@@ -564,6 +603,26 @@ class BrainAdapter:
     # I will replicate them below, ensuring they use self.client and handle errors.
     
     async def simulate_alpha(self, expression: str, region: str = "USA", universe: str = "TOP3000", delay: int = 1, decay: int = 4, neutralization: str = "SUBINDUSTRY", truncation: float = 0.08, test_period: str = "P2Y0M") -> Dict:
+        # A+ circuit breaker (2026-05-19): fast-fail when BRAIN auth is in
+        # known-bad state. Saves us from burning a sim slot acquire + 3 retry
+        # attempts + a 401 response just to discover what the LAST sim already
+        # told us. Caller's `retryable=True` path holds the alpha at PENDING
+        # (V-27.61) and the round-entry check in mining_tasks._run_one_round_inline
+        # short-circuits the whole LangGraph workflow so no LLM cost is burnt.
+        if BRAIN_AUTH_CIRCUIT.is_open():
+            status = BRAIN_AUTH_CIRCUIT.status()
+            return {
+                "success": False,
+                "error": (
+                    f"BRAIN auth circuit OPEN — fast-fail (reason="
+                    f"{status.last_failure_reason!r}, "
+                    f"reopens_in={max(0, int((status.until_ts or 0) - time.time()))}s)"
+                ),
+                "retryable": True,
+                "retry_after_sec": max(30, int((status.until_ts or time.time() + 60) - time.time())),
+                "error_kind": "brain_auth_circuit_open",
+            }
+
         # Construct payload
         sim_payload = {
             "type": "REGULAR",
@@ -631,6 +690,48 @@ class BrainAdapter:
                         "retry_after_sec": retry_after_sec,
                     }
                 if response.status_code not in [200, 201, 202]:
+                    # 2026-05-19 silent-burn fix: _request already attempted
+                    # _coalesced_reauth + 2x retry above. If the response is
+                    # STILL an auth error (401 or "Incorrect authentication
+                    # credentials" body marker), this is a transient BRAIN
+                    # session / account issue, NOT a per-alpha quality fail.
+                    # The pre-fix path returned ordinary {"success": False,
+                    # "error": "Creation failed: ..."} which made the caller
+                    # node_simulate write the alpha to alpha_failures, then
+                    # workflow continued through evaluate / hypothesis_feedback
+                    # / round_summary burning LLM cost — observed 121× /24h
+                    # "Incorrect authentication credentials" rows while other
+                    # workflow stages reported SUCCESS. Mark retryable +
+                    # error_kind so node_simulate (V-27.61) holds the alpha
+                    # at PENDING (not alpha_failures), tally classifies as
+                    # transient, and the round can soft-abort instead of
+                    # burning the rest of the LLM pipeline.
+                    if self._is_auth_error(response):
+                        logger.error(
+                            f"[BrainAdapter] simulate POST persists auth-error "
+                            f"after _request reauth+2x-retry — task likely "
+                            f"hit BRAIN session expiry or account lock. "
+                            f"Tripping BRAIN_AUTH_CIRCUIT to prevent silent-burn. "
+                            f"Status={response.status_code} body={response.text[:200]}"
+                        )
+                        # A+ circuit breaker: trip so subsequent calls fast-fail
+                        # without going through reauth+retry again. authenticate()
+                        # success (manual ops trigger or natural retry after TTL)
+                        # will clear the circuit.
+                        try:
+                            BRAIN_AUTH_CIRCUIT.trip(
+                                reason=f"simulate_post_auth_fail_{response.status_code}",
+                                ttl_sec=300,
+                            )
+                        except Exception:
+                            pass
+                        return {
+                            "success": False,
+                            "error": f"BRAIN auth failure: {response.text[:200]}",
+                            "retryable": True,
+                            "retry_after_sec": 300,
+                            "error_kind": "brain_auth_failure",
+                        }
                     logger.error(f"Brain Simulation Failed [{response.status_code}] | Payload: {json.dumps(sim_payload)} | Response: {response.text}")
                     return {"success": False, "error": f"Creation failed: {response.text}"}
 
@@ -966,19 +1067,30 @@ class BrainAdapter:
 
                 # Handle non-2xx response with retry
                 if response.status_code // 100 != 2:
-                    logger.error(f"Simulation poll {poll_url}, Status: {response.status_code}, Retry")
-                    await asyncio.sleep(30)
                     retry_count += 1
                     if retry_count <= max_retries:
+                        logger.warning(
+                            f"Simulation poll {poll_url} status={response.status_code} "
+                            f"— retry {retry_count}/{max_retries}"
+                        )
+                        await asyncio.sleep(30)
                         continue
                     else:
                         logger.error(f"Simulation {poll_url} failed after {max_retries} retries")
                         error_flag = True
                         break
-                
+
+                # 2026-05-21: reset the budget on every SUCCESSFUL poll so it
+                # measures CONSECUTIVE failures, not lifetime failures. Without
+                # this, sporadic transient blips (e.g. stale-keepalive TLS EOF)
+                # spread across a long simulation accumulate and falsely abort
+                # an otherwise-healthy sim → the alpha is lost on the Nth blip
+                # even though each was individually recoverable.
+                retry_count = 0
+
                 # Key check: If Retry-After header is missing or 0, simulation is complete
                 retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
-                
+
                 if not retry_after or retry_after == "0":
                     # Simulation completed - check for error status
                     data = response.json()
@@ -986,17 +1098,29 @@ class BrainAdapter:
                         error_flag = True
                         logger.error(f"Simulation error: {data}")
                     break
-                
+
                 # Still running, wait as instructed
                 await asyncio.sleep(float(retry_after))
-                
+
             except Exception as e:
-                import traceback
-                logger.error(f"Poll loop error: {e}\n{traceback.format_exc()}")
-                await asyncio.sleep(3)
                 retry_count += 1
                 if retry_count > max_retries:
+                    # Exhausted — this is the only path that loses the alpha,
+                    # so log loudly with traceback.
+                    import traceback
+                    logger.error(
+                        f"Poll loop error — giving up after {max_retries} "
+                        f"consecutive failures: {e}\n{traceback.format_exc()}"
+                    )
                     return {"success": False, "error": str(e)}
+                # Recoverable transient (TLS EOF / connection reset / timeout) —
+                # WARNING not ERROR+traceback, since the retry below typically
+                # reconnects and the sim continues.
+                logger.warning(
+                    f"Poll loop transient error (retry {retry_count}/{max_retries}): "
+                    f"{type(e).__name__}: {e}"
+                )
+                await asyncio.sleep(3)
         
         if error_flag:
             try:
@@ -1243,10 +1367,12 @@ class BrainAdapter:
         """Serialised, cache-invalidating re-auth shared by _request and
         _safe_api_call (V-27.91).
 
-        Acquire _auth_lock → re-check session validity (another coroutine may
-        have refreshed under the lock) → invalidate the Redis session cache
-        BEFORE re-auth (V-26.24: so a failed authenticate() can't be undone by
-        a stale cache resurrection) → authenticate().
+        Acquire _auth_lock (intra-process) → re-check session validity (another
+        coroutine may have refreshed under the lock) → _distributed_reauth,
+        which adds a fleet-wide Redis lock so only ONE process re-auths per
+        token-expiry window (方向1, 2026-05-20). The actual authenticate()
+        invalidates the Redis cache first (V-26.24: a failed authenticate()
+        can't be undone by a stale cache resurrection).
 
         Before this helper existed, _safe_api_call's 401 branch was a bare
         status==401 check + bare authenticate() — it bypassed V-22.7 body-
@@ -1265,25 +1391,133 @@ class BrainAdapter:
             # Reload from Redis BEFORE _is_session_valid so our stale
             # in-memory cookie doesn't trigger a redundant authenticate()
             # that races against BRAIN's /authentication rate-limit (5/min).
-            # Without this, N concurrent workers each invalidate the
-            # Redis cache and call authenticate(), mutually nuking the
-            # freshly-written cookie of the predecessor in the lock queue
-            # — symptom: a sustained loop of "Incorrect authentication
-            # credentials" errors observed on task 3083 (~36 rows / 90min).
-            try:
-                await self._load_session_from_redis()
-                if await self._is_session_valid():
-                    return True
-            except Exception:
-                pass
-            # Redis cookie also stale (or load/check raised) — we really
-            # are the first worker in this auth window. Invalidate + re-auth.
+            if await self._reload_and_validate_quietly():
+                return True
+            # 方向1 (2026-05-20): the per-process _auth_lock above only
+            # coalesces coroutines WITHIN this process. With 3 solo Celery
+            # workers + uvicorn all sharing one BRAIN session, each process
+            # could still authenticate() simultaneously and mutually nuke
+            # the others' cookie (BRAIN single-active-session) — the
+            # "Incorrect authentication credentials" thrash observed on task
+            # 3083. _distributed_reauth adds a fleet-wide Redis lock so only
+            # ONE process re-auths per token-expiry window.
+            return await self._distributed_reauth()
+
+    async def _reload_and_validate_quietly(self) -> bool:
+        """Reload the shared session from Redis and verify it against BRAIN.
+
+        Never raises — returns False on any error. Used both as the
+        intra-process fast-path and as the waiter's "did the lock holder
+        produce a usable session?" check.
+        """
+        try:
+            await self._load_session_from_redis()
+            return await self._is_session_valid()
+        except Exception:
+            return False
+
+    async def _release_reauth_lock(self, r, token: str) -> None:
+        """Atomic token-checked release. TTL reaps it if this fails."""
+        try:
+            await r.eval(self._REAUTH_RELEASE_LUA, 1, self.REDIS_REAUTH_LOCK_KEY, token)
+        except Exception as e:
+            logger.warning(
+                f"[BrainAdapter] reauth lock release failed (TTL will reap): {e}"
+            )
+
+    async def _distributed_reauth(self) -> bool:
+        """Fleet-wide re-auth coalescing (方向1, 2026-05-20).
+
+        Only ONE process across all workers + uvicorn calls authenticate()
+        per token-expiry window. The holder writes the fresh session to Redis
+        (authenticate() already does); the rest block on the Redis lock and
+        reload that session instead of re-authing — eliminating the
+        multi-process mutual-invalidation thrash that collapsed simulate
+        throughput. Caller holds the per-process _auth_lock (inner layer).
+
+        On Redis unavailability we fall back to a plain authenticate() so a
+        single-process / Redis-down deployment still works.
+        """
+        ttl = int(getattr(settings, "BRAIN_REAUTH_LOCK_TTL_SEC", 90) or 90)
+        wait_timeout = float(getattr(settings, "BRAIN_REAUTH_WAIT_TIMEOUT_SEC", 60.0) or 60.0)
+        poll = float(getattr(settings, "BRAIN_REAUTH_POLL_INTERVAL_SEC", 1.5) or 1.5)
+        deadline = time.time() + wait_timeout
+
+        async def _plain_reauth() -> bool:
             await self._invalidate_session_cache()
             try:
                 return bool(await self.authenticate())
             except Exception as e:
-                logger.error(f"[BrainAdapter] coalesced re-auth failed: {e}")
+                logger.error(f"[BrainAdapter] plain re-auth failed: {e}")
                 return False
+
+        try:
+            r = await self._get_redis()
+        except Exception as e:
+            logger.warning(
+                f"[BrainAdapter] reauth: redis unavailable ({e}); plain authenticate"
+            )
+            return await _plain_reauth()
+
+        try:
+            while True:
+                token = uuid.uuid4().hex
+                try:
+                    got_lock = bool(await r.set(
+                        self.REDIS_REAUTH_LOCK_KEY, token, nx=True, ex=ttl,
+                    ))
+                except Exception as e:
+                    logger.warning(
+                        f"[BrainAdapter] reauth lock SET failed ({e}); plain authenticate"
+                    )
+                    return await _plain_reauth()
+
+                if got_lock:
+                    # Sole re-auther this window.
+                    try:
+                        # Predecessor may have refreshed between our 401 and
+                        # acquiring this lock — reuse rather than re-auth.
+                        if await self._reload_and_validate_quietly():
+                            return True
+                        await self._invalidate_session_cache()
+                        return bool(await self.authenticate())
+                    except Exception as e:
+                        logger.error(f"[BrainAdapter] reauth (lock holder) failed: {e}")
+                        return False
+                    finally:
+                        await self._release_reauth_lock(r, token)
+
+                # A sibling holds the lock — wait for it to free, then validate.
+                lock_freed = False
+                while time.time() < deadline:
+                    await asyncio.sleep(poll)
+                    try:
+                        still_held = await r.get(self.REDIS_REAUTH_LOCK_KEY)
+                    except Exception:
+                        still_held = None
+                    if not still_held:
+                        lock_freed = True
+                        break
+
+                if not lock_freed:
+                    logger.warning(
+                        "[BrainAdapter] reauth: waited %.0fs for sibling refresh, "
+                        "lock still held — deferring to circuit/retry", wait_timeout,
+                    )
+                    return False
+
+                # Holder released. Validate the (hopefully fresh) session once.
+                if await self._reload_and_validate_quietly():
+                    return True
+                # Holder released WITHOUT a usable session (its auth failed).
+                # Loop to try the lock ourselves — serialized, never a stampede.
+                if time.time() >= deadline:
+                    return False
+        finally:
+            try:
+                await r.aclose()
+            except Exception:
+                pass
 
     async def _safe_api_call(self, method: str, endpoint: str, **kwargs) -> httpx.Response:
         """
@@ -1700,9 +1934,14 @@ class BrainAdapter:
             if search:
                 params["search"] = search
             if start_date:
-                # Brain API often uses 'startDate' for filtering creation date
-                params["startDate"] = start_date
-                
+                # 2026-05-20: BRAIN silently IGNORES 'startDate' (count is
+                # identical with/without it → the "incremental" sync was a full
+                # re-fetch every run). The working server-side filter is the
+                # range operator 'dateCreated>' with an ISO-8601 value that
+                # INCLUDES a timezone (BRAIN rejects naive: "Expected ISO 8601
+                # datetime with timezone"). Caller must pass tz-qualified ISO.
+                params["dateCreated>"] = start_date
+
             response = await self._safe_api_call("GET", "/users/self/alphas", params=params)
             
             if response.status_code == 200:

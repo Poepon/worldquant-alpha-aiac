@@ -99,24 +99,28 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="P2-B",
         description="hypothesis 节点根据 deficit 给出 pillar nudge",
     ),
-    # --- P2-C 市场体制 ---
-    "ENABLE_REGIME_INFERENCE": FlagSpec(
-        name="ENABLE_REGIME_INFERENCE",
+    # --- P2-C 市场体制 (Consolidated 2026-05-19: single switch + stage str) ---
+    "ENABLE_REGIME": FlagSpec(
+        name="ENABLE_REGIME",
         flag_type="bool",
         group="P2-C",
-        description="每日 10:30 SH 推断 regime + 写 Redis cache",
+        description=(
+            "P2-C 市场体制总开关。OFF 时无 regime 推断、无阈值倍率、无 style "
+            "preset 注入(byte-for-byte legacy)。ON 时按 REGIME_STAGE 决定生效"
+            "深度。Consolidated 2026-05-19 from 3 booleans into 1 + stage str。"
+        ),
     ),
-    "ENABLE_REGIME_AWARE_THRESHOLDS": FlagSpec(
-        name="ENABLE_REGIME_AWARE_THRESHOLDS",
-        flag_type="bool",
+    "REGIME_STAGE": FlagSpec(
+        name="REGIME_STAGE",
+        flag_type="str",
         group="P2-C",
-        description="按 regime 倍率应用 sharpe/fitness/turnover 阈值",
-    ),
-    "ENABLE_STYLE_PRESET_GUIDANCE": FlagSpec(
-        name="ENABLE_STYLE_PRESET_GUIDANCE",
-        flag_type="bool",
-        group="P2-C",
-        description="hypothesis 节点注入 regime style preset 投资哲学",
+        description=(
+            "Regime staged rollout 等级(类比 QLIB_PRESCREEN_MODE):"
+            "'inference' = 仅每日 10:30 SH 推断 regime + 写 Redis cache 攒数据;"
+            "'thresholds' = 推断 + 按 regime 倍率应用 sharpe/fitness/turnover;"
+            "'style' = 推断 + 倍率 + 注入投资哲学 block 进 hypothesis prompt。"
+            "Default 'inference'。需 ENABLE_REGIME=True 才生效。"
+        ),
     ),
     # --- P2-D 负向知识 ---
     "ENABLE_NEGATIVE_KNOWLEDGE_NUDGE": FlagSpec(
@@ -159,6 +163,33 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         flag_type="bool",
         group="Phase1-R3Q8",
         description="启用 DiversityScore 第 6 维 ast_diversity (1 − Jaccard subtree overlap)。Light wiring 仅记录到 ast_distance_log,不 gate 生成。Phase 2+ R10 family-cap 复用此信号。",
+    ),
+    # --- G3 AST originality gate (Phase A shadow, 2026-05-19) ---
+    "ENABLE_AST_ORIGINALITY_GATE": FlagSpec(
+        name="ENABLE_AST_ORIGINALITY_GATE",
+        flag_type="bool",
+        group="G3-Originality",
+        description=(
+            "G3 AST 原创度门 (Phase A shadow):node_evaluate R10 之后调 "
+            "backend.alpha_originality.OriginalityChecker,ast_distance "
+            "(1−Jaccard subtree overlap) < AST_ORIGINALITY_MIN_DISTANCE (τ, "
+            "默认 0.15) 的 alpha 写 metrics['_g3_*'] + "
+            "['_g3_ast_originality_blocked']=True。"
+            "AST_ORIGINALITY_MODE 控制效果:'shadow' (默认,仅 log + metrics) / "
+            "'soft' (标 PASS_PROVISIONAL 仍 simulate) / 'hard' (标 FAIL 跳 "
+            "simulate)。前置:Phase 1 R3/Q8 ast_distance_log 已 light-wire,"
+            "G3 复用 backend.knowledge_extraction.ast_distance_from_expressions。"
+            "Phase B 在 /ops/g3/originality-stats 7d 数据上 calibrate τ,Phase C "
+            "operator 决策 promote mode shadow→soft→hard。"
+            "与 R10 family-cap 互补:R10 看 operator-sequence 同族,G3 看 "
+            "AST subtree 同构。Soft-fail:checker 异常永不 break round。"
+            "⚠️ @deprecated_pending_r12_decision (Sprint 4, 2026-05-20): "
+            "B4.1 Sprint 4 ships G3-v2 grammar-aware validator as the "
+            "successor path (ENABLE_GRAMMAR_VALIDATOR). G3 shadow code "
+            "stays UNCHANGED in Sprint 4 (freeze constraint preserved). "
+            "Sprint 5 B4.2 conditionally retires this shadow per R12 "
+            "decision (GO/NO-GO/PARTIAL routes per plan v5 §6.14b)."
+        ),
     ),
     # --- R8 Hierarchical RAG ---
     "ENABLE_HIERARCHICAL_RAG": FlagSpec(
@@ -207,13 +238,15 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "~5d shadow → 3d soft → hard per plan §10 stage gates."
         ),
     ),
-    # --- Phase 3 R1b CoSTEER loop activation ---
+    # --- R1b CoSTEER loop (5 sub-stages — independent rollback, ordered deps) ---
+    # 设计:5 个 sub-stage 各自独立 flag。Ship 顺序 stage 1→5 但任一可 OFF 单独回滚。
+    # 依赖关系在 description 中标注;ops UI 按 group 排序看到完整 stage 列表。
     "ENABLE_R1B_RETRY_LOOP": FlagSpec(
         name="ENABLE_R1B_RETRY_LOOP",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.1 (2026-05-18): LangGraph cycle EVAL → "
+            "[stage 1/5 — no deps] R1b.1 (2026-05-18): LangGraph cycle EVAL → "
             "CODE_GEN_RETRY for IMPLEMENTATION attribution. Budget "
             "R1B_MAX_RETRIES_PER_ALPHA=3 + token ceiling "
             "R1B_TOKEN_COST_CEILING_USD_PER_ALPHA=$0.05. Soft-fall: LLM "
@@ -224,46 +257,47 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     "ENABLE_R1B_HYPOTHESIS_MUTATE": FlagSpec(
         name="ENABLE_R1B_HYPOTHESIS_MUTATE",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.2 (2026-05-18): LangGraph cycle EVAL → "
-            "HYPOTHESIS_MUTATE for HYPOTHESIS attribution. Budget "
-            "R1B_MAX_MUTATIONS_PER_DATASET_CYCLE=2. BOTH attribution → "
-            "mutate dominates retry per plan [V1.0-A2-3]. Creates "
-            "parent_hypothesis_id chain on Hypothesis."
+            "[stage 2/5 — deps: R1B_RETRY_LOOP for full BOTH-attribution effect] "
+            "R1b.2 (2026-05-18): LangGraph cycle EVAL → HYPOTHESIS_MUTATE for "
+            "HYPOTHESIS attribution. Budget R1B_MAX_MUTATIONS_PER_DATASET_CYCLE=2. "
+            "BOTH attribution → mutate dominates retry per plan [V1.0-A2-3]. "
+            "Creates parent_hypothesis_id chain on Hypothesis."
         ),
     ),
     "R1B_MAX_MUTATION_DEPTH": FlagSpec(
         name="R1B_MAX_MUTATION_DEPTH",
         flag_type="int",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.2 review MEDIUM (2026-05-18): caps cross-round "
-            "mutation chain depth. R1B_MAX_MUTATIONS_PER_DATASET_CYCLE "
-            "limits within a single round but pending → inject → mutate "
-            "could spiral across rounds. node_hypothesis_mutate now "
-            "reads parent Hypothesis.r1b_mutation_depth and refuses "
-            "when >= this cap. Default 3 = up to 3 levels of mutation "
-            "from the original RAG-seeded hypothesis."
+            "[stage 2/5 config — caps mutation chain depth across rounds] "
+            "R1b.2 review MEDIUM (2026-05-18): R1B_MAX_MUTATIONS_PER_DATASET_CYCLE "
+            "limits within a single round but pending → inject → mutate could "
+            "spiral across rounds. node_hypothesis_mutate now reads parent "
+            "Hypothesis.r1b_mutation_depth and refuses when >= this cap. "
+            "Default 3 = up to 3 levels of mutation from the original RAG-"
+            "seeded hypothesis."
         ),
     ),
     "ENABLE_R1B_FAILURE_TREE": FlagSpec(
         name="ENABLE_R1B_FAILURE_TREE",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.3 (2026-05-18): knowledge_extraction writes "
-            "failure_tree JSONB to KnowledgeEntry.meta_data; surfaced by "
-            "R8 RAG L2 for related hypothesis families. Soft-fail: KB "
-            "write error never blocks round."
+            "[stage 3/5 — deps: HYPOTHESIS_MUTATE for full failure-tree population] "
+            "R1b.3 (2026-05-18): knowledge_extraction writes failure_tree JSONB "
+            "to KnowledgeEntry.meta_data; surfaced by R8 RAG L2 for related "
+            "hypothesis families. Soft-fail: KB write error never blocks round."
         ),
     ),
     "ENABLE_R1B_TYPED_PIPELINE": FlagSpec(
         name="ENABLE_R1B_TYPED_PIPELINE",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.4 (2026-05-18): activates 3223-line DORMANT "
+            "[stage 4/5 — opt-in per task, coexists with stages 1+2] "
+            "R1b.4 (2026-05-18): activates 3223-line DORMANT "
             "agents/core/AlphaMiningPipeline for hypothesis_centric_variant=3 "
             "tasks. Bypasses LangGraph cycle; retry/mutate embedded in "
             "Experiment2Feedback. Coexists with R1b.1+R1b.2 — opt-in per task."
@@ -272,17 +306,18 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     "ENABLE_R1B_DAG_RETRY_REWARD": FlagSpec(
         name="ENABLE_R1B_DAG_RETRY_REWARD",
         flag_type="bool",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
-            "Phase 3 R1b.5 (2026-05-18): R6 DAG UCB1 includes retry "
-            "rewards in node selection. Pre-req R1b.1+R1b.2 GO gates "
-            "PASS + ≥14d production observation per [V1.2-A2-3]."
+            "[stage 5/5 — deps: RETRY_LOOP + HYPOTHESIS_MUTATE + DAG_TRACE all ON, "
+            "≥14d obs] R1b.5 (2026-05-18): R6 DAG UCB1 includes retry rewards in "
+            "node selection. Pre-req R1b.1+R1b.2 GO gates PASS + ≥14d production "
+            "observation per [V1.2-A2-3]."
         ),
     ),
     "R1B_MAX_COST_USD_PER_ROUND": FlagSpec(
         name="R1B_MAX_COST_USD_PER_ROUND",
         flag_type="float",
-        group="Phase3-R1b",
+        group="R1b-CoSTEER",
         description=(
             "Phase 3 R1b.1 review LOW 2 (2026-05-18): soft cap on cumulative "
             "R1b LLM cost (retry + mutate) within a single round. Per-alpha "
@@ -294,20 +329,61 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "(soft cap, no fail)."
         ),
     ),
-    # --- R8-v2 #2 Hierarchical RAG Redis cache ---
-    "ENABLE_HIERARCHICAL_RAG_CACHE": FlagSpec(
-        name="ENABLE_HIERARCHICAL_RAG_CACHE",
+    # --- G5 Phase A — Trajectory crossover ---
+    "ENABLE_G5_CROSSOVER": FlagSpec(
+        name="ENABLE_G5_CROSSOVER",
         flag_type="bool",
-        group="Phase3-R8",
+        group="G5-Crossover",
         description=(
-            "Phase 3 R8-v2 #2 (2026-05-18): per-layer Redis cache for "
-            "hierarchical RAG. cache_key=sha256[:16] over (layer + sorted "
-            "params); TTL=RAG_HIER_CACHE_TTL_SEC (default 300s). 无显式 "
-            "invalidation — TTL 自然过期 (KB write 频率 3-50/h 与 5-min "
-            "stale tolerance in plan §10 GO gate)。Redis unreachable → "
-            "soft-fall direct call。Rollback < 1min via flag flip OFF。"
+            "G5 Phase A (2026-05-19, QuantaAlpha arxiv 2602.07085):mining_agent "
+            "round 末选 2 个 PASS alpha → llm_crossover_alpha 产 ≤"
+            "G5_CROSSOVER_TOP_K_OFFSPRING 个 hybrid expression → persist 到 "
+            "task.config['g5_pending_offspring'](R1b.2-v2 同模式)→ 下一 round "
+            "_run_one_round_inline consume → state.g5_offspring_candidates → "
+            "node_code_gen prepend pending_alphas → 真走 validate/simulate/"
+            "evaluate/save_results 全 pipeline → offspring alpha.metrics 标 "
+            "_g5_crossover_parent_ids=[id_a, id_b] 反向 attribution。"
+            "每 call 写 g5_crossover_log。Soft-fail:LLM 异常 → 空 list → 下一 "
+            "round 正常进行。前置:同 task 内 ≥2 PASS alpha 且 sharpe ≥ "
+            "G5_CROSSOVER_MIN_PARENT_SHARPE。Phase B 看数据后决定 promote 到 "
+            "Phase C(可能加 R6 DAG sibling 加权或与 R1b retry 双轨)。"
         ),
     ),
+    # --- G8 Phase A — Hypothesis forest cross-task reference ---
+    "ENABLE_HYPOTHESIS_FOREST_REUSE": FlagSpec(
+        name="ENABLE_HYPOTHESIS_FOREST_REUSE",
+        flag_type="bool",
+        group="G8-HypothesisForest",
+        description=(
+            "G8 Phase A (2026-05-19, RD-Agent hypothesis-forest):node_hypothesis "
+            "在 LLM 生成前调 HypothesisService.fetch_cross_task_promoted 拉同 "
+            "region 内 top-K (pass_count ≥ HYPOTHESIS_FOREST_MIN_PASS_COUNT "
+            "AND sharpe_avg ≥ HYPOTHESIS_FOREST_MIN_SHARPE_AVG) PROMOTED/ACTIVE "
+            "hypothesis,经 P2-B pillar_hint 过滤后注入 prompt 作为 reference。"
+            "LLM 可选 extend 或 propose new。OFF 时 byte-for-byte legacy 渲染。"
+            "Soft-fail:fetch 异常 → cross_task_hypotheses=[] → prompt 不变。"
+            "Phase C(7d+ obs)再考虑 hard reuse(parent_hypothesis_id 跨 task chain)。"
+        ),
+    ),
+    # --- G2 Phase A — per-call LLM cost telemetry ---
+    "ENABLE_COST_TELEMETRY": FlagSpec(
+        name="ENABLE_COST_TELEMETRY",
+        flag_type="bool",
+        group="G2-CostTelemetry",
+        description=(
+            "G2 Phase A (2026-05-19): per-LLM-call row INSERT 到 llm_call_log "
+            "覆盖普通 round + R1b retry/mutate 全路径 (R1b 路径仍保留 "
+            "r1b_retry_log 写入,llm_call_log 用作全局聚合源)。task_id / "
+            "run_id / round_idx / node_key 经 contextvar 推送,round 末 batch "
+            "flush。Soft-fail:tracker 异常永不打断 LLM 调用。cost_usd 由 "
+            "tokens × LLM_PRICING_USD_PER_1K_TOKENS 估算 (Phase A 用 blended "
+            "rate,Phase B 可拆 prompt/completion)。flag OFF 时纯 no-op,零"
+            "采集开销。Phase C ≥7d 观察后 promote 到 cost-aware throttling。"
+        ),
+    ),
+    # Retired 2026-05-19 — ENABLE_HIERARCHICAL_RAG_CACHE + ENABLE_R5_L2_RANKING
+    # subsumed into the main ENABLE_HIERARCHICAL_RAG switch (cache always on,
+    # L2 R5 ranking always on). DB orphan override rows silently no-op.
     # phase15-D PR3c (2026-05-18): ENABLE_CASCADE_LEGACY flag retired —
     # cascade dispatch + router + watchdog probe now refuse
     # unconditionally. Removed from SUPPORTED_FLAGS so the override UI
@@ -328,19 +404,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "AsyncSession soft-fail INSERT — DB error never aborts RAG."
         ),
     ),
-    # --- R8-v2 #3 R5 L2 ranking ---
-    "ENABLE_R5_L2_RANKING": FlagSpec(
-        name="ENABLE_R5_L2_RANKING",
-        flag_type="bool",
-        group="Phase3-R8",
-        description=(
-            "Phase 3 R8-v2 #3 (2026-05-18): layer2_family SUCCESS 候选按 R5 "
-            "composite_score 历史 AVG 重排。SQL 单次 GROUP BY expression_hash "
-            "JOIN r1a_attribution_log,relevance_score = 0.45 + 0.4·avg(R5)。"
-            "前置 ENABLE_HIERARCHICAL_RAG ON + ENABLE_LLM_JUDGE ON 累计 r5 "
-            "score 非 NULL。Soft-fail SQL error → 原顺序。Rollback < 1min。"
-        ),
-    ),
     # --- R9 simulation cache ---
     "ENABLE_SIMULATION_CACHE": FlagSpec(
         name="ENABLE_SIMULATION_CACHE",
@@ -357,36 +420,42 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "Soft-fail: cache DB error → fall back to direct BRAIN call (never blocks)。"
         ),
     ),
-    # --- flat-F3: LLM-driven wrapper mutation ---
+    # --- Mining-Strategy: LLM-driven wrapper mutation (used by both flat & cascade) ---
     "ENABLE_LLM_MUTATE_ALPHA": FlagSpec(
         name="ENABLE_LLM_MUTATE_ALPHA",
         flag_type="bool",
-        group="Phase3-flatF3",
+        group="Mining-Strategy",
         description=(
-            "Phase 3 flat-F3 (master plan §4.5): wrapper-mutation 路径让 LLM "
-            "看 _failed_tests + P2-D pitfalls 选 2-3 wrappers,替代盲目穷举。"
-            "降 BRAIN sim cost ~40-75%,提 PASS rate (LLM 偏避有名失败模式)。"
-            "Soft-fail: LLM 失败 fall back to legacy enumerate。"
-            "Cost: haiku-4-5 ~$0.01/call/seed,top_k=3 variants。"
+            "[no deps — concept independent of flat/cascade] Phase 3 flat-F3 "
+            "(master plan §4.5): wrapper-mutation 路径让 LLM 看 _failed_tests + "
+            "P2-D pitfalls 选 2-3 wrappers,替代盲目穷举。降 BRAIN sim cost "
+            "~40-75%,提 PASS rate (LLM 偏避有名失败模式)。Soft-fail: LLM 失败 "
+            "fall back to legacy enumerate。Cost: haiku-4-5 ~$0.01/call/seed,"
+            "top_k=3 variants。"
         ),
     ),
-    # --- flat-F2: default flat session ---
+    # --- Flat-Mode (2 sub-flags — entry switch + default routing) ---
     "ENABLE_DEFAULT_FLAT_SESSION": FlagSpec(
         name="ENABLE_DEFAULT_FLAT_SESSION",
         flag_type="bool",
-        group="Phase3-flatF2",
+        group="Flat-Mode",
         description=(
+            "[entry routing — deps: FLAT_CONTINUOUS + DAG_TRACE both ON] "
             "Phase 3 flat-F2: POST /mining-session/start 默认创建 flat task。"
             "前置 ENABLE_FLAT_CONTINUOUS + ENABLE_DAG_TRACE 都 ON 才生效 "
             "(R6 给 flat reward-guided exploration)。"
         ),
     ),
-    # --- flat-F1 Advanced: FLAT continuous mining ---
     "ENABLE_FLAT_CONTINUOUS": FlagSpec(
         name="ENABLE_FLAT_CONTINUOUS",
         flag_type="bool",
-        group="Phase3-flatF1",
-        description="启用 FLAT 持续 session。Hypothesis-driven — dataset × hypothesis 迭代。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume 入口。",
+        group="Flat-Mode",
+        description=(
+            "[core flat session switch — no deps] Phase 3 flat-F1 Advanced: "
+            "启用 FLAT 持续 session。Hypothesis-driven — dataset × hypothesis "
+            "迭代。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume "
+            "入口。"
+        ),
     ),
     # --- Phase 2 R6: DAG Trace (MCTS-lite) ---
     "ENABLE_DAG_TRACE": FlagSpec(
@@ -427,8 +496,10 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "(operator-sequence signature) 只保留 top-K=2 by score。"
             "防止一个 op pipeline 在 evaluation batch 刷榜挤掉异质 alpha。"
             "evaluation node R5 hook 之后调 family_classifier.apply_family_cap,"
-            "超出 K 的标 quality_status='FAIL' + metrics['_r10_family_cap_dropped']=True。"
-            "误杀时 flag flip OFF (0 工程量) 或 FAMILY_CAP_TOP_K=5 放宽。"
+            "超出 K 的只 stamp metrics['_r10_family_cap_dropped']=True;FAIL "
+            "transition 走 evaluation node 末尾的 finalize pass(B3 Sprint 2 重构 — "
+            "R10 + R10-v2 stamps 合并 → quality_status=FAIL,允许 7d 互验 SQL 分别"
+            "计算两机制 false-positive rate)。误杀时 flag flip OFF 或 FAMILY_CAP_TOP_K=5 放宽。"
         ),
     ),
     # --- Phase 2 R5: Hypothesis-Alignment Dual-Bridge LLM Judge ---
@@ -455,6 +526,371 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "走 task.schedule (sole authoritative scheduling column post "
             "tier-system removal)。Tier removal 后 legacy fallback 已删,"
             "flag 仍保留作 staged rollout 节流入口。"
+        ),
+    ),
+    # --- Phase 4 Sprint 0 (2026-05-19) ---
+    "ENABLE_LLM_API_CIRCUIT": FlagSpec(
+        name="ENABLE_LLM_API_CIRCUIT",
+        flag_type="bool",
+        group="Phase4-Sprint0",
+        description=(
+            "Phase 4 PR0:LLM provider(DeepSeek/Anthropic)outage 熔断。"
+            "60s 内连续 LLM_API_CIRCUIT_FAIL_THRESHOLD(默认 5)次 5xx/timeout "
+            "→ trip 300s 冷却 → 任何 LLM caller fast-fail return success=False/"
+            "error='llm_api_circuit_open',不发实际 HTTP。任何 success → "
+            "立即 clear。Default ON(防御机制 default ON 与 BRAIN_AUTH_CIRCUIT "
+            "一致)。Soft-fail Redis blip 永不 brown-out。"
+        ),
+    ),
+    "ENABLE_R8_L0": FlagSpec(
+        name="ENABLE_R8_L0",
+        flag_type="bool",
+        group="Phase4-Sprint0",
+        description=(
+            "Phase 4 PR0.5:R8 hierarchical RAG L0(exact pattern_hash match)"
+            "选择性 sub-flag。Default ON(R8 4-layer 全部 LIVE)。"
+            "R12 LLM_MODE=assistant sentinel ON 时,全局 set False 仅 skip L0,"
+            "保留 L1 pillar / L2 family / L3 field。双 entry skip:"
+            "`backend/agents/hierarchical_rag.py:query_hierarchical` 主 entry + "
+            "`backend/agents/services/rag_service.py:query()` legacy entry。"
+        ),
+    ),
+    # --- Persistence-Ontology (P1-P4 2026-05-19, plan v1.3.1) ---
+    "ENABLE_FAIL_ALPHA_PERSIST": FlagSpec(
+        name="ENABLE_FAIL_ALPHA_PERSIST",
+        flag_type="bool",
+        group="Persistence-Ontology",
+        description=(
+            "P1:把 BRAIN 接受过的 FAIL alpha (alpha_id 存在 + 真 sim 成功)"
+            "写 alphas 表;OFF 时回到 PASS-only legacy 行为。修复 mining-time"
+            "write filter — alpha_failures.QUALITY_CHECK_FAILED 不再丢 BRAIN"
+            "handle。Flip ON 后 ≥1h 才能跑 P2 backfill 脚本(脚本自检)。"
+        ),
+    ),
+    "ENABLE_R1B_MUTATE_PROMPT_V2": FlagSpec(
+        name="ENABLE_R1B_MUTATE_PROMPT_V2",
+        flag_type="str",
+        group="Persistence-Ontology",
+        description=(
+            "P4:R1b mutate prompt v2 — parent context 富化为 failure-metrics-"
+            "with-diagnosis。Tri-state:'off' = byte-equivalent legacy / "
+            "'shadow' = 双 prompt 生成,只发 OLD 给 LLM,NEW 仅写 llm_call_log "
+            "供对比 / 'active' = 只发 NEW prompt。Rollout: off → shadow(7d) "
+            "→ active。"
+        ),
+    ),
+    # --- Phase 4 Sprint 1 A2 R14 task_stop_loss (2026-05-19) ---
+    "ENABLE_TASK_STOP_LOSS": FlagSpec(
+        name="ENABLE_TASK_STOP_LOSS",
+        flag_type="bool",
+        group="Phase4-Sprint1",
+        description=(
+            "Phase 4 A2 R14:Millennium-style hard stop-loss — task 累计 PASS "
+            "rate 低于 EMA floor OR 连续 CONSECUTIVE_FAIL_ROUNDS round 0 PASS "
+            "→ auto-pause task + INSERT task_stop_loss_events 行。Default OFF;"
+            "翻 ON 前看 scripts/sprint0_baseline_spike.py 校准 PASS_RATE_FLOOR "
+            "(production p50=0 → 推荐 floor=0.005)。Race fix:flat loop 已在 "
+            "BRAIN_AUTH_CIRCUIT skip 时 continue,CB-skipped round 不计 counter。"
+        ),
+    ),
+    "TASK_STOP_LOSS_PASS_RATE_FLOOR": FlagSpec(
+        name="TASK_STOP_LOSS_PASS_RATE_FLOOR",
+        flag_type="float",
+        group="Phase4-Sprint1",
+        description=(
+            "R14 EMA PASS rate 阈值。Default 0.005(0.5%)— spike-calibrated;"
+            "production p50 round PASS rate = 0,floor 设 5% 会全部 false-trigger。"
+            "Operator 想更保守可调到 0.001。"
+        ),
+    ),
+    "TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS": FlagSpec(
+        name="TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS",
+        flag_type="int",
+        group="Phase4-Sprint1",
+        description=(
+            "R14 连续 0-PASS round 数阈值。Default 3 — production 主 trigger "
+            "(EMA floor 因 p50=0 受 noise 干扰大)。调高 → 更宽松,调低 → 更早 pause。"
+        ),
+    ),
+    # --- A1.2 R12 LLM_MODE=assistant (Sprint 1, 2026-05-20) ---
+    "ENABLE_LLM_ASSISTANT_MODE": FlagSpec(
+        name="ENABLE_LLM_ASSISTANT_MODE",
+        flag_type="bool",
+        group="Phase4-Sprint1",
+        description=(
+            "Phase 4 R12:工业 8 家共识(Citadel/Two Sigma/Bridgewater AIA)— "
+            "LLM 做 research assistant 不做 expression-author。Default OFF。"
+            "Set True 时联动 6 LLM_ASSISTANT_SENTINEL_FLAGS 强制 False "
+            "(R1b mutate / G5 crossover / G8 forest reuse / R8 L0 / G3 / R9 cache)"
+            ",audit 留 sentinel_trigger_for 标识便于 restore。OFF 仅关 kill "
+            "switch — sentinel flag 不会自动恢复,需 POST /ops/llm-mode/"
+            "restore-sentinel 显式回滚。task.config['llm_mode']='assistant' 控制 "
+            "per-task opt-in。"
+        ),
+    ),
+    # --- A3 flat-F4 cross-region quota (Sprint 1, 2026-05-19) ---
+    "FLAT_CROSS_REGION_QUOTA": FlagSpec(
+        name="FLAT_CROSS_REGION_QUOTA",
+        flag_type="json",
+        group="Phase4-Sprint1",
+        description=(
+            "Phase 4 A3 flat-F4:每 region 的 active task share 上限(0-1)。"
+            "POST /ops/start-flat-session 前查 last-N-day active task by region,"
+            "新加入 task 后是否越过 quota — 越过则按 FLAT_CROSS_REGION_ENFORCE 决定 "
+            "reject 还是 warn。default: USA 0.30 / CHN 0.20 / JPN 0.15 / EUR 0.20 / "
+            "HKG 0.15(对 Millennium 320-pod 多策略启示的实操化)。"
+        ),
+    ),
+    "FLAT_CROSS_REGION_ENFORCE": FlagSpec(
+        name="FLAT_CROSS_REGION_ENFORCE",
+        flag_type="bool",
+        group="Phase4-Sprint1",
+        description=(
+            "Phase 4 A3:default False = warn-only 阶段观察 7d 数据;翻 True = POST "
+            "时越过 quota 直接 reject 400。Phase A 真效果(per "
+            "[[feedback_按效果选择]]):observation-only 是 fallback,不是 default — "
+            "operator 看 7d /ops/flat-region/distribution 数据后翻 ENFORCE=True。"
+        ),
+    ),
+    # --- B1 R11 alpha_capacity_estimator (Sprint 2, 2026-05-20) ---
+    "ENABLE_CAPACITY_SCORE": FlagSpec(
+        name="ENABLE_CAPACITY_SCORE",
+        flag_type="bool",
+        group="Phase4-Sprint2",
+        description=(
+            "Phase 4 B1 R11:工业派 capacity-cap(RenTec $10B / Bridgewater $5B "
+            "软上限)纳入 composite_score 第 5 维。Default OFF — 翻 ON 时 "
+            "evaluate_alpha_comprehensive composite normalize sum=1.0(原 4 维 × "
+            "0.9 + capacity × CAPACITY_SCORE_WEIGHT),calculate_alpha_score 加 "
+            "capacity 项。capacity_estimator.estimate(alpha) 用 ADV × universe × "
+            "(1 - turnover_decay) 粗估 USD,log-scale 5 桶 normalize [0,1]。"
+            "PASS alpha persist 前 stamp `alphas.capacity_usd_estimate`(Alembic "
+            "k2b3c4d5e6f7)。Phase A 真效果,不是 stamp-only。"
+        ),
+    ),
+    "CAPACITY_SCORE_WEIGHT": FlagSpec(
+        name="CAPACITY_SCORE_WEIGHT",
+        flag_type="float",
+        group="Phase4-Sprint2",
+        description=(
+            "R11 capacity 维度 weight。Default 0.10 — composite normalize 时原 4 "
+            "维 weight × (1 - 0.10) + capacity × 0.10 = 1.0。调高 → capacity 主导,"
+            "调低 → 接近原 4 维 baseline。验收期 obs 7d 后可 calibrate。"
+        ),
+    ),
+    # --- B3 R10-v2 family hard-ban shadow (Sprint 2, 2026-05-20) ---
+    "ENABLE_FAMILY_HARD_BAN": FlagSpec(
+        name="ENABLE_FAMILY_HARD_BAN",
+        flag_type="bool",
+        group="Phase4-Sprint2",
+        description=(
+            "Phase 4 B3 R10-v2:同 (pillar, family) alpha pairwise PnL correlation ≥ "
+            "FAMILY_BAN_MIN_PAIRWISE_CORR 时 stamp metrics['_r10v2_hard_banned']"
+            "=True。Shadow mode:不直接 set FAIL,evaluation 末 finalize pass "
+            "scan stamp 后统一 set FAIL。允许 R10/R10-v2 双 stamp 共存,7d obs "
+            "后跑 plan v5 §6.10 互验 SQL 比较 false-positive rate 决定胜出者。"
+            "⚠️ Default OFF + **DOA without Sprint 3 follow-up wire**:"
+            "  apply_family_hard_ban 读 state.r10v2_pnl_corr_matrix (Optional[pd."
+            "DataFrame]),但 producer 还没写 — flag ON 时 evaluation 块仅 DEBUG-"
+            "log skip。Sprint 3 follow-up:在 node_correlation_check / "
+            "node_evaluate 上游加 batch fetch + pandas .corr 写到该字段。"
+            "operator 先把 τ 用 calibrate_r10_pairwise_corr.py 校准 region-"
+            "specific 之后再 flip。"
+        ),
+    ),
+    "FAMILY_BAN_MIN_PAIRWISE_CORR": FlagSpec(
+        name="FAMILY_BAN_MIN_PAIRWISE_CORR",
+        flag_type="float",
+        group="Phase4-Sprint2",
+        description=(
+            "R10-v2 hard-ban pairwise PnL correlation threshold τ ∈ [0, 1]。"
+            "Default 0.65 = 保守初值;scripts/calibrate_r10_pairwise_corr.py "
+            "输出 region 内 intra-family p95/p99 中位会 calibrate 到 region-specific "
+            "(USA TOP3000 通常 0.7-0.8,emerging market 0.5-0.6)。调高 → 更宽容,"
+            "调低 → 更激进 ban。"
+        ),
+    ),
+    # --- B2 R13 factor_decomposition shadow (Sprint 2, 2026-05-20) ---
+    "ENABLE_FACTOR_LENS": FlagSpec(
+        name="ENABLE_FACTOR_LENS",
+        flag_type="bool",
+        group="Phase4-Sprint2",
+        description=(
+            "Phase 4 B2 R13:OLS 分解 PASS alpha daily returns 对 5 个 style "
+            "factor(size/value/momentum/quality/low_vol)产 residual_sharpe + "
+            "factor_exposures。Default OFF。三阶段 rollout:shadow→soft→hard "
+            "(per FACTOR_LENS_MODE)。Shadow 模式 stamp 不改 quality_status,"
+            "soft 模式 residual<τ → PASS_PROVISIONAL,hard 模式 residual<τ → "
+            "FAIL。数据依赖 backend/data/factor_returns_snapshot/{region}."
+            "parquet — operator 月维护。flag ON 但 snapshot 缺失 → soft-fall "
+            "skip(无 exception)。"
+        ),
+    ),
+    "FACTOR_LENS_MODE": FlagSpec(
+        name="FACTOR_LENS_MODE",
+        flag_type="string",
+        group="Phase4-Sprint2",
+        description=(
+            "R13 rollout 阶段 — 'shadow'(default)/ 'soft' / 'hard'。验收期"
+            "(per [[feedback_light_wiring_deferred_gate]]):shadow 7d obs ≥30 "
+            "alpha residual → flip soft → 7d obs PASS_PROV 中 ≥80% can_submit "
+            "→ flip hard。"
+        ),
+    ),
+    "FACTOR_LENS_RESIDUAL_SHARPE_MIN": FlagSpec(
+        name="FACTOR_LENS_RESIDUAL_SHARPE_MIN",
+        flag_type="float",
+        group="Phase4-Sprint2",
+        description=(
+            "R13 soft/hard 模式的 residual_sharpe 阈值 τ。default 0.5 — "
+            "alpha 经 style factor neutralize 后年化 sharpe 仍 ≥0.5 才认为"
+            "有 idiosyncratic 编辑。scripts/calibrate_r13_threshold.py 可"
+            "根据 7d obs 数据校准 region-specific 值(fast-follow)。"
+        ),
+    ),
+    # --- B5 R8-v3 cognitive layer 7-layer (Sprint 3, 2026-05-20) ---
+    "ENABLE_COGNITIVE_LAYER_PROMPT": FlagSpec(
+        name="ENABLE_COGNITIVE_LAYER_PROMPT",
+        flag_type="bool",
+        group="Phase4-Sprint3",
+        description=(
+            "Phase 4 B5 R8-v3:每 round 选 1 个 cognitive layer(7 选 1,"
+            "macro/behavioral/technical/value/microstructure/cross_sectional/"
+            "time_series_mean_reversion)splice 进 hypothesis prompt。Default "
+            "OFF — flag ON 时 node_hypothesis fetch + 注入 layer block + "
+            "stamp alpha.metrics['cognitive_layer_id']。R12 sentinel 联动:"
+            "R8 L0 disable 时 R8-v3 仍可独立 LIVE(L1/L2/L3 + cognitive "
+            "layer 共存)。"
+        ),
+    ),
+    "COGNITIVE_LAYER_SELECT_MODE": FlagSpec(
+        name="COGNITIVE_LAYER_SELECT_MODE",
+        flag_type="string",
+        group="Phase4-Sprint3",
+        description=(
+            "R8-v3 layer 选择策略:'round_robin'(default,公平轮转)/ "
+            "'bandit'(Beta-Bernoulli Thompson sample exploit > 0.5 优势 "
+            "layer)/ 'deficit_aware'(挑 PASS rate 最低 boost coverage)。"
+            "运行 ≥7d 累积 bandit state 后建议 flip 到 'bandit'。"
+        ),
+    ),
+    "COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET": FlagSpec(
+        name="COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET",
+        flag_type="int",
+        group="Phase4-Sprint3",
+        description=(
+            "R8-v3 hypothesis prompt 总 token 上限。Default 8000 — 超过时按 "
+            "drop order(dedup_blacklist → cross_task_forest → macro_narrative)"
+            "删除上下文块。cognitive_layer 块绝不删(R8-v3 的核心)。"
+        ),
+    ),
+    # --- A5.1 G10 logic-as-asset PR1 (Sprint 3, 2026-05-20) ---
+    "ENABLE_G10_LOGIC_DISTILL": FlagSpec(
+        name="ENABLE_G10_LOGIC_DISTILL",
+        flag_type="bool",
+        group="Phase4-Sprint3",
+        description=(
+            "Phase 4 A5.1:Sunday 03:00 SH 周末 cron — 过去 7d PASS alpha "
+            "按 (pillar, region) 分组,LLM 蒸馏成 1-3 句 logic 总结,写 "
+            "distilled_logic_library 表(Alembic n5e6f7g8h9i0)。Default OFF。"
+            "PR2 (Sprint 4) 注入回 hypothesis prompt 形成正反馈;PR1 只建库。"
+            "Cost cap LOGIC_DISTILL_MAX_COST_USD_PER_WEEK $5。"
+        ),
+    ),
+    "LOGIC_DISTILL_MAX_COST_USD_PER_WEEK": FlagSpec(
+        name="LOGIC_DISTILL_MAX_COST_USD_PER_WEEK",
+        flag_type="float",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 周末蒸馏 LLM cost 上限。Default $5/周。超过即停止 dispatch "
+            "新 bucket,fallback 是保留上周残余条目(staleness 在 "
+            "/ops/g10/logic-library 显示)。"
+        ),
+    ),
+    "LOGIC_DISTILL_TOP_K_PER_GROUP": FlagSpec(
+        name="LOGIC_DISTILL_TOP_K_PER_GROUP",
+        flag_type="int",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 每 (pillar, region) bucket 取 sharpe DESC top-K alpha 进 "
+            "distill prompt。Default 10 — LLM context size 与 distill 质量 "
+            "trade-off,调大 → 上下文丰富但 cost 高。"
+        ),
+    ),
+    "LOGIC_DISTILL_MIN_PASS_COUNT": FlagSpec(
+        name="LOGIC_DISTILL_MIN_PASS_COUNT",
+        flag_type="int",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 bucket < N PASS alpha 时 skip 蒸馏(数据不足以画出 pattern)。"
+            "Default 3 — production validate 后可调。"
+        ),
+    ),
+    "LOGIC_DISTILL_LOOKBACK_DAYS": FlagSpec(
+        name="LOGIC_DISTILL_LOOKBACK_DAYS",
+        flag_type="int",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 distill 回溯天数。Default 7(weekly cadence)。"
+        ),
+    ),
+    "LOGIC_DISTILL_SIMILARITY_THRESHOLD": FlagSpec(
+        name="LOGIC_DISTILL_SIMILARITY_THRESHOLD",
+        flag_type="float",
+        group="Phase4-Sprint3",
+        description=(
+            "G10 PR2 refine 阶段判断 logic entry 与上周是否近重复的 Jaccard "
+            "阈值。Default 0.70 — token 集合 70% 重叠就视为 stale 不写。"
+        ),
+    ),
+    # --- A5.2 G10 PR2 (Sprint 4, 2026-05-20) - prompt injection ---
+    "ENABLE_G10_LOGIC_INJECT": FlagSpec(
+        name="ENABLE_G10_LOGIC_INJECT",
+        flag_type="bool",
+        group="Phase4-Sprint4",
+        description=(
+            "Phase 4 A5.2:G10 distilled_logic_library 注入回 hypothesis "
+            "prompt(独立 block 渲染 + 与 R8-v3 cognitive layer 并存)。"
+            "Default OFF。node_hypothesis 在 G8 forest fetch 之后 fetch "
+            "active 条目(retired_at IS NULL,region+pillar match),5 entry "
+            "拼成 distilled_logic_block splice 进 prompt template。OFF 路径"
+            "byte-for-byte legacy(空 block → 空 splice)。"
+        ),
+    ),
+    "G10_LOGIC_INJECT_TOP_K": FlagSpec(
+        name="G10_LOGIC_INJECT_TOP_K",
+        flag_type="int",
+        group="Phase4-Sprint4",
+        description=(
+            "G10 inject 到 hypothesis prompt 的 entry 上限。Default 5。"
+            "考虑 token 预算 + 信号噪声,过多 entry → prompt 稀释 + LLM 选择困难。"
+        ),
+    ),
+    # --- B4.1 G3-v2 grammar-aware (Sprint 4, 2026-05-20) ---
+    "ENABLE_GRAMMAR_VALIDATOR": FlagSpec(
+        name="ENABLE_GRAMMAR_VALIDATOR",
+        flag_type="bool",
+        group="Phase4-Sprint4",
+        description=(
+            "Phase 4 B4.1 G3-v2:lark-based 语法子集 validator,catch 结构性"
+            "malformed alpha(unbalanced parens / unexpected tokens)。Default "
+            "OFF。新 code path 不动 G3 shadow code(ENABLE_AST_ORIGINALITY_GATE "
+            "@deprecated_pending_r12_decision,B4.2 Sprint 5 条件性 retire)。"
+            "validate fail → retry_with_whole_output_hint → node_code_gen 重发 "
+            "GRAMMAR_VALIDATOR_RETRY_MAX 次。lark 未安装时 degrade-open(返回 "
+            "ok=True 让 caller 走 legacy 检查)。"
+        ),
+    ),
+    "GRAMMAR_VALIDATOR_RETRY_MAX": FlagSpec(
+        name="GRAMMAR_VALIDATOR_RETRY_MAX",
+        flag_type="int",
+        group="Phase4-Sprint4",
+        description=(
+            "⚠️ RESERVED — not yet wired (Sprint 4 F4 review fix). "
+            "node_code_gen 当前对 parse-fail candidate 做 BUFFER + 50% drop "
+            "floor degrade-open,**不** 走 LLM re-emit。未来 PR 可把 "
+            "retry_with_whole_output_hint 接进 bounded re-emit loop 读此值。"
+            "调它当前无行为变化。"
         ),
     ),
 }
@@ -685,12 +1121,27 @@ class FeatureFlagService(BaseService):
         _flag_override_cache.update(new_cache)
         return dict(new_cache)
 
-    async def list_audit(self, limit: int = 50) -> List[FeatureFlagAudit]:
-        """Most recent flip / clear records for the audit Drawer."""
+    async def list_audit(
+        self,
+        limit: int = 50,
+        *,
+        include_sentinel: bool = False,
+    ) -> List[FeatureFlagAudit]:
+        """Most recent flip / clear records for the audit Drawer.
+
+        Phase 4 A1.2 (2026-05-20): default filters out R12 sentinel
+        cascade rows (sentinel_trigger_for IS NOT NULL) so the ops
+        Timeline isn't flooded by the 6-row burst on every R12 flip.
+        Operator can pass ``include_sentinel=True`` to see them — useful
+        when debugging "why did flag X go to False" right after R12 was
+        flipped on.
+        """
+        stmt = select(FeatureFlagAudit)
+        if not include_sentinel:
+            stmt = stmt.where(FeatureFlagAudit.sentinel_trigger_for.is_(None))
         stmt = (
-            select(FeatureFlagAudit)
-            .order_by(desc(FeatureFlagAudit.created_at))
-            .limit(min(max(limit, 1), 500))
+            stmt.order_by(desc(FeatureFlagAudit.created_at))
+                .limit(min(max(limit, 1), 500))
         )
         return list((await self.db.execute(stmt)).scalars().all())
 
@@ -755,6 +1206,79 @@ class FeatureFlagService(BaseService):
         # immediately even before the next refresher tick.
         _flag_override_cache[name] = value
 
+        # Phase 4 A1.2 (2026-05-20): R12 LLM_MODE=assistant sentinel cascade.
+        # When ENABLE_LLM_ASSISTANT_MODE is set True, force the 6
+        # LLM_ASSISTANT_SENTINEL_FLAGS to False in the SAME transaction so
+        # author-mode mechanisms (R1b mutate, G5 crossover, G8 forest
+        # reuse, R8 L0, G3 originality, R9 sim cache) don't fire under an
+        # assistant-mode hypothesis. Each forced flip writes an audit row
+        # with sentinel_trigger_for=name so restore_sentinel() can reverse
+        # the cascade later via a single WHERE clause.
+        # Idempotent: setting False (or any value other than True) does
+        # NOT cascade.
+        if name == "ENABLE_LLM_ASSISTANT_MODE" and value is True:
+            from backend.config import settings as _stg
+            sentinel_list = list(
+                getattr(_stg, "LLM_ASSISTANT_SENTINEL_FLAGS", []) or []
+            )
+            for sentinel_name in sentinel_list:
+                sentinel_spec = SUPPORTED_FLAGS.get(sentinel_name)
+                if sentinel_spec is None:
+                    # Skip silently — sentinel list may include a flag
+                    # that's been retired since A1.1 declared the list.
+                    # The restore_sentinel path also handles partial cascades.
+                    logger.warning(
+                        "[ff sentinel] %s in LLM_ASSISTANT_SENTINEL_FLAGS "
+                        "but not in SUPPORTED_FLAGS — skipping",
+                        sentinel_name,
+                    )
+                    continue
+                sentinel_encoded_off = _encode_value(False, sentinel_spec.flag_type)
+                sentinel_existing = (await self.db.execute(
+                    select(FeatureFlagOverride).where(
+                        FeatureFlagOverride.flag_name == sentinel_name
+                    )
+                )).scalar_one_or_none()
+                sentinel_old_encoded = (
+                    sentinel_existing.flag_value if sentinel_existing else None
+                )
+                # No-op when sentinel already at False — but still write
+                # an audit row so restore_sentinel can find + revert it.
+                # restore_sentinel reads old_value=None as "no prior
+                # override existed; restore = DELETE the row we just made".
+                if sentinel_existing is None:
+                    self.db.add(FeatureFlagOverride(
+                        flag_name=sentinel_name,
+                        flag_value=sentinel_encoded_off,
+                        flag_type=sentinel_spec.flag_type,
+                        updated_by=actor,
+                        note=(
+                            f"sentinel_cascade from ENABLE_LLM_ASSISTANT_MODE "
+                            f"by {actor}"
+                        ),
+                    ))
+                else:
+                    sentinel_existing.flag_value = sentinel_encoded_off
+                    sentinel_existing.flag_type = sentinel_spec.flag_type
+                    sentinel_existing.updated_by = actor
+                    sentinel_existing.note = (
+                        f"sentinel_cascade from ENABLE_LLM_ASSISTANT_MODE "
+                        f"by {actor}"
+                    )
+                self.db.add(FeatureFlagAudit(
+                    flag_name=sentinel_name,
+                    old_value=sentinel_old_encoded,
+                    new_value=sentinel_encoded_off,
+                    action="sentinel_set",
+                    actor=actor,
+                    note=(
+                        f"R12 sentinel cascade: forced False by "
+                        f"ENABLE_LLM_ASSISTANT_MODE=True"
+                    ),
+                    sentinel_trigger_for="ENABLE_LLM_ASSISTANT_MODE",
+                ))
+                _flag_override_cache[sentinel_name] = False
+
         # Cross-process invalidation hint (best-effort)
         self._bump_redis_async_safe()
 
@@ -817,6 +1341,370 @@ class FeatureFlagService(BaseService):
             effective_value=env_default,
             source="env" if env_default is not None else "default",
         )
+
+    # ---- A1.2 R12 sentinel restore ---------------------------------------
+
+    @transactional
+    async def restore_sentinel(
+        self,
+        sentinel_for: str = "ENABLE_LLM_ASSISTANT_MODE",
+        *,
+        actor: str = "ops_console",
+        note: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Reverse the most-recent R12 sentinel cascade.
+
+        Reads every feature_flag_audit row WHERE
+        sentinel_trigger_for=:sentinel_for AND restored_at IS NULL,
+        groups by flag_name, picks the latest row per flag (by created_at),
+        and restores each sentinel flag to its `old_value` snapshot.
+
+        Restoration rules per row:
+          - old_value=None (encoded "null") → DELETE the override (the
+            sentinel set was the first time a row existed; restore =
+            remove it so reads fall through to env default)
+          - old_value="false" / "true" / etc → UPSERT override back to
+            that JSON-encoded value
+
+        Idempotent: stamps `restored_at`, `restored_by` on every audit row
+        in the matched batch so a second call skips them. Also writes a
+        new audit row with action='sentinel_restore' for forensic clarity.
+
+        Returns ``{"restored_flags": [list of flag names], "audit_rows": int,
+        "skipped": int}``.
+
+        Soft-fail philosophy:
+          If a sentinel flag has been retired from SUPPORTED_FLAGS since
+          the cascade fired, we still stamp restored_at on the audit row
+          (so it doesn't loop forever) but skip the actual UPSERT.
+        """
+        # SELECT the still-unrestored sentinel audit rows for this trigger
+        stmt = (
+            select(FeatureFlagAudit)
+            .where(
+                FeatureFlagAudit.sentinel_trigger_for == sentinel_for,
+                FeatureFlagAudit.restored_at.is_(None),
+                FeatureFlagAudit.action == "sentinel_set",
+            )
+            .order_by(FeatureFlagAudit.flag_name, desc(FeatureFlagAudit.created_at))
+        )
+        rows = list((await self.db.execute(stmt)).scalars().all())
+        if not rows:
+            return {
+                "restored_flags": [],
+                "audit_rows": 0,
+                "skipped": [],
+                "skipped_reasons": {},
+                "sentinel_for": sentinel_for,
+                "drained_tasks": 0,
+                "drained_keys_total": 0,
+            }
+
+        # Group by flag_name + pick the LATEST row per flag (already
+        # ordered by created_at DESC within flag_name, so first wins).
+        latest_per_flag: Dict[str, FeatureFlagAudit] = {}
+        for row in rows:
+            latest_per_flag.setdefault(row.flag_name, row)
+
+        # F3 fix (S1-B A1.2 race): for each sentinel flag check whether
+        # the operator manually set/cleared the flag AFTER the cascade
+        # fired. If yes, the operator's manual action is the latest
+        # authority — skip restoring this flag + record the reason on
+        # the skipped list so the response surfaces the deliberate
+        # operator intervention (not silently revert it).
+        manual_override_after: Dict[str, "FeatureFlagAudit"] = {}
+        flag_names_in_batch = list(latest_per_flag.keys())
+        if flag_names_in_batch:
+            manual_stmt = (
+                select(FeatureFlagAudit)
+                .where(
+                    FeatureFlagAudit.flag_name.in_(flag_names_in_batch),
+                    FeatureFlagAudit.action.in_(("set", "clear")),
+                )
+                .order_by(FeatureFlagAudit.flag_name, desc(FeatureFlagAudit.created_at))
+            )
+            for mrow in (await self.db.execute(manual_stmt)).scalars().all():
+                # Keep only the LATEST manual action per flag. Use ROW ID
+                # (strictly monotonic auto-increment) rather than created_at
+                # — SQLite `func.now()` is second-resolution and can tie
+                # cascade-time with operator-time in fast test runs.
+                if mrow.flag_name not in manual_override_after:
+                    sentinel_set_id = latest_per_flag[mrow.flag_name].id
+                    if (
+                        mrow.id is not None
+                        and sentinel_set_id is not None
+                        and mrow.id > sentinel_set_id
+                    ):
+                        manual_override_after[mrow.flag_name] = mrow
+
+        now = datetime.utcnow()
+        restored: List[str] = []
+        skipped: List[str] = []
+        skipped_reasons: Dict[str, str] = {}
+        for flag_name, audit_row in latest_per_flag.items():
+            # F3: operator manually intervened after cascade → skip revert
+            if flag_name in manual_override_after:
+                manual_row = manual_override_after[flag_name]
+                logger.warning(
+                    "[ff restore_sentinel] flag %r had operator manual %s "
+                    "(actor=%s) at %s AFTER sentinel_set at %s — preserving "
+                    "operator intent, skipping revert",
+                    flag_name, manual_row.action, manual_row.actor,
+                    manual_row.created_at, audit_row.created_at,
+                )
+                skipped.append(flag_name)
+                skipped_reasons[flag_name] = "operator_manual_intervention"
+                # Still stamp restored_at on the cascade audit row so a
+                # repeat restore_sentinel call won't re-trip on it; also
+                # write a forensic row marking the skip decision.
+                for r in rows:
+                    if r.flag_name == flag_name and r.restored_at is None:
+                        r.restored_at = now
+                        r.restored_by = actor
+                self.db.add(FeatureFlagAudit(
+                    flag_name=flag_name,
+                    old_value=audit_row.new_value,  # still the sentinel-set False
+                    new_value=manual_row.new_value,  # operator's value preserved
+                    action="sentinel_restore",
+                    actor=actor,
+                    note=(
+                        f"sentinel_restore SKIPPED for {flag_name}: "
+                        f"operator manual {manual_row.action} by "
+                        f"{manual_row.actor} at {manual_row.created_at} "
+                        f"overrides earlier sentinel cascade"
+                    ),
+                    sentinel_trigger_for=sentinel_for,
+                    restored_at=now,
+                    restored_by=actor,
+                ))
+                continue
+
+            spec = SUPPORTED_FLAGS.get(flag_name)
+            if spec is None:
+                # Sentinel flag retired since cascade; stamp + skip UPSERT
+                logger.warning(
+                    "[ff restore_sentinel] flag %r no longer in "
+                    "SUPPORTED_FLAGS — stamping restored_at but skipping "
+                    "UPSERT (already untouchable from ops UI)",
+                    flag_name,
+                )
+                skipped.append(flag_name)
+            else:
+                # Restore prior state
+                existing_override = (await self.db.execute(
+                    select(FeatureFlagOverride).where(
+                        FeatureFlagOverride.flag_name == flag_name
+                    )
+                )).scalar_one_or_none()
+                if audit_row.old_value is None:
+                    # Sentinel set created the override row; restore = delete
+                    if existing_override is not None:
+                        await self.db.delete(existing_override)
+                    _flag_override_cache.pop(flag_name, None)
+                else:
+                    # Sentinel set replaced an existing override; restore = revert
+                    if existing_override is None:
+                        self.db.add(FeatureFlagOverride(
+                            flag_name=flag_name,
+                            flag_value=audit_row.old_value,
+                            flag_type=spec.flag_type,
+                            updated_by=actor,
+                            note=(
+                                f"sentinel_restore from {sentinel_for} by {actor}"
+                            ),
+                        ))
+                    else:
+                        existing_override.flag_value = audit_row.old_value
+                        existing_override.flag_type = spec.flag_type
+                        existing_override.updated_by = actor
+                        existing_override.note = (
+                            f"sentinel_restore from {sentinel_for} by {actor}"
+                        )
+                    # Best-effort decode for cache write-through
+                    try:
+                        _flag_override_cache[flag_name] = _decode_value(
+                            audit_row.old_value, spec.flag_type,
+                        )
+                    except Exception:  # noqa: BLE001
+                        _flag_override_cache.pop(flag_name, None)
+                restored.append(flag_name)
+
+            # Stamp restored_at on every row in this flag's batch (not
+            # just the latest — operator should see the full cascade
+            # marked as reverted, otherwise repeated restore calls would
+            # tag earlier rows on each invocation).
+            for r in rows:
+                if r.flag_name == flag_name and r.restored_at is None:
+                    r.restored_at = now
+                    r.restored_by = actor
+
+            # Forensic audit row for the restore itself
+            self.db.add(FeatureFlagAudit(
+                flag_name=flag_name,
+                old_value=_encode_value(False, "bool"),  # sentinel state
+                new_value=(audit_row.old_value or _encode_value(None, "json")),
+                action="sentinel_restore",
+                actor=actor,
+                note=note or f"sentinel_restore from {sentinel_for}",
+                sentinel_trigger_for=sentinel_for,
+                restored_at=now,
+                restored_by=actor,
+            ))
+
+        # F2 fix (S1-A Seam 1): drain cross-mode residue from active
+        # tasks AFTER restoring flags. While the sentinel cascade had
+        # the 6 flags OFF, R1b mutate / G5 crossover / etc. were
+        # flag-gated off → no new residue was added. But STALE residue
+        # from BEFORE the cascade (g5_pending_offspring,
+        # __r1b_consumed_pending_hypothesis, etc.) is still sitting in
+        # task.config; now that flags are back ON, the next round would
+        # consume that stale residue and inject silent zombie payload.
+        # Drain unconditionally — losing 1 round of cross-round
+        # accumulation is cheaper than a zombie inject.
+        drained_tasks = 0
+        drained_keys_total = 0
+        try:
+            from backend.models import MiningTask
+            from backend.services.llm_mode_service import drain_pending_residue
+            tasks_to_drain = (await self.db.execute(
+                select(MiningTask).where(
+                    MiningTask.status.in_(("RUNNING", "PAUSED", "PENDING"))
+                )
+            )).scalars().all()
+            for _task in tasks_to_drain:
+                d = drain_pending_residue(_task)
+                if isinstance(d, dict) and not d.get("_error"):
+                    if d:  # non-empty drain dict (some keys popped)
+                        drained_tasks += 1
+                        drained_keys_total += len(d)
+            if drained_tasks:
+                logger.info(
+                    "[ff restore_sentinel] drained %d residue keys across "
+                    "%d active tasks (sentinel_for=%s)",
+                    drained_keys_total, drained_tasks, sentinel_for,
+                )
+        except Exception as ex:  # noqa: BLE001
+            # Soft-fail: drain best-effort; flag restore already done.
+            logger.warning(
+                "[ff restore_sentinel] residue drain failed (non-fatal, "
+                "flags already restored): %s", ex,
+            )
+
+        self._bump_redis_async_safe()
+
+        return {
+            "restored_flags": sorted(restored),
+            "audit_rows": len(rows),
+            "skipped": sorted(skipped),
+            "skipped_reasons": skipped_reasons,
+            "sentinel_for": sentinel_for,
+            "drained_tasks": drained_tasks,
+            "drained_keys_total": drained_keys_total,
+        }
+
+    async def verify_sentinel_restore(
+        self,
+        sentinel_for: str = "ENABLE_LLM_ASSISTANT_MODE",
+        *,
+        expected_flags: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Sprint 5 PR2 (NO-GO route): confirm a sentinel restore is complete.
+
+        After ``restore_sentinel`` runs on the NO-GO route, the operator
+        wants proof every sentinel cascade row got reverted. This read-only
+        verifier checks:
+          1. **No dangling cascade**: zero feature_flag_audit rows with
+             ``sentinel_trigger_for=:sentinel_for AND action='sentinel_set'
+             AND restored_at IS NULL`` (every cascade row stamped restored).
+          2. **Restore audit present**: ≥1 ``action='sentinel_restore'`` row
+             exists for the trigger (the restore actually ran).
+          3. **Per-flag final state**: each expected sentinel flag's current
+             effective override value reported (operator eyeballs that none
+             is stuck at the sentinel-forced False when it should be back ON).
+
+        Args:
+            sentinel_for: the trigger flag whose cascade we verify.
+            expected_flags: sentinel flag names to report state for; defaults
+                to ``settings.LLM_ASSISTANT_SENTINEL_FLAGS``.
+
+        Returns:
+            {complete: bool, dangling_cascade_rows: int, restore_rows: int,
+             per_flag_state: {flag: {override_value, in_supported_flags}},
+             warnings: [str]}
+
+        Read-only — never mutates. Soft-fail on DB error → complete=False.
+        """
+        from backend.config import settings as _stg
+
+        if expected_flags is None:
+            expected_flags = list(
+                getattr(_stg, "LLM_ASSISTANT_SENTINEL_FLAGS", []) or []
+            )
+
+        warnings: List[str] = []
+        try:
+            dangling = list((await self.db.execute(
+                select(FeatureFlagAudit).where(
+                    FeatureFlagAudit.sentinel_trigger_for == sentinel_for,
+                    FeatureFlagAudit.action == "sentinel_set",
+                    FeatureFlagAudit.restored_at.is_(None),
+                )
+            )).scalars().all())
+            restore_rows = list((await self.db.execute(
+                select(FeatureFlagAudit).where(
+                    FeatureFlagAudit.sentinel_trigger_for == sentinel_for,
+                    FeatureFlagAudit.action == "sentinel_restore",
+                )
+            )).scalars().all())
+        except Exception as ex:  # noqa: BLE001
+            logger.warning("[ff verify_sentinel_restore] query failed: %s", ex)
+            return {
+                "complete": False,
+                "error": str(ex)[:200],
+                "dangling_cascade_rows": -1,
+                "restore_rows": -1,
+                "per_flag_state": {},
+                "warnings": ["query_failed"],
+            }
+
+        dangling_n = len(dangling)
+        restore_n = len(restore_rows)
+
+        if dangling_n > 0:
+            warnings.append(
+                f"{dangling_n} cascade row(s) still unrestored — run "
+                f"restore_sentinel('{sentinel_for}') again"
+            )
+        if restore_n == 0:
+            warnings.append(
+                "no sentinel_restore audit row found — restore never ran"
+            )
+
+        # Per-flag current override state (read-only)
+        per_flag_state: Dict[str, Any] = {}
+        for flag in expected_flags:
+            try:
+                override = (await self.db.execute(
+                    select(FeatureFlagOverride).where(
+                        FeatureFlagOverride.flag_name == flag
+                    )
+                )).scalar_one_or_none()
+                per_flag_state[flag] = {
+                    "override_value": (override.flag_value if override else None),
+                    "in_supported_flags": flag in SUPPORTED_FLAGS,
+                }
+            except Exception:  # noqa: BLE001
+                per_flag_state[flag] = {"override_value": "ERROR", "in_supported_flags": False}
+
+        complete = (dangling_n == 0 and restore_n > 0)
+        return {
+            "complete": complete,
+            "sentinel_for": sentinel_for,
+            "dangling_cascade_rows": dangling_n,
+            "restore_rows": restore_n,
+            "per_flag_state": per_flag_state,
+            "warnings": warnings,
+        }
 
     # ---- helpers ----------------------------------------------------------
 

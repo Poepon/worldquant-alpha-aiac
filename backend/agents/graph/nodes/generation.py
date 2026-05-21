@@ -374,6 +374,11 @@ async def _node_hypothesis_inject_consumed(
         # downstream nodes already handle None gracefully.
         "current_hypothesis_id": None,
         "current_hypothesis_ids": [],
+        # F4/F5 review fix: explicitly return cleared cognitive_layer_id_used
+        # so LangGraph state-merge guarantees the reset takes effect on this
+        # inject-path round (the in-place mutation at node_hypothesis entry
+        # is defense-in-depth).
+        "cognitive_layer_id_used": "",
         **trace_update,
     }
 
@@ -412,6 +417,14 @@ async def node_hypothesis(
     exploration_weight = strategy_dict.get("exploration_weight", 0.5)
 
     logger.info(f"[{node_name}] Starting | task={state.task_id} trace_len={len(experiment_trace)}")
+
+    # F4/F5 review fix (Sprint 3 R3): cross-round transient cleanup. Both
+    # paths (R1b inject + LLM exploration) must reset state.cognitive_
+    # layer_id_used so a stale layer ID from the previous round doesn't
+    # get stamped on the new alphas. Mirrors G8's g8_forest_referenced_ids
+    # reset at line 788. Done HERE (before the inject early-return) so
+    # both branches share the reset.
+    state.cognitive_layer_id_used = ""
 
     # ------------------------------------------------------------------
     # R1b.2-v2 (2026-05-18): inject path — when the prior round's
@@ -767,6 +780,217 @@ async def node_hypothesis(
             style_preset = None
             _p2c_regime = None
 
+    # G8 Phase A (2026-05-19): cross-task hypothesis-forest reference —
+    # opt-in via ``ENABLE_HYPOTHESIS_FOREST_REUSE``. When OFF (default) the
+    # entire block is skipped so prompt rendering is byte-for-byte legacy
+    # (cross_task_hypotheses stays []). When ON, top-K PROMOTED/ACTIVE
+    # hypotheses in this region (filtered by pillar_hint when P2-B fires,
+    # and by min_pass_count + min_sharpe_avg thresholds) are attached so
+    # the LLM can reference proven directions. Failure of the SQL path is
+    # non-fatal: ``cross_task_hyps`` stays empty and prompt falls back to
+    # legacy. Note: we deliberately query AFTER P2-B (pillar_hint may be
+    # set) AND AFTER P2-C (experiment_variant resolution via cfg) so the
+    # filter is well-informed.
+    cross_task_hyps: List[Dict] = []
+    # F-A3 fix (2026-05-19 review): Unconditionally reset on every node
+    # entry so a 2nd fire of node_hypothesis within the same workflow.run()
+    # (e.g. R1b CoSTEER retry/mutate cycle) cannot carry stale forest_ids
+    # from a previous fire's G8 fetch when this fire's fetch returns 0 hits.
+    # LangGraph's MiningState IS shared across nodes within one run; only a
+    # fresh workflow.run() builds a new state instance.
+    state.g8_forest_referenced_ids = []
+    _forest_enabled = bool(getattr(
+        _gen_settings, "ENABLE_HYPOTHESIS_FOREST_REUSE", False,
+    ))
+    if _forest_enabled:
+        try:
+            from backend.database import AsyncSessionLocal as _g8_session
+            from backend.services.hypothesis_service import (
+                HypothesisService as _G8HypService,
+            )
+            _g8_min_pass = int(getattr(
+                _gen_settings, "HYPOTHESIS_FOREST_MIN_PASS_COUNT", 2,
+            ))
+            _g8_min_sharpe = float(getattr(
+                _gen_settings, "HYPOTHESIS_FOREST_MIN_SHARPE_AVG", 1.0,
+            ))
+            _g8_top_k = int(getattr(
+                _gen_settings, "HYPOTHESIS_FOREST_TOP_K", 5,
+            ))
+            _g8_variant = (
+                (config.get("configurable", {}) or {}).get("experiment_variant")
+                if config else None
+            )
+            async with _g8_session() as _g8_db:
+                _g8_svc = _G8HypService(_g8_db)
+                _g8_rows = await _g8_svc.fetch_cross_task_promoted(
+                    region=state.region,
+                    pillar=pillar_hint,
+                    experiment_variant=_g8_variant,
+                    min_pass_count=_g8_min_pass,
+                    min_sharpe_avg=_g8_min_sharpe,
+                    limit=_g8_top_k,
+                )
+            cross_task_hyps = [
+                {
+                    "hypothesis_id": h.id,
+                    "statement": h.statement,
+                    "rationale": h.rationale or "",
+                    "pillar": h.pillar,
+                    "sharpe_avg": h.sharpe_avg,
+                    "pass_count": h.pass_count,
+                    "alpha_count": h.alpha_count,
+                }
+                for h in _g8_rows
+            ]
+            if cross_task_hyps:
+                logger.info(
+                    f"[{node_name}] G8 forest reference | n={len(cross_task_hyps)} "
+                    f"region={state.region} pillar_filter={pillar_hint} "
+                    f"ids={[h['hypothesis_id'] for h in cross_task_hyps]}"
+                )
+                # Phase 4 PR0.6 (Sprint 0, 2026-05-19): expose the referenced
+                # hypothesis ids on the state so evaluation.py can stamp
+                # alpha.metrics["_hypothesis_forest_reference"]=True for the
+                # alphas produced under these referenced hypotheses. The field
+                # `g8_forest_referenced_ids` (List[int]) is already declared on
+                # MiningState (state.py:182) — direct assignment, not setattr.
+                try:
+                    state.g8_forest_referenced_ids = [
+                        int(h["hypothesis_id"]) for h in cross_task_hyps
+                    ]
+                except Exception:  # noqa: BLE001 — state assign never breaks round
+                    pass
+        except Exception as _g8_ex:
+            logger.warning(
+                f"[{node_name}] G8 hypothesis-forest fetch failed "
+                f"(non-fatal): {_g8_ex}"
+            )
+            cross_task_hyps = []
+
+    # B5 R8-v3 (Sprint 3, 2026-05-20): cognitive-layer selection. Pick
+    # one of 7 research lenses (macro / behavioral / technical / value /
+    # microstructure / cross_sectional / time_series_mean_reversion) per
+    # ENABLE_COGNITIVE_LAYER_PROMPT + COGNITIVE_LAYER_SELECT_MODE; the
+    # chosen layer's prompt block splices into the hypothesis prompt to
+    # bias the LLM's direction of search. Default OFF → cognitive_layer_
+    # block stays empty → byte-for-byte legacy. Soft-fail: any error
+    # leaves both block + id empty.
+    _r8v3_block = ""
+    _r8v3_layer_id = ""
+    # NB: state.cognitive_layer_id_used was already reset at function entry
+    # (line ~422, F4 review fix); the in-place mutation here is a defense-
+    # in-depth alongside the dict return below (F6 review fix — LangGraph
+    # state-merge contract requires returning the field for guaranteed
+    # propagation across nodes).
+    if bool(getattr(_gen_settings, "ENABLE_COGNITIVE_LAYER_PROMPT", False)):
+        try:
+            from backend.services import cognitive_layer_service as _r8v3_svc
+            _r8v3_strategy = str(getattr(
+                _gen_settings, "COGNITIVE_LAYER_SELECT_MODE", "round_robin",
+            ))
+            # F8 review fix (Sprint 3 R1): MiningState has no `round_index`
+            # field. Without a real counter, round_robin permanently picked
+            # layer[0] (macro_top_down) every round. Use experiment_trace
+            # length as a monotonic proxy — increments naturally each round
+            # via the LangGraph workflow. Combined with task_id hash as
+            # entropy so two concurrent tasks don't synchronize on the
+            # same layer.
+            _r8v3_trace_len = int(len(experiment_trace) if experiment_trace else 0)
+            _r8v3_task_seed = int(abs(hash(str(getattr(state, "task_id", "") or ""))) % 7)
+            _r8v3_round = _r8v3_trace_len + _r8v3_task_seed
+            # Tier E E1: load per-layer Beta-Bernoulli posterior from
+            # cognitive_layer_bandit_state (written by the weekly cron) so
+            # COGNITIVE_LAYER_SELECT_MODE='bandit'/'deficit_aware' sample
+            # real reward — round_robin ignores stats so the load is only
+            # paid for the data-driven modes. Soft-fall to {} (uniform
+            # prior) on any error.
+            _r8v3_stats: Dict[str, Any] = {}
+            if _r8v3_strategy in ("bandit", "deficit_aware"):
+                try:
+                    from backend.database import AsyncSessionLocal as _bandit_session
+                    from backend.models.cognitive_layer_bandit import (
+                        CognitiveLayerBanditState as _CLBandit,
+                    )
+                    from sqlalchemy import select as _bsel
+                    async with _bandit_session() as _bandit_db:
+                        _brows = (await _bandit_db.execute(_bsel(_CLBandit))).scalars().all()
+                    _r8v3_stats = {
+                        r.layer_id: _r8v3_svc.BanditArmStats(
+                            layer_id=r.layer_id,
+                            pass_count=int(r.pass_count or 0),
+                            fail_count=int(r.fail_count or 0),
+                        )
+                        for r in _brows
+                    }
+                except Exception as _bandit_ex:  # noqa: BLE001
+                    logger.debug(
+                        f"[{node_name}] R8-v3 bandit state load failed "
+                        f"(uniform prior): {_bandit_ex}"
+                    )
+                    _r8v3_stats = {}
+            _r8v3_layer = _r8v3_svc.select_layer(
+                strategy=_r8v3_strategy,
+                stats=_r8v3_stats,
+                round_index=_r8v3_round,
+                pillar_hint=pillar_hint,
+            )
+            if _r8v3_layer is not None:
+                _r8v3_block = _r8v3_svc.build_cognitive_layer_block(_r8v3_layer)
+                _r8v3_layer_id = _r8v3_layer.layer_id
+                state.cognitive_layer_id_used = _r8v3_layer_id
+                logger.info(
+                    f"[{node_name}] R8-v3 cognitive layer | "
+                    f"strategy={_r8v3_strategy} layer={_r8v3_layer_id} "
+                    f"pillar_hint={pillar_hint}"
+                )
+        except Exception as _r8v3_ex:
+            logger.warning(
+                f"[{node_name}] R8-v3 cognitive layer failed (non-fatal): {_r8v3_ex}"
+            )
+            _r8v3_block = ""
+            _r8v3_layer_id = ""
+
+    # A5.2 G10 PR2 (Sprint 4, 2026-05-20): distilled-logic injection.
+    # Fetch active distilled_logic_library entries for (region, pillar)
+    # and render into a markdown block. Default OFF → block stays "" →
+    # byte-for-byte legacy. Soft-fail: any error logged + block empty.
+    _g10_block = ""
+    _g10_entries_n = 0
+    state.g10_injected_entries_n = 0
+    if bool(getattr(_gen_settings, "ENABLE_G10_LOGIC_INJECT", False)):
+        try:
+            from backend.database import AsyncSessionLocal as _g10_session
+            from backend.services.logic_distill_service import (
+                fetch_active_logic_entries as _g10_fetch,
+                build_distilled_logic_block as _g10_render,
+            )
+            _g10_top_k = int(getattr(_gen_settings, "G10_LOGIC_INJECT_TOP_K", 5))
+            async with _g10_session() as _g10_db:
+                _g10_entries = await _g10_fetch(
+                    _g10_db,
+                    region=state.region,
+                    pillar=pillar_hint,
+                    limit=_g10_top_k,
+                )
+            if _g10_entries:
+                _g10_block = _g10_render(_g10_entries, max_entries=_g10_top_k)
+                _g10_entries_n = len(_g10_entries)
+                # F14 review fix (Sprint 4 R3): stamp injected count on
+                # state so node_code_gen can mark each candidate's metrics
+                # (these candidates ARE persisted, unlike the dropped G3-v2
+                # ones) → /ops + canary SOP can observe G10 inject coverage.
+                state.g10_injected_entries_n = _g10_entries_n
+                logger.info(
+                    f"[{node_name}] G10 inject | n={_g10_entries_n} "
+                    f"region={state.region} pillar_filter={pillar_hint}"
+                )
+        except Exception as _g10_ex:  # noqa: BLE001
+            logger.warning(
+                f"[{node_name}] G10 inject failed (non-fatal): {_g10_ex}"
+            )
+            _g10_block = ""
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -802,6 +1026,19 @@ async def node_hypothesis(
         # a regime injection. Off path: style_preset = None → builder
         # returns "" → byte-for-byte legacy.
         style_preset=(style_preset if _style_enabled else None),
+        # G8 Phase A (2026-05-19): only attach when the flag is ON AND we
+        # fetched ≥1 row. Off / fetch-failed paths set cross_task_hypotheses=[]
+        # so build_cross_task_hypotheses_block returns "" → template splice
+        # produces the empty-string byte-for-byte legacy render.
+        cross_task_hypotheses=(cross_task_hyps if _forest_enabled else []),
+        # B5 R8-v3 (Sprint 3, 2026-05-20): pre-rendered cognitive-layer
+        # block (str). "" = OFF / no layer fired → template splice yields
+        # empty (byte-for-byte legacy).
+        cognitive_layer_block=_r8v3_block,
+        cognitive_layer_id=_r8v3_layer_id,
+        # A5.2 G10 PR2 (Sprint 4, 2026-05-20): pre-rendered distilled-
+        # logic block (str). "" = OFF / no rows → splice yields empty.
+        distilled_logic_block=_g10_block,
     )
     
     # Use new hypothesis builder with experiment trace
@@ -1193,6 +1430,19 @@ async def node_hypothesis(
         # Phase 2: typed Hypothesis link IDs. None when level<2 / no hypotheses.
         "current_hypothesis_id": current_hypothesis_id,
         "current_hypothesis_ids": current_hypothesis_ids,
+        # G8 Phase A follow-up: surface forest reference IDs to state so
+        # persistence can stamp them onto alpha.metrics for reverse
+        # attribution (empty when flag OFF / no rows).
+        "g8_forest_referenced_ids": [
+            int(h["hypothesis_id"]) for h in cross_task_hyps
+            if h.get("hypothesis_id") is not None
+        ],
+        # F6 review fix (Sprint 3 R3): explicitly return cognitive_layer_
+        # id_used so LangGraph state-merge propagates it to downstream
+        # nodes (node_evaluate reads it via getattr). In-place mutation
+        # at line ~900 is defense-in-depth but the dict-return is the
+        # documented LangGraph contract.
+        "cognitive_layer_id_used": _r8v3_layer_id,
         **trace_update
     }
 
@@ -1358,7 +1608,16 @@ async def node_code_gen(
     pending_alphas = []
     implementation_notes = ""
     alternatives_considered = []
-    
+    # F2/F3 review fix (Sprint 4 R2+R3): G3-v2 parse-fail telemetry +
+    # min-pass-rate degrade-open floor. Dropped candidates are buffered
+    # (not silently `continue`d) so (a) we can count the drop rate and
+    # degrade-open when a too-narrow grammar would zero out the round,
+    # and (b) the parse-fail count survives to a state counter for
+    # telemetry (the dropped candidate's own metrics never persist —
+    # mirror of Sprint 2 F2 / Sprint 3 F1 trap).
+    _g3v2_parse_fail_buffer = []  # candidates that failed grammar parse
+    _g3v2_total_seen = 0
+
     if response.success and response.parsed and isinstance(response.parsed, dict):
         parsed = response.parsed
         # V-26.48 (2026-05-13): validate `alphas` is actually a list of dicts
@@ -1389,17 +1648,46 @@ async def node_code_gen(
         if not isinstance(alternatives_considered, list):
             alternatives_considered = []
 
+        # Phase 4 Sprint 1 A1.3 (2026-05-20): assistant-mode template synth.
+        # When state.llm_mode_used == "assistant", every alpha_data has its
+        # LLM-emitted ``expression`` overwritten by the template composer's
+        # output. The hypothesis text remains the authoritative artifact;
+        # the DSL is *re-derived* from a curated 10-entry library
+        # (backend/data/assistant_mode_templates.yaml) keyed on pillar +
+        # keyword overlap. Soft-fail: per-alpha — if no template matches,
+        # the LLM's own expression survives (we fall through to author
+        # behavior for that single candidate; never break the round).
+        # A1.4 will measure via /ops/llm-mode/comparison whether this
+        # actually moves PASS rate. Authorial path is byte-identical when
+        # state.llm_mode_used == "author".
+        _assistant_mode_active = (
+            getattr(state, "llm_mode_used", "author") == "assistant"
+        )
+        if _assistant_mode_active:
+            try:
+                from backend.services.assistant_template import (
+                    compose_for_hypothesis as _assistant_compose,
+                )
+            except Exception as _imp_ex:  # noqa: BLE001
+                logger.warning(
+                    "[%s] A1.3 assistant_template import failed (falling through "
+                    "to author per-alpha): %s", node_name, _imp_ex,
+                )
+                _assistant_compose = None  # type: ignore
+        else:
+            _assistant_compose = None
+
         for alpha_data in raw_alphas:
             # Handle both old format (hypothesis) and new format (hypothesis_tested)
             hypothesis_text = alpha_data.get("hypothesis_tested", alpha_data.get("hypothesis", ""))
-            
+
             # Handle both old format (string) and new format (dict) for explanation
             explanation_raw = alpha_data.get("explanation", "")
             if isinstance(explanation_raw, dict):
                 explanation = f"{explanation_raw.get('approach', '')} - {explanation_raw.get('market_logic', '')}"
             else:
                 explanation = explanation_raw
-            
+
             # V-26.50 (2026-05-13): LLM output sometimes has expected_sharpe
             # as a string, NaN, or absurd magnitude (the field is user-facing
             # context in downstream prompts so a junk value pollutes the loop).
@@ -1415,23 +1703,145 @@ async def node_code_gen(
             except (TypeError, ValueError):
                 sanitized_es = None
 
+            # A1.3 assistant override: re-compose DSL from template library.
+            _composed_expression: Optional[str] = None
+            _composed_template_id: Optional[str] = None
+            _composed_score: Optional[float] = None
+            if _assistant_compose is not None and hypothesis_text:
+                try:
+                    pillar_hint = alpha_data.get("pillar") or alpha_data.get(
+                        "pillar_choice"
+                    )
+                    composed = _assistant_compose(
+                        hypothesis_text,
+                        pillar=pillar_hint if isinstance(pillar_hint, str) else None,
+                    )
+                    if composed is not None and composed.get("expression"):
+                        _composed_expression = composed["expression"]
+                        _composed_template_id = composed.get("template_id")
+                        _composed_score = composed.get("score")
+                except Exception as _comp_ex:  # noqa: BLE001
+                    logger.warning(
+                        "[%s] A1.3 assistant compose failed for hypothesis %r "
+                        "(falling through to author expression): %s",
+                        node_name, hypothesis_text[:40], _comp_ex,
+                    )
+
             candidate = AlphaCandidate(
-                expression=alpha_data.get("expression", ""),
+                expression=(
+                    _composed_expression
+                    if _composed_expression is not None
+                    else alpha_data.get("expression", "")
+                ),
                 hypothesis=hypothesis_text,
                 explanation=explanation,
                 expected_sharpe=sanitized_es,
             )
-            
-            # Attach additional metadata for tracking
+
+            # Attach additional metadata for tracking (in-round routing
+            # decisions only — these fields NEVER persist to alpha.metrics
+            # because persistence.py:382 reads alpha.metrics, not metadata).
             candidate.metadata = {
                 "fields_used": alpha_data.get("fields_used", []),
                 "complexity": alpha_data.get("complexity", "unknown"),
                 "novelty_level": alpha_data.get("novelty_level", "unknown"),
             }
-            
+            # A1.3 trace assistant-mode synth — must land in candidate.metrics
+            # (NOT metadata) so the keys survive the validate → simulate →
+            # evaluate pipeline via evaluation.py:1278 setdefault merge into
+            # alpha.metrics. F1 fix per Sprint 1 S1-A Seam 3 review: prior
+            # writes to .metadata caused R12 GO gate to see 100% author / 0%
+            # assistant because A1.4 query_mode_pool reads row.metrics
+            # (persisted) not row.metadata (which doesn't even persist).
+            if _assistant_mode_active:
+                candidate.metrics["llm_mode_used"] = "assistant"
+                if _composed_expression is not None:
+                    candidate.metrics["assistant_template_id"] = _composed_template_id
+                    candidate.metrics["assistant_template_score"] = _composed_score
+                    candidate.metrics["assistant_template_fallthrough"] = False
+                else:
+                    candidate.metrics["assistant_template_fallthrough"] = True
+
+            # F14 review fix (Sprint 4 R3): stamp G10 inject coverage onto
+            # each candidate's metrics (reachable persist path). 0 = OFF /
+            # no rows. These flow through validate→simulate→evaluate into
+            # alpha.metrics via the setdefault merge.
+            _g10_n = int(getattr(state, "g10_injected_entries_n", 0) or 0)
+            if _g10_n > 0:
+                candidate.metrics["_g10_injected"] = True
+                candidate.metrics["_g10_entries_n"] = _g10_n
+
             if candidate.expression and candidate.expression.strip():
+                # B4.1 G3-v2 grammar-aware validation (Sprint 4, 2026-05-20):
+                # parse the expression BEFORE persistence / simulation.
+                # Parse-fail candidates are BUFFERED (not silently dropped)
+                # so a min-pass-rate floor can degrade-open if the grammar
+                # is too narrow (F2/F3 review fix). Soft-fail: validator
+                # exception falls through to legacy append.
+                if bool(getattr(_gen_settings, "ENABLE_GRAMMAR_VALIDATOR", False)):
+                    try:
+                        from backend.services import grammar_validator as _g3v2
+                        _g3v2_total_seen += 1
+                        _g3v2_res = _g3v2.validate(candidate.expression)
+                        if not _g3v2_res.ok:
+                            candidate.metrics["_g3v2_parse_failed"] = True
+                            candidate.metrics["_g3v2_parse_error"] = _g3v2_res.error_msg
+                            candidate.metrics["_g3v2_parse_position"] = _g3v2_res.error_position
+                            logger.info(
+                                f"[{node_name}] G3-v2 parse fail "
+                                f"({_g3v2_res.error_msg[:80]}); "
+                                f"buffering expression={candidate.expression[:60]}"
+                            )
+                            _g3v2_parse_fail_buffer.append(candidate)
+                            continue  # decision deferred to post-loop floor check
+                        if _g3v2_res.unknown_ops:
+                            candidate.metrics["_g3v2_unknown_ops"] = list(_g3v2_res.unknown_ops)
+                            logger.debug(
+                                f"[{node_name}] G3-v2 unknown ops "
+                                f"{_g3v2_res.unknown_ops} in {candidate.expression[:60]}"
+                            )
+                    except Exception as _g3v2_ex:  # noqa: BLE001
+                        logger.warning(
+                            f"[{node_name}] G3-v2 validator failed (non-fatal): {_g3v2_ex}"
+                        )
                 pending_alphas.append(candidate)
-    
+
+    # F2/F3 review fix: G3-v2 min-pass-rate degrade-open floor + telemetry.
+    # If grammar would drop > 50% of this round's candidates, a too-narrow
+    # grammar (or a lark version regression) is the likely cause — better
+    # to degrade-open (re-include the buffered candidates) than to zero out
+    # production. Always record the parse-fail count to a state counter so
+    # an operator can observe the drop rate even though the dropped
+    # candidate's own metrics never persist (it's not in pending_alphas).
+    if _g3v2_total_seen > 0 and _g3v2_parse_fail_buffer:
+        _g3v2_drop_rate = len(_g3v2_parse_fail_buffer) / _g3v2_total_seen
+        try:
+            state.g3v2_parse_fail_count = (
+                int(getattr(state, "g3v2_parse_fail_count", 0) or 0)
+                + len(_g3v2_parse_fail_buffer)
+            )
+            state.g3v2_total_validated = (
+                int(getattr(state, "g3v2_total_validated", 0) or 0)
+                + _g3v2_total_seen
+            )
+        except Exception:  # noqa: BLE001 — state attr-set must never break round
+            pass
+        if _g3v2_drop_rate > 0.5:
+            logger.warning(
+                f"[{node_name}] G3-v2 drop rate {_g3v2_drop_rate:.0%} > 50% "
+                f"({len(_g3v2_parse_fail_buffer)}/{_g3v2_total_seen}) — "
+                f"degrade-open: re-including buffered candidates (grammar "
+                f"likely too narrow; check /ops or widen _GRAMMAR)"
+            )
+            for _buffered in _g3v2_parse_fail_buffer:
+                _buffered.metrics["_g3v2_degrade_open_readmit"] = True
+                pending_alphas.append(_buffered)
+        else:
+            logger.info(
+                f"[{node_name}] G3-v2 dropped {len(_g3v2_parse_fail_buffer)}/"
+                f"{_g3v2_total_seen} ({_g3v2_drop_rate:.0%}, within floor)"
+            )
+
     _debug_log("A", "nodes.py:code_gen:result", "Alpha code generation complete", {
         "alphas_generated": len(pending_alphas),
         "target": state.num_alphas_target,
@@ -1480,6 +1890,58 @@ async def node_code_gen(
         response.error if hasattr(response, 'error') else None
     )
     
+    # G5 Phase A (2026-05-19): prepend crossover offspring (carried from prior
+    # round via state.g5_offspring_candidates). Each becomes a fresh
+    # AlphaCandidate with parent ids stamped on metrics so the persistence
+    # layer can write _g5_crossover_parent_ids without needing more plumbing.
+    # Soft-fail: malformed entries are dropped silently.
+    g5_offspring = getattr(state, "g5_offspring_candidates", None) or []
+    if g5_offspring:
+        from backend.agents.graph.state import AlphaCandidate as _G5AC
+        _g5_prepended: List = []
+        for off in g5_offspring:
+            if not isinstance(off, dict):
+                continue
+            expr = (off.get("expression") or "").strip()
+            if not expr:
+                continue
+            try:
+                parent_ids = [
+                    int(x) for x in (
+                        off.get("parent_a_alpha_id"),
+                        off.get("parent_b_alpha_id"),
+                    ) if x is not None
+                ]
+                cand = _G5AC(
+                    expression=expr,
+                    hypothesis=(
+                        "G5 crossover: combine alpha "
+                        f"{off.get('parent_a_alpha_id', '?')} + "
+                        f"{off.get('parent_b_alpha_id', '?')} via "
+                        f"{off.get('combination_strategy', '?')}"
+                    ),
+                    explanation=(off.get("rationale") or "")[:200],
+                    parent_alpha_id=parent_ids[0] if parent_ids else None,
+                    metrics={
+                        "_g5_crossover_parent_ids": parent_ids,
+                        "_g5_combination_strategy": off.get(
+                            "combination_strategy", "unspecified"
+                        ),
+                    },
+                )
+                _g5_prepended.append(cand)
+            except Exception as _g5_ex:
+                logger.warning(
+                    f"[{node_name}] G5 offspring AlphaCandidate build failed "
+                    f"(non-fatal, dropping): {_g5_ex}"
+                )
+        if _g5_prepended:
+            logger.info(
+                f"[{node_name}] G5 prepended {len(_g5_prepended)} offspring "
+                f"to pending_alphas (parent ids carried in metrics)"
+            )
+            pending_alphas = _g5_prepended + pending_alphas
+
     return {
         "pending_alphas": pending_alphas,
         "current_alpha_index": 0,

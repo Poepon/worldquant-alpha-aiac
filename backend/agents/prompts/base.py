@@ -68,6 +68,36 @@ class PromptContext:
     # test_flag_off_byte_for_byte_legacy).
     style_preset: Optional[Dict] = None
 
+    # G8 Phase A (2026-05-19): cross-task hypothesis-forest reference pool.
+    # node_hypothesis fills this when ENABLE_HYPOTHESIS_FOREST_REUSE is on
+    # AND HypothesisService.fetch_cross_task_promoted returns ≥1 row.
+    # Each entry is a dict carrying {statement, rationale, pillar,
+    # sharpe_avg, pass_count, alpha_count, hypothesis_id}. Empty list = no
+    # nudge → build_cross_task_hypotheses_block returns "" → template
+    # splice produces the empty string at the insertion point (byte-for-byte
+    # legacy invariant, mirrors P2-A/B/C/D pattern).
+    cross_task_hypotheses: List[Dict] = field(default_factory=list)
+
+    # B5 R8-v3 (Sprint 3, 2026-05-20): selected cognitive-layer block —
+    # rendered markdown ready to splice. None / "" → no nudge → template
+    # splice produces empty (byte-for-byte legacy). When set, it's the
+    # output of cognitive_layer_service.build_cognitive_layer_block(layer)
+    # for one of 7 research lenses (macro / behavioral / technical / value
+    # / microstructure / cross_sectional / time_series_mean_reversion).
+    # node_hypothesis fills this when ENABLE_COGNITIVE_LAYER_PROMPT is on.
+    cognitive_layer_block: str = ""
+    # Layer id stamped on the resulting alpha.metrics for bandit reward
+    # feedback (the orchestrator updates BanditArmStats from this on
+    # round end). Empty when no layer fired.
+    cognitive_layer_id: str = ""
+
+    # A5.2 G10 PR2 (Sprint 4, 2026-05-20): distilled-logic block —
+    # rendered markdown from active distilled_logic_library entries
+    # for (region, pillar). Empty string when ENABLE_G10_LOGIC_INJECT
+    # is OFF or no rows match → template splice yields empty (byte-
+    # for-byte legacy). Mirrors cognitive_layer_block pattern.
+    distilled_logic_block: str = ""
+
 
 def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     """Build concise field reference with type info."""
@@ -278,6 +308,44 @@ def build_macro_context_block(narratives: List[Dict]) -> str:
         lines.append(
             f"- **{label}** ({hint}, conf={conf:.2f}): {mechanism}\n"
             f"    transmission: {transmission}"
+        )
+    return "\n".join(lines)
+
+
+def build_cross_task_hypotheses_block(hypotheses: List[Dict]) -> str:
+    """G8 Phase A (2026-05-19): render a cross-task hypothesis-forest reference
+    block. Each entry should carry the fields produced by
+    ``HypothesisService.fetch_cross_task_promoted``:
+    ``statement / rationale / pillar / sharpe_avg / pass_count / alpha_count``.
+
+    Empty input returns "" so build_hypothesis_prompt can splice it
+    byte-for-byte unchanged when the flag is OFF or no rows qualify
+    (G8 flag-off invariant — mirrors P2-A/B/C/D contract). Caps at 5
+    entries to bound prompt size; if caller passes more, only top-5 render.
+    """
+    if not hypotheses:
+        return ""
+    lines = [
+        "## Cross-task Hypothesis Forest — Reference (proven in same region)",
+        "",
+        "These hypotheses have ≥2 PASS alphas with sharpe_avg ≥ 1.0 in this "
+        "region. Consider extending one of them (set `parent_hypothesis_id` in "
+        "your statement narrative) when your idea aligns; or propose a fresh "
+        "direction if none fit. Do NOT verbatim copy — adapt to the current "
+        "dataset / pillar / regime.",
+        "",
+    ]
+    for h in hypotheses[:5]:
+        statement = (h.get("statement") or "")[:200]
+        pillar = h.get("pillar") or "?"
+        sharpe = h.get("sharpe_avg")
+        passes = int(h.get("pass_count") or 0)
+        attempts = int(h.get("alpha_count") or 0)
+        hid = h.get("hypothesis_id") or h.get("id")
+        sharpe_str = f"{float(sharpe):.2f}" if isinstance(sharpe, (int, float)) else "?"
+        lines.append(
+            f"- **H{hid}** (pillar={pillar}, sharpe_avg={sharpe_str}, "
+            f"pass={passes}/{attempts}): {statement}"
         )
     return "\n".join(lines)
 

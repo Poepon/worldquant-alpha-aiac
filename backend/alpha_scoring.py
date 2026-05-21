@@ -342,13 +342,58 @@ def evaluate_alpha_comprehensive(
     else:
         eval_result.robustness_score = 0.0
     
-    # Composite score
-    eval_result.composite_score = (
+    # Composite score — base 4 dimensions sum to 1.0.
+    base_composite = (
         0.40 * eval_result.sharpe_score +
         0.25 * eval_result.fitness_score +
         0.15 * eval_result.turnover_score +
         0.20 * eval_result.robustness_score
     )
+
+    # B1 R11 (Sprint 2): capacity as the 5th dimension. When
+    # ENABLE_CAPACITY_SCORE is OFF (default), we leave composite
+    # byte-identical with the historical 4-dim formula — required for
+    # the regression baseline guarantee. When ON, original weights are
+    # scaled by (1 - CAPACITY_SCORE_WEIGHT) so the resulting sum stays
+    # at 1.0; capacity_norm is the log-bucket normalized capacity
+    # (see backend/services/capacity_estimator.normalize). Failures in
+    # capacity inference (missing region/universe/turnover) soft-fall
+    # to 0.0 — no exception escapes scoring.
+    # F3 (Sprint 2 review fix): BRAIN sim_result has no top-level `region` —
+    # it lives under sim_result["settings"]["region"]. The previous call
+    # passed sim_result directly to estimate_from_alpha_dict; the region
+    # lookup missed, cap_norm fell to 0.0, and flag-ON simply applied a
+    # blanket -10% discount to every alpha's composite. Build the lookup
+    # dict explicitly from this function's `region` parameter (caller
+    # always knows it — see _get_completed_alpha_details + node_evaluate)
+    # plus universe / turnover from settings/is.
+    try:
+        from backend.config import settings as _settings
+        if getattr(_settings, "ENABLE_CAPACITY_SCORE", False):
+            from backend.services import capacity_estimator as _cap
+            cap_w = float(getattr(_settings, "CAPACITY_SCORE_WEIGHT", 0.10))
+            _sim_settings = sim_result.get("settings") if isinstance(sim_result, dict) else None
+            _cap_universe = (
+                sim_result.get("universe")
+                if isinstance(sim_result, dict) else None
+            )
+            if not _cap_universe and isinstance(_sim_settings, dict):
+                _cap_universe = _sim_settings.get("universe")
+            cap_lookup = {
+                "region": region,
+                "universe": _cap_universe,
+                "turnover": turnover,
+            }
+            cap_usd = _cap.estimate_from_alpha_dict(cap_lookup)
+            cap_norm = _cap.normalize(cap_usd)
+            eval_result.composite_score = (
+                base_composite * (1.0 - cap_w) + cap_norm * cap_w
+            )
+        else:
+            eval_result.composite_score = base_composite
+    except Exception as _e:
+        logger.debug(f"capacity_score path soft-fall: {_e}")
+        eval_result.composite_score = base_composite
     
     # =========================================================================
     # 使用 BRAIN 官方检查结果（如果可用）
@@ -435,12 +480,14 @@ def evaluate_alpha_comprehensive(
         failed_tests.append(f"HIGH_PROD_CORR (pc={prod_corr:.2f} > {thresholds.prod_corr_max:.2f})")
         recommendations.append("Try different fields or operators for more novelty")
     
-    # 新增：权重集中度检查
-    if long_count and short_count:
-        total_positions = long_count + short_count
-        if total_positions < 10:  # 持仓过于集中
-            failed_tests.append(f"CONCENTRATED_WEIGHT (positions={total_positions})")
-            recommendations.append("Consider using rank() or grouping operators for better diversification")
+    # 权重集中度检查 (Gap 1, 2026-05-20): use (long or 0)+(short or 0) so a
+    # one-sided long-only / short-only alpha (the other count == 0, falsy) can
+    # no longer bypass the breadth floor via the old `if long_count and
+    # short_count` guard. total_positions == 0 means missing/unsimulated → skip.
+    total_positions = (long_count or 0) + (short_count or 0)
+    if 0 < total_positions < 10:  # 持仓过于集中
+        failed_tests.append(f"CONCENTRATED_WEIGHT (positions={total_positions})")
+        recommendations.append("Consider using rank() or grouping operators for better diversification")
     
     eval_result.failed_tests = failed_tests
     eval_result.recommendations = list(set(recommendations))  # 去重
@@ -548,6 +595,44 @@ def calculate_alpha_score(
         w['turnover_penalty'] * turnover_penalty -
         w['investability_penalty'] * investability_penalty
     )
+
+    # B1 R11 (Sprint 2): capacity bonus. ON-flag adds normalized capacity
+    # USD as a positive contribution scaled by CAPACITY_SCORE_WEIGHT.
+    # OFF-flag → byte-identical to historical formula (baseline guarantee).
+    # Custom-weights call path bypasses capacity (caller has full control
+    # over the formula).
+    if weights is None:
+        try:
+            from backend.config import settings as _settings
+            if getattr(_settings, "ENABLE_CAPACITY_SCORE", False):
+                from backend.services import capacity_estimator as _cap
+                cap_w = float(getattr(_settings, "CAPACITY_SCORE_WEIGHT", 0.10))
+                # F3 (Sprint 2 review fix): sim_result has no top-level
+                # region/universe; pull from settings sub-dict or fall back
+                # to sim_result top-level for hand-built test dicts.
+                _sim_settings = sim_result.get("settings") if isinstance(sim_result, dict) else None
+                _cap_region = (
+                    sim_result.get("region")
+                    if isinstance(sim_result, dict) else None
+                )
+                if not _cap_region and isinstance(_sim_settings, dict):
+                    _cap_region = _sim_settings.get("region")
+                _cap_universe = (
+                    sim_result.get("universe")
+                    if isinstance(sim_result, dict) else None
+                )
+                if not _cap_universe and isinstance(_sim_settings, dict):
+                    _cap_universe = _sim_settings.get("universe")
+                _cap_lookup = {
+                    "region": _cap_region,
+                    "universe": _cap_universe,
+                    "turnover": turnover,
+                }
+                cap_usd = _cap.estimate_from_alpha_dict(_cap_lookup)
+                cap_norm = _cap.normalize(cap_usd)
+                score += cap_w * cap_norm
+        except Exception as _e:
+            logger.debug(f"calculate_alpha_score capacity bonus soft-fall: {_e}")
     
     # _safe_float guards against None coming from BRAIN responses (see edge case
     # EC-1: 32% of historical alphas have returns < 0, and some metric fields

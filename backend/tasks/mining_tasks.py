@@ -957,6 +957,36 @@ async def _run_one_round_inline(
 ) -> dict:
     """Run one round on the foreground session. Returns mining_agent result
     dict (or empty dict on failure)."""
+    # A+ circuit breaker (2026-05-19): if BRAIN auth is in a known-bad state,
+    # skip the entire LangGraph workflow — no hypothesis / code_gen / validate
+    # / simulate / evaluate / R5 / R1a LLM cost burnt running a round whose
+    # sim will fail. Caller (_run_flat_iteration outer loop) sees
+    # skipped=True with reason brain_auth_circuit_open and sleeps before the
+    # next iteration so we don't busy-wait.
+    try:
+        from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
+        if BRAIN_AUTH_CIRCUIT.is_open():
+            status = BRAIN_AUTH_CIRCUIT.status()
+            logger.warning(
+                f"[_run_one_round_inline] BRAIN auth circuit OPEN — "
+                f"skipping round dataset={dataset_id} reason="
+                f"{status.last_failure_reason!r} reopens_in="
+                f"{status.to_dict()['seconds_until_half_open']}s. "
+                f"NO LLM cost burnt this round."
+            )
+            return {
+                "all_alphas": [],
+                "iterations_completed": 0,
+                "skipped": True,
+                "skipped_reason": "brain_auth_circuit_open",
+                "circuit_reopens_in_sec": status.to_dict()["seconds_until_half_open"],
+            }
+    except Exception as _circ_e:
+        # Soft-fail: Redis blip etc. — DO NOT skip the round, let traffic
+        # through (the circuit's own is_open already defaults to False on
+        # error, but defend against import-time crashes too).
+        logger.debug(f"[_run_one_round_inline] circuit check skipped: {_circ_e}")
+
     # R1b.2c+v2 wire (2026-05-18): drain any cross-round pending hypothesis
     # from the prior round's hypothesis_mutate, then INJECT it into MiningState
     # via the workflow's configurable so node_hypothesis can use it directly
@@ -998,6 +1028,42 @@ async def _run_one_round_inline(
     except Exception as _r1b_ex:
         logger.warning(
             f"[r1b_wire] task={task.id} consume_pending_hypothesis failed (round unaffected): {_r1b_ex}"
+        )
+
+    # G5 Phase A (2026-05-19): consume offspring stashed by prior round's
+    # mining_agent._maybe_run_g5_crossover. Mirror R1b.2-v2 plumbing — stash
+    # consumed list on task.config["__g5_consumed_offspring"], workflow.run
+    # pops + clears + injects into MiningState.g5_offspring_candidates.
+    # Flag-gated; soft-fail全链.
+    try:
+        from backend.config import settings as _g5_settings
+        if bool(getattr(_g5_settings, "ENABLE_G5_CROSSOVER", False)):
+            from backend.agents.graph.nodes.g5_persistence import (
+                consume_pending_offspring,
+            )
+            _g5_consumed = await consume_pending_offspring(task, db)
+            if _g5_consumed:
+                logger.info(
+                    f"[g5_wire] task={task.id} round-entry consumed "
+                    f"{len(_g5_consumed)} pending offspring"
+                )
+                try:
+                    _cfg = dict(getattr(task, "config", None) or {})
+                    _cfg["__g5_consumed_offspring"] = _g5_consumed
+                    task.config = _cfg
+                    try:
+                        from sqlalchemy.orm.attributes import flag_modified
+                        flag_modified(task, "config")
+                    except Exception:
+                        pass
+                    await db.commit()
+                except Exception as _stash_ex:
+                    logger.warning(
+                        f"[g5_wire] task={task.id} stash consumed failed: {_stash_ex}"
+                    )
+    except Exception as _g5_ex:
+        logger.warning(
+            f"[g5_wire] task={task.id} consume_pending_offspring failed: {_g5_ex}"
         )
 
     # R1b.4b: route to typed AlphaMiningPipeline when the task opts in via
@@ -1212,6 +1278,23 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 # dataset cycles (and pause-resume boundaries).
                 iteration_offset=iterations,
             )
+            # A+ circuit breaker: if BRAIN auth circuit is OPEN the round
+            # was skipped — don't busy-loop hitting the same circuit-open
+            # check on every dataset. Sleep enough for the circuit's TTL to
+            # naturally probe (capped at 60s — long enough to avoid hot
+            # loop, short enough to recover quickly when ops re-auths).
+            if result.get("skipped") and result.get("skipped_reason") == "brain_auth_circuit_open":
+                _wait_sec = min(60, max(5, int(result.get("circuit_reopens_in_sec") or 30)))
+                logger.info(
+                    f"[flat] task={task.id} BRAIN auth circuit open — "
+                    f"sleeping {_wait_sec}s before next iteration (cursor "
+                    f"unchanged, iterations unchanged)"
+                )
+                await asyncio.sleep(_wait_sec)
+                # Do NOT advance flat_cursor / iterations / total_alphas —
+                # the round didn't run, so the same dataset gets retried.
+                continue
+
             round_alphas = len(result.get("all_alphas") or [])
             total_alphas += round_alphas
             iterations += 1
@@ -1241,6 +1324,62 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 f"[flat] task={task.id} iter={iterations} dataset={dataset_id} "
                 f"round_alphas={round_alphas} total={total_alphas}/{daily_goal}"
             )
+
+            # Phase 4 Sprint 1 A2 (2026-05-19): R14 task_stop_loss check.
+            # Counts PASS alpha in this round; updates EMA + consecutive_zero
+            # state on task.config[stop_loss_state]; pauses task on trigger.
+            # Race fix: CB-skipped rounds reach `continue` above and never
+            # touch this code — auto-excluded from counters.
+            # Soft-fail: any exception in service → log + continue mining;
+            # never block round (task fault tolerance > stop_loss precision).
+            try:
+                if bool(getattr(settings, "ENABLE_TASK_STOP_LOSS", False)):
+                    from backend.services.task_stop_loss_service import (
+                        check_should_pause as _stop_loss_check,
+                        apply_stop_loss_decision as _stop_loss_apply,
+                    )
+
+                    def _pass_count(alphas_list):
+                        n = 0
+                        for _a in alphas_list:
+                            _q = (
+                                getattr(_a, "quality_status", None)
+                                or (isinstance(_a, dict) and _a.get("quality_status"))
+                                or ""
+                            )
+                            _q_str = getattr(_q, "value", _q) if _q is not None else ""
+                            if _q_str == "PASS":
+                                n += 1
+                        return n
+
+                    _round_pass = _pass_count(result.get("all_alphas") or [])
+                    _r14_decision = _stop_loss_check(
+                        task,
+                        round_pass_count=_round_pass,
+                        round_alpha_count=round_alphas,
+                    )
+                    # Persist EMA/counter state mutation (service set
+                    # task.config + flag_modified; commit here).
+                    await db.commit()
+                    if _r14_decision.should_pause:
+                        await _stop_loss_apply(
+                            db, task, _r14_decision,
+                            extra_meta={
+                                "iteration": iterations,
+                                "dataset_id": dataset_id,
+                                "total_alphas": total_alphas,
+                            },
+                        )
+                        logger.warning(
+                            f"[flat] task={task.id} R14 stop_loss TRIGGERED "
+                            f"reason={_r14_decision.reason} — exiting flat loop"
+                        )
+                        break
+            except Exception as _r14_ex:  # noqa: BLE001
+                logger.warning(
+                    f"[flat] task={task.id} R14 stop_loss check failed "
+                    f"(non-fatal): {_r14_ex}"
+                )
 
     # HIGH-#5 fix (2026-05-18): mirror cascade's V-19.10 H2 finalization
     # (cf. line 1821-1833). Only mark the run COMPLETED when the loop

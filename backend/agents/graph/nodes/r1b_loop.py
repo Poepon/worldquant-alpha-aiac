@@ -862,7 +862,6 @@ async def _insert_mutated_hypothesis(
                     )
 
             new_row = Hypothesis(
-                task_id=task_id,
                 region=region or "USA",
                 statement=statement,
                 rationale=str(pending.get("rationale", "")),

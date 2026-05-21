@@ -385,23 +385,14 @@ def extract_failures_from_alpha_failure(
     error_type = (getattr(failure, "error_type", "") or "").strip()
     if not error_type:
         return []
-    msg = getattr(failure, "error_message", "") or ""
-    # 2026-05-19 — skip BRAIN-infra failures (auth, slot acquire timeout,
-    # rate-limit) so the alpha skeleton isn't blamed for ops-layer issues.
-    # An auth-storm on task 3083 produced 142 false PITFALL rows over 90min
-    # that suppressed real skeletons via RAG. Filter against the response
-    # body markers; error_type alone is too coarse (BRAIN packs every non-2xx
-    # under generic "SIMULATION_ERROR").
-    msg_lower = msg.lower()
-    _INFRA_MARKERS = (
-        "incorrect authentication",
-        "creation failed:",         # simulate_alpha non-2xx wrapper (auth / 5xx)
-        "brain sim slot acquire timeout",  # internal slot timeout, not alpha-quality
-        "brain concurrent limit exceeded",
-        "brain 429 rate limit",
-    )
-    if any(m in msg_lower for m in _INFRA_MARKERS):
+    # SIMULATION_ERROR / OTHER / UNKNOWN are generic buckets in
+    # persistence._persist_failures — they pack every non-2xx BRAIN response
+    # under one label, so the resulting rule_id matches every alpha skeleton
+    # and poisons RAG. Skip; SYNTAX_ERROR + QUALITY_CHECK_FAILED remain real
+    # per-alpha signal.
+    if error_type.upper() in {"SIMULATION_ERROR", "OTHER", "UNKNOWN"}:
         return []
+    msg = getattr(failure, "error_message", "") or ""
     rule_id = f"sim_error:{error_type.lower()}"
     failure_id = getattr(failure, "id", None)
 

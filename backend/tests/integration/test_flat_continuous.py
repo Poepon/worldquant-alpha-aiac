@@ -174,6 +174,82 @@ async def test_flat_resume_preserves_cursor(pg_session):
 
 
 # ---------------------------------------------------------------------------
+# Test 2b: pause_flat_session (2026-05-20) — FLAT manual pause endpoint
+# counterpart to resume, fixing the frontend 恢复/暂停 button 400 on FLAT.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_pause_flat_session_running_to_paused(pg_session):
+    """pause_flat_session sets RUNNING→PAUSED without worker dispatch; the
+    flat worker self-exits at the next round boundary (mirrors quota_guard)."""
+    svc = TaskService(pg_session)
+
+    task = MiningTask(
+        task_name=f"{_TAG}_pause_running",
+        region="USA",
+        universe="TOP3000",
+        status="RUNNING",
+        schedule="FLAT",
+    )
+    created = await svc.task_repo.create(task)
+    await pg_session.commit()
+
+    info = await svc.pause_flat_session(created.id)
+    assert info.status == "PAUSED"
+
+    refreshed = await svc.task_repo.get_by_id(created.id)
+    assert refreshed.status == "PAUSED"
+
+
+@pytest.mark.asyncio
+async def test_pause_flat_session_rejects_non_flat(pg_session):
+    """pause_flat_session validates schedule == FLAT."""
+    svc = TaskService(pg_session)
+
+    task = MiningTask(
+        task_name=f"{_TAG}_pause_nonflat",
+        region="USA",
+        universe="TOP3000",
+        status="RUNNING",
+        schedule="ONESHOT",
+    )
+    created = await svc.task_repo.create(task)
+    await pg_session.commit()
+
+    with pytest.raises(ValueError, match=r"not a FLAT session"):
+        await svc.pause_flat_session(created.id)
+
+
+@pytest.mark.asyncio
+async def test_pause_flat_session_rejects_non_running(pg_session):
+    """pause_flat_session refuses to pause a task that isn't RUNNING
+    (e.g. already PAUSED returns idempotently; STOPPED raises)."""
+    svc = TaskService(pg_session)
+
+    # Already PAUSED → idempotent return (no error)
+    paused = MiningTask(
+        task_name=f"{_TAG}_pause_idempotent",
+        region="USA", universe="TOP3000",
+        status="PAUSED", schedule="FLAT",
+    )
+    created_p = await svc.task_repo.create(paused)
+    await pg_session.commit()
+    info = await svc.pause_flat_session(created_p.id)
+    assert info.status == "PAUSED"
+
+    # STOPPED → ValueError
+    stopped = MiningTask(
+        task_name=f"{_TAG}_pause_stopped",
+        region="USA", universe="TOP3000",
+        status="STOPPED", schedule="FLAT",
+    )
+    created_s = await svc.task_repo.create(stopped)
+    await pg_session.commit()
+    with pytest.raises(ValueError, match=r"cannot pause from status"):
+        await svc.pause_flat_session(created_s.id)
+
+
+# ---------------------------------------------------------------------------
 # Test 4: Q2 A — intervene_task blocks FLAT mode (parametrized PAUSE+RESUME)
 # ---------------------------------------------------------------------------
 

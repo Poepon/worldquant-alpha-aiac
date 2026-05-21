@@ -16,8 +16,8 @@ This module is data-driven and side-effect-free. Callers (node_simulate,
 flip-retry block, future genetic mutations) pass an expression + context
 and get back a settings dict ready to forward to BrainAdapter.simulate_alpha.
 
-Toggle integration via settings.ENABLE_SMART_SIM_SETTINGS (default False —
-flag exists so the optimization can be enabled without touching call sites).
+Hard-wired into node_simulate as of 2026-05-19 (formerly toggled via
+ENABLE_SMART_SIM_SETTINGS, retired now).
 
 Public API:
     smart_simulation_settings(expression, *, region="USA", universe="TOP3000",

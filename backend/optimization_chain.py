@@ -169,6 +169,34 @@ def generate_local_rewrites(
     return [v.to_dict() for v in variants[:max_variants]]
 
 
+def recommend_decay_for_turnover(current_decay: int, turnover: float) -> Optional[int]:
+    """Single-shot turnover→decay pick (reference machine_lib get_alphas schedule).
+
+    Higher observed turnover ⇒ more smoothing. Returns ONE recommended decay for
+    the next simulation, or None when turnover is low enough (≤0.30) that no
+    decay bump is warranted. The multiplicative bands use base=max(current,1) so
+    a decay-0 alpha still gets real smoothing (0*4 would stay 0).
+
+    Picking ONE decay directly is cheaper than sweeping all DECAY_OPTIONS — on a
+    3-slot USER account every saved simulation matters.
+    """
+    d = int(current_decay or 0)
+    base = d if d > 0 else 1
+    if turnover > 0.7:
+        return base * 4
+    if turnover > 0.6:
+        return base * 3 + 3
+    if turnover > 0.5:
+        return base * 3
+    if turnover > 0.4:
+        return base * 2
+    if turnover > 0.35:
+        return d + 4
+    if turnover > 0.3:
+        return d + 2
+    return None
+
+
 def generate_settings_variants(
     base_settings: Dict,
     context: Optional[OptimizationContext] = None
@@ -227,7 +255,29 @@ def generate_settings_variants(
     # Prioritize based on context if available
     if context:
         variants = _prioritize_settings_variants(variants, context)
-    
+        # Gap 2 (2026-05-20): the reference computes ONE decay directly from
+        # observed turnover (graduated schedule) rather than sweeping every
+        # DECAY_OPTIONS. On a 3-slot USER account each saved sim matters, so
+        # put that single targeted decay FIRST and leave the sweep as fallback.
+        rec_decay = recommend_decay_for_turnover(base_decay, context.turnover)
+        if rec_decay is not None and rec_decay != base_decay:
+            # Drop a redundant swept decay variant equal to it to save a sim.
+            variants = [
+                v for v in variants
+                if not (v.change_type == OptimizationType.SETTINGS_DECAY
+                        and v.decay == rec_decay)
+            ]
+            variants.insert(0, SettingsVariant(
+                neutralization=base_neut,
+                decay=rec_decay,
+                truncation=base_trunc,
+                change_type=OptimizationType.SETTINGS_DECAY,
+                description=(
+                    f'Decay (turnover-targeted): {base_decay} -> {rec_decay} '
+                    f'(turnover={context.turnover:.2f})'
+                ),
+            ))
+
     return [v.to_dict() for v in variants]
 
 
@@ -485,76 +535,6 @@ def _prioritize_settings_variants(
 
 
 # =============================================================================
-# LLM-BASED OPTIMIZATION PROMPT (For Advanced Cases)
-# =============================================================================
-
-def create_optimization_prompt(
-    expression: str,
-    sim_result: Dict,
-    pool_corr: float = 0.0
-) -> str:
-    """
-    Create LLM prompt for generating optimization suggestions.
-    
-    Used when rule-based optimization is insufficient.
-    """
-    from alpha_scoring import get_failed_tests, should_optimize
-    
-    context = _build_optimization_context(expression, sim_result)
-    failed = get_failed_tests(sim_result)
-    _, reason = should_optimize(sim_result)
-    
-    prompt = f"""## Alpha Expression to Optimize
-
-```
-{expression}
-```
-
-## Backtest Results
-
-| Metric | Value |
-|--------|-------|
-| Train Sharpe | {context.train_sharpe:.3f} |
-| Test Sharpe | {context.test_sharpe:.3f} |
-| Fitness | {context.fitness:.3f} |
-| Turnover | {context.turnover:.3f} |
-| Risk-Neutralized Sharpe | {context.rn_sharpe:.3f} |
-| Investability-Constrained Sharpe | {context.invest_sharpe:.3f} |
-| Pool Correlation | {pool_corr:.3f} |
-
-## Issues Identified
-
-- **Failed Tests**: {', '.join(failed) if failed else 'None'}
-- **Optimization Trigger**: {reason}
-
-## Task
-
-Generate 5-8 targeted modifications that address the identified issues.
-
-**Focus Areas**:
-1. If Risk-Neutralized >> Raw: Reduce factor exposure via neutralization or structure
-2. If Investability-Constrained << Raw: Add concentration controls (winsorize, truncation)
-3. If Test << Train: Increase stability (larger windows, more decay)
-4. If Turnover > 0.6: Smooth the signal (larger windows, decay)
-
-**Output** (JSON):
-```json
-{{
-  "analysis": "Brief analysis of what might be wrong",
-  "modifications": [
-    {{
-      "type": "window|wrapper|sign|structure|settings",
-      "expression": "Modified expression",
-      "rationale": "Why this might help"
-    }}
-  ]
-}}
-```"""
-    
-    return prompt
-
-
-# =============================================================================
 # OPTIMIZATION EXECUTION (For Integration)
 # =============================================================================
 
@@ -610,7 +590,11 @@ async def run_optimization_chain(
     
     # Generate variants
     expr_variants = generate_local_rewrites(expression, sim_result, max_variants=budget // 2)
-    settings_variants = generate_settings_variants(settings or {})
+    # Pass context so the turnover-targeted decay (Gap 2) fires.
+    settings_variants = generate_settings_variants(
+        settings or {},
+        context=_build_optimization_context(expression, sim_result),
+    )
     
     best_score = original_score
     best_variant = None

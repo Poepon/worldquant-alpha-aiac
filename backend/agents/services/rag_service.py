@@ -26,14 +26,39 @@ from backend.config import settings as _settings
 from backend.knowledge_extraction import extract_operator_chain as _extract_operator_chain
 
 
-# Dataset category mapping for intelligent pattern matching
+# Dataset category mapping for intelligent pattern matching.
+#
+# 2026-05-21: vocabulary unified with the BRAIN ``datafields.category`` catalog
+# (the pattern-side signal — see ``resolve_field_categories``) so query-side and
+# pattern-side categories overlap. Added option/socialmedia/sentiment/model;
+# split socialmedia OUT of news (datafields has them as distinct categories →
+# socialmedia8 must NOT collapse onto news18). ORDER MATTERS: first keyword hit
+# wins, so socialmedia precedes news (news's "media" would otherwise swallow
+# "socialmedia8"), and news precedes sentiment (keep "news_sentiment"→news).
 DATASET_CATEGORY_MAPPING = {
     "pv": ["pv", "price", "volume", "trade", "ohlc", "vwap"],
     "analyst": ["analyst", "anl", "estimate", "forecast", "recommendation", "eps", "target"],
     "fundamental": ["fundamental", "fnd", "fin", "balance", "income", "cash", "ratio", "margin"],
-    "news": ["news", "sentiment", "headline", "article", "media", "social", "oth635"],
+    "option": ["option", "opt"],
+    "socialmedia": ["socialmedia", "social"],
+    "news": ["news", "headline", "article", "media", "oth635"],
+    "sentiment": ["sentiment", "snt"],
+    "model": ["model", "mdl"],
     "other": ["other", "oth", "misc", "alternative"],
 }
+
+# Canonical dataset-category vocabulary == the distinct ``datafields.category``
+# values (USA catalog) plus "other". Both the query side (infer_dataset_category)
+# and the pattern side (resolve_field_categories) speak this so set-overlap works.
+_CANONICAL_CATEGORIES = {
+    "pv", "analyst", "fundamental", "news",
+    "option", "socialmedia", "sentiment", "model", "other",
+}
+
+# Local field-token regex (mirrors hierarchical_rag._FIELD_TOKEN_RE). Kept here so
+# resolve_field_categories has no cross-module dependency; operator/constant
+# tokens that slip through simply fail the datafields lookup → harmlessly dropped.
+_FIELD_TOKEN_RE_RESOLVE = re.compile(r"\b([a-z][a-z0-9_]*)\b")
 
 
 # =============================================================================
@@ -109,13 +134,74 @@ def infer_dataset_category(dataset_id: str) -> str:
         return "other"
     
     dataset_lower = dataset_id.lower()
-    
+
     for category, keywords in DATASET_CATEGORY_MAPPING.items():
         for keyword in keywords:
             if keyword in dataset_lower:
                 return category
-    
+
     return "other"
+
+
+def _canonical_category(raw: Optional[str]) -> str:
+    """Normalize a raw ``datafields.category`` value to the canonical vocab.
+
+    datafields.category is already clean (pv/fundamental/analyst/news/option/
+    socialmedia/sentiment/model), so this is mostly lower-casing; anything
+    outside the canonical set collapses to "other" (it could never overlap a
+    query category anyway).
+    """
+    c = (raw or "").strip().lower()
+    return c if c in _CANONICAL_CATEGORIES else "other"
+
+
+async def resolve_field_categories(expression_or_fields, region: str, db) -> List[str]:
+    """Resolve the SET of dataset-categories an alpha's fields touch.
+
+    This is the real retrieval key (2026-05-21 redesign): an alpha is identified
+    by the field set it uses — which can span multiple datasets/categories — not
+    by a single "anchor" dataset_id. We extract field tokens and look each up in
+    the BRAIN ``datafields`` catalog (``field_id`` → ``category``); the union of
+    canonical categories is returned.
+
+    Args:
+        expression_or_fields: a concrete alpha expression (str) OR a pre-extracted
+            list of field tokens (e.g. ``alphas.fields_used``).
+        region: BRAIN region (e.g. "USA"). The datafields catalog is currently
+            USA-only — non-USA regions resolve to ``[]`` (acknowledged gap; backfills
+            as sync extends regions).
+        db: an AsyncSession.
+
+    Returns:
+        Sorted unique canonical categories, e.g. ``["fundamental", "pv"]``.
+        ``[]`` when region unsupported, no tokens, or nothing resolves. Operator/
+        constant tokens that slip through extraction fail the catalog lookup and
+        are dropped, so the result reflects only real fields.
+    """
+    if not region or not expression_or_fields:
+        return []
+    if isinstance(expression_or_fields, str):
+        tokens = {
+            t for t in _FIELD_TOKEN_RE_RESOLVE.findall(expression_or_fields.lower())
+            if not t.isdigit()
+        }
+    else:
+        tokens = {str(f).strip().lower() for f in expression_or_fields if f}
+    if not tokens:
+        return []
+    try:
+        from backend.models.metadata import DataField
+        rows = (await db.execute(
+            select(DataField.category)
+            .where(DataField.region == region.upper())
+            .where(func.lower(DataField.field_id).in_(list(tokens)))
+            .where(DataField.category.isnot(None))
+            .distinct()
+        )).scalars().all()
+    except Exception as ex:
+        logger.debug(f"[resolve_field_categories] datafields lookup failed: {ex}")
+        return []
+    return sorted({_canonical_category(c) for c in rows if c})
 
 
 class RAGResult:
@@ -379,9 +465,41 @@ class RAGService:
         # Phase 3 R8 (2026-05-18): hierarchical RAG dispatch — opt-in via
         # current_expression or hypothesis_pillar. Soft-fall to legacy.
         from backend.config import settings as _stg
+
+        # G4 补强 Phase A (2026-05-19): when neither current_expression nor
+        # hypothesis_pillar is provided by the caller (e.g. node_rag_query
+        # which runs BEFORE node_hypothesis), infer hypothesis_pillar from
+        # the 7d alpha pool deficit so R8 L1 (pillar layer) can still fire.
+        # Uses the same Redis cache key as P2-B (aiac:pillar_deficit:{region}:
+        # {date}, 60s TTL) so when node_hypothesis also runs P2-B later in
+        # the same round, both nodes see identical pillar_hint. Soft-fail:
+        # any error in inference → hypothesis_pillar stays None → falls back
+        # to legacy. Only triggers when the R8 flag is ON (zero overhead
+        # when OFF). The caller's explicit hypothesis_pillar always wins.
         if (
             getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)
-            and (current_expression or hypothesis_pillar)
+            and not current_expression
+            and not hypothesis_pillar
+            and region
+        ):
+            try:
+                hypothesis_pillar = await self._infer_pillar_hint_from_pool(
+                    region=region,
+                )
+            except Exception as _g4_e:
+                logger.warning(
+                    f"[RAGService] G4 pillar-hint inference failed "
+                    f"(non-fatal, falling back to legacy): {_g4_e}"
+                )
+                hypothesis_pillar = None
+
+        # 2026-05-21: dispatch on dataset_id too. At step-1 the G4 pillar hint is
+        # noisy/often None, but dataset_id (the task anchor) is usually present —
+        # the redesigned L1 retrieves by the query's dataset-CATEGORY set even
+        # without a pillar, so hierarchical must fire on dataset_id alone.
+        if (
+            getattr(_stg, "ENABLE_HIERARCHICAL_RAG", False)
+            and (current_expression or hypothesis_pillar or dataset_id)
         ):
             try:
                 from backend.agents.hierarchical_rag import query_hierarchical
@@ -424,6 +542,22 @@ class RAGService:
                     f"(falling back to legacy): {_r8_e}"
                 )
                 # Fall through to legacy path
+
+        # Phase 4 PR0.5 (Sprint 0, 2026-05-19) — F-S2 fix (post-review):
+        # R8_L0 sentinel telemetry — only emitted when control flow reaches
+        # legacy retrieval (i.e. NOT hierarchical-dispatched). Logging at
+        # query() entry was misleading because hierarchical-dispatch
+        # callers also saw the message; the legacy path has no L0-equivalent
+        # so this is the meaningful point to surface "R12 sentinel ACTIVE,
+        # legacy used".
+        _r8_l0_on = bool(getattr(_stg, "ENABLE_R8_L0", True))
+        if not _r8_l0_on:
+            logger.info(
+                "[RAGService] R8_L0 sentinel ACTIVE (ENABLE_R8_L0=False) | "
+                f"dataset={dataset_id} region={region} "
+                f"expr_present={bool(current_expression)} "
+                "— legacy retrieval used (no L0-equivalent to skip)"
+            )
 
         # Infer category from dataset_id
         category = infer_dataset_category(dataset_id) if dataset_id else "other"
@@ -469,6 +603,88 @@ class RAGService:
             region=region
         )
     
+    async def _infer_pillar_hint_from_pool(self, *, region: str) -> Optional[str]:
+        """G4 补强 Phase A (2026-05-19): infer the most-deficient pillar from
+        the recent (7d) alpha pool so RAG.query can trigger R8 L1 even when
+        the caller has no current_expression / explicit hypothesis_pillar
+        (the node_rag_query case).
+
+        Algorithm mirrors node_hypothesis P2-B exactly, including the Redis
+        cache key, so when both nodes fire in the same round they read the
+        same cached deficit map (60s TTL — short enough that fresh alphas
+        rebalance shares quickly; long enough that consecutive nodes in one
+        round share the snapshot).
+
+        Returns the pillar name with the largest deficit if it exceeds
+        ``PILLAR_BALANCE_SKEW_THRESHOLD * target_share``, else None.
+        Returns None on any error (caller treats None as "fall back to
+        legacy retrieval"). NEVER raises.
+        """
+        try:
+            import json
+            from datetime import datetime, timedelta, timezone
+            from backend.tasks.redis_pool import get_redis_client
+            from backend.models import Alpha, Hypothesis
+            from sqlalchemy import select as _sa_select, func as _sa_func
+            from backend.config import settings as _stg
+
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            cache_key = f"aiac:pillar_deficit:{region}:{today}"
+            redis = None
+            try:
+                redis = get_redis_client()
+            except Exception:
+                redis = None
+
+            counts: Optional[Dict[str, int]] = None
+            if redis is not None:
+                try:
+                    cached = redis.get(cache_key)
+                    if cached is not None:
+                        counts = json.loads(cached)
+                except Exception:
+                    counts = None
+
+            if counts is None:
+                cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).replace(tzinfo=None)
+                stmt = (
+                    _sa_select(Hypothesis.pillar, _sa_func.count(Alpha.id))
+                    .select_from(Alpha)
+                    .outerjoin(Hypothesis, Alpha.hypothesis_id == Hypothesis.id)
+                    .where(Alpha.region == region, Alpha.created_at >= cutoff)
+                    .group_by(Hypothesis.pillar)
+                )
+                rows = (await self.db.execute(stmt)).all()
+                counts = {(p or "unknown"): int(c) for p, c in rows}
+                if redis is not None:
+                    try:
+                        redis.setex(cache_key, 60, json.dumps(counts))
+                    except Exception:
+                        pass
+
+            target = getattr(_stg, "PILLAR_TARGET_DISTRIBUTION", {}) or {}
+            if not target:
+                return None
+            pillared_total = sum(c for p, c in counts.items() if p in target) or 1
+            shares = {p: counts.get(p, 0) / pillared_total for p in target}
+            deficits = {p: max(0.0, target[p] - shares.get(p, 0.0)) for p in target}
+            if not deficits:
+                return None
+            top_pillar, top_def = max(deficits.items(), key=lambda kv: kv[1])
+            skew_t = float(getattr(_stg, "PILLAR_BALANCE_SKEW_THRESHOLD", 0.4))
+            if top_def > skew_t * target.get(top_pillar, 0.2):
+                logger.info(
+                    f"[RAGService] G4 pillar-hint inferred | region={region} "
+                    f"hint={top_pillar} deficit={top_def:.3f}"
+                )
+                return top_pillar
+            return None
+        except Exception as e:
+            logger.warning(
+                f"[RAGService] G4 _infer_pillar_hint_from_pool failed: {e}"
+            )
+            return None
+
     async def _get_success_patterns_enhanced(
         self,
         dataset_id: str = None,
@@ -1146,6 +1362,13 @@ class RAGService:
                 # Check if similar pattern already exists
                 existing = await self._find_similar_pitfall(skeleton, region, db=kb_db)
 
+                # 2026-05-21: field-derived category SET (see record_success_pattern).
+                # Failure rows rarely carry resolvable fields, so this is often [];
+                # acceptable — failure pitfalls are largely universal "avoid" hints.
+                dataset_categories_used = await resolve_field_categories(
+                    expression, region, kb_db
+                )
+
                 if existing:
                     # Update existing pattern's failure count
                     existing.meta_data = existing.meta_data or {}
@@ -1161,6 +1384,10 @@ class RAGService:
                         if hypothesis_id not in hids:
                             hids.append(hypothesis_id)
                         existing.meta_data['hypothesis_ids'] = hids
+                    if dataset_categories_used:
+                        _cats = set(existing.meta_data.get('dataset_categories_used') or [])
+                        _cats |= set(dataset_categories_used)
+                        existing.meta_data['dataset_categories_used'] = sorted(_cats)
                     # F-5: variant tag preserved as-is on first record (don't
                     # overwrite — different variants get different KB entries
                     # via _find_similar_pitfall already returning per-skeleton).
@@ -1195,6 +1422,7 @@ class RAGService:
                             'region': region,
                             'dataset': dataset_id,
                             'dataset_category': category,
+                            'dataset_categories_used': dataset_categories_used,
                             'error_type': error_type,
                             'severity': severity,
                             'operator_chain': op_chain[:5] if op_chain else [],
@@ -1232,11 +1460,20 @@ class RAGService:
         alpha_id: str = None,
         hypothesis_id: Optional[int] = None,
         experiment_variant: Optional[str] = None,
+        source: str = "feedback_loop",
     ) -> bool:
         """
         Record a success pattern to the knowledge base.
-        
+
         Called when an alpha passes all quality thresholds.
+
+        ``source`` (2026-05-20) tags provenance into meta_data so analytics +
+        attribution can distinguish loop-generated patterns from externally
+        ingested ones. Default 'feedback_loop' = the live mining path (existing
+        callers unchanged). The sync-reconcile path passes 'sync_reconcile'.
+        Provenance is informational only — BRAIN-validated patterns are
+        legitimate RAG signal regardless of source; the real filter is skeleton
+        quality (the reconcile gates on nesting>=2), not provenance.
         """
         from backend.knowledge_extraction import expression_to_skeleton, extract_operator_chain
         from backend.database import AsyncSessionLocal
@@ -1254,6 +1491,14 @@ class RAGService:
             async with AsyncSessionLocal() as kb_db:
                 # Check if similar pattern exists
                 existing = await self._find_similar_success(skeleton, region, db=kb_db)
+
+                # 2026-05-21: the real retrieval key — the SET of dataset-categories
+                # this expression's fields touch (an alpha is multi-dataset; the
+                # single dataset_id is the task anchor, not the expression's truth).
+                # Computed from the FULL expression before the [:200] truncation.
+                dataset_categories_used = await resolve_field_categories(
+                    expression, region, kb_db
+                )
 
                 if existing:
                     # Update existing pattern
@@ -1291,6 +1536,19 @@ class RAGService:
                         if hypothesis_id not in hids:
                             hids.append(hypothesis_id)
                         existing.meta_data['hypothesis_ids'] = hids
+                    # Provenance (2026-05-20): track which sources reinforced this
+                    # pattern (mining feedback_loop vs sync_reconcile).
+                    _srcs = list(existing.meta_data.get('sources') or [])
+                    if source not in _srcs:
+                        _srcs.append(source)
+                    existing.meta_data['sources'] = _srcs
+                    # 2026-05-21: accumulate the union of category-sets across every
+                    # expression that reinforced this skeleton (same skeleton can be
+                    # instantiated with fields from different datasets).
+                    if dataset_categories_used:
+                        _cats = set(existing.meta_data.get('dataset_categories_used') or [])
+                        _cats |= set(dataset_categories_used)
+                        existing.meta_data['dataset_categories_used'] = sorted(_cats)
                     from sqlalchemy.orm.attributes import flag_modified
                     flag_modified(existing, 'meta_data')
                     logger.info(f"[RAGService] Updated success pattern | skeleton={skeleton[:50]}")
@@ -1319,12 +1577,18 @@ class RAGService:
                         is_active=True,
                         usage_count=1,
                         meta_data={
-                            'source': 'feedback_loop',
+                            'source': source,
+                            'sources': [source],
                             'region': region,
                             'regions': [region] if region else [],
                             'dataset': dataset_id,
                             'dataset_category': category,
                             'dataset_categories': [category],
+                            # 2026-05-21: the real retrieval key (field-derived
+                            # category SET; can span datasets). Empty when fields
+                            # don't resolve (non-USA / unknown) — retrieval degrades
+                            # gracefully via the 0-candidate fallback.
+                            'dataset_categories_used': dataset_categories_used,
                             'operator_chain': op_chain[:5] if op_chain else [],
                             'example_expression': expression[:200],
                             'alpha_id': alpha_id,

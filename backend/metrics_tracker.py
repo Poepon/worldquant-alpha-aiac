@@ -539,61 +539,6 @@ class MetricsTracker:
 
 
 # =============================================================================
-# Convenience Functions
-# =============================================================================
-
-def create_metrics_tracker(
-    task_id: int,
-    debug_log_path: str = None,
-    db: Any = None
-) -> MetricsTracker:
-    """Create a configured metrics tracker."""
-    return MetricsTracker(
-        task_id=task_id,
-        debug_log_path=debug_log_path or ".cursor/debug.log",
-        db=db
-    )
-
-
-def log_round_summary(
-    round_id: int,
-    pass_rate: float,
-    alphas_generated: int,
-    alphas_passed: int,
-    avg_sharpe: float,
-    diversity_score: float
-):
-    """Quick helper to log round summary."""
-    logger.info(
-        f"[Round {round_id}] "
-        f"pass_rate={pass_rate:.1%} "
-        f"generated={alphas_generated} "
-        f"passed={alphas_passed} "
-        f"avg_sharpe={avg_sharpe:.2f} "
-        f"diversity={diversity_score:.2f}"
-    )
-
-
-def log_session_summary(
-    session_id: str,
-    rounds: int,
-    total_passed: int,
-    overall_pass_rate: float,
-    best_sharpe: float,
-    duration_minutes: float
-):
-    """Quick helper to log session summary."""
-    logger.info(
-        f"[Session {session_id}] COMPLETE | "
-        f"rounds={rounds} "
-        f"passed={total_passed} "
-        f"pass_rate={overall_pass_rate:.1%} "
-        f"best_sharpe={best_sharpe:.2f} "
-        f"duration={duration_minutes:.1f}min"
-    )
-
-
-# =============================================================================
 # Per-Node LLM Metrics (module-level accumulator)
 # =============================================================================
 # Decoupled from MetricsTracker / session lifecycle: LLMService is a process-

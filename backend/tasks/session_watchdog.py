@@ -374,16 +374,41 @@ async def _quota_guard_async() -> dict:
         # sim-fail expressions, the guard would not trigger until 130%
         # actual usage — long past the threshold. Adding alpha_failures
         # closes the gap.
+        # Bug A follow-up (2026-05-20): only count mining-direct alphas
+        # (task_id NOT NULL). sync_user_alphas imports HISTORICAL BRAIN alphas
+        # with created_at = insert-time (today), but they consumed BRAIN quota
+        # historically, not today — counting them spikes the daily denominator
+        # (e.g. a sync of 1040 historical rows looked like 1040 sims "today")
+        # and would falsely pause live mining. Sync-imported rows have
+        # task_id=NULL; mining-direct (the ones that actually burned today's
+        # quota) always carry task_id.
         alpha_cnt = (
             await db.execute(
                 select(func.count(Alpha.id))
-                .where(Alpha.created_at >= today_start)
+                .where(
+                    Alpha.created_at >= today_start,
+                    Alpha.task_id.isnot(None),
+                )
             )
         ).scalar() or 0
+        # Bug A fix (2026-05-20): exclude pre-BRAIN skip rows. These never
+        # consumed a BRAIN simulate slot, so counting them inflated this
+        # denominator and paused sessions early. Two kinds:
+        #   PRESIM_SKIP — pre-simulate skeleton classifier + Q10 hard reject
+        #   DEDUP_SKIP  — local-DB dedup (expression already simulated; the
+        #                 prior simulation consumed the slot, not this skip)
+        # Honours the long-standing comment intent above ("every alpha_failure
+        # that wasn't a pre-sim rejection ALSO corresponds to ~1 simulate").
+        # coalesce keeps NULL-error_type rows counted.
         fail_cnt = (
             await db.execute(
                 select(func.count(AlphaFailure.id))
-                .where(AlphaFailure.created_at >= today_start)
+                .where(
+                    AlphaFailure.created_at >= today_start,
+                    ~func.coalesce(AlphaFailure.error_type, "").in_(
+                        ["PRESIM_SKIP", "DEDUP_SKIP"]
+                    ),
+                )
             )
         ).scalar() or 0
         cnt = alpha_cnt + fail_cnt

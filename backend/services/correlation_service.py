@@ -561,6 +561,86 @@ class CorrelationService:
 
         return out
 
+    async def compute_pairwise_corr_for_ids(
+        self,
+        alpha_ids: List[str],
+        *,
+        min_overlap_days: int = MIN_OVERLAP_DAYS,
+        max_alphas: int = 50,
+    ) -> Optional["pd.DataFrame"]:
+        """Build an in-round pairwise daily-return correlation matrix for
+        a SPECIFIC set of alpha_ids (Phase 4 R10-v2 upstream wire, Tier A).
+
+        Distinct from ``compute_portfolio_matrix`` (which works off the
+        cached OS pool) — this fetches PnL for the exact round alpha_ids
+        passed in (typically only same-family members from
+        ``family_classifier.same_family_alpha_ids``, so the fetch count
+        is bounded and usually 0).
+
+        Returns a pandas DataFrame indexed by alpha_id on both axes
+        (``DataFrame.corr(min_periods=min_overlap_days)``), or None when:
+          - alpha_ids has < 2 entries
+          - BRAIN_AUTH_CIRCUIT is open (fast-fail, no fetch stampede)
+          - < 2 alphas yielded a non-empty PnL series
+
+        Soft-fail: per-alpha fetch errors are skipped (partial coverage
+        is handled by apply_family_hard_ban's min_coverage_ratio guard).
+        Bounded by max_alphas to cap worst-case BRAIN cost.
+        """
+        if not alpha_ids or len(alpha_ids) < 2:
+            return None
+
+        # F6 lesson (Sprint 4): short-circuit on BRAIN auth circuit open so
+        # a dead session doesn't trigger a per-alpha retry stampede.
+        try:
+            from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
+            if BRAIN_AUTH_CIRCUIT.is_open():
+                logger.info(
+                    "[CorrelationService] R10-v2 corr matrix skipped — "
+                    "BRAIN_AUTH_CIRCUIT open"
+                )
+                return None
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Dedup + cap
+        uniq_ids = list(dict.fromkeys(str(a) for a in alpha_ids))[:max_alphas]
+        sem = asyncio.Semaphore(PNL_FETCH_CONCURRENCY)
+
+        # R2 review fix: in-round budget is tight — use max_attempts=1 (a
+        # retry's value is low here vs the latency it adds) and re-check the
+        # auth circuit before each fetch so a mid-gather auth drop fast-fails
+        # the remaining fetches instead of each one burning a retry/backoff.
+        try:
+            from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT as _BAC
+        except Exception:  # noqa: BLE001
+            _BAC = None
+
+        async def _fetch(aid: str) -> Optional[pd.Series]:
+            async with sem:
+                if _BAC is not None and _BAC.is_open():
+                    return None
+                try:
+                    s = await self._fetch_pnl_series(aid, max_attempts=1)
+                    return s if (s is not None and not s.empty) else None
+                except Exception as e:  # noqa: BLE001
+                    logger.debug(
+                        f"[CorrelationService] R10-v2 PnL fetch failed {aid}: {e}"
+                    )
+                    return None
+
+        results = await asyncio.gather(*(_fetch(a) for a in uniq_ids))
+        series = [s for s in results if s is not None and not s.empty]
+        if len(series) < 2:
+            return None
+
+        pnl_df = pd.concat(series, axis=1)
+        pnl_df = pnl_df.loc[:, ~pnl_df.columns.duplicated()]
+        # daily returns then pairwise corr (mirror calibrate_r10 convention)
+        returns = pnl_df - pnl_df.ffill().shift(1)
+        corr_df = returns.corr(min_periods=min_overlap_days)
+        return corr_df
+
     def compute_portfolio_matrix(
         self,
         region: str,

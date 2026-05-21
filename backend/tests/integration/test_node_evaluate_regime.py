@@ -157,14 +157,19 @@ class TestNodeEvaluateRegime:
             }
         }
 
-        original_flag = settings.ENABLE_REGIME_AWARE_THRESHOLDS
+        # (Consolidated 2026-05-19: ENABLE_REGIME_AWARE_THRESHOLDS now derived
+        # from ENABLE_REGIME + REGIME_STAGE. AWARE_THRESHOLDS truthy ⇔
+        # ENABLE_REGIME=True AND REGIME_STAGE in {"thresholds","style"}.)
+        original_enabled = settings.ENABLE_REGIME
+        original_stage = settings.REGIME_STAGE
 
         # ---- flag OFF: PASS bar=1.25 → not PASS, but PROV bar=0.80 → PROV ----
-        settings.ENABLE_REGIME_AWARE_THRESHOLDS = False
+        settings.ENABLE_REGIME = False
         try:
             out_off = await node_evaluate(state_off, brain=None, config=cfg)
         finally:
-            settings.ENABLE_REGIME_AWARE_THRESHOLDS = original_flag
+            settings.ENABLE_REGIME = original_enabled
+            settings.REGIME_STAGE = original_stage
         alpha_off = out_off["pending_alphas"][0]
         # flag=OFF should NOT land at PASS (sharpe<1.25)
         assert alpha_off.quality_status != "PASS", (
@@ -173,11 +178,13 @@ class TestNodeEvaluateRegime:
         )
 
         # ---- flag ON: PASS bar drops to 0.875 → sharpe=0.95 can reach PASS ----
-        settings.ENABLE_REGIME_AWARE_THRESHOLDS = True
+        settings.ENABLE_REGIME = True
+        settings.REGIME_STAGE = "thresholds"
         try:
             out_on = await node_evaluate(state_on, brain=None, config=cfg)
         finally:
-            settings.ENABLE_REGIME_AWARE_THRESHOLDS = original_flag
+            settings.ENABLE_REGIME = original_enabled
+            settings.REGIME_STAGE = original_stage
         alpha_on = out_on["pending_alphas"][0]
 
         # The DECISIVE assertion: flag=ON quality must be >= flag=OFF
@@ -214,15 +221,16 @@ class TestNodeEvaluateRegime:
             }
         }
 
-        original_aware = settings.ENABLE_REGIME_AWARE_THRESHOLDS
-        original_style = settings.ENABLE_STYLE_PRESET_GUIDANCE
-        settings.ENABLE_REGIME_AWARE_THRESHOLDS = True
-        settings.ENABLE_STYLE_PRESET_GUIDANCE = False
+        # (Consolidated 2026-05-19: AWARE=True + STYLE=False ⇔ REGIME_STAGE="thresholds".)
+        original_enabled = settings.ENABLE_REGIME
+        original_stage = settings.REGIME_STAGE
+        settings.ENABLE_REGIME = True
+        settings.REGIME_STAGE = "thresholds"
         try:
             out = await node_evaluate(state, brain=None, config=cfg)
         finally:
-            settings.ENABLE_REGIME_AWARE_THRESHOLDS = original_aware
-            settings.ENABLE_STYLE_PRESET_GUIDANCE = original_style
+            settings.ENABLE_REGIME = original_enabled
+            settings.REGIME_STAGE = original_stage
 
         alpha = out["pending_alphas"][0]
         assert isinstance(alpha.metrics, dict)
@@ -251,15 +259,16 @@ class TestNodeEvaluateRegime:
                 }
             }
         }
-        original_aware = settings.ENABLE_REGIME_AWARE_THRESHOLDS
-        original_style = settings.ENABLE_STYLE_PRESET_GUIDANCE
-        settings.ENABLE_REGIME_AWARE_THRESHOLDS = True
-        settings.ENABLE_STYLE_PRESET_GUIDANCE = True
+        # (Consolidated 2026-05-19: AWARE=True + STYLE=True ⇔ REGIME_STAGE="style".)
+        original_enabled = settings.ENABLE_REGIME
+        original_stage = settings.REGIME_STAGE
+        settings.ENABLE_REGIME = True
+        settings.REGIME_STAGE = "style"
         try:
             out = await node_evaluate(state, brain=None, config=cfg)
         finally:
-            settings.ENABLE_REGIME_AWARE_THRESHOLDS = original_aware
-            settings.ENABLE_STYLE_PRESET_GUIDANCE = original_style
+            settings.ENABLE_REGIME = original_enabled
+            settings.REGIME_STAGE = original_stage
 
         alpha = out["pending_alphas"][0]
         assert "_regime_at_eval" not in (alpha.metrics or {})

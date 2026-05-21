@@ -14,10 +14,14 @@ Contains:
 - build_distill_prompt: Builder for distillation prompt
 """
 
+import logging
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from backend.agents.prompts.base import (
     PromptContext,
+    build_cross_task_hypotheses_block,  # G8 (2026-05-19)
     build_dual_channel_patterns_block,  # R4' (2026-05-17 Phase 1)
     build_fields_context,
     build_macro_context_block,  # P2-A (2026-05-16)
@@ -247,7 +251,37 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
         dual_channel=getattr(settings, "ENABLE_DUAL_CHANNEL_RAG", False),
     )
 
-    return f"""## Research Context
+    # G8 Phase A (2026-05-19): cross-task hypothesis-forest reference. Empty
+    # when ctx.cross_task_hypotheses is [] (legacy / flag-off path) so the
+    # splice below produces the empty string at the insertion point and the
+    # template renders byte-for-byte identical to pre-G8.
+    cross_task_block = build_cross_task_hypotheses_block(
+        getattr(ctx, "cross_task_hypotheses", []) or []
+    )
+    cross_task_block_with_leading_newline = (
+        f"\n{cross_task_block}\n" if cross_task_block else ""
+    )
+
+    # B5 R8-v3 (Sprint 3, 2026-05-20): cognitive-layer research-lens block.
+    # Pre-rendered by cognitive_layer_service.build_cognitive_layer_block
+    # in node_hypothesis. Empty string when R8-v3 OFF or no layer fired →
+    # splice below collapses to "" → byte-for-byte legacy.
+    cognitive_layer_text = getattr(ctx, "cognitive_layer_block", "") or ""
+    cognitive_layer_block_with_leading_newline = (
+        f"\n{cognitive_layer_text}\n" if cognitive_layer_text else ""
+    )
+
+    # A5.2 G10 PR2 (Sprint 4, 2026-05-20): distilled-logic block. Pre-
+    # rendered by logic_distill_service.build_distilled_logic_block in
+    # node_hypothesis. Empty when ENABLE_G10_LOGIC_INJECT OFF / no rows →
+    # splice below yields "" → byte-for-byte legacy.
+    distilled_logic_text = getattr(ctx, "distilled_logic_block", "") or ""
+    distilled_logic_block_with_leading_newline = (
+        f"\n{distilled_logic_text}\n" if distilled_logic_text else ""
+    )
+
+    def _assemble(macro_nl: str, cross_task_nl: str) -> str:
+        return f"""## Research Context
 
 **Dataset**: {ctx.dataset_id}
 **Category**: {ctx.dataset_category or 'General'}
@@ -257,7 +291,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 ## Available Data Fields (Sample)
 
 {field_overview}
-{macro_block_with_leading_newline}{style_block_with_leading_newline}
+{macro_nl}{style_block_with_leading_newline}{cross_task_nl}{cognitive_layer_block_with_leading_newline}{distilled_logic_block_with_leading_newline}
 {patterns_block}
 {trace_section}
 {strategy_section}
@@ -301,6 +335,44 @@ Generate 3-5 investment hypotheses for this dataset.
   }}
 }}
 ```"""
+
+    # Tier E E2: token-budget guard. enforce_token_budget was a standalone
+    # util with no caller (Sprint 3/4 review). Wire it HERE — but ONLY
+    # actively trim when ENABLE_COGNITIVE_LAYER_PROMPT is on AND the full
+    # prompt exceeds the budget. The OFF path + the under-budget path
+    # return the identical full prompt → byte-for-byte legacy preserved
+    # (the heavily-tested invariant). Drop order: cross_task_hypotheses
+    # then macro_narratives (the two droppable blocks with standalone
+    # render vars; failure_pitfalls is folded into patterns_block and is
+    # not independently trimmable here).
+    full_prompt = _assemble(
+        macro_block_with_leading_newline, cross_task_block_with_leading_newline
+    )
+    try:
+        from backend.config import settings as _hp_settings
+        if getattr(_hp_settings, "ENABLE_COGNITIVE_LAYER_PROMPT", False):
+            from backend.services.cognitive_layer_service import (
+                estimate_tokens as _est, DEFAULT_TOKEN_BUDGET as _DEF_BUDGET,
+            )
+            budget = int(getattr(
+                _hp_settings, "COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET", _DEF_BUDGET,
+            ))
+            if _est(full_prompt) > budget:
+                # Drop cross_task first
+                trimmed = _assemble(macro_block_with_leading_newline, "")
+                if _est(trimmed) > budget:
+                    # Then macro
+                    trimmed = _assemble("", "")
+                logger.info(
+                    "[hypothesis_prompt] token-budget guard trimmed prompt "
+                    "(%d→%d est tokens, budget=%d)",
+                    _est(full_prompt), _est(trimmed), budget,
+                )
+                return trimmed
+    except Exception as _hp_ex:  # noqa: BLE001 — guard must never break prompt build
+        logger.debug("[hypothesis_prompt] token-budget guard skipped: %s", _hp_ex)
+
+    return full_prompt
 
 
 def build_distill_prompt(ctx: PromptContext, field_categories: Dict[str, List[str]]) -> str:

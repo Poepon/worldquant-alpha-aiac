@@ -102,6 +102,35 @@ from backend.models.r1b_retry import R1bRetryLog
 # R8 query-level telemetry (per-call layer_hits + cache_hit row, flag-gated)
 from backend.models.r8_query_log import R8QueryLog
 
+# G2 Phase A per-call LLM cost telemetry (flag-gated, batched flush at round
+# boundary; dedicated per [[feedback_r1a_dedicated_log_table]])
+from backend.models.llm_call_log import LLMCallLog
+
+# G5 Phase A trajectory crossover log (per-LLM-call row + outcome alpha
+# back-fill; dedicated per same rationale)
+from backend.models.g5_crossover_log import G5CrossoverLog
+
+# Pitfall-classifier per-call decision log (feedback_agent
+# _classify_pitfall_error_type — drop vs stamp telemetry)
+from backend.models.classifier_call_log import ClassifierCallLog
+
+# Phase 4 Sprint 1 A2 — R14 task_stop_loss trigger event log (Millennium
+# 5%/7.5% hard stop-loss pattern; dedicated table per
+# [[feedback_r1a_dedicated_log_table]])
+from backend.models.task_stop_loss_event import TaskStopLossEvent
+
+# Phase 4 Sprint 2 B2 — R13 factor_lens OLS decomposition per PASS alpha
+# (Two Sigma 18-factor lens / AQR autoencoder asset pricing pattern)
+from backend.models.factor_lens_residual import FactorLensResidual
+
+# Phase 4 Sprint 3 A5.1 G10 — distilled_logic_library (LLM weekly summary
+# of common logic across past 7d PASS alphas grouped by pillar, region)
+from backend.models.distilled_logic import DistilledLogic
+
+# Phase 4 Tier E E1 — cognitive_layer_bandit_state (per-layer Beta-Bernoulli
+# posterior for R8-v3 'bandit' select mode; weekly cron updates pass/fail)
+from backend.models.cognitive_layer_bandit import CognitiveLayerBanditState
+
 __all__ = [
     # Enums
     "MiningStatus",

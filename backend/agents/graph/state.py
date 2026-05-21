@@ -173,6 +173,71 @@ class MiningState(BaseModel):
     current_hypothesis_id: Optional[int] = None
     current_hypothesis_ids: List[int] = Field(default_factory=list)
 
+    # G8 Phase A follow-up (2026-05-19): hypothesis IDs that node_hypothesis
+    # surfaced to the LLM via the cross-task forest reference block. Stamped
+    # into alpha.metrics["_g8_forest_referenced_ids"] by _incremental_save_alphas
+    # for reverse attribution analytics ("which alphas were generated under
+    # what forest prompt context"). Empty when ENABLE_HYPOTHESIS_FOREST_REUSE
+    # is OFF or no rows qualified — stamp key omitted in that case.
+    g8_forest_referenced_ids: List[int] = Field(default_factory=list)
+
+    # G5 Phase A (2026-05-19): crossover offspring candidates carried from the
+    # PRIOR round via task.config["g5_pending_offspring"] consume. Each entry:
+    # {expression, combination_strategy, rationale, parent_a_alpha_id,
+    #  parent_b_alpha_id, parent_a_sharpe, parent_b_sharpe}. node_code_gen
+    # prepends these to pending_alphas so they walk the full validate →
+    # simulate → evaluate → save_results pipeline. Empty when
+    # ENABLE_G5_CROSSOVER OFF or no offspring stashed.
+    g5_offspring_candidates: List[Dict] = Field(default_factory=list)
+
+    # Phase 4 Sprint 1 A1.1 (2026-05-19): LLM mode used for THIS round —
+    # "author" (LLM emits BRAIN DSL directly, AIAC v1 default) or
+    # "assistant" (LLM emits hypothesis text + GA + template library
+    # compose the expression). Resolved by
+    # backend.services.llm_mode_service.resolve_mode at round entry;
+    # round-end hook reads this to detect mid-task mode flip + drain
+    # cross-round residue keys before the next round. NOT yet wired to
+    # node_code_gen branching (A1.3); A1.1 just records the resolution.
+    llm_mode_used: str = "author"
+
+    # F9 (Sprint 2 review fix): R10-v2 hard-ban DOA placeholder.
+    # apply_family_hard_ban reads state.r10v2_pnl_corr_matrix at
+    # evaluation node tail. The actual populator (a node_correlation_check
+    # / node_evaluate upstream hook that batches PnL fetches + computes
+    # pandas.DataFrame.corr()) is Sprint 3 follow-up. Until then, this
+    # field stays None and the R10-v2 block soft-skips with a DEBUG log.
+    # Declared here so producers wiring the upstream populator have a
+    # known target field name, and so static type-checks don't flag
+    # `getattr(state, "r10v2_pnl_corr_matrix", None)` as an ad-hoc attr.
+    # Type Any (pd.DataFrame at runtime) to avoid pandas import in the
+    # state module.
+    r10v2_pnl_corr_matrix: Optional[Any] = None
+
+    # B5 R8-v3 (Sprint 3, 2026-05-20): cognitive-layer id chosen by
+    # cognitive_layer_service.select_layer at hypothesis time. Empty
+    # string = R8-v3 OFF or layer load failed → no stamp downstream.
+    # evaluation node copies this onto each alpha.metrics[
+    # "_cognitive_layer_used"] so the bandit reward update (offline cron,
+    # fast-follow) can attribute PASS/FAIL to the layer that was active.
+    cognitive_layer_id_used: str = ""
+
+    # B4.1 G3-v2 (Sprint 4 F2/F3 review fix): per-run grammar parse-fail
+    # telemetry. Dropped candidates never reach persistence (not in
+    # pending_alphas), so their _g3v2_parse_failed metric is unreachable
+    # — these state counters are the observable signal instead. The
+    # min-pass-rate floor in node_code_gen degrades-open when the drop
+    # rate exceeds 50% (suspected too-narrow grammar).
+    g3v2_parse_fail_count: int = 0
+    g3v2_total_validated: int = 0
+
+    # A5.2 G10 PR2 (Sprint 4 F14 review fix): count of distilled-logic
+    # entries injected into THIS round's hypothesis prompt. node_code_gen
+    # stamps alpha.metrics["_g10_injected"]=True + ["_g10_entries_n"]=N on
+    # each candidate (reachable persist path, unlike the dropped G3-v2
+    # candidates) so /ops + canary SOP can observe G10 coverage. 0 = OFF
+    # or no rows matched.
+    g10_injected_entries_n: int = 0
+
     # Plan v5+ §Phase 2 B5/B6: per-hypothesis round history. Key = hypothesis_id.
     # Each entry: {round_index, alpha_count, pass_count, fail_count,
     #              syntax_fail_count, simulate_fail_count, attribution,

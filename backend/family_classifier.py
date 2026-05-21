@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Iterable, List, Optional, Sequence, Tuple, TYPE_CHECKING
 
 from backend.pillar_classifier import _extract_operators
 
@@ -46,21 +46,43 @@ def family_signature(expression: str) -> str:
     return hashlib.sha256(op_seq.encode("utf-8")).hexdigest()[:16]
 
 
-def _alpha_score(alpha, *, score_key: str = "sharpe") -> float:
-    """Resolve an alpha's composite score for ranking inside a family.
+def _alpha_score(alpha, *, score_key: str = "sharpe", use_composite: bool = True) -> float:
+    """Resolve an alpha's score for ranking inside a family.
 
-    Tries metrics["composite_score"] first (R5 + R1a combined), then sharpe,
-    then 0.0. Negative scores acceptable (alpha could be in flip-retry).
+    D10 review fix (Tier D): the prior version preferred
+    metrics["composite_score"] (range ~0-3) but fell back to sharpe
+    (range ~-3..4) per-alpha. When SOME family members had composite
+    stamped and others didn't, the top-K race mixed two scales →
+    incorrect ranking. Callers now decide ONE basis for the whole
+    family via ``use_composite`` (see _family_uses_composite), so a
+    family is ranked entirely by composite OR entirely by sharpe.
+
+    Negative scores acceptable (alpha could be in flip-retry).
     """
     metrics = getattr(alpha, "metrics", None) or {}
     if isinstance(metrics, dict):
-        comp = metrics.get("composite_score")
-        if isinstance(comp, (int, float)):
-            return float(comp)
+        if use_composite:
+            comp = metrics.get("composite_score")
+            if isinstance(comp, (int, float)):
+                return float(comp)
         sharpe = metrics.get(score_key)
         if isinstance(sharpe, (int, float)):
             return float(sharpe)
     return 0.0
+
+
+def _family_uses_composite(members: Sequence) -> bool:
+    """Return True iff EVERY member has a numeric composite_score —
+    only then is ranking the family by composite consistent. Otherwise
+    the family ranks by sharpe (D10 review fix — no scale mixing)."""
+    for a in members:
+        metrics = getattr(a, "metrics", None) or {}
+        if not isinstance(metrics, dict):
+            return False
+        comp = metrics.get("composite_score")
+        if not isinstance(comp, (int, float)):
+            return False
+    return True
 
 
 def _alpha_pillar(alpha) -> str:
@@ -126,10 +148,11 @@ def apply_family_cap(
         logger.warning(f"[family_cap] invalid top_k={top_k}, treating as 1")
         top_k = 1
 
-    # Group: (pillar, family_sig) → list of (score, idx) tuples.
+    # Group: (pillar, family_sig) → list of (alpha, idx). Score AFTER
+    # grouping so each family picks ONE consistent scoring basis (D10).
     # M4: skip alphas already in a terminal-fail status — they must not
     # occupy a top-K slot nor be re-stamped FAIL by the caller.
-    groups: dict[Tuple[str, str], List[Tuple[float, int]]] = {}
+    groups: dict[Tuple[str, str], List[Tuple[object, int]]] = {}
     for idx, a in enumerate(alphas):
         status = getattr(a, "quality_status", None)
         # Normalize to str (handles QualityStatus enum or raw str)
@@ -139,23 +162,231 @@ def apply_family_cap(
         expr = getattr(a, "expression", "") or ""
         sig = family_signature(expr)
         pillar = _alpha_pillar(a)
-        score = _alpha_score(a, score_key=score_key)
-        groups.setdefault((pillar, sig), []).append((score, idx))
+        groups.setdefault((pillar, sig), []).append((a, idx))
 
     drop_idx: List[int] = []
     for (pillar, sig), members in groups.items():
         if len(members) <= top_k:
             continue
-        # Sort by score descending — keep highest, drop the rest
-        members.sort(key=lambda x: x[0], reverse=True)
-        for score, idx in members[top_k:]:
+        # D10: pick one scoring basis for the whole family (composite iff
+        # every member has it, else sharpe) so the top-K race never mixes
+        # composite (~0-3) with sharpe (~-3..4) scales.
+        _use_comp = _family_uses_composite([a for a, _i in members])
+        scored = [
+            (_alpha_score(a, score_key=score_key, use_composite=_use_comp), idx)
+            for a, idx in members
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        for _score, idx in scored[top_k:]:
             drop_idx.append(idx)
         logger.debug(
             f"[family_cap] dropped {len(members) - top_k} from "
-            f"(pillar={pillar} sig={sig[:8]}) — kept top {top_k} by {score_key}"
+            f"(pillar={pillar} sig={sig[:8]}) — kept top {top_k} "
+            f"by {'composite' if _use_comp else score_key}"
         )
 
     return sorted(drop_idx)
 
 
-__all__ = ["family_signature", "apply_family_cap"]
+def same_family_alpha_ids(alphas: Sequence) -> List[str]:
+    """Return alpha_ids that share a (pillar, family_signature) bucket
+    with ≥2 members — i.e. the ONLY alphas worth fetching daily PnL for
+    when building the R10-v2 pairwise-correlation matrix.
+
+    R10-v2 hard-ban only fires WITHIN a family, so a solo-family alpha
+    can never be banned and its PnL fetch would be wasted BRAIN cost.
+    Most rounds have zero same-family duplicates → this returns [] →
+    the producer skips the fetch entirely.
+
+    Skips terminal-FAIL alphas (already excluded from the ban) and rows
+    without a usable alpha_id / expression. Pure function.
+    """
+    if not alphas:
+        return []
+    groups: dict[Tuple[str, str], List[str]] = {}
+    for a in alphas:
+        status = getattr(a, "quality_status", None)
+        status_str = getattr(status, "value", status) if status is not None else None
+        if status_str in _FAMILY_CAP_EXCLUDED_STATUSES:
+            continue
+        aid = getattr(a, "alpha_id", None)
+        if aid is None:
+            continue
+        expr = getattr(a, "expression", "") or ""
+        sig = family_signature(expr)
+        if sig == "<empty>":
+            continue
+        pillar = _alpha_pillar(a)
+        groups.setdefault((pillar, sig), []).append(str(aid))
+
+    out: List[str] = []
+    for _key, ids in groups.items():
+        if len(ids) >= 2:
+            out.extend(ids)
+    return out
+
+
+def apply_family_hard_ban(
+    alphas: Sequence,
+    *,
+    pnl_corr_matrix: Optional["object"] = None,
+    threshold: float = 0.65,
+    min_coverage_ratio: float = 0.7,
+) -> List[int]:
+    """Apply Phase 4 R10-v2 family hard-ban (per plan v5 §6.10).
+
+    Within each (pillar, family_signature) bucket, sort members by
+    score descending and greedily build a survivor set: each new member
+    is BANNED if it correlates ≥ threshold with ANY surviving member.
+    Mirrors ``apply_family_cap``'s (pillar, sig) grouping so R10 and
+    R10-v2 ban the same population (F8 review fix — pillar-blind sig
+    grouping let R10-v2 cross-pillar-ban, polluting互验 SQL false-
+    positive rates with design conflicts).
+
+    Stamp-only — caller stamps ``metrics["_r10v2_hard_banned"] = True``;
+    FAIL classification deferred to evaluation node's finalize pass so
+    R10 + R10-v2 stamps coexist for the互验 SQL output.
+
+    F7 review fix — coverage guard. Pairs where either side is missing
+    from the corr matrix index are not "no ban needed" — they're
+    "we don't have data to decide". For each (pillar, family) bucket,
+    if the actual fraction of cross-member lookups that succeeded
+    falls below ``min_coverage_ratio``, the whole bucket is skipped
+    (no bans returned for it). Prevents partial-coverage data from
+    silently letting half a family bypass the ban.
+
+    Args:
+        alphas: sequence of alpha-like objects with .expression /
+            .metrics / .quality_status / .alpha_id. ``.id`` fallback
+            removed (F-N1 review): the matrix is keyed by BRAIN string
+            alpha_id; falling back to DB int id silently mis-matches.
+        pnl_corr_matrix: pandas.DataFrame indexed by alpha_id on both
+            axes (square, symmetric, diag=1.0). None → return [].
+        threshold: τ ∈ [0, 1]. ≥ τ → ban the lower-scoring sibling.
+        min_coverage_ratio: per-bucket coverage floor (F7). 0 disables.
+
+    Returns:
+        Sorted list of integer indices (into alphas) to mark banned.
+
+    Pure-function — no DB / BRAIN calls.
+    """
+    if not alphas:
+        return []
+    if pnl_corr_matrix is None:
+        return []
+    if not (0.0 <= threshold <= 1.0):
+        logger.warning(
+            f"[family_hard_ban] threshold={threshold} out of [0,1] — skipping"
+        )
+        return []
+
+    # Pre-compute matrix index set for fast membership tests
+    try:
+        _matrix_index = set(pnl_corr_matrix.index.astype(str))
+    except Exception:  # noqa: BLE001
+        _matrix_index = set()
+
+    # F8 review fix: group by (pillar, family_signature) — mirrors
+    # apply_family_cap so R10 + R10-v2 ban on the same partition.
+    # F-N1 review fix: skip rows without alpha_id (matrix is BRAIN-id
+    # keyed; falling back to DB int id silently mis-matches).
+    # Store (alpha, idx, aid); score AFTER grouping so each family picks
+    # one consistent scoring basis (D10).
+    raw_groups: dict[Tuple[str, str], List[Tuple[object, int, str]]] = {}
+    for idx, a in enumerate(alphas):
+        status = getattr(a, "quality_status", None)
+        status_str = getattr(status, "value", status) if status is not None else None
+        if status_str in _FAMILY_CAP_EXCLUDED_STATUSES:
+            continue
+        aid = getattr(a, "alpha_id", None)
+        if aid is None:
+            continue
+        expr = getattr(a, "expression", "") or ""
+        sig = family_signature(expr)
+        if sig == "<empty>":
+            continue
+        pillar = _alpha_pillar(a)
+        raw_groups.setdefault((pillar, sig), []).append((a, idx, str(aid)))
+
+    # D10: resolve scores per-family with a single basis (composite iff
+    # every member has it, else sharpe).
+    groups: dict[Tuple[str, str], List[Tuple[float, int, str]]] = {}
+    for key, raw_members in raw_groups.items():
+        _use_comp = _family_uses_composite([a for a, _i, _aid in raw_members])
+        groups[key] = [
+            (_alpha_score(a, use_composite=_use_comp), idx, aid)
+            for a, idx, aid in raw_members
+        ]
+
+    ban_idx: set[int] = set()
+    _low_coverage_skips = 0
+    for (pillar, sig), members in groups.items():
+        if len(members) < 2:
+            continue
+        # F7: coverage check — count members whose alpha_id is in the
+        # matrix index. If < min_coverage_ratio, skip this bucket
+        # entirely (lack of data ≠ "no ban needed").
+        if min_coverage_ratio > 0:
+            covered = sum(1 for _s, _i, aid in members if aid in _matrix_index)
+            if covered < int(len(members) * min_coverage_ratio + 0.999):
+                _low_coverage_skips += 1
+                logger.debug(
+                    f"[family_hard_ban] (pillar={pillar} sig={sig[:8]}) "
+                    f"coverage {covered}/{len(members)} < min_ratio "
+                    f"{min_coverage_ratio:.2f} — skip bucket"
+                )
+                continue
+
+        # Sort descending by score — preserve the highest, ban siblings
+        # whose corr against the surviving set exceeds threshold.
+        members.sort(key=lambda x: x[0], reverse=True)
+        survivors: List[Tuple[float, int, str]] = []
+        for score, idx, aid in members:
+            ban_this = False
+            if aid not in _matrix_index:
+                # This member has no PnL data — can't decide. Treat as
+                # "survives" but log; F7 coverage check above should
+                # have caught the systemic case already.
+                survivors.append((score, idx, aid))
+                continue
+            for _s, _i, surv_aid in survivors:
+                if surv_aid not in _matrix_index:
+                    continue
+                try:
+                    c = pnl_corr_matrix.loc[aid, surv_aid]
+                except KeyError:
+                    continue
+                except Exception:  # noqa: BLE001
+                    continue
+                try:
+                    cf = float(c)
+                except (TypeError, ValueError):
+                    continue
+                if cf >= threshold:
+                    ban_this = True
+                    break
+            if ban_this:
+                ban_idx.add(idx)
+            else:
+                survivors.append((score, idx, aid))
+        if len(members) - len(survivors) > 0:
+            logger.debug(
+                f"[family_hard_ban] (pillar={pillar} sig={sig[:8]}) kept "
+                f"{len(survivors)}/{len(members)} (τ={threshold:.2f})"
+            )
+
+    if _low_coverage_skips > 0:
+        logger.info(
+            f"[family_hard_ban] {_low_coverage_skips} bucket(s) skipped due "
+            f"to coverage < {min_coverage_ratio:.2f}"
+        )
+
+    return sorted(ban_idx)
+
+
+__all__ = [
+    "family_signature",
+    "apply_family_cap",
+    "apply_family_hard_ban",
+    "same_family_alpha_ids",
+]

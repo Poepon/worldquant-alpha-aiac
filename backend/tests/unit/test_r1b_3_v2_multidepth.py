@@ -89,6 +89,57 @@ async def test_insert_helper_soft_fails_on_db_exception():
             assert out is None
 
 
+@pytest.mark.asyncio
+async def test_insert_helper_persists_hypothesis_row_against_real_orm(
+    async_engine, monkeypatch
+):
+    """Production regression (2026-05-19): the previous mocks here never
+    exercised the actual ``Hypothesis(...)`` constructor, so an invalid
+    ``task_id=`` kwarg slipped into prod and 973/973 mutate INSERTs failed
+    silently (R1b chain_depth=0 across the entire fleet). This test hits a
+    real in-memory aiosqlite session, ensuring any future kwarg drift fails
+    at unit-test time rather than at 2am on Saturday.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.orm import sessionmaker
+    from sqlalchemy import select as _sel
+
+    from backend.agents.graph.nodes.r1b_loop import _insert_mutated_hypothesis
+    from backend.models import Hypothesis
+
+    session_maker = sessionmaker(
+        async_engine, class_=AsyncSession, expire_on_commit=False,
+    )
+    monkeypatch.setattr("backend.database.AsyncSessionLocal", session_maker)
+
+    new_id = await _insert_mutated_hypothesis(
+        task_id=42,
+        parent_hypothesis_id=None,
+        pending={
+            "statement": "mutated thesis statement",
+            "rationale": "why this mutation",
+            "pillar": "momentum",
+            "key_fields": ["close", "volume"],
+            "suggested_operators": ["ts_rank"],
+            "selected_datasets": ["pv1"],
+        },
+        region="USA",
+    )
+    assert isinstance(new_id, int) and new_id > 0
+
+    async with session_maker() as sess:
+        row = (
+            await sess.execute(_sel(Hypothesis).where(Hypothesis.id == new_id))
+        ).scalar_one()
+    assert row.statement == "mutated thesis statement"
+    assert row.kind == "IMPROVEMENT_RULE"
+    assert row.status == "PROPOSED"
+    assert row.r1b_mutation_depth == 1
+    assert row.parent_hypothesis_id is None
+    assert row.region == "USA"
+    assert row.pillar == "momentum"
+
+
 # ---------------------------------------------------------------------------
 # _build_parent_chain — fallback behavior
 # ---------------------------------------------------------------------------

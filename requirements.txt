@@ -31,6 +31,7 @@ langchain-openai>=0.2.0
 # Data Processing
 pandas>=2.1.4
 numpy>=1.26.3
+openpyxl>=3.1.0  # read AQR BAB .xlsx in scripts/prep_aqr_bab.py
 scipy>=1.11.0
 matplotlib>=3.8.0
 plotly>=5.18.0

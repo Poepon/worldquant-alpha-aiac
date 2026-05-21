@@ -71,6 +71,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.sync_datasets",
         "schedule": crontab(hour=6, minute=0),
     },
+    # P2.C (2026-05-20): sync user alphas from BRAIN every 6h. Closes the
+    # local-vs-BRAIN parity gap that otherwise drifts (it was sync'd only on
+    # manual /alphas/sync clicks — last ran 7 days stale). Off-minute :50
+    # avoids the 06:00/06:15/06:30 daily BRAIN-touching cluster. Skips
+    # cleanly when BRAIN_AUTH_CIRCUIT is open (sync_user_alphas guard).
+    "sync-user-alphas": {
+        "task": "backend.tasks.sync_user_alphas",
+        "schedule": crontab(hour="*/6", minute=50),
+    },
     # W0.5: refresh OS-alpha PnL cache daily at 06:30 (after dataset sync)
     "refresh-os-correlation-cache": {
         "task": "backend.tasks.refresh_os_correlation_cache",
@@ -222,6 +231,25 @@ celery_app.conf.beat_schedule = {
     "r8-query-log-pruner": {
         "task": "backend.tasks.run_r8_query_log_pruner",
         "schedule": crontab(hour=4, minute=30, day_of_week=0),
+    },
+    # Phase 4 Sprint 3 A5.1 G10 (2026-05-20): Sunday 03:00 SH weekly distill
+    # of past 7d PASS alphas into distilled_logic_library. flag-gated by
+    # ENABLE_G10_LOGIC_DISTILL (default OFF → task fires but no-ops).
+    # Cost-capped at LOGIC_DISTILL_MAX_COST_USD_PER_WEEK ($5 default).
+    # Scheduled 1h before r1b-failure-tree-pruner (04:00) so DB writes
+    # finish before the pruner sweep.
+    "g10-weekly-logic-distill": {
+        "task": "backend.tasks.run_weekly_logic_distill",
+        "schedule": crontab(hour=3, minute=0, day_of_week=0),
+    },
+    # Phase 4 Tier E E1 (2026-05-20): Sunday 04:45 SH cognitive-layer bandit
+    # reward update. Aggregates _cognitive_layer_used PASS/FAIL → per-layer
+    # Beta posterior so COGNITIVE_LAYER_SELECT_MODE='bandit' works. Staggered
+    # 04:45 — after r1b-pruner (04:00) + r8-query-pruner (04:30), before the
+    # 06:00 sync jobs. flag-gated → no-op when R8-v3 OFF.
+    "r8v3-cognitive-layer-bandit-update": {
+        "task": "backend.tasks.run_cognitive_layer_bandit_update",
+        "schedule": crontab(hour=4, minute=45, day_of_week=0),
     },
     # Canary monitoring (2026-05-18): every-6h red-flag check post v1.3
     # ship. Runs the 5 SQL checks from docs/production_canary_sop_2026_05_18.md

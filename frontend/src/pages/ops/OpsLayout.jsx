@@ -15,6 +15,16 @@ import BrainRoleSwitch from './BrainRoleSwitch'
 import SimulationCacheMonitor from './SimulationCacheMonitor'
 import LLMJudgeMonitor from './LLMJudgeMonitor'
 import DagMonitor from './DagMonitor'
+import CostMonitor from './CostMonitor'
+import DirectionBanditMonitor from './DirectionBanditMonitor'
+import G3OriginalityMonitor from './G3OriginalityMonitor'
+import G8ForestMonitor from './G8ForestMonitor'
+import G5CrossoverMonitor from './G5CrossoverMonitor'
+import R8v3Monitor from './R8v3Monitor'
+import R11CapacityMonitor from './R11CapacityMonitor'
+import R13FactorLensMonitor from './R13FactorLensMonitor'
+import G10LogicMonitor from './G10LogicMonitor'
+import G3v2Monitor from './G3v2Monitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -73,6 +83,22 @@ export default function OpsLayout() {
         <Route path="r5-judge" element={<LLMJudgeMonitor />} />
         {/* Phase 2 R6 — DAG trace telemetry (2026-05-18) */}
         <Route path="r6-dag" element={<DagMonitor />} />
+        {/* G2 Phase A — LLM cost telemetry (2026-05-19) */}
+        <Route path="cost-monitor" element={<CostMonitor />} />
+        {/* G1 Phase A — direction-bandit telemetry (2026-05-19) */}
+        <Route path="direction-bandit-monitor" element={<DirectionBanditMonitor />} />
+        {/* G3 Phase A — AST originality stats (2026-05-19) */}
+        <Route path="g3-monitor" element={<G3OriginalityMonitor />} />
+        {/* G8 Phase A — hypothesis forest telemetry (2026-05-19) */}
+        <Route path="g8-monitor" element={<G8ForestMonitor />} />
+        {/* G5 Phase A — trajectory crossover telemetry (2026-05-19) */}
+        <Route path="g5-monitor" element={<G5CrossoverMonitor />} />
+
+        <Route path="r8v3-monitor" element={<R8v3Monitor />} />
+        <Route path="r11-capacity" element={<R11CapacityMonitor />} />
+        <Route path="r13-factor-lens" element={<R13FactorLensMonitor />} />
+        <Route path="g10-logic" element={<G10LogicMonitor />} />
+        <Route path="g3v2-monitor" element={<G3v2Monitor />} />
       </Routes>
     </div>
   )

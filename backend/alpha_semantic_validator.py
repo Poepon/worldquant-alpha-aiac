@@ -987,36 +987,6 @@ class ExpressionDeduplicator:
 
 
 # =============================================================================
-# P1-4: Diversity scoring for batch evaluation
-# =============================================================================
-
-def compute_batch_diversity(expressions: List[str]) -> float:
-    """
-    Compute diversity score for a batch of expressions.
-    
-    Higher is better (more diverse).
-    
-    Returns: 0.0 to 1.0
-    """
-    if len(expressions) <= 1:
-        return 1.0
-        
-    # Pairwise similarity
-    similarities = []
-    for i in range(len(expressions)):
-        for j in range(i + 1, len(expressions)):
-            sim = compute_structural_similarity(expressions[i], expressions[j])
-            similarities.append(sim)
-            
-    if not similarities:
-        return 1.0
-        
-    # Diversity = 1 - average similarity
-    avg_sim = sum(similarities) / len(similarities)
-    return 1.0 - avg_sim
-
-
-# =============================================================================
 # Integration helper for node_validate
 # =============================================================================
 

@@ -163,9 +163,12 @@ class TestNodeHypothesisRegime:
             }
         }
 
+        # (Consolidated 2026-05-19: STYLE_PRESET_GUIDANCE=False ⇔ REGIME_STAGE in
+        # {"inference","thresholds"} or ENABLE_REGIME=False. Use ENABLE_REGIME=False.)
         from backend.config import settings
-        original = settings.ENABLE_STYLE_PRESET_GUIDANCE
-        settings.ENABLE_STYLE_PRESET_GUIDANCE = False
+        original_enabled = settings.ENABLE_REGIME
+        original_stage = settings.REGIME_STAGE
+        settings.ENABLE_REGIME = False
         try:
             captured = {}
             import backend.agents.graph.nodes.generation as _g
@@ -183,7 +186,8 @@ class TestNodeHypothesisRegime:
                 )
                 result = await node_hypothesis(state, llm, config=config)
         finally:
-            settings.ENABLE_STYLE_PRESET_GUIDANCE = original
+            settings.ENABLE_REGIME = original_enabled
+            settings.REGIME_STAGE = original_stage
 
         ctx = captured.get("ctx")
         assert ctx is not None, "build_hypothesis_prompt was not called"
@@ -222,9 +226,13 @@ class TestNodeHypothesisRegime:
             }
         }
 
+        # (Consolidated 2026-05-19: STYLE flag truthy ⇔ ENABLE_REGIME=True AND
+        # REGIME_STAGE="style".)
         from backend.config import settings
-        original = settings.ENABLE_STYLE_PRESET_GUIDANCE
-        settings.ENABLE_STYLE_PRESET_GUIDANCE = True
+        original_enabled = settings.ENABLE_REGIME
+        original_stage = settings.REGIME_STAGE
+        settings.ENABLE_REGIME = True
+        settings.REGIME_STAGE = "style"
         try:
             captured = {}
             import backend.agents.graph.nodes.generation as _g
@@ -242,7 +250,8 @@ class TestNodeHypothesisRegime:
                 )
                 result = await node_hypothesis(state, llm, config=config)
         finally:
-            settings.ENABLE_STYLE_PRESET_GUIDANCE = original
+            settings.ENABLE_REGIME = original_enabled
+            settings.REGIME_STAGE = original_stage
 
         ctx = captured.get("ctx")
         assert ctx is not None
@@ -297,9 +306,13 @@ class TestNodeHypothesisRegime:
             }
         }
 
+        # (Consolidated 2026-05-19: STYLE flag truthy ⇔ ENABLE_REGIME=True AND
+        # REGIME_STAGE="style".)
         from backend.config import settings
-        original = settings.ENABLE_STYLE_PRESET_GUIDANCE
-        settings.ENABLE_STYLE_PRESET_GUIDANCE = True
+        original_enabled = settings.ENABLE_REGIME
+        original_stage = settings.REGIME_STAGE
+        settings.ENABLE_REGIME = True
+        settings.REGIME_STAGE = "style"
         try:
             captured = {}
             import backend.agents.graph.nodes.generation as _g
@@ -317,7 +330,8 @@ class TestNodeHypothesisRegime:
                 )
                 result = await node_hypothesis(state, llm, config=config)
         finally:
-            settings.ENABLE_STYLE_PRESET_GUIDANCE = original
+            settings.ENABLE_REGIME = original_enabled
+            settings.REGIME_STAGE = original_stage
 
         ctx = captured.get("ctx")
         assert ctx is not None

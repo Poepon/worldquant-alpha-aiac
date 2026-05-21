@@ -233,7 +233,7 @@ export default function CoSTEERMonitor() {
               {Object.entries(r1bPayload.flags || {}).map(([k, v]) => flagTag(k, v))}
               {Object.entries(r8Payload.flags || {}).map(([k, v]) => flagTag(k, v))}
               {Object.entries(r8QueryPayload.flags || {})
-                .filter(([k]) => k === 'ENABLE_R8_QUERY_LOG' || k === 'ENABLE_HIERARCHICAL_RAG_CACHE')
+                .filter(([k]) => k === 'ENABLE_R8_QUERY_LOG')
                 .map(([k, v]) => flagTag(k, v))}
             </Space>
           }

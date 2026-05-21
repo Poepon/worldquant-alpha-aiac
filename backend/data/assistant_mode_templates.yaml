@@ -1,0 +1,169 @@
+# Phase 4 Sprint 1 A1.3 — assistant_mode templates
+# ----------------------------------------------------
+# When ENABLE_LLM_ASSISTANT_MODE flips ON for a task, node_code_gen asks
+# the LLM for a hypothesis_text + pillar choice (NOT a BRAIN DSL
+# expression). assistant_template.match_template scores each template's
+# hypothesis_keywords against the LLM-emitted hypothesis text + uses the
+# best match's expression_skeleton with default slots to compose the DSL.
+#
+# Each entry shape:
+#   template_id            — globally unique stable id
+#   pillar                 — one of momentum/value/quality/volatility/sentiment
+#   hypothesis_keywords    — words / phrases the LLM is likely to mention
+#                            when describing the hypothesis this template
+#                            captures. Used by match_template via simple
+#                            Jaccard / token-overlap scoring.
+#   expression_skeleton    — BRAIN DSL with {{slot}} placeholders
+#   slots                  — {slot_name: {default, type}} — used to fill
+#                            placeholders. Types: field_ref / int / float / str.
+#   recommended_operators  — informational; the operators the skeleton
+#                            actually uses. Lets future audits flag drift.
+#   description            — one-line plain-English rationale for the
+#                            operator. Surfaces in audit / debug logs.
+#
+# Forward compat hooks (per [[feedback_forward_compat_metadata_hook]]):
+#   • Templates are versioned by template_id stability — A1.3 ships v1.
+#     If a template's skeleton changes meaningfully, mint a new id
+#     (e.g. momentum.basic_ts_zscore.v2) so future audit SQL can JOIN.
+#   • Adding a new pillar = append a new block; no code changes needed.
+# ----------------------------------------------------
+
+- template_id: momentum.basic_ts_zscore
+  pillar: momentum
+  hypothesis_keywords: [momentum, persistence, trend, ts_zscore, mean reversion baseline]
+  expression_skeleton: "ts_zscore({{field}}, {{window}})"
+  slots:
+    field:
+      default: returns
+      type: field_ref
+    window:
+      default: 60
+      type: int
+  recommended_operators: [ts_zscore]
+  description: "Standard z-score momentum: above-average rolling N-day return."
+
+- template_id: momentum.industry_neutral
+  pillar: momentum
+  hypothesis_keywords: [industry neutral, sector neutral, residual momentum, group_neutralize]
+  expression_skeleton: "group_neutralize(ts_zscore({{field}}, {{window}}), {{group}})"
+  slots:
+    field:
+      default: returns
+      type: field_ref
+    window:
+      default: 60
+      type: int
+    group:
+      default: industry
+      type: str
+  recommended_operators: [ts_zscore, group_neutralize]
+  description: "Industry-neutralized momentum — residual after sector exposure removed (Gu/Kelly/Xiu autoencoder echo)."
+
+- template_id: value.book_to_market_rank
+  pillar: value
+  hypothesis_keywords: [value, book-to-market, fundamental ratio, cheap]
+  expression_skeleton: "rank({{field}})"
+  slots:
+    field:
+      default: book_to_market
+      type: field_ref
+  recommended_operators: [rank]
+  description: "Classic value rank: cross-sectional rank of book-to-market."
+
+- template_id: value.industry_neutral_value
+  pillar: value
+  hypothesis_keywords: [sector value, industry neutral value, group_neutralize, fundamentals]
+  expression_skeleton: "group_neutralize(rank({{field}}), {{group}})"
+  slots:
+    field:
+      default: book_to_market
+      type: field_ref
+    group:
+      default: industry
+      type: str
+  recommended_operators: [rank, group_neutralize]
+  description: "Industry-neutralized value — controls for sector composition (Giglio-Kelly-Xiu factor zoo deduplication)."
+
+- template_id: quality.roe_persistence
+  pillar: quality
+  hypothesis_keywords: [quality, profitability, ROE, return on equity, persistent earnings]
+  expression_skeleton: "ts_mean({{field}}, {{window}})"
+  slots:
+    field:
+      default: roe
+      type: field_ref
+    window:
+      default: 252
+      type: int
+  recommended_operators: [ts_mean]
+  description: "Long-horizon profitability average — persistence of quality."
+
+- template_id: quality.earnings_acceleration
+  pillar: quality
+  hypothesis_keywords: [earnings acceleration, earnings revision, profit growth, eps momentum]
+  expression_skeleton: "ts_delta({{field}}, {{window}})"
+  slots:
+    field:
+      default: eps_est
+      type: field_ref
+    window:
+      default: 60
+      type: int
+  recommended_operators: [ts_delta]
+  description: "Forward-EPS revision momentum — captures analyst sentiment change (Chen/Kelly/Xiu LLM-ER mechanism in proxy form)."
+
+- template_id: volatility.low_vol_anomaly
+  pillar: volatility
+  hypothesis_keywords: [low volatility, low vol anomaly, idiosyncratic risk, vol drag]
+  expression_skeleton: "-1 * ts_std_dev({{field}}, {{window}})"
+  slots:
+    field:
+      default: returns
+      type: field_ref
+    window:
+      default: 60
+      type: int
+  recommended_operators: [ts_std_dev, multiply]
+  description: "Negated vol — captures the low-vol anomaly (Frazzini-Pedersen 2014)."
+
+- template_id: volatility.realized_vol_rank
+  pillar: volatility
+  hypothesis_keywords: [realized volatility, volatility rank, vol of vol, dispersion]
+  expression_skeleton: "rank(ts_std_dev({{field}}, {{window}}))"
+  slots:
+    field:
+      default: returns
+      type: field_ref
+    window:
+      default: 20
+      type: int
+  recommended_operators: [ts_std_dev, rank]
+  description: "Cross-sectional rank of realized volatility — for vol-conditioned screens."
+
+- template_id: sentiment.analyst_coverage_burst
+  pillar: sentiment
+  hypothesis_keywords: [analyst coverage, sentiment, attention, news count, coverage burst]
+  expression_skeleton: "ts_zscore({{field}}, {{window}})"
+  slots:
+    field:
+      default: analyst_count
+      type: field_ref
+    window:
+      default: 60
+      type: int
+  recommended_operators: [ts_zscore]
+  description: "Analyst-coverage burstiness as sentiment proxy (Chen/Kelly/Xiu LLM-ER actionable embodiment)."
+
+- template_id: sentiment.estimate_revision
+  pillar: sentiment
+  hypothesis_keywords: [estimate revision, analyst revision, forward eps change, revision momentum]
+  expression_skeleton: "ts_delta({{field}}, {{window}})"
+  slots:
+    field:
+      default: eps_est
+      type: field_ref
+    window:
+      default: 30
+      type: int
+  recommended_operators: [ts_delta]
+  description: "Forward-EPS estimate revision — sentiment shift signal."

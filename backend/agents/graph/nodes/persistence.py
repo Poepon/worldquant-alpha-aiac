@@ -124,6 +124,50 @@ async def is_expression_persisted_in_task(
 # PR7 — Incremental persistence helpers (T2/T3)
 # =============================================================================
 
+async def _read_bandit_arm_for_round(db_session, task_id: int) -> Optional[str]:
+    """G1 Phase A (2026-05-19): read the bandit-selected arm for THIS round
+    from ``mining_tasks.config['contextual_bandit_v1']['last_select']``.
+
+    Returns the arm name string, or None when:
+      * ``ENABLE_DIRECTION_BANDIT=False`` (state never written)
+      * Round 1 of a task (bandit's ``_evolve_strategy`` cycle hasn't run yet)
+      * task.config or last_select missing / malformed
+      * any DB error (soft-fail to keep persistence hot path resilient)
+
+    Single cheap SELECT per save batch (1-4 alphas typical) — preferable to
+    threading the arm through 3 layers of LangGraph configurable / kwargs
+    just for an observability stamp.
+    """
+    try:
+        from backend.config import settings as _g1_settings
+        if not getattr(_g1_settings, "ENABLE_DIRECTION_BANDIT", False):
+            return None
+        from sqlalchemy import select as _g1_select
+        from backend.models.task import MiningTask
+        stmt = _g1_select(MiningTask.config).where(MiningTask.id == task_id).limit(1)
+        row = (await db_session.execute(stmt)).scalar_one_or_none()
+        if not isinstance(row, dict):
+            return None
+        state = row.get("contextual_bandit_v1")
+        if not isinstance(state, dict):
+            return None
+        last_select = state.get("last_select")
+        # Persisted shape: [[region, category, failure], arm_name] (per
+        # ContextualDirectionBandit.to_dict). Tolerate tuple/list variants
+        # in case of future schema drift; reject anything else as None.
+        if isinstance(last_select, (list, tuple)) and len(last_select) == 2:
+            arm = last_select[1]
+            if isinstance(arm, str) and arm:
+                return arm
+        return None
+    except Exception as _e:
+        # Hot path — log at debug, do NOT raise into the save batch.
+        logger.debug(
+            f"[_read_bandit_arm_for_round] task_id={task_id} soft-fail: {_e}"
+        )
+        return None
+
+
 async def _incremental_save_alphas(
     db_session,
     task_id: int,
@@ -133,6 +177,7 @@ async def _incremental_save_alphas(
     dataset_id: str,
     pending_alphas: List,
     hypothesis_id: Optional[int] = None,
+    g8_forest_referenced_ids: Optional[List[int]] = None,
 ) -> List["AlphaResult"]:
     """Write PASS / PASS_PROVISIONAL Alpha rows directly to DB at save_results
     time rather than buffering in state.generated_alphas until workflow returns.
@@ -163,6 +208,22 @@ async def _incremental_save_alphas(
     # V-19.2 (2026-05-05): per-row SAVEPOINT — see workflow.run_with_persistence
     # for full rationale. One bad row no longer rolls back the whole seed batch.
     from backend.agents.graph.persistence_errors import log_persistence_error
+
+    # G1 Phase A (2026-05-19): stamp every PASS alpha's metrics dict with the
+    # bandit-recommended arm for this round. ``last_select`` was persisted at
+    # the end of the PRIOR round by ``_evolve_strategy`` → bandit cycle, so it
+    # reflects "the arm Thompson sampling picked for THIS round". Reading it
+    # here (one cheap SELECT per batch — typically 1-4 alphas) means the
+    # ``alphas.metrics`` JSONB carries arm provenance, enabling per-arm PASS-
+    # rate analytics WITHOUT joining direction_bandit_log on (task_id, round).
+    #
+    # When ``ENABLE_DIRECTION_BANDIT=False`` the stamp is None (key omitted).
+    # Round 1 (cold start, no prior _evolve_strategy run) also writes None.
+    # Soft-fail: any read error leaves metrics untouched (no exception
+    # bubbles into the persistence hot path).
+    bandit_arm_for_round: Optional[str] = await _read_bandit_arm_for_round(
+        db_session, task_id
+    )
 
     # V-26.87 (2026-05-13): the original V-19.3 pre-check SELECT'd existing
     # alpha_ids to label cross-task duplicates BEFORE the savepoint INSERT.
@@ -223,8 +284,21 @@ async def _incremental_save_alphas(
                 f"(non-fatal, link kept): {_tg_e}"
             )
 
+    # P1 (2026-05-19, plan v1.3.1 §3.2.3 [V1.0-M4 / V1.1]): widen accepted
+    # statuses to include FAIL when ENABLE_FAIL_ALPHA_PERSIST ON.
+    # BRAIN-accepted FAIL alphas (alpha_id present + is_simulated + sim
+    # success) carry full metrics and a BRAIN handle — they belong in the
+    # entity store (alphas table), not the failure log.
+    from backend.config import settings as _persist_settings
+    _persist_fail = bool(
+        getattr(_persist_settings, "ENABLE_FAIL_ALPHA_PERSIST", False)
+    )
+    _accepted_statuses = {"PASS", "PASS_PROVISIONAL"}
+    if _persist_fail:
+        _accepted_statuses.add("FAIL")
+
     for alpha in pending_alphas:
-        if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+        if alpha.quality_status not in _accepted_statuses:
             continue
         # V-26.92 (2026-05-13): PASS-status alpha with no alpha_id is a
         # broken upstream contract — INSERT would store a NULL alpha_id
@@ -234,14 +308,48 @@ async def _incremental_save_alphas(
         if not alpha.alpha_id:
             skipped_no_alpha_id.append(getattr(alpha, "expression", "?")[:60])
             logger.warning(
-                f"[_incremental_save_alphas] V-26.92 skipping PASS-status "
+                f"[_incremental_save_alphas] V-26.92 skipping {alpha.quality_status}-status "
                 f"alpha with no alpha_id (likely sim returned None): "
                 f"expression={getattr(alpha, 'expression', '?')[:120]!r}"
             )
             continue
+        # P1: FAIL alpha sanity — require is_simulated + simulation_success
+        # to ensure BRAIN really accepted it. Without this, a future code
+        # path that constructs FAIL alphas with alpha_id but no real sim
+        # (e.g., test mock leak) would write a bogus row.
+        if alpha.quality_status == "FAIL":
+            if not (alpha.is_simulated and alpha.simulation_success):
+                skipped_no_alpha_id.append(
+                    getattr(alpha, "expression", "?")[:60]
+                )
+                logger.warning(
+                    f"[_incremental_save_alphas] P1 skipping FAIL alpha "
+                    f"without (is_simulated + simulation_success); "
+                    f"alpha_id={alpha.alpha_id} expression="
+                    f"{getattr(alpha, 'expression', '?')[:120]!r}"
+                )
+                continue
         # V-26.87: cross-task dedup handled by ON CONFLICT below — no more
         # pre-batch SELECT round-trip.
         metrics_dict = alpha.metrics if isinstance(alpha.metrics, dict) else {}
+        # G1 Phase A (2026-05-19): stamp bandit-recommended arm on PASS alpha
+        # metrics. Mutates in place so the JSONB INSERT below picks it up.
+        # Only stamps when bandit ran AND we got an arm (flag-OFF / round 1
+        # → bandit_arm_for_round is None → key omitted).
+        if bandit_arm_for_round:
+            if not isinstance(alpha.metrics, dict):
+                alpha.metrics = dict(metrics_dict)
+            alpha.metrics["_direction_bandit_recommended_arm"] = bandit_arm_for_round
+            metrics_dict = alpha.metrics
+        # G8 Phase A follow-up (2026-05-19): stamp forest-referenced hypothesis
+        # IDs so reverse attribution analytics ("alphas generated under what
+        # forest context") can join without re-reading prompt state. Empty
+        # list / None → key omitted (flag OFF / no rows qualified).
+        if g8_forest_referenced_ids:
+            if not isinstance(alpha.metrics, dict):
+                alpha.metrics = dict(metrics_dict)
+            alpha.metrics["_g8_forest_referenced_ids"] = list(g8_forest_referenced_ids)
+            metrics_dict = alpha.metrics
         expr_hash = compute_expression_hash(alpha.expression) if alpha.expression else None
 
         # V-26.91: per-alpha snapshot_at. BRAIN's dateModified is ISO-string
@@ -289,6 +397,17 @@ async def _incremental_save_alphas(
             fields_used=fields_used_for_insert,
             # Phase 2 B4: typed Hypothesis link
             hypothesis_id=hypothesis_id,
+            # F2 (Sprint 2 review fix): B1 R11 added the column + stamp in
+            # evaluation, but the previous INSERT path skipped it → column
+            # always NULL, /ops/r11/capacity-stats range scans found nothing.
+            # The value lives in alpha.metrics['capacity_usd_estimate'] when
+            # ENABLE_CAPACITY_SCORE was ON at sim time. Promote to the
+            # column so both paths surface (column for indexed range scans,
+            # metrics JSONB for forward-compat).
+            capacity_usd_estimate=(
+                alpha.metrics.get("capacity_usd_estimate")
+                if isinstance(alpha.metrics, dict) else None
+            ),
         )
         try:
             async with db_session.begin_nested():
@@ -311,6 +430,43 @@ async def _incremental_save_alphas(
                 continue
             if alpha.alpha_id:
                 inserted_alpha_ids.append(alpha.alpha_id)
+
+            # G5 follow-up (2026-05-19): outcome back-fill. When this is a
+            # G5 offspring alpha (metrics carries _g5_crossover_parent_ids),
+            # append the new alpha.id to the matching g5_crossover_log row's
+            # outcome_alpha_ids JSONB array, bump outcome_pass_count (if PASS).
+            # Closes the parent → offspring attribution loop so /ops/g5/
+            # crossover-stats can compute true offspring PASS rate without
+            # re-scanning alphas.metrics. Soft-fail: any error logged but
+            # never breaks the round.
+            _g5_parents = None
+            try:
+                _g5_parents = metrics_dict.get("_g5_crossover_parent_ids") if isinstance(metrics_dict, dict) else None
+            except Exception:
+                _g5_parents = None
+            if isinstance(_g5_parents, list) and len(_g5_parents) >= 2 and inserted_id:
+                try:
+                    from sqlalchemy import text as _g5_text
+                    _g5_is_pass = alpha.quality_status in ("PASS", "PASS_PROVISIONAL")
+                    async with db_session.begin_nested():
+                        await db_session.execute(_g5_text(
+                            "UPDATE g5_crossover_log "
+                            "SET outcome_alpha_ids = COALESCE(outcome_alpha_ids, '[]'::jsonb) "
+                            "                       || to_jsonb(:new_id::int), "
+                            "    outcome_pass_count = COALESCE(outcome_pass_count, 0) "
+                            "                         + CASE WHEN :is_pass THEN 1 ELSE 0 END "
+                            "WHERE parent_a_alpha_id = :pa AND parent_b_alpha_id = :pb"
+                        ), {
+                            "new_id": int(inserted_id),
+                            "is_pass": bool(_g5_is_pass),
+                            "pa": int(_g5_parents[0]),
+                            "pb": int(_g5_parents[1]),
+                        })
+                except Exception as _g5_bf:
+                    logger.warning(
+                        f"[_incremental_save_alphas] G5 outcome back-fill failed "
+                        f"(non-fatal): {_g5_bf}"
+                    )
         except Exception as e:
             import traceback as _tb
             logger.error(
@@ -383,11 +539,13 @@ async def _incremental_save_alphas(
     # incremental path. V-19.2: scope to only those that actually inserted —
     # alpha_ids whose savepoint rolled back are not in DB so the UPDATE would
     # be a no-op anyway, but skipping them keeps the log tidy.
+    # P1 (2026-05-19): broaden to match the INSERT filter so FAIL alphas
+    # also get fields_used populated.
     from sqlalchemy import update as _sa_update, select
     inserted_set = set(inserted_alpha_ids)
     fields_used_updated = 0
     for alpha in pending_alphas:
-        if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+        if alpha.quality_status not in _accepted_statuses:
             continue
         if not alpha.alpha_id or not alpha.expression:
             continue
@@ -418,8 +576,17 @@ async def _incremental_save_alphas(
     # actually inserted; failed savepoints come back persisted=False so the
     # workflow's batch path (also savepoint-protected now) gets a retry —
     # at worst it logs the same error twice, never silently drops.
+    # P1 (2026-05-19): when flag ON, BRAIN-accepted FAIL alphas also appear
+    # in the result list (matching the broadened INSERT filter at line 287).
     for alpha in pending_alphas:
-        if alpha.quality_status not in ("PASS", "PASS_PROVISIONAL"):
+        if alpha.quality_status not in _accepted_statuses:
+            continue
+        # P1: same FAIL sanity as the upstream INSERT filter — skip FAIL
+        # without is_simulated + simulation_success (otherwise the result
+        # references a row that wasn't actually INSERTed).
+        if alpha.quality_status == "FAIL" and not (
+            alpha.is_simulated and alpha.simulation_success
+        ):
             continue
         landed = bool(alpha.alpha_id and alpha.alpha_id in inserted_set)
         db_id = None
@@ -552,6 +719,9 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                 dataset_id=state.dataset_id,
                 pending_alphas=state.pending_alphas,
                 hypothesis_id=current_hypothesis_id,
+                g8_forest_referenced_ids=getattr(
+                    state, "g8_forest_referenced_ids", None,
+                ) or None,
             )
             for alpha in state.pending_alphas:
                 if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
@@ -648,8 +818,28 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
     if not use_incremental:
         # Original behavior — buffer in state.generated_alphas; workflow
         # writes to DB after returning.
+        # P1 [V1.0-M4 / V1.1] (2026-05-19): BRAIN-accepted alphas all go to
+        # alphas table. QUALITY_CHECK_FAILED = BRAIN sim succeeded + alpha_id
+        # assigned + full metrics returned, only AIAC gate didn't pass —
+        # entity-store value (correlation, submit, parity) requires we keep
+        # the row. Plan ~/.claude/plans/alpha-persistence-ontology-refactor-
+        # 2026-05-19.md v1.3.1 §3.2.1.
+        from backend.config import settings as _persist_settings
+        _persist_fail = bool(
+            getattr(_persist_settings, "ENABLE_FAIL_ALPHA_PERSIST", False)
+        )
         for alpha in state.pending_alphas:
-            if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
+            _is_brain_accepted_fail = (
+                _persist_fail
+                and alpha.quality_status == "FAIL"
+                and alpha.alpha_id            # MUST have BRAIN handle
+                and alpha.is_simulated
+                and alpha.simulation_success  # exclude HTTP 200 empty/error responses
+            )
+            if (
+                alpha.quality_status in ("PASS", "PASS_PROVISIONAL")
+                or _is_brain_accepted_fail
+            ):
                 res = AlphaResult(
                     expression=alpha.expression,
                     hypothesis=alpha.hypothesis,
@@ -670,8 +860,24 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
     # Failure path — buffered the same way regardless of incremental /
     # batch mode, since AlphaFailure rows are bulk-written by
     # run_with_persistence. (Could be made incremental too in a follow-up.)
+    # P1 [V1.0-M4 / V1.1] (2026-05-19): when ENABLE_FAIL_ALPHA_PERSIST ON,
+    # BRAIN-accepted FAIL alphas were already routed to success_batch above;
+    # skip the fail_batch path for them. Plan v1.3.1 §3.2.2.
+    from backend.config import settings as _persist_settings  # noqa: E402
+    _persist_fail = bool(
+        getattr(_persist_settings, "ENABLE_FAIL_ALPHA_PERSIST", False)
+    )
     for alpha in state.pending_alphas:
         if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
+            continue
+        # P1: skip BRAIN-accepted FAIL — already in success_batch
+        if (
+            _persist_fail
+            and alpha.quality_status == "FAIL"
+            and alpha.alpha_id
+            and alpha.is_simulated
+            and alpha.simulation_success
+        ):
             continue
         # V-27.61: retryable alphas are transient BRAIN failures (HTTP 200
         # but empty/error sim), not real hypothesis evidence. Writing them as
@@ -685,15 +891,48 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
         err_type = "UNKNOWN"
         err_msg = "Unknown error"
 
-        if alpha.is_valid is False:
+        # Bug A fix (2026-05-20): pre-BRAIN skips (pre-simulate skeleton
+        # classifier + Q10 hard reject) set is_simulated=True for bookkeeping
+        # but NEVER consumed a BRAIN simulate slot. Label them PRESIM_SKIP so
+        # the quota guard can exclude them — otherwise they inflate the daily
+        # BRAIN-quota denominator (~20% on the news datasets) and pause mining
+        # sessions early. Checked BEFORE the is_simulated branch which would
+        # otherwise mislabel them SIMULATION_ERROR.
+        if isinstance(alpha.metrics, dict) and alpha.metrics.get("_pre_brain_skip"):
+            # Bug A follow-up (2026-05-20): distinguish dedup skips (already
+            # simulated in a prior round/task — no fresh BRAIN slot) from
+            # pre-simulate/Q10 classifier skips. Both excluded from quota.
+            if alpha.metrics.get("_skip_kind") == "dedup":
+                err_type = "DEDUP_SKIP"
+                err_msg = alpha.simulation_error or "DB duplicate: already simulated (no quota consumed)"
+            else:
+                err_type = "PRESIM_SKIP"
+                err_msg = alpha.simulation_error or "Pre-BRAIN skip (classifier/Q10; no quota consumed)"
+        elif alpha.is_valid is False:
             err_type = "SYNTAX_ERROR"
             err_msg = alpha.validation_error or "Syntax Error"
         elif alpha.is_simulated and not alpha.simulation_success:
             err_type = "SIMULATION_ERROR"
             err_msg = alpha.simulation_error or "Simulation Failed"
         elif alpha.quality_status == "FAIL":
-            err_type = "QUALITY_CHECK_FAILED"
-            err_msg = "Metrics below threshold"
+            # P1 contract violation: FAIL gate without alpha_id (or with
+            # alpha_id but is_simulated=False / simulation_success=False)
+            # should not happen — gate verdict is computed only on
+            # simulated alphas. Log it explicitly when flag ON so the
+            # situation is observable but doesn't break the batch.
+            if _persist_fail:
+                logger.warning(
+                    f"[node_save_results] P1 contract violation: FAIL gate "
+                    f"without (alpha_id + is_simulated + simulation_success); "
+                    f"alpha_id={alpha.alpha_id} is_simulated={alpha.is_simulated} "
+                    f"sim_success={alpha.simulation_success} "
+                    f"expression={(alpha.expression or '')[:80]!r}"
+                )
+                err_type = "OTHER"
+                err_msg = "FAIL gate but BRAIN handle missing / sim unverified"
+            else:
+                err_type = "QUALITY_CHECK_FAILED"
+                err_msg = "Metrics below threshold"
         else:
             err_type = "OTHER"
             err_msg = "Unknown failure"

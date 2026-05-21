@@ -1,0 +1,112 @@
+# R8-v3 7 Cognitive Layer Definitions (Phase 4 Sprint 3 / plan v5 §6.11)
+#
+# Each layer is a *research lens* — a different perspective an experienced
+# quant researcher would apply to the same dataset. The hypothesis prompt
+# injects ONE selected layer's `prompt` + `few_shot` to nudge the LLM into
+# generating ideas in that style; the select_layer strategy (bandit /
+# round_robin / deficit_aware) picks which lens fires on each round.
+#
+# Layer prompts are kept terse (200-400 chars) so the 8k token budget
+# absorbs the addition without crowding out other context blocks.
+#
+# Validation: cognitive_layer_service.load_cognitive_layers() asserts:
+#   - exactly 7 entries
+#   - unique layer_id
+#   - non-empty prompt + ≥1 few_shot per layer
+
+- layer_id: macro_top_down
+  name: "Macro Top-Down"
+  # F7 review fix (Sprint 3 R1): pillar_affinity now uses
+  # PILLAR_TARGET_DISTRIBUTION keys (momentum/value/quality/volatility/
+  # sentiment/other) so pillar_hint pre-filter actually matches. Macro
+  # signals don't fit cleanly into the 5 main pillars → tag as "other".
+  pillar_affinity: ["other"]
+  prompt: |
+    You are a top-down macro researcher. Start from broad economic
+    signals (rates, FX, commodity, credit spreads) and trace how they
+    propagate into individual stock returns through sector exposure.
+    Prefer alphas that combine a macro state variable with a stock-level
+    sensitivity (beta to the macro factor).
+  few_shot:
+    - "rank(close * ts_corr(close, beta_to_macro, 60))"
+    - "ts_regression_residual(returns, macro_proxy, 252)"
+  research_question: "When the macro state shifts, which stocks lead/lag?"
+
+- layer_id: behavioral_sentiment
+  name: "Behavioral / Sentiment"
+  pillar_affinity: ["sentiment"]
+  prompt: |
+    You are a behavioral-finance researcher. Capture investor psychology
+    via news flow, analyst dispersion, short interest, retail-flow
+    proxies, or implied-volatility skew. Look for anomalies where the
+    fundamental does not justify the price drift — those are sentiment
+    edges.
+  few_shot:
+    - "rank(analyst_dispersion - ts_zscore(short_interest, 60))"
+    - "ts_decay_linear(news_sentiment_z, 5)"
+  research_question: "Where does market psychology overshoot fundamentals?"
+
+- layer_id: technical_momentum
+  name: "Technical / Momentum"
+  pillar_affinity: ["momentum"]
+  prompt: |
+    You are a technical-momentum researcher. Stocks with strong recent
+    trend tend to continue (price momentum / earnings momentum); stocks
+    breaking key moving-average crossovers signal regime shifts. Combine
+    multi-timeframe persistence with volume confirmation.
+  few_shot:
+    - "ts_rank(returns_252 - returns_21, 60)"
+    - "rank(ts_corr(close, ts_mean(volume, 20), 60))"
+  research_question: "Is the recent trend persistent and volume-confirmed?"
+
+- layer_id: fundamental_value
+  name: "Fundamental Value"
+  pillar_affinity: ["value", "quality"]
+  prompt: |
+    You are a fundamental-value researcher. Mean-reversion to intrinsic
+    value: low book-to-market with rising earnings, high free-cash-flow
+    yield, high return-on-invested-capital with low EV/EBITDA. Favor
+    cross-sectional ranks of accounting ratios over time-series signals.
+  few_shot:
+    - "rank(book_to_market * roe / ev_to_ebitda)"
+    - "rank(ts_delta(fcf_yield, 21))"
+  research_question: "Is the stock cheap on accounting fundamentals relative to peers?"
+
+- layer_id: microstructure
+  name: "Microstructure"
+  pillar_affinity: ["volatility", "other"]  # F7: aligned with PILLAR_TARGET_DISTRIBUTION
+  prompt: |
+    You are a microstructure researcher. Order-flow imbalance, bid-ask
+    pressure, intraday return reversal, and liquidity-adjusted volatility
+    are your tools. Many alphas die from transaction cost — design for
+    capacity by preferring liquid names + slower turnover.
+  few_shot:
+    - "rank(-ts_corr(close, volume, 5))"
+    - "ts_decay_linear(order_imbalance, 3) / sqrt(adv)"
+  research_question: "What does flow / liquidity say about near-term price pressure?"
+
+- layer_id: cross_sectional_rank
+  name: "Cross-Sectional Ranking"
+  pillar_affinity: ["quality", "value"]  # F7: cross-sectional → fundamental ranking
+  prompt: |
+    You are a cross-sectional researcher. Convert raw signals into
+    rank-based positions every day; relative scoring is robust to
+    distribution drift and outliers. Industry / sector neutralization
+    matters more than absolute thresholds.
+  few_shot:
+    - "industry_neutralize(rank(signal), industry)"
+    - "rank(ts_zscore(signal, 60) - cross_sectional_median)"
+  research_question: "Among today's investable set, which names rank highest on this signal?"
+
+- layer_id: time_series_mean_reversion
+  name: "Time-Series Mean-Reversion"
+  pillar_affinity: ["volatility", "other"]  # F7: TS mean-reversion → volatility-driven
+  prompt: |
+    You are a time-series statistical-arbitrage researcher. Cointegrating
+    pairs, Bollinger-band reversals, deviation from long-run moving
+    averages — every excess move begs a snap-back. Filter for stationary
+    signals; avoid trending pairs (they break the model).
+  few_shot:
+    - "-ts_zscore(close, 20)"
+    - "ts_regression_residual(close, sector_close, 60)"
+  research_question: "Has this stock deviated significantly from its statistical equilibrium?"

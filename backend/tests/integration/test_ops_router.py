@@ -103,7 +103,9 @@ async def test_list_flags_returns_all_supported(client):
     names = [f["name"] for f in body]
     # Every whitelisted flag is present
     assert "ENABLE_PILLAR_AWARE_SELECTION" in names
-    assert "ENABLE_REGIME_INFERENCE" in names
+    # Consolidated 2026-05-19: ENABLE_REGIME_INFERENCE/AWARE_THRESHOLDS/
+    # STYLE_PRESET_GUIDANCE → ENABLE_REGIME + REGIME_STAGE
+    assert "ENABLE_REGIME" in names
     # All start as env defaults (no overrides yet)
     for f in body:
         assert f["source"] != "runtime-override"

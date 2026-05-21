@@ -672,7 +672,8 @@ class HypothesisHealthService:
           - last call was fallback_* within LLM_SCORE_RETRY_BACKOFF_HOURS → no
             (SFX-13: status field, not ai_feedback prefix)
         """
-        if self.llm is None or not settings.ENABLE_LLM_THESIS_SCORE_ON_TRIGGER:
+        # (Retired ENABLE_LLM_THESIS_SCORE_ON_TRIGGER 2026-05-19 — hard-wired ON.)
+        if self.llm is None:
             return False
         if self._token_used >= settings.THESIS_SCORE_PER_RUN_TOKEN_BUDGET:
             return False

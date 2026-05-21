@@ -152,7 +152,7 @@ async def test_kb_shape_exposes_r8_flags(client_factory):
     async with client as ac:
         r = await ac.get("/api/v1/ops/r8/kb-shape")
     flags = r.json()["flags"]
-    assert set(flags.keys()) == {"ENABLE_HIERARCHICAL_RAG", "ENABLE_R5_L2_RANKING"}
+    assert set(flags.keys()) == {"ENABLE_HIERARCHICAL_RAG"}
     for v in flags.values():
         assert isinstance(v, bool)
 

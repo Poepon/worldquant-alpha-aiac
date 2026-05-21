@@ -16,6 +16,7 @@ from loguru import logger
 
 from backend.config import settings
 from backend.protocols.llm_protocol import LLMProtocol, LLMResponse as LLMResponseProtocol
+from backend.circuit_breaker import CircuitBreaker
 
 # W5: Anthropic SDK is optional — only loaded when LLM_PROVIDER=anthropic.
 try:
@@ -24,6 +25,128 @@ try:
 except ImportError:
     anthropic = None
     _ANTHROPIC_AVAILABLE = False
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 Sprint 0 PR0 — LLM_API_CIRCUIT (2026-05-19)
+# ---------------------------------------------------------------------------
+# Module-level CircuitBreaker instance — defended against DeepSeek/Anthropic
+# 5xx / timeout outages. Pattern mirrors BRAIN_AUTH_CIRCUIT (brain_adapter.py:46)
+# but with N-consecutive-fail trip threshold rather than immediate trip on
+# single auth-error. Rationale: BRAIN 401 is hard fail; LLM 5xx is often
+# transient blip (rate limit, network), shouldn't trip on single error.
+LLM_API_CIRCUIT = CircuitBreaker("llm_api", default_ttl_sec=300)
+
+# Redis key for the consecutive-fail counter. INCR on each fail with TTL=window;
+# when count >= threshold within window, trip the circuit + reset counter.
+_LLM_API_FAIL_COUNTER_KEY = "llm_api:fail_counter"
+
+
+def _llm_get_redis():
+    """Soft-fail Redis getter — never raises."""
+    try:
+        from backend.tasks.redis_pool import get_redis_client
+        return get_redis_client()
+    except Exception:
+        return None
+
+
+def _llm_record_fail(error_kind: str = "unknown") -> None:
+    """Increment the consecutive-fail counter; trip the circuit if it reaches
+    LLM_API_CIRCUIT_FAIL_THRESHOLD within LLM_API_CIRCUIT_FAIL_WINDOW_SEC.
+
+    Called from the LLMService.call() exception path. Soft-fail Redis blip →
+    no-op (a Redis outage MUST NEVER cause global brown-out by spuriously
+    tripping circuits).
+    """
+    from backend.config import settings as _stg
+    if not getattr(_stg, "ENABLE_LLM_API_CIRCUIT", True):
+        return
+    threshold = int(getattr(_stg, "LLM_API_CIRCUIT_FAIL_THRESHOLD", 5))
+    window = int(getattr(_stg, "LLM_API_CIRCUIT_FAIL_WINDOW_SEC", 60))
+    cooldown = int(getattr(_stg, "LLM_API_CIRCUIT_COOLDOWN_SEC", 300))
+    r = _llm_get_redis()
+    if r is None:
+        return
+    try:
+        new_count = r.incr(_LLM_API_FAIL_COUNTER_KEY)
+        if new_count == 1:
+            # First failure in window — set TTL so counter naturally expires.
+            r.expire(_LLM_API_FAIL_COUNTER_KEY, window)
+        if int(new_count) >= threshold:
+            LLM_API_CIRCUIT.trip(
+                reason=f"llm_consec_fail_{int(new_count)}_{error_kind[:60]}",
+                ttl_sec=cooldown,
+            )
+            # Reset so the next `threshold` post-clear failures can re-trip.
+            r.delete(_LLM_API_FAIL_COUNTER_KEY)
+    except Exception:
+        pass
+
+
+def _llm_record_success() -> None:
+    """Reset the consecutive-fail counter AND clear the circuit on any success.
+
+    Called from the LLMService.call() success path. The clear() is a no-op
+    when the circuit is already CLOSED; only trips when we recovered from
+    an OPEN/HALF_OPEN probe.
+    """
+    from backend.config import settings as _stg
+    if not getattr(_stg, "ENABLE_LLM_API_CIRCUIT", True):
+        return
+    r = _llm_get_redis()
+    if r is not None:
+        try:
+            r.delete(_LLM_API_FAIL_COUNTER_KEY)
+        except Exception:
+            pass
+    try:
+        if LLM_API_CIRCUIT.is_open():
+            LLM_API_CIRCUIT.clear(reason="llm_api_success_probe")
+    except Exception:
+        pass
+
+
+def _llm_error_is_api_failure(exc: BaseException) -> bool:
+    """Classify whether an exception is an LLM-provider API failure worth
+    incrementing the fail counter, versus a *content* failure (JSON parse,
+    empty response, bad arg) which we shouldn't trip on.
+
+    Recognized API failures:
+      - openai.APIConnectionError / APITimeoutError / RateLimitError /
+        APIStatusError (5xx) / AuthenticationError (401) /
+        PermissionDeniedError (403)
+      - anthropic.APIConnectionError / APITimeoutError / RateLimitError /
+        APIStatusError (5xx) / AuthenticationError (401) /
+        PermissionDeniedError (403) — only if anthropic SDK loaded
+
+    F-S1 (post-review): 401 / 403 are now treated as API failures (mirrors
+    BRAIN_AUTH_CIRCUIT auth-error trip). Both providers return 401 when API
+    key is revoked / expired and 403 when org quota is exhausted; without
+    this, callers loop indefinitely and burn budget silently — exactly the
+    pattern this circuit was built to root-cause.
+    """
+    name = type(exc).__name__
+    # openai/anthropic SDK exception hierarchy (class names are identical
+    # across both providers' SDKs, so single name set covers both)
+    api_exc_names = {
+        "APIConnectionError", "APITimeoutError", "RateLimitError",
+        "InternalServerError", "APIStatusError",
+        # F-S1: 401 + 403 auth/permission errors
+        "AuthenticationError", "PermissionDeniedError",
+    }
+    if name in api_exc_names:
+        return True
+    # status_code attribute on APIError subclasses
+    status = getattr(exc, "status_code", None)
+    if status is not None:
+        try:
+            s = int(status)
+            # F-S1: 401, 403, 429, 5xx all trip
+            return s >= 500 or s in (401, 403, 429)
+        except Exception:
+            return False
+    return False
 
 
 # Anthropic reasoning models that reject `temperature` at the API layer.
@@ -307,6 +430,26 @@ class LLMService:
         start_time = time.time()
         call_id = f"{int(start_time * 1000) % 100000}"
 
+        # Phase 4 PR0 (Sprint 0, 2026-05-19): LLM_API_CIRCUIT fast-fail.
+        # When the LLM provider has been hammering 5xx/timeout, every caller
+        # should fast-fail rather than burn another HTTP round-trip + retry
+        # budget. Soft-fail: Redis blip → is_open()=False → traffic flows
+        # (CircuitBreaker.status fails-open by design).
+        if getattr(settings, "ENABLE_LLM_API_CIRCUIT", True) and LLM_API_CIRCUIT.is_open():
+            logger.warning(
+                f"[LLMService] LLM_API_CIRCUIT OPEN — fast-fail | id={call_id} "
+                f"node={node_key or '-'} (callers should treat as transient)"
+            )
+            return LLMResponse(
+                content="",
+                parsed=None,
+                model=self.model,
+                tokens_used=0,
+                latency_ms=0,
+                success=False,
+                error="llm_api_circuit_open",
+            )
+
         # Resolve per-call effort (three-tier priority):
         #   1. explicit `thinking_effort` arg
         #   2. settings.THINKING_EFFORT_OVERRIDES[node_key] (gated by
@@ -318,7 +461,20 @@ class LLMService:
             f"[LLMService] Call started | id={call_id} json_mode={json_mode} "
             f"node={node_key or '-'} effort={effort_active}"
         )
-        
+
+        # qwen / DashScope json_mode compat (2026-05-20): the DashScope
+        # OpenAI-compatible endpoint HARD-REQUIRES the literal word "json"
+        # somewhere in the messages whenever response_format=json_object is set
+        # — otherwise it 400s ("'messages' must contain the word 'json' ... to
+        # use 'response_format' of type 'json_object'"). OpenAI/Anthropic don't
+        # enforce this, so prompts weren't guaranteed to include it. Inject a
+        # minimal instruction when json_mode is on and neither prompt mentions
+        # json. Harmless for every provider (it's just a clarifying directive).
+        if json_mode and "json" not in (system_prompt + " " + user_prompt).lower():
+            user_prompt = (
+                f"{user_prompt}\n\nRespond with a single valid JSON object."
+            )
+
         # JSON-mode parse retry: 1 extra attempt on JSONDecodeError. LLMs
         # occasionally truncate mid-string (provider hiccup / network abort);
         # cheap to reissue. Connection-level retries are handled by the
@@ -482,6 +638,16 @@ class LLMService:
                         await asyncio.sleep(0.5)
 
             latency_ms = int((time.time() - start_time) * 1000)
+            # Phase 4 PR0: LLM API call reached this point → provider returned
+            # SOMETHING (content may be unparseable JSON, but the HTTP round-
+            # trip succeeded). Reset fail counter + clear circuit if probing.
+            # Provider-outage circuit cares about *transport-level* health,
+            # not content quality. JSON parse failure stays a soft-failure
+            # on the LLMResponse, but the circuit goes back to CLOSED.
+            try:
+                _llm_record_success()
+            except Exception:
+                pass
             # json_mode + parse_error = soft failure (content returned but
             # unparseable). success=False so callers can branch on .success
             # without re-checking .parsed.
@@ -495,6 +661,27 @@ class LLMService:
                 )
             # parse-fail warning already emitted inside the loop.
             self._emit_metrics(node_key, effort_active, tokens_used, latency_ms, success=success_final)
+
+            # G2 Phase A (2026-05-19): record per-call cost telemetry into the
+            # active round's contextvar accumulator (drained by mining_agent
+            # at round exit via cost_tracker.flush_round_async). No-op when
+            # ENABLE_COST_TELEMETRY=False or no active round context —
+            # tracker is the recorder of last resort, never raises.
+            try:
+                from backend.cost_tracker import record_llm_call as _cost_record
+                _cost_record(
+                    model=self.model,
+                    provider=self.provider,
+                    effort=effort_active,
+                    node_key=node_key,
+                    tokens_total=tokens_used,
+                    latency_ms=latency_ms,
+                    success=success_final,
+                    error_kind=("parse_error" if (json_mode and parse_error) else None),
+                    call_id=call_id,
+                )
+            except Exception:
+                pass
 
             return LLMResponse(
                 content=content,
@@ -512,7 +699,35 @@ class LLMService:
                 f"[LLMService] Call failed | id={call_id} "
                 f"node={node_key or '-'} effort={effort_active} error={e}"
             )
+            # Phase 4 PR0: only API-level failures (5xx/timeout/connection)
+            # increment the fail counter — JSON parse / ValueError / arg
+            # errors are content issues and shouldn't trip the circuit.
+            try:
+                if _llm_error_is_api_failure(e):
+                    _llm_record_fail(error_kind=type(e).__name__)
+            except Exception:
+                pass
             self._emit_metrics(node_key, effort_active, 0, latency_ms, success=False)
+
+            # G2 Phase A: still record failed calls (0 tokens, success=False,
+            # error_kind=exception class). Useful for the /ops/cost/telemetry
+            # to surface failure-rate-per-node alongside cost — provider
+            # outages currently invisible to operators.
+            try:
+                from backend.cost_tracker import record_llm_call as _cost_record
+                _cost_record(
+                    model=self.model,
+                    provider=self.provider,
+                    effort=effort_active,
+                    node_key=node_key,
+                    tokens_total=0,
+                    latency_ms=latency_ms,
+                    success=False,
+                    error_kind=type(e).__name__[:40],
+                    call_id=call_id,
+                )
+            except Exception:
+                pass
 
             return LLMResponse(
                 content="",

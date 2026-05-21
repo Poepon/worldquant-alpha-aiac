@@ -105,17 +105,21 @@ async def test_dispatch_flag_off_uses_legacy_path(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_dispatch_flag_on_no_expression_uses_legacy(pg_session):
-    """Flag ON but NO current_expression → legacy path (opt-in only)."""
+async def test_dispatch_no_signal_uses_legacy(pg_session):
+    """Flag ON but NO signal at all (no expression, no region→no G4 pillar,
+    no dataset_id) → legacy path. 2026-05-21: the opt-in signals widened to
+    include dataset_id (pillar-decoupled category retrieval) and a region-driven
+    G4 pillar hint, so a genuine legacy fallback requires NONE of those."""
     _flag_override_cache["ENABLE_HIERARCHICAL_RAG"] = True
     from backend.agents.services.rag_service import RAGService
     svc = RAGService(pg_session)
-    # Flag ON but no current_expression/pillar → legacy
-    r = await svc.query(region="USA", max_patterns=10)
+    # No expression, no region (→ G4 skipped), no dataset_id → nothing to
+    # dispatch on → legacy.
+    r = await svc.query(max_patterns=10)
     has_layer_tag = any(
         "source_layer" in (p.get("metadata") or {}) for p in r.patterns
     )
-    assert not has_layer_tag, "no expression → legacy regardless of flag"
+    assert not has_layer_tag, "no signal → legacy regardless of flag"
 
 
 @pytest.mark.asyncio

@@ -593,6 +593,74 @@ const api = {
     return data
   },
 
+  // G2 Phase A cost telemetry (2026-05-19) — per-call LLM cost across all callers
+  // (普通 round + R1b + macro + R5 + future). Window-aggregated by_model /
+  // by_node_key / by_pillar plus 24h hourly bucket. Healthy gate: flag ON +
+  // total_calls > 0 + error_rate ≤ 0.10.
+  getOpsCostTelemetry: async (days = 7, topN = 10) => {
+    const { data } = await client.get('/ops/cost/telemetry', {
+      params: { days, top_n: topN },
+    })
+    return data
+  },
+
+  // G1 Phase A direction-bandit telemetry (2026-05-19) — per-arm pulls /
+  // observed reward / PASS rate joined from alphas.metrics. GO-gate readiness
+  // signal exposed via go_gate_segments_ready.
+  getOpsDirectionBanditTelemetry: async (days = 7, topSegments = 10) => {
+    const { data } = await client.get('/ops/direction-bandit/telemetry', {
+      params: { days, top_segments: topSegments },
+    })
+    return data
+  },
+
+  // G3 Phase A AST originality stats (2026-05-19) — shadow-mode block rate at
+  // current τ + min_distance histogram + top-N nearest-neighbor + per-pillar
+  // block rate. Operator uses this to calibrate τ before promoting MODE.
+  getOpsG3OriginalityStats: async (days = 7, histogramBins = 10, topNeighbors = 10) => {
+    const { data } = await client.get('/ops/g3/originality-stats', {
+      params: {
+        days,
+        histogram_bins: histogramBins,
+        top_neighbors: topNeighbors,
+      },
+    })
+    return data
+  },
+
+  // G8 Phase A hypothesis forest telemetry (2026-05-19) — eligible pool +
+  // top-N entries + per-pillar breakdown + reverse-attribution stats
+  // (alphas.metrics._g8_forest_referenced_ids). Healthy gate: flag ON +
+  // eligible_count > 0 + total_referenced_alphas > 0.
+  getOpsHypothesisForest: async (
+    days = 7,
+    region = 'USA',
+    topN = 10,
+    minPassCount = 2,
+    minSharpeAvg = 1.0,
+  ) => {
+    const params = {
+      days,
+      top_n: topN,
+      min_pass_count: minPassCount,
+      min_sharpe_avg: minSharpeAvg,
+    }
+    if (region) params.region = region
+    const { data } = await client.get('/ops/hypothesis/forest', { params })
+    return data
+  },
+
+  // G5 Phase A trajectory crossover telemetry (2026-05-19) — per-strategy +
+  // per-pillar-pair calls / offspring volume / PASS rate (joined from
+  // alphas.metrics._g5_crossover_parent_ids). Healthy gate: flag ON +
+  // total_crossover_calls > 0 + offspring_pass_rate > 0.
+  getOpsG5CrossoverStats: async (days = 7) => {
+    const { data } = await client.get('/ops/g5/crossover-stats', {
+      params: { days },
+    })
+    return data
+  },
+
   // flat-F1 advanced kickoff (2026-05-18). Gated server-side by
   // ENABLE_FLAT_CONTINUOUS — flag OFF returns HTTP 400 with detail string.
   startFlatSession: async ({ region, universe, datasets = [] }) => {
@@ -606,6 +674,52 @@ const api = {
 
   resumeFlatSession: async (taskId) => {
     const { data } = await client.post(`/ops/flat-sessions/${taskId}/resume`)
+    return data
+  },
+
+  pauseFlatSession: async (taskId) => {
+    const { data } = await client.post(`/ops/flat-sessions/${taskId}/pause`)
+    return data
+  },
+
+  // ---- Phase 4 Sprint 3-5 + Tier B/C telemetry ----
+  // R8-v3 cognitive layer per-layer fire + PASS rate (Sprint 3 B5).
+  getOpsR8v3CognitiveLayerStats: async (days = 7) => {
+    const { data } = await client.get('/ops/r8-v3/cognitive-layer-stats', {
+      params: { days },
+    })
+    return data
+  },
+  // R11 alpha-capacity log-scale histogram + PASS rate (Sprint 2 B1 / Tier B).
+  getOpsR11CapacityStats: async (days = 7) => {
+    const { data } = await client.get('/ops/r11/capacity-stats', { params: { days } })
+    return data
+  },
+  // R13 factor-lens residual-sharpe distribution (Sprint 2 B2 / Tier B).
+  getOpsR13FactorResiduals: async (days = 7) => {
+    const { data } = await client.get('/ops/r13/factor-residuals', { params: { days } })
+    return data
+  },
+  // R13 factor-returns snapshot staleness (Tier B). No DB — filesystem mtime.
+  getOpsR13SnapshotStaleCheck: async (staleDays = 90) => {
+    const { data } = await client.get('/ops/r13/snapshot-stale-check', {
+      params: { stale_days: staleDays },
+    })
+    return data
+  },
+  // G10 distilled-logic library (Sprint 3 A5.1 / Sprint 4 A5.2).
+  getOpsG10LogicLibrary: async (
+    { days = 28, region = null, pillar = null, activeOnly = true, limit = 100 } = {},
+  ) => {
+    const params = { days, active_only: activeOnly, limit }
+    if (region) params.region = region
+    if (pillar) params.pillar = pillar
+    const { data } = await client.get('/ops/g10/logic-library', { params })
+    return data
+  },
+  // G3-v2 grammar parse telemetry (Sprint 4 B4.1 / Tier B).
+  getOpsG3v2ParseStats: async (days = 7) => {
+    const { data } = await client.get('/ops/g3v2/parse-stats', { params: { days } })
     return data
   },
 }

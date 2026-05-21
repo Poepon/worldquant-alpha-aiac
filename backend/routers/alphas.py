@@ -54,6 +54,8 @@ class AlphaListItem(BaseModel):
     date_created: Optional[datetime] = None
     self_corr: Optional[float] = None
     self_corr_source: Optional[str] = None
+    date_submitted: Optional[datetime] = None
+    can_submit: Optional[bool] = None
 
     class Config:
         from_attributes = True
@@ -196,6 +198,8 @@ async def list_alphas(
             created_at=item.created_at,
             self_corr=item.self_corr,
             self_corr_source=item.self_corr_source,
+            date_submitted=item.date_submitted,
+            can_submit=item.can_submit,
         )
         for item in items
     ]

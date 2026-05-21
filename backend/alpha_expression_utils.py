@@ -91,12 +91,6 @@ def _vec_ops() -> Set[str]:
     return reg.vec_operators or _BUILTIN_VEC_OPS
 
 
-def populate_known_fields(field_ids: Set[str]) -> None:
-    """Populate the field cache so structural helpers recognize DB-backed names."""
-    global _DB_FIELD_CACHE
-    _DB_FIELD_CACHE = {f.lower() for f in field_ids if f}
-
-
 def is_known_field(token: str) -> bool:
     """Best-effort field recognition: builtin set ∪ DataField cache."""
     if not token:

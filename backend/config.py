@@ -188,6 +188,279 @@ class Settings(BaseSettings):
     BRAIN_SIM_SLOT_LIMIT_USER: int = 3
     BRAIN_SIM_SLOT_LIMIT_CONSULTANT: int = 80
 
+    # Cross-process BRAIN re-auth coalescing (方向1, 2026-05-20). The single
+    # shared BRAIN session (Redis key brain_session:cookies) is used by 3 solo
+    # Celery workers + uvicorn; without a fleet-wide lock each process re-auths
+    # independently on a 401, and BRAIN's single-active-session invalidates the
+    # others' cookie → mutual-invalidation thrash → repeated 300s circuit trips.
+    # _distributed_reauth wraps authenticate() in a Redis lock so only one
+    # process re-auths per token-expiry window; the rest wait + reload.
+    # LOCK_TTL must exceed a normal authenticate() round-trip (a healthy auth is
+    # <5s; the retry-storm path is covered by the circuit breaker, not this).
+    BRAIN_REAUTH_LOCK_TTL_SEC: int = 90
+    BRAIN_REAUTH_WAIT_TIMEOUT_SEC: float = 60.0
+    BRAIN_REAUTH_POLL_INTERVAL_SEC: float = 1.5
+
+    # ===== Phase 4 Sprint 0 (2026-05-19) =====
+    # Plan: docs/phase4_a_b_plan_v5_2026-05-19.md
+    # ----- PR0 LLM_API_CIRCUIT (Sprint 0) -----
+    # 防 DeepSeek/Anthropic outage silent burn — 复用 backend/circuit_breaker.py
+    # framework + N-consecutive-fail trip pattern。Default ON(防御机制 default ON
+    # 与 BRAIN_AUTH_CIRCUIT 一致)。Soft-fail Redis blip 永不 brown-out。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_LLM_API_CIRCUIT: bool = True
+    LLM_API_CIRCUIT_FAIL_THRESHOLD: int = 5    # 60s 内连续 N 次 5xx/timeout 跳闸
+    LLM_API_CIRCUIT_FAIL_WINDOW_SEC: int = 60  # 失败计数器 TTL
+    LLM_API_CIRCUIT_COOLDOWN_SEC: int = 300    # 跳闸冷却(同 BRAIN_AUTH_CIRCUIT)
+
+    # ----- Sprint 0 spike calibration (2026-05-19) -----
+    # Production baseline (last 30d, scripts/sprint0_baseline_spike.py):
+    #   - finalized_n=8,658  pass_n=131  author_pass_rate_30d=0.0151 (1.51%)
+    #   - hypothesis_round_stats 28 rounds: p5=0.0000 / p10=0.0000 / p50=0.0000
+    # → Half of all rounds yield ZERO PASS, so an EMA-style PASS_RATE_FLOOR
+    #   at 5% would auto-pause virtually every task. The dominant R14 trigger
+    #   in production will be CONSECUTIVE_FAIL_ROUNDS (3 consecutive
+    #   zero-PASS rounds), not EMA floor. Keep floor very low so EMA only
+    #   fires on truly degenerate distributions, not normal noise.
+    # R12 GO gate (Sprint 末): assistant_pass_rate >= 0.0151 * 0.90 = 0.01359
+    #   with bootstrap 80% CI not crossing 0. Given the ~131 PASS over 30d
+    #   spread across author/assistant, sample size is the binding constraint
+    #   — expect the GO gate to need 30d *minimum* and likely 45-60d to
+    #   accumulate enough samples for a tight CI.
+
+    # ----- PR0.5 ENABLE_R8_L0 sub-flag (Sprint 0,Phase 4 R12 sentinel 前置) -----
+    # 默认 True(R8 hierarchical RAG 已 LIVE,L0 是 4 层之一)。R12 sentinel ON
+    # 时全局 set False,跳过 L0(exact pattern_hash match)进 L1 pillar/L2 family/L3 field。
+    # 双 entry skip:`backend/agents/hierarchical_rag.py:query_hierarchical` +
+    # `backend/agents/services/rag_service.py:query()` legacy entry。
+    # 双文件注册:本文件 + feature_flag_service.py SUPPORTED_FLAGS。
+    ENABLE_R8_L0: bool = True
+
+    # ===== Phase 4 Sprint 1 (2026-05-19+) =====
+    # ----- A2 R14 task_stop_loss -----
+    # Millennium 5%/7.5% hard stop-loss 工业模式 — task 累计 PASS rate 低于
+    # EMA floor OR 连续 N round 0 PASS → auto-pause task。
+    # Spike-calibrated (2026-05-19, scripts/sprint0_baseline_spike.py):
+    # production p50 round PASS rate = 0% (28 rounds, hypothesis_round_stats
+    # 30d window)。半数 round 是 0 PASS,EMA floor 设到 0.005 (0.5%) 才不会
+    # false-trigger;主 trigger 走 CONSECUTIVE_FAIL_ROUNDS=3。
+    # Race fix (Round S0-A finding):flat loop 已在 CB-skip 时 `continue`,
+    # 自动满足 EXCLUDE_CB_SKIPPED;flag 保留作 defense-in-depth(若未来其他
+    # caller 路径不 continue,service 仍可 skip 计数器)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.2
+    ENABLE_TASK_STOP_LOSS: bool = False
+    TASK_STOP_LOSS_EMA_ALPHA: float = 0.3
+    TASK_STOP_LOSS_MIN_ROUNDS: int = 5         # warmup — 前 N round 不 trigger
+    TASK_STOP_LOSS_PASS_RATE_FLOOR: float = 0.005    # Spike-calibrated 0.5% (production p50=0)
+    TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS: int = 3  # 主 trigger
+    TASK_STOP_LOSS_EXCLUDE_CB_SKIPPED: bool = True   # race fix (defense-in-depth)
+
+    # ----- A3 flat-F4 cross-region quota (Sprint 1) -----
+    # Millennium 320 pods / Citadel 5 业务线 multi-strategy 启示 — AIAC 当前
+    # region 严重偏 USA(production 数据印证)。flat-F4 在 POST 时校验新 task
+    # 加入后的 region 分布是否越过 FLAT_CROSS_REGION_QUOTA。
+    # ENFORCE=True → POST 拒绝越界(400);ENFORCE=False(default)→ 仅 warn log。
+    # Phase A 真效果(per [[feedback_按效果选择]]):default ENFORCE=False 配合
+    # warn 阶段先观察 7d,然后翻 ENFORCE=True 真改 mining 决策。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.3
+    FLAT_CROSS_REGION_QUOTA: dict = {
+        "USA": 0.30,
+        "CHN": 0.20,
+        "JPN": 0.15,
+        "EUR": 0.20,
+        "HKG": 0.15,
+    }
+    FLAT_CROSS_REGION_ENFORCE: bool = False
+    FLAT_CROSS_REGION_LOOKBACK_DAYS: int = 30  # last-N-days window for share computation
+
+    # ----- A1.1 R12 LLM_MODE=assistant — service + state machine (Sprint 1) -----
+    # Critical path 工业派共识吸收 — "LLM 是 research assistant 不是 expression-
+    # author"(Citadel / Two Sigma / Bridgewater AIA)。A1 拆 4 sub-PR:
+    #   A1.1 (this PR)  — service + state machine + drain residue keys
+    #   A1.2            — sentinel guard 联动 6 LIVE flag + audit + restore
+    #   A1.3            — code_gen branching + assistant template library
+    #   A1.4            — ops endpoint + bootstrap CI GO gate
+    # Default OFF — task.config["llm_mode"]='assistant' opt-in 灰度。
+    # NOT yet in SUPPORTED_FLAGS (A1.2 will register + 联动)。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.1 (v3.0/v5.0 critical path)
+    ENABLE_LLM_ASSISTANT_MODE: bool = False
+    # Sentinel flags A1.2 will force OFF when ENABLE_LLM_ASSISTANT_MODE=True.
+    # Declared here so the llm_mode_service can reason about expected
+    # cross-flag state without circular import on feature_flag_service.
+    LLM_ASSISTANT_SENTINEL_FLAGS: list = [
+        "ENABLE_R1B_HYPOTHESIS_MUTATE",
+        "ENABLE_G5_CROSSOVER",
+        "ENABLE_HYPOTHESIS_FOREST_REUSE",
+        "ENABLE_R8_L0",
+        "ENABLE_AST_ORIGINALITY_GATE",
+        "ENABLE_SIMULATION_CACHE",
+    ]
+    # F13 review fix (Sprint 4 R3): Sprint-4 flag sentinel-membership
+    # rationale (the next reviewer will otherwise see the asymmetry vs
+    # G8/AST-gate as an oversight):
+    #   - ENABLE_G10_LOGIC_INJECT: NOT a sentinel. It's pure prompt
+    #     information (distilled logic text); the LLM still authors the
+    #     hypothesis in assistant mode — same class as macro/style blocks
+    #     which are also not sentinel-listed. Assistant mode benefits from
+    #     the prior, so leave it ON.
+    #   - ENABLE_GRAMMAR_VALIDATOR: NOT a sentinel. It validates DSL
+    #     syntax regardless of who authored it (template library in
+    #     assistant mode OR LLM in author mode); a malformed expression is
+    #     malformed either way. Leaving it ON in assistant mode is correct
+    #     (catches broken template composition too). NB: distinct from
+    #     ENABLE_AST_ORIGINALITY_GATE (sentinel) which gates *originality*
+    #     — an author-mode-specific concern G3-v2 deliberately does NOT
+    #     duplicate.
+    # Task.config keys drained when LLM mode flips (per Round S0-A F-A5):
+    # 4 cross-round / inject staging keys that would carry author-mode
+    # state into an assistant-mode round (or vice versa) and produce
+    # silent zombie consumption. Kept declarative so future audits don't
+    # have to hunt them down in service code.
+    # NOT drained: brain_role_snapshot (Consultant-mode survives mode flip),
+    # stop_loss_state (R14 cross-round accumulator), flat_cursor (lives
+    # on run.runtime_state not task.config).
+    LLM_ASSISTANT_RESIDUE_KEYS: list = [
+        "g5_pending_offspring",
+        "__pending_hypothesis",
+        "__g5_consumed_offspring",
+        "__r1b_consumed_pending_hypothesis",
+        "contextual_bandit_v1",  # mining_agent._BANDIT_CONFIG_KEY value
+    ]
+
+    # ----- B1 R11 alpha_capacity_estimator (Sprint 2, 2026-05-20) -----
+    # 工业派 capacity-cap 思维(RenTec Medallion $10B cap / Bridgewater AIA
+    # $5B 软上限)— 高 sharpe 低 capacity 的 alpha 应降权。把单 alpha 估算的
+    # USD capacity 作为 composite_score 第 5 维(原 4 维:sharpe / fitness /
+    # turnover / robustness),log-scale 5 桶 normalize 到 [0,1]。
+    # Phase A 真效果(per [[feedback_按效果选择]]):flag ON 直接改 composite
+    # ranking,不是 stamp-only。Default OFF 保 byte-identical regression;
+    # ENABLE_CAPACITY_SCORE=True 时 composite normalize sum=1.0(原 4 维 weight
+    # × 0.9 + capacity × 0.10 = 1.0,见 alpha_scoring.evaluate_alpha_comprehensive)。
+    # Estimator 公式:capacity_usd = ADV(region+universe) × universe_size ×
+    #   (1 - turnover_decay_factor) — 粗估,精度优先于完美。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.8 / v2 §4.5
+    ENABLE_CAPACITY_SCORE: bool = False
+    CAPACITY_SCORE_WEIGHT: float = 0.10
+    # Log-scale buckets — alpha capacity USD 落入哪桶决定 normalize 后的值
+    # [0.0, 0.25, 0.50, 0.75, 1.0]。<$1M → 0.0,>$10B → 1.0。
+    CAPACITY_LOG_BUCKETS: list = [1e6, 1e7, 1e8, 1e9, 1e10]
+
+    # ----- B3 R10-v2 family hard-ban shadow (Sprint 2, 2026-05-20) -----
+    # 工业派 Citadel / Bridgewater 内部 portfolio-construction 经验:同
+    # family 的 alpha 即使 sharpe 都达 PASS 阈值,若 PnL 时间序列高度相关
+    # (pairwise corr ≥ τ),纳入组合后边际贡献接近 0 → hard-ban 低分者。
+    # R10-v2 是 R10 family-cap(纯 structural top-K)的 fine-grain 补充。
+    # Shadow mode:family_classifier.apply_family_hard_ban 不直接 set FAIL,
+    # 只 stamp `metrics["_r10v2_hard_banned"]=True`;evaluation 末统一
+    # finalize 段 scan stamp → FAIL,允许 R10/R10-v2 双 stamp 共存以便
+    # plan v5 §6.10 互验 SQL 计算 false-positive rate。
+    # Default OFF + production wire pending τ 校准 — operator 先跑
+    # scripts/calibrate_r10_pairwise_corr.py 出 region-specific τ,再
+    # flip ENABLE_FAMILY_HARD_BAN + 上游 state.r10v2_pnl_corr_matrix 填充
+    # 路径接通(fast-follow)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.10
+    ENABLE_FAMILY_HARD_BAN: bool = False
+    # τ ∈ [0, 1]。default 0.65 = 保守初值;R10-calib spike 输出 p95-p99 中位
+    # 会校准到 region-specific(USA 通常较高,emerging market 较低)。
+    FAMILY_BAN_MIN_PAIRWISE_CORR: float = 0.65
+
+    # ----- B2 R13 factor_decomposition shadow (Sprint 2, 2026-05-20) -----
+    # Two Sigma 18-factor lens / AQR autoencoder asset pricing intuition —
+    # AIAC evaluation 只看 sharpe/fitness/turnover/self-corr,无 style factor
+    # neutralization。R13 把 alpha 的 daily returns 对 5 个 style factor
+    # (size/value/momentum/quality/low_vol) OLS 分解,产 residual_sharpe +
+    # factor_exposures + r_squared。
+    # 三阶段 rollout(per [[feedback_light_wiring_deferred_gate]]):
+    #   1. shadow(default):default OFF;flip ON → log + stamp,无 quality
+    #      _status 改动
+    #   2. soft:7d obs ≥30 alpha residual → flip MODE='soft',
+    #      residual<τ → quality_status='PASS_PROVISIONAL'
+    #   3. hard:再 7d obs PASS_PROVISIONAL 中 ≥80% can_submit=True →
+    #      flip MODE='hard',residual<τ → quality_status='FAIL'
+    # Path:R13-spike GO OLS 路径(backend/services/factor_lens_service.py)。
+    # 数据依赖:backend/data/factor_returns_snapshot/{region}.parquet
+    # (operator manual maintenance,每月 refresh)。stale >90d → /ops/r13/
+    # snapshot-stale-check 告警(fast-follow)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.9 / v2 §4.6
+    ENABLE_FACTOR_LENS: bool = False
+    FACTOR_LENS_MODE: str = "shadow"  # "shadow" | "soft" | "hard"
+    FACTOR_LENS_FACTORS: list = ["size", "value", "momentum", "quality", "low_vol"]
+    FACTOR_LENS_RESIDUAL_SHARPE_MIN: float = 0.5  # hard 模式 < τ → FAIL
+    FACTOR_LENS_OLS_LOOKBACK_DAYS: int = 504  # ~2y daily
+    FACTOR_LENS_MIN_OVERLAP_DAYS: int = 60  # < N 天交集 → 跳过 decompose
+
+    # ----- B5 R8-v3 cognitive layer 7-layer (Sprint 3, 2026-05-20) -----
+    # 7 research-lens prompts (macro/behavioral/technical/value/microstructure/
+    # cross_sectional/time_series_mean_reversion) — 每 round 选 1 个 splice
+    # 进 hypothesis prompt,nudge LLM 朝该 lens 思考。3 个 select 策略:
+    #   - bandit:Beta-Bernoulli Thompson sample,exploit > 0.5 优势 layer
+    #   - round_robin:固定顺序轮转
+    #   - deficit_aware:挑 PASS rate 最低的 boost coverage
+    # Token budget guard:hypothesis prompt 总 token ≤ 8k,超出时按
+    # _DROP_ORDER 删 dedup_blacklist → cross_task_forest → macro_narrative
+    # (cognitive_layer 块绝不删,这是 R8-v3 整个目的)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.11 / v4 §6.11
+    ENABLE_COGNITIVE_LAYER_PROMPT: bool = False
+    COGNITIVE_LAYER_SELECT_MODE: str = "round_robin"  # bandit | round_robin | deficit_aware
+    COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET: int = 8000
+    # Tier E E1: trailing window the weekly bandit-reward cron aggregates
+    # _cognitive_layer_used PASS/FAIL over (cumulative upsert).
+    COGNITIVE_LAYER_BANDIT_WINDOW_DAYS: int = 7
+
+    # ----- A5.1 G10 logic-as-asset (Sprint 3, 2026-05-20) -----
+    # RD-Agent NeurIPS 2025 "logic-as-asset" + Citadel internal "research
+    # diary" — past 7d PASS alpha 周末 LLM 蒸馏成 1-3 句话的 logic 总结,
+    # 写 distilled_logic_library 表。PR2 (Sprint 4) 注入回 hypothesis
+    # prompt 形成正反馈;PR1 (本次) 只蒸馏 + 建库。
+    # Cost guard:LOGIC_DISTILL_MAX_COST_USD_PER_WEEK $5 上限,LLM call
+    # cost 累计超过即停;Top-K alpha per (pillar, region) bucket 限制
+    # prompt 大小;< min_pass_count alpha 的 bucket skip。
+    # Schedule:Sunday 03:00 Asia/Shanghai (off-peak,与其他 weekly cron
+    # 错开)。Alembic n5e6f7g8h9i0_distilled_logic.
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.12 / v4 §6.12
+    ENABLE_G10_LOGIC_DISTILL: bool = False
+    LOGIC_DISTILL_MAX_COST_USD_PER_WEEK: float = 5.00
+    LOGIC_DISTILL_TOP_K_PER_GROUP: int = 10
+    LOGIC_DISTILL_MIN_PASS_COUNT: int = 3
+    LOGIC_DISTILL_LOOKBACK_DAYS: int = 7
+    LOGIC_DISTILL_SIMILARITY_THRESHOLD: float = 0.70
+
+    # ----- A5.2 G10 PR2 (Sprint 4, 2026-05-20) - prompt injection -----
+    # PR1 (Sprint 3) 建库;PR2 注入回 hypothesis prompt 形成正反馈。
+    # ENABLE_G10_LOGIC_INJECT 独立 flag(可单独启用 inject 不启用 distill,
+    # 比如已有库时只 inject 不重蒸馏)。
+    # G10_LOGIC_INJECT_TOP_K 注入到 prompt 的 entry 数。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.13
+    ENABLE_G10_LOGIC_INJECT: bool = False
+    G10_LOGIC_INJECT_TOP_K: int = 5
+
+    # ----- B4.1 G3-v2 grammar-aware validator (Sprint 4, 2026-05-20) -----
+    # lark-based parser for a subset of BRAIN DSL — catches structurally
+    # malformed alphas (unbalanced parens / unexpected tokens) BEFORE the
+    # LLM-generated text reaches G3 originality or BRAIN simulator. New
+    # path; G3 shadow code (alpha_originality.py) stays unchanged behind
+    # ENABLE_AST_ORIGINALITY_GATE @deprecated_pending_r12_decision —
+    # B4.2 in Sprint 5 conditionally retires per R12 decision.
+    # When validate() returns ok=False, retry_with_whole_output_hint
+    # gives a terse parse error → node_code_gen re-emits.
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.14
+    ENABLE_GRAMMAR_VALIDATOR: bool = False
+    # F4 review fix (Sprint 4 R3): RESERVED — not yet wired. node_code_gen
+    # currently BUFFERS parse-fail candidates + degrades-open above a 50%
+    # drop floor; it does NOT re-emit via LLM. A future PR may wire
+    # retry_with_whole_output_hint into a bounded re-emit loop reading this
+    # setting. Until then this is a no-op knob (kept so the future wire
+    # doesn't need a config migration).
+    GRAMMAR_VALIDATOR_RETRY_MAX: int = 2  # RESERVED — see comment above
+
     # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
     # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
     # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入
@@ -230,6 +503,12 @@ class Settings(BaseSettings):
         "genetic_mutation",
     ]
     DIRECTION_BANDIT_COLD_THRESHOLD: int = 5
+    # G1 Phase A (2026-05-19): per plan §1.9, the R2/Q7 GO gate fires when at
+    # least one segment has ≥ DIRECTION_BANDIT_GO_GATE_MIN_PULLS observed
+    # selects in the telemetry window. Below this, Thompson posterior is too
+    # noisy to draw arm-promotion conclusions. The /ops/direction-bandit/
+    # telemetry endpoint reports go_gate_segments_ready against this value.
+    DIRECTION_BANDIT_GO_GATE_MIN_PULLS: int = 10
 
     # ----- R3/Q8 AST subtree-isomorphism diversity dim (Phase 1, 2026-05-17) -----
     # Adds a 6th dim `ast_diversity` to DiversityScore based on Jaccard subtree
@@ -241,6 +520,23 @@ class Settings(BaseSettings):
     ENABLE_AST_DIVERSITY_DIM: bool = False
     AST_DIVERSITY_MAX_DEPTH: int = 3       # OperatorNode skeleton truncation
     AST_DIVERSITY_HISTORY_K: int = 20      # compare new alpha to top-K recent attempts
+
+    # ----- G3 AST originality gate (Phase A shadow, 2026-05-19) -----
+    # Promotes Phase 1 R3/Q8 ast_distance_log → candidate-time gate in
+    # node_evaluate (after R10 family-cap). Three modes:
+    #   shadow — log warning + alpha.metrics['_g3_*'] only (Phase A default)
+    #   soft   — block flips quality_status='PASS_PROVISIONAL' (still simulates)
+    #   hard   — block flips quality_status='FAIL' (skip persistence)
+    # τ (AST_ORIGINALITY_MIN_DISTANCE) standardization: ast_distance returns
+    # 1 − Jaccard(subtree_sets), so values are bounded [0, 1]. τ=0.15 = "alpha
+    # shares ≥85% of subtree skeletons with its nearest neighbor". Calibrate
+    # via /ops/g3/originality-stats + scripts/calibrate_g3_threshold.py.
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py
+    # (per [[feedback_enable_flag_double_file]]).
+    ENABLE_AST_ORIGINALITY_GATE: bool = False
+    AST_ORIGINALITY_MODE: str = "shadow"        # shadow | soft | hard
+    AST_ORIGINALITY_MIN_DISTANCE: float = 0.15  # τ — Phase B re-calibrate
+    AST_ORIGINALITY_HISTORY_K: int = 50         # compare new alpha vs top-K recent
 
     # ----- flat-F1 Advanced: FLAT_CONTINUOUS mining mode (Phase 3, 2026-05-18) -----
     # 第二个 mining_mode = FLAT_CONTINUOUS,与 legacy CONTINUOUS_CASCADE 并行。
@@ -305,17 +601,21 @@ class Settings(BaseSettings):
     RAG_HIER_TOTAL_CAP: int = 20      # orchestrator hard cap
     RAG_HIER_CACHE_TTL_SEC: int = 300 # Redis cache TTL per layer query
     RAG_HIER_CROSS_REGION_DECAY: float = 0.7  # 跨 region 命中 score 折扣
+    # 2026-05-21: L1 candidate pool size for relevance-first selection. The
+    # over-fetched pool is scored by dataset-category overlap + quality, then
+    # truncated to the layer budget. Kill-switch: set == budget to degenerate
+    # back to recency-only behavior with no code change.
+    RAG_HIER_L1_CANDIDATE_CAP: int = 40
 
     # R8-v2 #3 (2026-05-18): R5 composite_score ranking for L2 SUCCESS。
-    # ENABLE_R5_L2_RANKING=True 时,layer2_family fetched 候选会 JOIN
-    # r1a_attribution_log.r5_composite_score AVG GROUP BY expression_hash
-    # (sha256[:64] of KB pattern,匹配 evaluation.py:2631 R1a hook 写入
-    # 约定),按 R5 mean score 降序重排;有样本 row 用 0.45+0.4*avg 折算
-    # relevance_score (range [0.45,0.85] 高 R5 sort 在前)。零样本 row 保
-    # 原 0.65 默认。Soft-fail SQL error → 原顺序。前置 R5 ENABLE_LLM_JUDGE
+    # layer2_family fetched 候选会 JOIN r1a_attribution_log.r5_composite_score
+    # AVG GROUP BY expression_hash (sha256[:64] of KB pattern,匹配
+    # evaluation.py:2631 R1a hook 写入约定),按 R5 mean score 降序重排;有样
+    # 本 row 用 0.45+0.4*avg 折算 relevance_score (range [0.45,0.85])。零样本
+    # row 保原 0.65 默认。Soft-fail SQL error → 原顺序。前置 R5 ENABLE_LLM_JUDGE
     # ON 累积 r1a_attribution_log r5_composite_score 非 NULL。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    ENABLE_R5_L2_RANKING: bool = False
+    # (Retired ENABLE_R5_L2_RANKING flag 2026-05-19 — hard-wired ON;subsumed
+    #  into ENABLE_HIERARCHICAL_RAG main switch.)
     R5_L2_RANKING_MIN_SAMPLES: int = 1   # 至少 N r1a sample 才参与重排
     R5_L2_RANKING_LOOKBACK_DAYS: int = 30  # AVG 窗口
 
@@ -394,8 +694,8 @@ class Settings(BaseSettings):
     # cache_key = sha256[:16](layer + sorted params),TTL = RAG_HIER_CACHE_TTL_SEC
     # (default 300s)。无显式 invalidation — KB 写入频率 3-50/h,5-min stale window
     # 在 plan §10 GO gate 容忍范围。redis 不可用 → soft-fall direct layer call。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    ENABLE_HIERARCHICAL_RAG_CACHE: bool = False
+    # (Retired ENABLE_HIERARCHICAL_RAG_CACHE flag 2026-05-19 — hard-wired ON;
+    #  subsumed into ENABLE_HIERARCHICAL_RAG main switch.)
 
     # ----- R8 query-level telemetry (2026-05-18 follow-up) -----
     # Per-call layer_hits + cache_hit + had_failure_tree_elevation row in
@@ -566,12 +866,9 @@ class Settings(BaseSettings):
     # PR5 — T1 sign-flip retry. When a T1 candidate FAILs but |sharpe| ≥
     # T1_FLIP_RETRY_SHARPE (default 0.5), evaluation re-simulates the negated
     # expression (`multiply(-1, expr)`) and re-evaluates against the same
-    # gate. This catches alphas where the LLM picked the right field/op
-    # but the wrong sign convention (e.g. quality factors that should be
-    # ranked descending). Bounded by T1_FLIP_RETRY_CAP per round to keep
-    # BRAIN budget under control. Set ENABLE_T1_SIGN_FLIP_RETRY=False to
-    # disable globally.
-    ENABLE_T1_SIGN_FLIP_RETRY: bool = True
+    # gate. Catches alphas where the LLM picked the right field/op but the
+    # wrong sign convention. Bounded by T1_FLIP_RETRY_CAP per round.
+    # (Retired ENABLE_T1_SIGN_FLIP_RETRY flag 2026-05-19 — hard-wired ON.)
     T1_FLIP_RETRY_SHARPE: float = 0.5  # min |sharpe| to trigger flip; below = noise
     T1_FLIP_RETRY_CAP: int = 5  # max flips per round
 
@@ -657,16 +954,19 @@ class Settings(BaseSettings):
 
     # P2-C (2026-05-16): regime-aware threshold gating + style preset encoding.
     # 来源: docs/alphagbm_skills_research_2026-05-15.md skills vix-status /
-    # duan-analysis. All three flags default OFF (S1 + P2-A/B/D 惯例).
-    # regime_at_eval stamp 仅当 strategy.regime 被注入时触发 (任一 effect
-    # flag 为 True 即可,即 ENABLE_REGIME_AWARE_THRESHOLDS 或
-    # ENABLE_STYLE_PRESET_GUIDANCE 之一). 推荐启用顺序:
-    #   1. ENABLE_REGIME_INFERENCE=True 攒 1-2 天 docs/regime_state/<sh-date>.json
-    #   2. ENABLE_REGIME_AWARE_THRESHOLDS=True 让倍率生效 + 数据采集 stamp
-    #   3. ENABLE_STYLE_PRESET_GUIDANCE=True 注入投资哲学 block 进 hypothesis prompt
-    ENABLE_REGIME_INFERENCE: bool = False
-    ENABLE_REGIME_AWARE_THRESHOLDS: bool = False
-    ENABLE_STYLE_PRESET_GUIDANCE: bool = False
+    # duan-analysis. Default OFF (S1 + P2-A/B/D 惯例). regime_at_eval stamp
+    # 仅当 strategy.regime 被注入时触发(stage ≥ "thresholds" 即可)。
+    #
+    # Consolidated 2026-05-19 — single switch ENABLE_REGIME + REGIME_STAGE str
+    # replaces the previous 3 booleans (ENABLE_REGIME_INFERENCE /
+    # ENABLE_REGIME_AWARE_THRESHOLDS / ENABLE_STYLE_PRESET_GUIDANCE). The 3
+    # legacy names remain as read-only @property derivations so all callers
+    # keep working byte-for-byte. Staged rollout (mirrors Q10/G3):
+    #   - REGIME_STAGE="inference"  → 攒 1-2 天 docs/regime_state/<sh-date>.json
+    #   - REGIME_STAGE="thresholds" → 倍率生效 + 数据采集 stamp
+    #   - REGIME_STAGE="style"      → 注入投资哲学 block 进 hypothesis prompt
+    ENABLE_REGIME: bool = False
+    REGIME_STAGE: str = "inference"  # one of: inference / thresholds / style
     REGIME_INFERENCE_WINDOW_DAYS: int = 7
     REGIME_EWMA_ALPHA: float = 0.3
     REGIME_CACHE_TTL_SECONDS: int = 86400   # 24h
@@ -705,8 +1005,9 @@ class Settings(BaseSettings):
     TRIGGER_DETAIL_MAX_ENTRIES: int = 50            # trigger_detail FIFO cap
 
     # LLM scoring controls
-    ENABLE_LLM_THESIS_SCORE_ON_PROMOTED: bool = True
-    ENABLE_LLM_THESIS_SCORE_ON_TRIGGER: bool = True
+    # (Retired ENABLE_LLM_THESIS_SCORE_ON_PROMOTED + ENABLE_LLM_THESIS_SCORE_ON_TRIGGER
+    #  flags 2026-05-19 — hard-wired ON. ON_PROMOTED had no reader; ON_TRIGGER
+    #  was a degenerate guard alongside `if self.llm is None`.)
     # Per-RUN(not per-day)token budget — counter resets every Celery beat
     # invocation. Renamed in P2 review fix; the old "DAILY" name was misleading
     # because nothing tracked spend across runs.
@@ -727,30 +1028,24 @@ class Settings(BaseSettings):
     # T1 tasks already persist per round.
     T2_INCREMENTAL_PERSISTENCE: bool = True
 
-    # PR7 — wrapper-aware simulation settings. When True, node_simulate buckets
-    # expressions by per-alpha settings (chosen via smart_simulation_settings
-    # based on expression form + field category) and calls simulate_batch per
-    # bucket. Defaults to True after backfill found 0% of mining-produced
-    # alphas can submit — root cause is double-neutralization (group_*
-    # wrapper + BRAIN neut=SUBINDUSTRY) and decay-vs-trade_when conflicts.
-    # Toggle off if a future task shows PASS-rate regression.
-    ENABLE_SMART_SIM_SETTINGS: bool = True
+    # PR7 — wrapper-aware simulation settings. node_simulate buckets expressions
+    # by per-alpha settings (chosen via smart_simulation_settings based on
+    # expression form + field category) and calls simulate_batch per bucket.
+    # Root cause for the flip: backfill found 0% of mining-produced alphas can
+    # submit — double-neutralization (group_* wrapper + BRAIN neut=SUBINDUSTRY)
+    # and decay-vs-trade_when conflicts.
+    # (Retired ENABLE_SMART_SIM_SETTINGS flag 2026-05-19 — hard-wired ON.)
 
-    # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier toggle.
-    # When True, node_simulate runs each candidate through the trained
-    # sklearn LogisticRegression and skips alphas with P(PASS) < threshold
-    # BEFORE BRAIN simulate. Saves BRAIN concurrent-slot time on
-    # likely-fails. Model: AUC=0.813 on 2737 historical alphas (451 PASS).
-    #
-    # V-24.B (2026-05-13): default flipped ON with conservative threshold
-    # 0.10. Threshold table from training run:
+    # Plan v5+ #3 (2026-05-07): pre-simulate skeleton classifier filter.
+    # node_simulate runs each candidate through the trained sklearn
+    # LogisticRegression and skips alphas with P(PASS) < threshold BEFORE BRAIN
+    # simulate. Saves BRAIN concurrent-slot time on likely-fails.
+    # Model: AUC=0.813 on 2737 historical alphas (451 PASS).
+    # V-24.B (2026-05-13): conservative threshold 0.10:
     #   0.05  → 98.9% PASS recall, skips  2.2% FAIL (negligible savings)
     #   0.10  → 98.0% PASS recall, skips  7.1% FAIL  ← current default
-    #   0.15  → 96.5% PASS recall, skips 17.0% FAIL  ← recommended
-    # Picking 0.10 trades 2pp PASS recall for 7% BRAIN simulate savings
-    # — a safer first rollout than 0.15. Run a week of metrics
-    # (scripts/pre_simulate_filter_audit.py) before bumping to 0.15.
-    ENABLE_PRE_SIMULATE_FILTER: bool = True
+    #   0.15  → 96.5% PASS recall, skips 17.0% FAIL  ← recommended after audit
+    # (Retired ENABLE_PRE_SIMULATE_FILTER flag 2026-05-19 — hard-wired ON.)
     PRE_SIMULATE_FILTER_THRESHOLD: float = 0.10
 
     # V-24.E (2026-05-13): FIELD_INSIGHT / HYPOTHESIS_INSIGHT writes gated.
@@ -839,6 +1134,74 @@ class Settings(BaseSettings):
     # Rate Limiting
     MAX_SIMULATIONS_PER_DAY: int = 100
     MAX_TOKENS_PER_DAY: int = 500000
+
+    # ----- G2 Phase A — per-call LLM cost telemetry (2026-05-19) -----
+    # Light wiring per [[feedback_light_wiring_deferred_gate]]: Phase A logs
+    # every LLMService.call to llm_call_log table (task_id / round_idx /
+    # node_key contextvar-resolved), no behavior change. Phase C (~7d obs
+    # later) will promote to cost-aware throttling using LLM_PRICING + a new
+    # COST_CEILING_USD_PER_TASK_DAY check.
+    # Default OFF — flip via FeatureFlagOverride (双文件注册 per
+    # [[feedback_enable_flag_double_file]]). Soft-fail: tracker exception
+    # never breaks LLM hot path.
+    ENABLE_COST_TELEMETRY: bool = False
+    # Pricing dict — blended per-1k-token rate by model prefix. Used at
+    # round-flush time to derive cost_usd from raw tokens (Phase A keeps it
+    # simple; if prompt vs completion split ever matters we can swap dict
+    # values to {"prompt": x, "completion": y} without schema change).
+    # Source: provider public pages as of 2026-05-19. Unknown models fall
+    # back to 0.0 (cost_usd=None in the row), tokens still recorded.
+    LLM_PRICING_USD_PER_1K_TOKENS: dict = {
+        "deepseek-chat": 0.00027,        # DeepSeek V3 blended input/output
+        "deepseek-reasoner": 0.00055,    # DeepSeek R1 blended
+        "claude-haiku-4-5": 0.00125,     # Anthropic Haiku 4.5 blended
+        "claude-sonnet-4-6": 0.0075,     # Anthropic Sonnet 4.6 blended
+        "claude-opus-4-7": 0.0375,       # Anthropic Opus 4.7 blended
+    }
+    # 90-day retention for llm_call_log — weekly Sunday 04:45 SH beat task
+    # ``run_llm_call_log_pruner`` deletes rows older than this value (rounded
+    # up to the day). Match R8_QUERY_LOG_RETENTION_DAYS pattern. Operational
+    # tunable — no feature flag.
+    LLM_CALL_LOG_RETENTION_DAYS: int = 90
+
+    # ----- G5 Phase A — Trajectory crossover (2026-05-19) -----
+    # QuantaAlpha arxiv 2602.07085 (2026-02). Combine 2 high-reward PASS
+    # alpha "siblings" into hybrid offspring via LLM. Offspring persist on
+    # task.config["g5_pending_offspring"] via R1b.2-v2 same mechanism; next
+    # round consumes + injects into MiningState.g5_offspring_candidates;
+    # node_code_gen prepends them to pending_alphas so they walk full
+    # validate → simulate → evaluate → save_results pipeline.
+    # OFF byte-for-byte legacy. Soft-fail全链 — crossover 异常永不 block round。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
+    ENABLE_G5_CROSSOVER: bool = False
+    # 选 sibling pair 的过滤 — 要求两个 parent 都 PASS sharpe ≥ X 才 trigger。
+    # Lookback 是 SQL window(最近 X round 内本 task PASS alpha 池)。
+    # max_pair_pillar_overlap True 时不允许两 parent 同 pillar(强制 diversity)。
+    G5_CROSSOVER_MIN_PARENT_SHARPE: float = 1.25
+    G5_CROSSOVER_LOOKBACK_ROUNDS: int = 10
+    G5_CROSSOVER_TOP_K_OFFSPRING: int = 2
+    G5_CROSSOVER_REQUIRE_DIFFERENT_PILLAR: bool = True
+    # LLM model override — None / "" uses LLMService default。同 LLM_MUTATE_MODEL 模式
+    LLM_CROSSOVER_MODEL: str = ""
+
+    # ----- G8 Phase A — Hypothesis forest cross-task reference (2026-05-19) -----
+    # RD-Agent NeurIPS 2025 假设森林。当前 Hypothesis 表 region-scoped
+    # 无 task_id,本就全局共享;但 node_hypothesis 只做 V-22.13 cross-round
+    # reuse(同 task),不 cross-task。G8 Phase A = prompt-level reference,
+    # 不 hard reuse hypothesis_id 避免 V-27.45 terminal race 复杂度。
+    # OFF 时 byte-for-byte legacy 渲染。soft-fail:fetch 异常 → 注入空 list
+    # → prompt 不变。Phase C(7d+ obs)再考虑 hard reuse(parent_hypothesis_id
+    # 跨 task chain)。
+    # 双文件注册:本文件 + backend/services/feature_flag_service.py
+    # (per [[feedback_enable_flag_double_file]])。
+    ENABLE_HYPOTHESIS_FOREST_REUSE: bool = False
+    # 过滤阈值:只把 ≥N pass + sharpe_avg ≥X 的 hypothesis 加进 prompt。
+    # 默认 conservative 防早期 noise dominate(production 用 PROMOTED 状态
+    # 已 implicit 满足这两个 ≥1 PASS 的 lifecycle 约束,但显式 gate
+    # 保护未来 status 语义漂移)。
+    HYPOTHESIS_FOREST_MIN_PASS_COUNT: int = 2
+    HYPOTHESIS_FOREST_MIN_SHARPE_AVG: float = 1.0
+    HYPOTHESIS_FOREST_TOP_K: int = 5
 
     # Layer 1 Anti-collapse (2026-05-11) — ε-greedy explore budget.
     # Probability that a strategy_select round runs in EXPLORE mode: RAG
@@ -988,6 +1351,25 @@ class Settings(BaseSettings):
     ROBUSTNESS_PER_ALPHA_TIMEOUT_SEC: int = 600
     ROBUSTNESS_SELECTION_STRATEGY: str = "first"
 
+    # ----------------------------------------------------------------------
+    # Persistence-Ontology refactor (2026-05-19) — plan
+    # ~/.claude/plans/alpha-persistence-ontology-refactor-2026-05-19.md v1.3.1
+    # ----------------------------------------------------------------------
+    # P1: 把 BRAIN 接受过的 FAIL alpha (alpha_id 存在 + 真 sim 成功) 写 alphas
+    # 表;OFF 时回到 PASS-only legacy 行为。Mining-time write filter 修复:
+    # alpha_failures.QUALITY_CHECK_FAILED 不再丢 BRAIN handle。
+    # 双文件注册: 本文件 + backend/services/feature_flag_service.py per
+    # [[feedback_enable_flag_double_file]]
+    ENABLE_FAIL_ALPHA_PERSIST: bool = False
+
+    # P4: R1b mutate prompt v2 — parent context 富化为 failure-metrics-with-
+    # diagnosis;tri-state 因 shadow-mode A/B 需求 [V1.1-S2]:
+    #   'off'    — byte-equivalent legacy prompt(default)
+    #   'shadow' — 生成 OLD+NEW 两份 prompt,把 NEW 写 llm_call_log 但只发
+    #              OLD 给 LLM(零行为变化,纯 cost/parse-failure 对比)
+    #   'active' — 只生成 NEW prompt 发给 LLM
+    ENABLE_R1B_MUTATE_PROMPT_V2: str = "off"
+
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
@@ -1024,6 +1406,30 @@ class Settings(BaseSettings):
         if self.ENABLE_BRAIN_CONSULTANT_MODE:
             return dict(self.CONSULTANT_REGION_UNIVERSES)
         return {"USA": "TOP3000"}
+
+    # ---- Regime staged-rollout derivations (post 2026-05-19 consolidation) ----
+    # 3 legacy ENABLE_REGIME_* names kept as read-only properties so existing
+    # callers (mining_agent / generation / evaluation / regime_infer) and
+    # tests stay byte-for-byte. New single switch lives in ENABLE_REGIME +
+    # REGIME_STAGE; stage progression: inference → thresholds → style.
+    # The Settings.__getattribute__ hook is bypassed for these names because
+    # they are not in SUPPORTED_FLAGS (no override row); fall-through hits
+    # the @property descriptor below.
+    @property
+    def ENABLE_REGIME_INFERENCE(self) -> bool:
+        return bool(self.ENABLE_REGIME) and self.REGIME_STAGE in (
+            "inference", "thresholds", "style",
+        )
+
+    @property
+    def ENABLE_REGIME_AWARE_THRESHOLDS(self) -> bool:
+        return bool(self.ENABLE_REGIME) and self.REGIME_STAGE in (
+            "thresholds", "style",
+        )
+
+    @property
+    def ENABLE_STYLE_PRESET_GUIDANCE(self) -> bool:
+        return bool(self.ENABLE_REGIME) and self.REGIME_STAGE == "style"
 
     class Config:
         case_sensitive = True

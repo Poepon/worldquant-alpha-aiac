@@ -13,10 +13,9 @@ Failure modes:
     log emits a one-time warning per process.
   - Inference exception → keep that alpha (don't skip on doubt). Logged.
 
-Toggle:
-  - ENABLE_PRE_SIMULATE_FILTER env var / setting controls activation.
-    Default False — explicit opt-in via .env so production rollout is
-    deliberate.
+Hard-wired into node_simulate as of 2026-05-19 (formerly toggled via
+ENABLE_PRE_SIMULATE_FILTER, retired now).
+
   - PRE_SIMULATE_FILTER_THRESHOLD overrides recommended threshold from
     metadata.json.
 """
