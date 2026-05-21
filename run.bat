@@ -161,15 +161,18 @@ cd frontend
 start "AIAC Frontend" cmd /k "npm run dev"
 cd ..
 
-REM Start a SINGLE Celery worker (2026-05-21). Was 3 parallel --pool=solo
-REM workers, but multiple worker PROCESSES each hold their own BrainAdapter
-REM session and thrash one shared BRAIN login (401 storm → zombie RUNNING
-REM tasks producing 0 alphas; see memory project_brain_session_thrash_fix).
-REM One worker = one BRAIN session = no inter-process thrash. Trade-off:
-REM concurrency 1 (one mining task at a time); --pool=solo already serialized
-REM each worker, so this only drops cross-task parallelism.
-echo [INFO] Starting Celery Worker (single instance)...
-start "AIAC Celery Worker 1" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -n worker1@%%h --logfile=.celery_worker1.log"
+REM Two Celery workers on separate queues (2026-05-21). Earlier this was 3
+REM identical workers (BRAIN session thrash → zombie tasks), then 1 worker (no
+REM thrash but single solo thread → a long/hung mining task starved the beat
+REM maintenance tasks, so a frozen FLAT session could never be revived → permanent
+REM RUNNING zombie). Fix: route run_mining_task to the `mining` queue (see
+REM celery_app.task_routes) and run a dedicated `mining` worker, plus a `celery`
+REM worker that always drains the default queue (watchdog/quota_guard/sync) even
+REM while a long FLAT session occupies the mining worker. eb0d5a8 fleet-lock keeps
+REM the two workers' shared BRAIN session coherent (no inter-process thrash).
+echo [INFO] Starting Celery Workers (mining + maintenance)...
+start "AIAC Celery Worker - Mining" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -Q mining -n mining@%%h --logfile=.celery_worker_mining.log"
+start "AIAC Celery Worker - Maint" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -Q celery -n maint@%%h --logfile=.celery_worker_maint.log"
 
 REM Start Celery Beat — drives the scheduled tasks declared in
 REM celery_app.beat_schedule (V-19.7 watchdog every 5min, quota guard

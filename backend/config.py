@@ -213,6 +213,15 @@ class Settings(BaseSettings):
     LLM_API_CIRCUIT_FAIL_WINDOW_SEC: int = 60  # 失败计数器 TTL
     LLM_API_CIRCUIT_COOLDOWN_SEC: int = 300    # 跳闸冷却(同 BRAIN_AUTH_CIRCUIT)
 
+    # ----- Hard deadlines on external calls (2026-05-21) -----
+    # 根因:LLM HTTP 调用无显式 timeout → 死 socket 让 asyncio loop 永久 park 在
+    # select(py-spy 实证),Windows --pool=solo 单线程被独占 → worker 永久僵死。
+    # wait_for + client timeout 双层兜底;round-level deadline 兜任何非 LLM 的
+    # 未约束 await。Windows solo 上 Celery task_time_limit 不生效,这是唯一可靠机制。
+    LLM_CALL_TIMEOUT_SEC: float = 180.0     # 单次 LLM HTTP 调用硬上限(非流式)
+    LLM_STREAM_TIMEOUT_SEC: float = 600.0   # anthropic thinking 流式调用硬上限
+    MINING_ROUND_TIMEOUT_SEC: int = 1200    # per-round 兜底(20min;健康 round 5-13min)
+
     # ----- Sprint 0 spike calibration (2026-05-19) -----
     # Production baseline (last 30d, scripts/sprint0_baseline_spike.py):
     #   - finalized_n=8,658  pass_n=131  author_pass_rate_30d=0.0151 (1.51%)

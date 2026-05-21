@@ -51,7 +51,21 @@ celery_app.conf.update(
     enable_utc=True,
     task_track_started=True,
     task_time_limit=3600,  # 1 hour max per task
+    # NOTE (2026-05-21): task_time_limit does NOT fire on Windows --pool=solo
+    # (no signals/subprocess). Real per-call/per-round deadlines live in-task via
+    # asyncio.wait_for (llm_service.call + mining_tasks._run_one_round_inline).
     worker_prefetch_multiplier=1,  # Fair scheduling
+    # 2026-05-21: route the long-running mining task to a dedicated `mining`
+    # queue so a separate solo worker can keep draining the default `celery`
+    # queue (watchdog_revive_dead_sessions / quota_guard / sync). Single-worker
+    # solo pool otherwise starves beat maintenance during a long FLAT session →
+    # a hung mining task could never be revived. Run two solo workers:
+    #   worker -Q mining   (run_mining_task only)
+    #   worker -Q celery   (everything else, incl. beat maintenance)
+    task_default_queue="celery",
+    task_routes={
+        "backend.tasks.run_mining_task": {"queue": "mining"},
+    },
 )
 
 # Scheduled tasks (Celery Beat)

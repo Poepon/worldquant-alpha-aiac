@@ -519,23 +519,28 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                             # num_alphas_per_round (was hardcoded 4 ignoring user
                             # input).
                             num_per_round = task.daily_goal if task.daily_goal else 4
-                            result = await mining_agent.run_evolution_loop(
-                                task=task,
-                                dataset_id=dataset_id,
-                                fields=fields,
-                                operators=operators,
-                                max_iterations=task.max_iterations or 10,
-                                target_alphas=remaining_goal,
-                                num_alphas_per_round=num_per_round,
-                                run_id=run.id,
-                                available_dataset_pool=available_dataset_pool,
-                                # Plan v5+ §Phase 2 (B3): typed Hypothesis
-                                # persistence triggers when level>=2. Variant
-                                # tags rows for F-5 KB isolation.
-                                hypothesis_centric_level=int(active_level or 0),
-                                experiment_variant=str(
-                                    (task.config or {}).get("hypothesis_centric_variant", active_level)
+                            # 2026-05-21: per-round hard deadline (see _run_one_round_inline).
+                            # TimeoutError is caught by the except below → loop continues.
+                            result = await asyncio.wait_for(
+                                mining_agent.run_evolution_loop(
+                                    task=task,
+                                    dataset_id=dataset_id,
+                                    fields=fields,
+                                    operators=operators,
+                                    max_iterations=task.max_iterations or 10,
+                                    target_alphas=remaining_goal,
+                                    num_alphas_per_round=num_per_round,
+                                    run_id=run.id,
+                                    available_dataset_pool=available_dataset_pool,
+                                    # Plan v5+ §Phase 2 (B3): typed Hypothesis
+                                    # persistence triggers when level>=2. Variant
+                                    # tags rows for F-5 KB isolation.
+                                    hypothesis_centric_level=int(active_level or 0),
+                                    experiment_variant=str(
+                                        (task.config or {}).get("hypothesis_centric_variant", active_level)
+                                    ),
                                 ),
+                                timeout=settings.MINING_ROUND_TIMEOUT_SEC,
                             )
                             
                             # Update progress
@@ -1082,17 +1087,24 @@ async def _run_one_round_inline(
     active_level = _get_active_level(task)
 
     try:
-        return await mining_agent.run_evolution_loop(
-            task=task, dataset_id=dataset_id, fields=fields, operators=operators,
-            max_iterations=1, target_alphas=999999,
-            num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
-            run_id=run.id,
-            available_dataset_pool=available_dataset_pool,
-            hypothesis_centric_level=active_level,
-            experiment_variant=str(
-                (task.config or {}).get("hypothesis_centric_variant", active_level)
+        # 2026-05-21: per-round hard deadline. Backstop for any unbounded await
+        # (Redis/asyncpg/httpx) that the LLM-level wait_for doesn't cover — a hung
+        # round must fail cleanly, never freeze the worker. asyncio.TimeoutError
+        # is an Exception subclass → caught by the except below → soft-fail dict.
+        return await asyncio.wait_for(
+            mining_agent.run_evolution_loop(
+                task=task, dataset_id=dataset_id, fields=fields, operators=operators,
+                max_iterations=1, target_alphas=999999,
+                num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
+                run_id=run.id,
+                available_dataset_pool=available_dataset_pool,
+                hypothesis_centric_level=active_level,
+                experiment_variant=str(
+                    (task.config or {}).get("hypothesis_centric_variant", active_level)
+                ),
+                iteration_offset=iteration_offset,
             ),
-            iteration_offset=iteration_offset,
+            timeout=settings.MINING_ROUND_TIMEOUT_SEC,
         )
     except Exception as e:
         logger.error(f"[flat round {dataset_id}] inline round failed: {e}")

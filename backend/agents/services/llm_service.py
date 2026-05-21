@@ -10,6 +10,7 @@ import json
 import time
 from typing import Dict, List, Optional, Any, Type, Tuple
 from pydantic import BaseModel
+import httpx
 import openai
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from loguru import logger
@@ -134,6 +135,10 @@ def _llm_error_is_api_failure(exc: BaseException) -> bool:
         "InternalServerError", "APIStatusError",
         # F-S1: 401 + 403 auth/permission errors
         "AuthenticationError", "PermissionDeniedError",
+        # 2026-05-21: asyncio.wait_for hard-deadline raises builtin TimeoutError
+        # (== asyncio.TimeoutError). Classify as API failure so a hung provider
+        # trips LLM_API_CIRCUIT instead of silently burning rounds.
+        "TimeoutError",
     }
     if name in api_exc_names:
         return True
@@ -278,6 +283,11 @@ class LLMService:
         self.client = openai.AsyncOpenAI(
             api_key=self.api_key,
             base_url=self.base_url,
+            # 2026-05-21: explicit timeout — without it a dead socket hangs the
+            # event loop forever (no timeout fires). max_retries=0: SDK retry off,
+            # the @retry decorator + LLM_API_CIRCUIT own the retry/backoff policy.
+            timeout=httpx.Timeout(settings.LLM_CALL_TIMEOUT_SEC, connect=10.0),
+            max_retries=0,
         )
 
         # Lazy-init anthropic client only when provider=anthropic and SDK
@@ -298,6 +308,10 @@ class LLMService:
             anthropic_kwargs: Dict[str, Any] = {"api_key": self.anthropic_api_key}
             if self.anthropic_base_url:
                 anthropic_kwargs["base_url"] = self.anthropic_base_url
+            # 2026-05-21: explicit timeout (thinking streams can run minutes) +
+            # max_retries=0 so the @retry/circuit layer owns retry policy.
+            anthropic_kwargs["timeout"] = settings.LLM_STREAM_TIMEOUT_SEC
+            anthropic_kwargs["max_retries"] = 0
             self.anthropic_client = anthropic.AsyncAnthropic(**anthropic_kwargs)
 
         # Pre-resolve thinking-tier display name for logging only.
@@ -338,7 +352,12 @@ class LLMService:
                 if db_model:
                     self.model = db_model
 
-                self.client = openai.AsyncOpenAI(api_key=self.api_key, base_url=self.base_url)
+                self.client = openai.AsyncOpenAI(
+                    api_key=self.api_key,
+                    base_url=self.base_url,
+                    timeout=httpx.Timeout(settings.LLM_CALL_TIMEOUT_SEC, connect=10.0),
+                    max_retries=0,
+                )
             except Exception as e:
                 logger.warning(f"[LLMService] Failed to load DB credentials, using settings/env | error={e}")
             finally:
@@ -549,9 +568,17 @@ class LLMService:
                     # shape so the downstream code path stays identical.
                     if thinking_enabled:
                         async with self.anthropic_client.messages.stream(**anth_kwargs) as stream:
-                            resp = await stream.get_final_message()
+                            # Hard deadline: stream aggregation can otherwise hang
+                            # forever on a dead socket (no client timeout fires).
+                            resp = await asyncio.wait_for(
+                                stream.get_final_message(),
+                                timeout=settings.LLM_STREAM_TIMEOUT_SEC,
+                            )
                     else:
-                        resp = await self.anthropic_client.messages.create(**anth_kwargs)
+                        resp = await asyncio.wait_for(
+                            self.anthropic_client.messages.create(**anth_kwargs),
+                            timeout=settings.LLM_CALL_TIMEOUT_SEC,
+                        )
                     # Extract text from the first content block (TextBlock)
                     content = ""
                     for block in resp.content:
@@ -576,15 +603,21 @@ class LLMService:
                             f"cache_create={cache_create}"
                         )
                 else:
-                    response = await self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt}
-                        ],
-                        temperature=temperature,
-                        max_tokens=max_tokens,
-                        response_format={"type": "json_object"} if json_mode else None
+                    # Hard deadline (asyncio.wait_for): ultimate backstop when the
+                    # client/httpx timeout fails to fire — the 2026-05-21 zombie
+                    # had the loop parked in select on this very await.
+                    response = await asyncio.wait_for(
+                        self.client.chat.completions.create(
+                            model=self.model,
+                            messages=[
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_prompt}
+                            ],
+                            temperature=temperature,
+                            max_tokens=max_tokens,
+                            response_format={"type": "json_object"} if json_mode else None
+                        ),
+                        timeout=settings.LLM_CALL_TIMEOUT_SEC,
                     )
 
                     # Defensive: handle empty/malformed responses
