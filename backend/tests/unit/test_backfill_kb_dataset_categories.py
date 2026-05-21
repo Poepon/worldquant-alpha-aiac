@@ -103,3 +103,17 @@ async def test_resolve_non_usa_region_returns_empty(pg_session):
     from backend.agents.services.rag_service import resolve_field_categories
     cats = await resolve_field_categories("rank(close)", f"ZZ_{uuid.uuid4().hex[:6]}", pg_session)
     assert cats == []
+
+
+@pg_only
+@pytest.mark.asyncio
+async def test_noisy_fields_used_tokens_self_filter(pg_session):
+    """P0.5 safety: the new own-`fields_used` tier feeds legacy failure-row token
+    lists straight to the resolver. Many such lists are description WORDS, not real
+    fields (observed live: ['based','of','ranks','transformations', ...]). The
+    resolver must keep only tokens matching a real datafields field_id, so pure-noise
+    lists resolve to [] — no false categories stamped."""
+    from backend.agents.services.rag_service import resolve_field_categories
+    noise = ["based", "of", "on", "ranks", "transformations", "identical", "parameters"]
+    cats = await resolve_field_categories(noise, "USA", pg_session)
+    assert cats == []
