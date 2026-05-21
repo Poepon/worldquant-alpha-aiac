@@ -85,6 +85,10 @@ class FailureRecord(BaseModel):
     # via the same hypothesis_id key; previously FAIL alphas were
     # attribution-orphaned (alpha_failures had no hypothesis_id column).
     hypothesis_id: Optional[int] = None
+    # RAG A/B (2026-05-21): per-round arm, stamped from state.rag_ab_arm at
+    # node_save_results so the FAIL-path persist (workflow.run_with_persistence)
+    # carries it reliably (the final-state `result` dict was not propagating it).
+    rag_ab_arm: Optional[str] = None
 
 
 class TraceStepData(BaseModel):
@@ -180,6 +184,16 @@ class MiningState(BaseModel):
     # what forest prompt context"). Empty when ENABLE_HYPOTHESIS_FOREST_REUSE
     # is OFF or no rows qualified — stamp key omitted in that case.
     g8_forest_referenced_ids: List[int] = Field(default_factory=list)
+
+    # RAG category-overlap A/B (2026-05-21): per-round experiment arm,
+    # "control" (layer1_pillar suppresses dataset-category derivation) or
+    # "category" (P0 behavior). Assigned in node_rag_query via
+    # hash((task_id, current_round)) % 2 when ENABLE_RAG_CATEGORY_AB is ON;
+    # "" when the flag is OFF (→ no A/B, category overlap always on). Copied
+    # onto alpha.metrics["_rag_ab_arm"] at evaluation (mirrors
+    # cognitive_layer_id_used) + alpha_failures.rag_ab_arm at workflow persist,
+    # so scripts/rag_ab_report.py can compute PASS-per-real-sim by arm.
+    rag_ab_arm: str = ""
 
     # G5 Phase A (2026-05-19): crossover offspring candidates carried from the
     # PRIOR round via task.config["g5_pending_offspring"] consume. Each entry:

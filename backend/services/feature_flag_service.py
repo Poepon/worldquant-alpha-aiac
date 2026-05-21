@@ -210,6 +210,21 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "meta_data GIN index + backfill_kb_pillar_family_signature.py 3K+ entries。"
         ),
     ),
+    # --- RAG category-overlap A/B experiment harness ---
+    "ENABLE_RAG_CATEGORY_AB": FlagSpec(
+        name="ENABLE_RAG_CATEGORY_AB",
+        flag_type="bool",
+        group="Phase4-RAG-AB",
+        description=(
+            "实验台 (2026-05-21): per-round A/B 评测 P0 的 dataset-category-overlap "
+            "检索是否真提升挖矿产出。ON 时 node_rag_query 按 hash((task_id,round))%2 "
+            "把每轮分到 'control'(layer1_pillar 关闭 category 派生,回退 pillar/recency) "
+            "或 'category'(现 P0 行为);arm 写 alpha.metrics['_rag_ab_arm'] + "
+            "alpha_failures.rag_ab_arm。scripts/rag_ab_report.py 算 PASS-per-real-sim "
+            "(分母合并 alphas+alpha_failures、扣 PRESIM_SKIP/DEDUP_SKIP) 按 arm 对比。"
+            "OFF(默认)= arm 空、category 常开 = 现状零变化。soft-fail。"
+        ),
+    ),
     # --- Phase 3 Q10: pyqlib local pre-screen (Multi-Fidelity Layer 0) ---
     "ENABLE_QLIB_PRESCREEN": FlagSpec(
         name="ENABLE_QLIB_PRESCREEN",

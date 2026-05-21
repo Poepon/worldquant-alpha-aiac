@@ -659,6 +659,7 @@ async def layer1_pillar(
     dataset_id: Optional[str] = None,
     query_categories: Optional[List[str]] = None,
     budget: int = 5,
+    rag_ab_arm: str = "",
 ) -> tuple[List[RAGEntry], List[RAGEntry]]:
     """RAG#1: pillar/theme + dataset-category SET overlap.
 
@@ -694,7 +695,10 @@ async def layer1_pillar(
     # category fill here would consume the shared pattern budget and starve
     # the more-specific L2/L3 layers.
     qcats = [str(c).lower() for c in (query_categories or []) if c]
-    if not qcats and dataset_id and not current_expression:
+    # RAG A/B (2026-05-21): "control" arm suppresses the dataset-category
+    # derivation → L1 falls back to pillar/recency (pre-P0), isolating the
+    # net effect of the category-overlap change. arm "" / "category" → P0.
+    if not qcats and dataset_id and not current_expression and rag_ab_arm != "control":
         try:
             from backend.agents.services.rag_service import infer_dataset_category
             _c = infer_dataset_category(dataset_id)
@@ -1059,6 +1063,7 @@ async def query_hierarchical(
     layer_budgets: Optional[Dict[str, int]] = None,
     current_hypothesis: Optional[str] = None,
     task_id: Optional[int] = None,
+    rag_ab_arm: str = "",
 ) -> RAGResult:
     """Phase 3 R8 PR3 orchestrator — sequential fall-through L0 → L1 → L2 → L3.
 
@@ -1175,12 +1180,14 @@ async def query_hierarchical(
             # (category-set overlap). Without it two datasets sharing pillar/region
             # would collide on one cached (succ,fail) and the fix would be masked.
             {"expr": current_expression, "pillar": hypothesis_pillar,
-             "region": region, "dataset": dataset_id, "budget": _l1_budget},
+             "region": region, "dataset": dataset_id, "budget": _l1_budget,
+             "arm": rag_ab_arm},
             lambda: layer1_pillar(
                 db, current_expression=current_expression,
                 hypothesis_pillar=hypothesis_pillar, region=region,
                 dataset_id=dataset_id,
                 budget=_l1_budget,
+                rag_ab_arm=rag_ab_arm,
             ),
         )
         result.total_queries += 1

@@ -183,6 +183,14 @@ class AlphaFailure(SQLAlchemyBase):
     # was OFF / cold-start (round 1).
     bandit_arm_recommended = Column(String(40), nullable=True, index=True)
 
+    # RAG category-overlap A/B (2026-05-21): per-round experiment arm
+    # ("control"/"category") for the FAIL path — symmetric with
+    # Alpha.metrics["_rag_ab_arm"] on the PASS path. Failures dominate the
+    # "real BRAIN sim" denominator (~40:1 vs alphas), so per-arm failure
+    # attribution is essential for scripts/rag_ab_report.py's PASS-per-sim.
+    # NULL when ENABLE_RAG_CATEGORY_AB is OFF / legacy rows.
+    rag_ab_arm = Column(String(40), nullable=True, index=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
