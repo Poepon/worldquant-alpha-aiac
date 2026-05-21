@@ -1021,7 +1021,12 @@ async def node_hypothesis(
         region=state.region,
         universe=state.universe,
         fields=target_fields,
-        operators=state.operators[:30],
+        # Pass the full operator catalog for parity with node_code_gen. NOTE:
+        # build_hypothesis_prompt does not currently render ctx.operators, so
+        # this is a no-op for the hypothesis LLM today — kept so a future
+        # hypothesis prompt that surfaces operators sees the full set, not [:30].
+        # The operator-visibility fix that actually matters is in node_code_gen.
+        operators=state.operators,
         success_patterns=state.patterns[:5],
         # P2-D: when flag is on AND we fetched ≥1 pitfall, prepend them to
         # state.pitfalls. When flag is off OR no pitfalls fetched, fall
@@ -1588,7 +1593,9 @@ async def node_code_gen(
         region=state.region,
         universe=state.universe,
         fields=code_gen_fields,
-        operators=state.operators[:50],
+        # Full operator catalog (see node_hypothesis note) — code_gen must see
+        # the Cross Sectional / Group operators to compose neutralized alphas.
+        operators=state.operators,
         success_patterns=merged_patterns[:8],
         failure_pitfalls=state.pitfalls[:5],
         preferred_fields=preferred_fields,

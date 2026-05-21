@@ -34,10 +34,16 @@ class RuleId:
 
     # syntax / semantics
     EMPTY_EXPRESSION = "empty_expression"
-    UNKNOWN_OPERATOR = "unknown_operator"           # severity=soft (Q1: unchanged)
+    # Tier 2b (plan a-streamed-wren, 2026-05-21): hard when the allowed-operator
+    # set is known (non-empty); soft/skipped only when no operator set is
+    # available (footgun guard). Was always-soft pre-fix → hallucinated ops
+    # (vec_stddev/vec_count/vec_max) reached BRAIN and burned sims.
+    UNKNOWN_OPERATOR = "unknown_operator"
     FIELD_NOT_FOUND = "field_not_found"             # severity=hard if strict_field_check, else soft
     TYPE_MISMATCH_VECTOR_TS = "type_mismatch_vector_ts"
     LOW_COVERAGE_FIELD = "low_coverage_field"
+    # Tier 2a (plan a-streamed-wren): ts_regression(x,x) / ts_corr(x,x) etc.
+    DEGENERATE_SELF_REFERENCE = "degenerate_self_reference"
     OTHER = "other"
 
     # risk (P1-E new — static max-loss inference)
@@ -627,6 +633,47 @@ def _aggregate_risk_bounds(findings: List[Finding]) -> Dict[str, Any]:
     }
 
 
+# Self-paired operators that collapse to a constant when their first two args
+# are identical: ts_regression(x, x, d) → residual 0 / slope 1 (constant);
+# ts_corr(x, x, d) → 1.0. ts_covariance is deliberately excluded because
+# cov(x, x) = variance is a real signal. Production (2026-05-21) burned
+# ~10/138 sims on ts_regression self-reference. See plan a-streamed-wren Tier 2a.
+_SELF_REFERENCE_DEGENERATE_OPS: Tuple[str, ...] = ("ts_regression", "ts_corr")
+
+
+def _infer_degenerate_findings(expression: str) -> List[Finding]:
+    """Hard Findings for mathematically degenerate self-reference calls.
+
+    `ts_regression(x, x, d)` and `ts_corr(x, x, d)` regress/correlate a series
+    with itself → constant (zero-information) output. Rejecting them pre-simulate
+    routes the round to SELF_CORRECT instead of burning a BRAIN simulation.
+    Uses `_walk_call_args` so nested inner args (e.g.
+    ts_regression(ts_mean(x, 5), ts_mean(x, 5), 10)) compare correctly.
+    """
+    findings: List[Finding] = []
+    if not expression:
+        return findings
+    # Case-insensitive: live BRAIN DSL is lowercase, but the repo supports
+    # UPPERCASE alias dialects (Alpha191 etc.). Match on a lowercased copy so
+    # TS_REGRESSION(x, x, ...) is not silently waved through.
+    expr_l = expression.lower()
+    for op in _SELF_REFERENCE_DEGENERATE_OPS:
+        for call_args in _walk_call_args(expr_l, op):
+            if len(call_args) >= 2 and call_args[0].strip() == call_args[1].strip():
+                findings.append(Finding(
+                    rule_id=RuleId.DEGENERATE_SELF_REFERENCE,
+                    severity="hard",
+                    message=(
+                        f"{op}(x, x, ...) regresses/correlates a series with "
+                        f"itself — degenerate constant output (zero signal)"
+                    ),
+                    category="semantics",
+                    location=f"{op}({call_args[0][:24]}, {call_args[1][:24]}, ...)",
+                    metadata={"operator": op},
+                ))
+    return findings
+
+
 class AlphaSemanticValidator:
     """
     Enhanced semantic validator for alpha expressions.
@@ -643,19 +690,27 @@ class AlphaSemanticValidator:
         fields: Optional[List[Dict]] = None,
         operators: Optional[List[str]] = None,
         strict_field_check: bool = True,
-        strict_type_check: bool = True
+        strict_type_check: bool = True,
+        reject_unknown_operators: bool = False,
     ):
         """
         Initialize validator with dataset context.
-        
+
         Args:
             fields: List of field dicts with id, type, coverage, etc.
             operators: List of allowed operator names
             strict_field_check: If True, unknown fields are errors; if False, warnings
             strict_type_check: If True, type mismatches are errors; if False, warnings
+            reject_unknown_operators: Tier 2b (plan a-streamed-wren). When True
+                AND the allowed-operator set is known (non-empty), an operator
+                outside it is HARD (invalidates → SELF_CORRECT) instead of soft.
+                Used by the mining pre-simulate path so hallucinated operators
+                (e.g. vec_stddev) never burn a BRAIN sim. Default False keeps
+                the legacy soft/non-invalidating contract for all other callers.
         """
         self.strict_field_check = strict_field_check
         self.strict_type_check = strict_type_check
+        self.reject_unknown_operators = reject_unknown_operators
         
         # Build field lookup
         self.field_map: Dict[str, FieldInfo] = {}
@@ -709,17 +764,24 @@ class AlphaSemanticValidator:
         fields_used = self._extract_fields(expression, operators_used)
         result.used_fields = fields_used
 
-        # 3. Validate operators exist (M-1: unknown_operator stays soft)
+        # 3. Validate operators exist. Severity is soft by default (legacy
+        # M-1/Q1 contract); Tier 2b promotes to HARD only when the caller
+        # opted in (reject_unknown_operators) AND we have a known operator set
+        # to judge against — so hallucinated ops route to SELF_CORRECT pre-sim
+        # rather than burning a BRAIN simulation. Footgun guard: when neither
+        # the constructor set nor the registry is populated, nothing fires.
         for op in operators_used:
             op_lower = op.lower()
             if self.allowed_operators and op_lower not in self.allowed_operators:
                 # Check against all known operators from registry
                 all_known = get_known_operators()
                 if op_lower not in all_known:
-                    # P1-E S-3 row 2 (L320): unknown_operator → soft (Q1 unchanged)
+                    sev: FindingSeverity = (
+                        "hard" if self.reject_unknown_operators else "soft"
+                    )
                     result._emit_finding(
                         rule_id=RuleId.UNKNOWN_OPERATOR,
-                        severity="soft",
+                        severity=sev,
                         message=f"Unknown operator: {op}",
                         category="semantics",
                         location=op,
@@ -796,6 +858,19 @@ class AlphaSemanticValidator:
         for rf in _infer_risk_findings(expression):
             result.findings.append(rf)
         result.risk_bounds = _aggregate_risk_bounds(result.findings)
+
+        # 8. Tier 2a (plan a-streamed-wren): hard-reject degenerate self-reference
+        # (ts_regression(x,x) / ts_corr(x,x)) pre-simulate. _emit_finding flips
+        # result.valid=False on the hard severity (single source of that rule).
+        for df in _infer_degenerate_findings(expression):
+            result._emit_finding(
+                rule_id=df.rule_id,
+                severity=df.severity,
+                message=df.message,
+                category=df.category,
+                location=df.location,
+                metadata=df.metadata,
+            )
 
         return result
     

@@ -140,23 +140,30 @@ def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
     return "\n".join(lines)
 
 
-def build_operators_context(operators: List[Dict], max_ops: int = 40) -> str:
+def build_operators_context(operators: List[Dict], max_ops: int = 120) -> str:
     """Build operator reference grouped by category."""
     if not operators:
         return "Use standard operators."
     
     by_category: Dict[str, List[str]] = {}
     for op in operators[:max_ops]:
-        cat = op.get("category", "Other")
+        # `or "Other"` (not get default): category column is nullable, so a
+        # NULL comes back as None — a None dict key would crash sorted() below
+        # once it coexists with str keys.
+        cat = op.get("category") or "Other"
         if cat not in by_category:
             by_category[cat] = []
         op_name = op.get("name", op.get("id", "unknown"))
         by_category[cat].append(op_name)
-    
+
     lines = []
     for cat, op_names in sorted(by_category.items()):
-        lines.append(f"- {cat}: {', '.join(op_names[:10])}")
-    
+        # Per-category cap of 30 (was 10): callers now pass the full catalog
+        # ORDER BY category, name, so an alphabetical [:10] would drop the
+        # workhorse Time Series ops (ts_mean/ts_rank/ts_zscore/ts_scale/...
+        # all sort after ts_delta). 30 > the largest real category (~24 ops).
+        lines.append(f"- {cat}: {', '.join(op_names[:30])}")
+
     return "\n".join(lines)
 
 
@@ -266,7 +273,26 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
         "**MATRIX FIELD RULE**: MATRIX-type fields can use ts_* operators directly. "
         "Example: ts_rank(matrix_field, 20)"
     )
-    
+    # CANONICAL STRUCTURE (plan a-streamed-wren, 2026-05-21): a raw signal on
+    # fundamental/price/volume fields carries market & sector beta and rarely
+    # survives evaluation on its own. Teach the canonical alpha shape so
+    # neutralization is a first-class instruction rather than something that
+    # only leaks in via retrieved RAG patterns.
+    constraints.append(
+        "**CROSS-SECTIONAL NEUTRALIZATION RULE**: A raw time-series signal on "
+        "fundamental/price/volume fields carries market & sector beta and rarely "
+        "survives evaluation alone. Wrap the signal in a cross-sectional "
+        "normalizer and, when a grouping is meaningful, neutralize it. Canonical "
+        "shape: group_neutralize( normalize( ts_signal(fields) ), <group> ) "
+        "where normalize is one of {rank, zscore, scale, normalize} and <group> "
+        "is one of {market, sector, industry, subindustry}. "
+        "Example: group_neutralize(rank(ts_zscore(<a listed field>, 60)), industry). "
+        "Prefer at least one cross-sectional op (rank / zscore / scale / normalize "
+        "/ group_*) in the outer layers unless the signal is already "
+        "cross-sectionally comparable (a pure time-series factor-composite signal "
+        "can pass on its own — see the FACTOR_COMPOSITE example above)."
+    )
+
     # Syntax constraints (always apply)
     constraints.extend([
         "Lookback windows must be positive integers",

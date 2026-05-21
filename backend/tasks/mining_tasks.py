@@ -731,7 +731,14 @@ async def _get_complementary_datasets(
 
 async def _get_operators(db):
     """Get operators for mining."""
-    op_query = select(Operator).where(Operator.is_active == True)
+    # ORDER BY category, name — deterministic, and ensures any downstream cap
+    # spans categories rather than slicing off the (insertion-last) Cross
+    # Sectional / Group operators (id 51-66). See plan a-streamed-wren.
+    op_query = (
+        select(Operator)
+        .where(Operator.is_active == True)
+        .order_by(Operator.category, Operator.name)
+    )
     op_result = await db.execute(op_query)
     
     operators = []

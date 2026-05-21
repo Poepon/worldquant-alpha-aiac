@@ -120,12 +120,24 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
         "expressions": [a.expression[:100] for a in state.pending_alphas]
     })
     
-    # Initialize semantic validator with field type info
+    # Initialize semantic validator with field type info.
+    # Tier 2b (plan a-streamed-wren): feed the round's full operator catalog
+    # (state.operators, ~66 ops from _get_operators) as the allowed set and
+    # turn on reject_unknown_operators. The OperatorRegistry singleton is NOT
+    # loaded in the Celery worker (only the FastAPI process loads it at
+    # startup), so get_known_operators() is empty here — passing state.operators
+    # is what makes hallucinated-operator rejection actually fire pre-sim. Falls
+    # back to None (→ registry → footgun-safe skip) when state has no operators.
+    _allowed_op_names = [
+        o.get("name") for o in (state.operators or [])
+        if isinstance(o, dict) and o.get("name")
+    ]
     semantic_validator = AlphaSemanticValidator(
         fields=state.fields,
-        operators=None,
+        operators=_allowed_op_names or None,
         strict_field_check=False,
-        strict_type_check=True
+        strict_type_check=True,
+        reject_unknown_operators=True,
     )
     
     for alpha in state.pending_alphas:
