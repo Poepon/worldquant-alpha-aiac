@@ -513,7 +513,17 @@ class BrainAdapter:
                 f"Session invalid or expiring "
                 f"(force_refresh={force_refresh}), re-authenticating..."
             )
-            await self.authenticate()
+            # 2026-05-21: route this PROACTIVE refresh through the fleet-wide
+            # coalesced re-auth instead of a bare authenticate(). 16 call-sites
+            # use `async with BrainAdapter()`, whose __aenter__ runs ensure_session
+            # every time; across 3 solo workers + uvicorn a bare authenticate()
+            # here let every process re-auth the same expiry window at once and
+            # mutually invalidate each other's cookie (BRAIN single-active-
+            # session) — the 401 thrash that stalled task 3329 ~11h. The 401
+            # paths (_request/_safe_api_call) were already routed through
+            # _coalesced_reauth by 方向1; this closes the proactive gap so only
+            # ONE process per window actually hits /authentication.
+            await self._coalesced_reauth()
 
     async def _is_session_valid(self) -> bool:
         """

@@ -318,7 +318,22 @@ class CredentialsService:
             adapter = BrainAdapter(email=email, password=password)
             # Get client and try to authenticate
             adapter.client = await adapter.get_client()
-            result = await adapter.authenticate()
+            # 2026-05-21: do NOT bare-authenticate() here. BRAIN is single-active-
+            # session, so minting a fresh session on every "test connection" click
+            # evicted the cookie the running workers depend on → 401 thrash that
+            # stalled mining (task 3329). Instead verify through the fleet-coalesced
+            # path: a healthy shared session is validated READ-ONLY (no new login,
+            # no eviction); only a genuinely dead session triggers ONE serialised
+            # re-auth (which also exercises the credentials and refreshes Redis).
+            # On credential rotation (tested creds differ from the cached/shared
+            # ones) drop the stale shared session first so the verify exercises
+            # the NEW credentials rather than validating the old still-live one.
+            if (BrainAdapter._cached_email and email != BrainAdapter._cached_email) or (
+                BrainAdapter._cached_password and password != BrainAdapter._cached_password
+            ):
+                await adapter._invalidate_session_cache()
+                BrainAdapter.invalidate_credentials_cache()
+            result = await adapter._coalesced_reauth()
             return {
                 "success": result,
                 "message": "Authentication successful" if result else "Authentication failed"
