@@ -449,15 +449,16 @@ async def test_e2e_empty_context_no_failure_pitfall(pg_session, monkeypatch):
     ))
     await pg_session.commit()
 
-    # Omit current_expression — L0/L2/L3 are expression-gated, so this
-    # restricts the query to L1 only. L1 filters by pillar_classified,
-    # and our unique uniq_pillar guarantees no production KB row matches
-    # → real empty-context shape.
+    # Omit current_expression (L0/L2/L3 are expression-gated) AND dataset_id:
+    # the 2026-05-21 P0 change makes L1 ALSO match by dataset-category overlap
+    # (cross-pillar), so passing a real dataset_id would pull category-stamped
+    # production rows — a unique pillar alone no longer isolates. With no
+    # dataset_id, no category is derived → L1 is pillar-only → uniq_pillar
+    # guarantees no production KB row matches → real empty-context shape.
 
     svc = RAGService(pg_session)
     r = await svc.query(
         region="USA",
-        dataset_id="fnd6",
         hypothesis_pillar=uniq_pillar,
         max_patterns=5,
         max_pitfalls=5,

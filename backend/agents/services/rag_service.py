@@ -423,6 +423,7 @@ class RAGService:
         current_expression: str = None,
         hypothesis_pillar: str = None,
         task_id: int = None,
+        rag_ab_arm: str = "",
     ) -> RAGResult:
         """
         Query knowledge base for relevant patterns and pitfalls.
@@ -512,6 +513,7 @@ class RAGService:
                     max_patterns=max_patterns,
                     max_pitfalls=max_pitfalls,
                     task_id=task_id,
+                    rag_ab_arm=rag_ab_arm,
                 )
                 # Convert RAGEntry list → legacy List[Dict] shape so
                 # existing RAGService.RAGResult callers see no change.

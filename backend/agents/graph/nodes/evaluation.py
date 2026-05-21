@@ -3243,6 +3243,18 @@ async def node_evaluate(
             _a.metrics = _new_m
     # === end R8-v3 stamp ===
 
+    # === RAG category-overlap A/B stamp (2026-05-21) ===
+    # Copy the round's experiment arm onto every evaluated alpha's metrics so
+    # the alphas-table rows (PASS / PROV / OPTIMIZE / FAIL) carry it for
+    # scripts/rag_ab_report.py. "" when ENABLE_RAG_CATEGORY_AB OFF → no stamp.
+    _rag_ab_arm = getattr(state, "rag_ab_arm", "") or ""
+    if _rag_ab_arm and updated_alphas:
+        for _a in updated_alphas:
+            _new_m = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
+            _new_m["_rag_ab_arm"] = _rag_ab_arm
+            _a.metrics = _new_m
+    # === end RAG A/B stamp ===
+
     # === F13 Sprint 2 R13 hard-mode stamp → FAIL finalize (review fix) ===
     # Mirrors the R10/R10-v2 stamp → FAIL pattern: R13 hard mode no longer
     # transitions quality_status inline (avoids the same anti-pattern B3

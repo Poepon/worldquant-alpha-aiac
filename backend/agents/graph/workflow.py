@@ -450,6 +450,12 @@ class MiningWorkflow:
                 )
                 _g1_bandit_arm = None
 
+            # RAG category-overlap A/B (2026-05-21): the round's arm rides on
+            # the final graph state (node_rag_query set it). Stamp it onto
+            # AlphaFailure so the dominant failure side carries arm provenance
+            # for scripts/rag_ab_report.py. "" when ENABLE_RAG_CATEGORY_AB OFF.
+            _rag_ab_arm_buf = (result.get("rag_ab_arm") or "") if isinstance(result, dict) else ""
+
             # V-19.2 (2026-05-05): per-row SAVEPOINT persistence. Pre-V-19.2
             # used a single batch commit so one row's IntegrityError rolled
             # back the entire batch (spike B5/B6 + B7 lost 7/8 tasks of
@@ -681,6 +687,10 @@ class MiningWorkflow:
                         # so PASS+FAIL both reflect the round's arm. NULL
                         # when flag OFF / round 1 / read failed (soft-fail).
                         bandit_arm_recommended=_g1_bandit_arm,
+                        # RAG A/B (2026-05-21): per-round arm for FAIL path —
+                        # symmetric with Alpha.metrics["_rag_ab_arm"]. NULL when
+                        # ENABLE_RAG_CATEGORY_AB OFF (_rag_ab_arm_buf == "").
+                        rag_ab_arm=(_rag_ab_arm_buf or None),
                     )
                     async with self.db.begin_nested():
                         self.db.add(fail_record)

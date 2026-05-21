@@ -606,6 +606,10 @@ class Settings(BaseSettings):
     # truncated to the layer budget. Kill-switch: set == budget to degenerate
     # back to recency-only behavior with no code change.
     RAG_HIER_L1_CANDIDATE_CAP: int = 40
+    # 2026-05-21: RAG category-overlap A/B experiment harness (see
+    # feature_flag_service ENABLE_RAG_CATEGORY_AB). OFF = no A/B, category
+    # overlap always on (current P0 behavior). Registered in SUPPORTED_FLAGS.
+    ENABLE_RAG_CATEGORY_AB: bool = False
 
     # R8-v2 #3 (2026-05-18): R5 composite_score ranking for L2 SUCCESS。
     # layer2_family fetched 候选会 JOIN r1a_attribution_log.r5_composite_score

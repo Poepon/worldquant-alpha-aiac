@@ -1,16 +1,18 @@
 # 竞品分析 — 知识检索(RAG)环节应该怎么设计
 
-> **文档日期**:2026-05-21(**v2,经 2 路 fresh-agent 对抗性审查修订**,见 §7)
+> **文档日期**:2026-05-21(**v3 — P0 已 ship,根因与设计随实施重构**;v2 经 2 路 fresh-agent 审查,见 §7)
 > **承前**:[`competitive_analysis_v2_2026-05-19.md`](competitive_analysis_v2_2026-05-19.md)(系统层 25 系统对比)
 > **本文聚焦**:挖矿流程"第 1 步:知识检索"(RAG_QUERY)这一个环节 —— 各家怎么设计、AIAC 现状的实证缺陷、目标设计与路线
 > **触发**:生产观察到"第 1 步参考模式/避坑指南内容恒定不变",根因定位后做的横向设计调研
 > **前提**:本文描述的 bug **仅在 `ENABLE_HIERARCHICAL_RAG` override 为 ON 时成立**(`config.py:596` 默认 `False`)。该 flag 自 2026-05-18 被 DB override 置 ON,故现网命中。flag OFF 时走 legacy 路径,不发生 L1 坍缩。
+>
+> ⚠️ **v3 重大更新(commit `64c56f4`)**:v2 把 P0 设计成"在 L1 内 thread **单个** dataset_id 做软打分"。实施中用户提出两个根基性问题 —— **「一个 alpha 只用一个 dataset_id 吗?」「为什么很多新 alpha 的 dataset_id 是空的?」** —— 揭示了更深的真因:**单 dataset_id 本身就是错的检索 key**(一个 alpha 跨多数据集用字段;dataset_id 只是任务锚点且常空)。P0 因此重设计为 **按 dataset-category *集合* 做 set-overlap 匹配**(用已原子捕获的 `fields_used` 当真信号),并已 ship + 生产验证。§0/§1.4/§3-G7/§4.1/§5 据此重写;v2 的"thread 单 dataset_id"原案作废,见 §4.1。
 
 ---
 
 ## 0. 三条 take-away
 
-1. **AIAC 的"hierarchical RAG"与同名的 Alpha-GPT 方向相反、且在第 1 步退化为单层**。Alpha-GPT 是 *agent 主动 top-down 导航*(类目→子类→字段,生成**之前**用来在数万字段里收敛搜索空间);AIAC 是 *被动 fall-through 检索*(精确→pillar→family→字段,specific→broad)。第 1 步没有表达式时 **只有 L1-pillar 能 fire**,且 L1 是 `ORDER BY id DESC` + **完全忽略 dataset_id** → 返回该 pillar「最新 N 条」(N≤budget=5)→ **同一 region 内所有数据集拿到相同内容**。这就是生产里"参考模式/避坑指南都一样"的根因。(不同 region 因 pillar 推断不同,内容会变。)
+1. **根因不是"L1 忘了过滤 dataset_id",而是"检索 key 选错了"**(v3 修正)。表层症状:第 1 步无表达式 → 只有 L1-pillar 能 fire,L1 `ORDER BY id DESC` + 忽略 dataset → 同 region 所有数据集拿到该 pillar「最新 N 条」,内容恒定。但更深一层:**一个 alpha 不是单数据集的** —— 表达式跨多个 dataset 用字段(`mining_tasks.py:466` universal-PV merge、Phase1 cross-dataset hypothesis、`validation.py:127` `strict_field_check=False`),而 `dataset_id` 只是"任务锚点"且**常为空**(`state.dataset_id=""` 默认 / oneshot 未设 / flat 取不到)。所以"按单 dataset_id 匹配"无论怎么修都是有损的。**真信号 = 表达式用到的字段集合 → dataset-category 集合**,而 `alphas.fields_used` 已经原子捕获了这个字段集合,只是从没被检索用上。(对比:AIAC 的"hierarchical RAG"借了 Alpha-GPT 的名字却是相反方向 —— Alpha-GPT 是 agent 主动 top-down 导航,AIAC 是被动 fall-through。)
 
 2. **AIAC 检索无 embedding、无语义相似度;相关性靠精确匹配 + Python 端加权打分**。匹配手段是 JSONB `@>` containment / 文本 ILIKE / hash 相等。relevance 排序确实存在(legacy 的 composite score、L2 的 R5 历史分),但**第 1 步命中的 L1 这一层恰恰没有任何相关性排序,只有 `id DESC`**——这正是 bug 所在。对比 2026 业界标配 **dense 向量 + sparse(BM25)+ 全文 三路 hybrid + RRF 融合 + reranker**,AIAC 在"语义检索"这一维仍是空白。
 
@@ -72,6 +74,8 @@ ENABLE_HIERARCHICAL_RAG=ON(override)
 > - legacy **FAILURE** 路径(`rag_service.py:786-822`)**完全没有 dataset 项**,只按 severity/category/error_type/hypothesis-family。
 > 所以 legacy 比 hierarchical-L1 略好(success 侧有数据集倾向),但**不是可靠的 dataset-aware 检索**。这弱化了把"fall back legacy"当 P0 的吸引力(见 §4.1)。
 
+> **v3 as-built**:上面整条因果链的修复**不是**给 L1 补单 dataset 过滤(那仍是错 key),而是换 key —— L1 改为按 `meta_data.dataset_categories_used`(字段派生的 category 集合)做 set-overlap,**跨所有 pillar** 取候选(category 为主,pillar 仅软偏好),并 scoped 到第 1 步。详见 §4.1。
+
 ---
 
 ## 2. 竞品怎么设计知识检索
@@ -107,13 +111,13 @@ Experience Memory 存 **success pattern** + **forbidden region**(与库内已有
 
 | # | 维度 | 业界做法 | AIAC 现状 | 严重度 |
 |---|---|---|---|---|
-| G1 | **语义相关性** | dense 向量 + hybrid + rerank | 精确匹配 + Python 加权,无 embedding | 🔴 高 |
-| G2 | **第 1 步可用信号** | Alpha-GPT agent 导航 / FactorMiner memory signal | L1-only,`id DESC`,与 dataset 无关 | 🔴 高(当前 bug) |
+| G1 | **语义相关性** | dense 向量 + hybrid + rerank | category-集合 set-overlap(P0 已加,exact-category 非语义);仍无 embedding | 🟡 中(P0 部分补) |
+| G2 | **第 1 步可用信号** | Alpha-GPT agent 导航 / FactorMiner memory signal | ✅ **P0 已修**:category 集合驱动,跨数据集区分 | ✅ 已解决 |
 | G3 | **检索时机** | 生成前导航 + 生成中/自纠时再检索 | 仅每轮开头单发,self-correct 不检索 | 🟡 中 |
 | G4 | **正交/反样本导向** | forbidden region 主动避重(FactorMiner) | R4' 负通道有,但无"正交区"steering | 🟡 中(R10-v2 已规划) |
 | G5 | **agent 主动性** | LLM 自主 top-down 导航 (Alpha-GPT) | 被动单次 SQL | 🟡 中 |
 | G6 | **闭环回写** | PASS→抽 logic→反哺(AlphaLogics) | ingest 单向 | 🟢 低(G10 已规划) |
-| G7 | **dataset 粒度** | 字段级语义检索 | L1 完全忽略 dataset_id(无该入参) | 🔴 高(当前 bug) |
+| G7 | **dataset 粒度** | 字段级语义检索 | ✅ **P0 已修(category 级)**:按字段派生 category 集合匹配,非单 dataset_id。字段级语义仍待 P1 | 🟢 低(category 级已解决,字段级语义待 P1) |
 
 ---
 
@@ -121,17 +125,36 @@ Experience Memory 存 **success pattern** + **forbidden region**(与库内已有
 
 分四层递进。**P0 在 L1 源头修当前 bug;P1 补语义底座;P1.5 精排;P2 对齐 SOTA。**
 
-### 4.1 P0(立即,修症状)— 让第 1 步重新有 dataset 区分度
+### 4.1 P0(✅ 已 ship 2026-05-21,commit `64c56f4`)— 按 dataset-category 集合做 set-overlap 匹配
 
-> ⚠️ **审查否决了旧 v1 的"(b) 把 RAG 时机后移到 hypothesis 之后"**:`node_rag_query` 的产出 `state.patterns/pitfalls` **正是** distill_context(`generation.py:211`)+ hypothesis(`generation.py:1005,1011`)的 prompt 输入。把 RAG 移到 hypothesis 之后会**饿死 hypothesis**(拿不到任何 pattern/pitfall)。且"先决策后检索"与 Alpha-GPT 的"navigate-to-decide"方向相反。故 **(b)-as-move 作废**。
+> **本节是 as-built,取代 v2 的两个原案**:
+> - v2 (b)"把 RAG 时机后移到 hypothesis 之后" —— 早被审查否决(会饿死 hypothesis,`generation.py:211/1005/1011` 消费 RAG 产出);
+> - v2 (c)"在 L1 thread **单个** dataset_id 做软打分" —— 被用户根基提问推翻:**单 dataset_id 是错 key**(§0 #1)。
+> 真正 ship 的是下面的 **category-集合 set-overlap**。
 
-推荐 **(c) 在 L1 源头修**(真根因修复):
+**核心:把检索 key 从「单 dataset_id」换成「字段派生的 dataset-category 集合」,做 set-overlap 匹配。**
 
-- `layer1_pillar` 当前签名 `(current_expression, hypothesis_pillar, region, budget)` —— **没有 dataset_id 入参**(orchestrator 也没往下传)。P0:把 `dataset_id` / `dataset_category` 一路 thread 进 `layer1_pillar`,作为 **soft 打分项**(不是 hard `WHERE` —— 多数行无 dataset stamp,硬过滤会清空结果),并把 `ORDER BY id DESC` 换成 **pillar 命中集内按 `expected_sharpe`/`usage`(JSONB 取值,Python 端排序)+ 轻随机** 选取。本质是把 legacy 已有的 composite 打分逻辑,scoped 到 pillar 命中集。
-- 效果:第 1 步对同 region 不同 dataset 给出不同且更相关的 patterns;同时拿掉"永远最新一条"的死板。
-- 备选 **(a) fall back legacy**:实现更小(`query()` 加分支),但据 §1.4 修正,legacy 只有 success 侧部分 dataset-aware、failure 侧完全不 aware —— 是治标的次选,不如 (c) 治本。
+1. **打标 — `resolve_field_categories(fields|expr, region, db)`**(`rag_service.py`):提字段 → 查 `datafields` 表(`field_id`→`category`,USA-only 5937 行)→ canonical 集合(`{pv,analyst,fundamental,news,option,socialmedia,sentiment,model,other}`)。算子/常量 token 查不到 → 自然丢弃。
+   - **record 时**:`record_success/failure_pattern` 从 full `expression`(截断前)算,写 `meta_data['dataset_categories_used']`。
+   - **回填存量**:`scripts/backfill_kb_dataset_categories.py` 三 tier(`alpha_id`/`alpha_id_ref`→`alphas.fields_used` / `example_expression` / 任意 source 的 concrete `pattern`),skeleton-only 留空。**已 apply:477 行,覆盖 0→63.8%**,幂等 + provenance(`backfill_batch`)。
+   - **修污染源**:`external_knowledge.import_curated_patterns` 改从 concrete pattern 跑 resolver(原来写自由文本 `ext.category`,是 split-vocab 来源)。
+   - **统一词表**:`infer_dataset_category`(query 侧)扩 option/socialmedia/sentiment/model,**socialmedia 拆出 news**(否则 news18==socialmedia8),与 datafields 词表对齐。
 
-> 注:`expected_sharpe` 在 `meta_data` JSONB 里,不是列;SQL 端 `ORDER BY` 需 `meta_data->>'expected_sharpe'` 转型且无索引,故建议在 Python 端排序(候选集 ≤ budget*2,量小)。
+2. **检索 — L1 重设计**(`hierarchical_rag.py:layer1_pillar`):
+   - **relevance-first 两遍候选**(治本 R3 的 newest-N 排除):pass1 按 query category 集合 `meta_data @> {dataset_categories_used:[c]}` OR 起来取(走 `ix_kb_meta_data_gin`),**跨所有 pillar**;pass2 pillar-scoped newest 补满 `RAG_HIER_L1_CANDIDATE_CAP=40`。
+   - **打分**:category 重叠数 × `RAG_SCORE_CATEGORY_EXACT` + 精确 dataset bonus + quality;元组 `(score, recency_idx)` 排序取 budget。无 category 命中时退化为 quality-ranked(非 raw newest)。
+   - **pillar 解耦**(关键):category 是**主过滤**;G4 推断的单一 pillar 噪声大(~1% pool 驱动)且会把非该 pillar 的 category 收窄塌缩,故 pass1 **不**用 pillar,pillar 仅作 pass2 fill 软偏好。`query()` dispatch gate 加 `dataset_id`(无 pillar 也能 fire)。
+   - **scoped step-1**:仅 `current_expression` 为空(第 1 步)时启用 category 检索;有表达式时 L1 退回 pillar-only newest(避免抢占 L2/L3 的共享 pattern 预算)。
+   - **cache key 加 dataset**(`_make_layer_cache_key` 的 L1 params),否则 per-layer Redis 缓存会掩盖 dataset 差异。
+
+3. **kill-switch**:`RAG_HIER_L1_CANDIDATE_CAP` 设成 budget 即退化回旧行为;整条仍受 `ENABLE_HIERARCHICAL_RAG` 门控。不加新 flag。
+
+**实测(真库 + 已回填)**:pv1→pv / fundamental6→fundamental / news18→news / analyst4→analyst / option9→option,第 1 步检索**两两全不同且各命中对应 category**。107 RAG 测试 + baseline 6/6 0 漂移。
+
+**残留 gap(graceful 降级,非 bug)**:
+- `datafields` 仅 USA → 非 USA 行(CHN 等)解析空 → 落 quality/recency fallback;
+- skeleton-only 行无具体字段 → 36% 未覆盖,同样 fallback;
+- → 提升覆盖见 §5 P0.5。这也是 §4.2 pgvector 的动机之一(embedding 不依赖 datafields 目录、可处理未标注尾部)。
 
 ### 4.2 P1(补语义底座)— pgvector + hybrid 检索 ⚠️ **新增基础设施,非"零成本"**
 
@@ -165,16 +188,20 @@ Experience Memory 存 **success pattern** + **forbidden region**(与库内已有
 
 ## 5. 路线与优先级
 
-| 优先级 | 项 | 工时(修正后) | 修哪个 gap | 依赖 |
+| 优先级 | 项 | 状态/工时 | 修哪个 gap | 依赖 |
 |---|---|---|---|---|
-| **P0** | 4.1 (c) L1 源头 thread dataset_id + 去 recency 排序(或 (a) fallback) | 1-2 人日 | G2/G7 | 无,立即可做 |
-| **P1** | 4.2 pgvector **扩展安装 + embedding provider** + hybrid + RRF + 回填 | **≥10 人日**(infra + 新依赖 + 回填,远超旧估 4-5) | G1 | DB 镜像/扩展 + embedding 选型 |
-| **P1.5** | 4.3 **新建** LLM reranker + batch/成本守卫 | 3-4 人日 | G1 | P1 落地后 |
-| **P2** | 4.4 第二次检索(add)+ agent 导航 | 3-4 人日 | G3/G5 | P1 |
+| **P0** | 4.1 category-集合 set-overlap(打标 + 回填 + L1 重设计 + pillar 解耦) | ✅ **已 ship**(`64c56f4`,实际远超 v2 估的 1-2 人日) | G2/G7 | — |
+| **P0.5** | 提升回填覆盖(现 63.8%):datafields 同步到非 USA region;skeleton 行经 alpha_id 链更激进派生 | 1-2 人日 | G7 尾部 | sync 扩 region |
+| **P1** | 4.2 pgvector + hybrid + RRF —— **重定位为 category 之上的语义层**(within-category 排序 + 模糊字段匹配 + 覆盖未标注/非 USA 尾部),不再是"主相关性机制" | **≥10 人日**(infra + 新依赖 + 回填) | G1 | DB 镜像/扩展 + embedding 选型 |
+| **P1.5** | 4.3 **新建** LLM reranker + batch/成本守卫 | 3-4 人日 | G1 | P1 |
+| **P2** | 4.4 第二次检索(hypothesis 后,add 非 move)+ agent 导航 | 3-4 人日 | G3/G5 | — |
 | **P2** | forbidden-region(合并 R10-v2) | 2 人日 | G4 | R10-v2 |
 | **P2** | 闭环蒸馏(合并 G10) | 4 人日 | G6 | G10 |
 
-**建议序**:先 **P0 (c)** 本周止血(flag-gated,符合 default-OFF + 观察期文化,且不锁死 workflow 形态)→ 评估 P1 的 infra 成本后再决定是否上 pgvector(这是最大投入,需单独 plan 含镜像/扩展/embedding 选型 + Windows dev 路径)→ P1.5 → P2 顺 G10/R10-v2 既有路线合并。
+**重估后的建议序**(P0 已 ship 改变了路线优先级):
+1. **P0.5 先做**(便宜、直接抬 P0 收益):现 63.8% 覆盖,非 USA + skeleton 行落 fallback。把 `datafields` sync 扩到其它 region + 对 skeleton 行用 `alpha_id→fields_used` 更激进派生,能把覆盖推向 ~90%。**这是当前性价比最高的下一步。**
+2. **P1(pgvector)降级、不急**:category-集合已提供真 relevance 信号(实测区分 5 数据集),pgvector 从"主相关性机制"变成"锦上添花的语义层"(within-category 模糊排序 + 兜未标注尾部)。仍是最大 infra 投入,需单独 plan 评估镜像/扩展/embedding + Windows dev 路径,**等 P0 观察期数据再决定是否值得**。
+3. P1.5 / P2 顺 G10/R10-v2 既有路线合并。
 
 > **不学**:全套 PPO/RL 检索(TLRS)—— BRAIN 日级 sim 限额下不划算;naive 大向量模型 —— 业界已验证小 embedding + LLM rerank 更优。
 
@@ -206,6 +233,15 @@ Experience Memory 存 **success pattern** + **forbidden region**(与库内已有
 
 **SHOULD-FIX**:FactorMiner 60/20 标注为自有 ablation、不外推 AIAC(§0#3/§2.2);L1 条件触发(可返回 None / "other" 短路);`expected_sharpe` 是 JSONB key 非列(§4.1 注);存量 count 标注为注释/待核实;"最新一条"→"最新 N≤5 条";作用域限"同 region 内"。
 
+### 7.1 v3 实施轮(2026-05-21,P0 ship + 用户根基重构)
+
+v2 定稿后进入实施,又经 2 轮真库审计 + 用户两个根基提问,把 P0 从"thread 单 dataset_id"重定向为"category 集合 set-overlap":
+- **R3 真库打分模拟**:newest-N cap 结构性排除 stamped 行 → 主力 momentum pillar(72%)对用户数据集 no-op;G4 pillar 由 27/2427 alpha 驱动噪声大。→ 驱动 relevance-first + pillar 解耦。
+- **R4 真库端到端模拟**:PV-dominance 证伪(USA alpha 仅 46.5% 含 pv);字段→category 解析率 76%/100%;pv1≠fundamental6≠news18 → **方案成立**。修正 `datafields.field_id` 真表名/列名、concrete-pattern tier 开给所有 source(覆盖 35%→63.8%)、词表补 option/socialmedia/model/sentiment。
+- **用户根基提问** → 推翻"单 dataset_id"key 本身,改用 `fields_used`→category 集合(§0 #1)。
+- **实施中又一发现**:初版 pass1 仍按 G4 pillar 过滤 → 只有 pv1 区分开、其余 4 个塌缩;改 pass1 跨所有 pillar(category 为主)后 5 数据集全区分 —— 即 §4.1 的 as-built。
+- **防回归**:category 检索 scoped 到 step-1(无表达式),later-step L1 退回 pillar-only,不抢 L2/L3 预算(E2E 坐实)。
+
 ---
 
-*本文聚焦知识检索单环节,是 v2 系统层竞品分析的纵深补充。下一步:P0 (c) 可直接实施;P1 pgvector 是最大投入,需单独 plan 评估 infra/embedding 选型后再决策。*
+*本文聚焦知识检索单环节,是 v2 系统层竞品分析的纵深补充。**v3 现状**:P0(category-集合 set-overlap)已 ship + 生产验证;下一步性价比最高的是 **P0.5 提升回填覆盖**(datafields 扩 region + skeleton 行派生);P1 pgvector 已降级为"语义层增强",等 P0 观察期数据再评估是否值得这笔 infra 投入。*

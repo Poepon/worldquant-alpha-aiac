@@ -96,6 +96,19 @@ async def node_rag_query(
             _hids_for_rag = state.current_hypothesis_ids or []
             if _hids_for_rag:
                 _hid_for_rag = _hids_for_rag[0]
+        # RAG category-overlap A/B (2026-05-21): per-round arm assignment.
+        # Deterministic + balanced (alternates within a task, balanced across
+        # tasks); avoids Python hash() salting. OFF → "" → category always on.
+        _rag_arm = ""
+        try:
+            from backend.config import settings as _ab_stg
+            if getattr(_ab_stg, "ENABLE_RAG_CATEGORY_AB", False):
+                _tid = int(getattr(state, "task_id", 0) or 0)
+                _rnd = int(getattr(state, "current_round", 0) or 0)
+                _rag_arm = "category" if (_tid + _rnd) % 2 == 0 else "control"
+        except Exception as _ab_e:
+            logger.debug(f"[{node_name}] rag_ab_arm assignment skipped: {_ab_e}")
+            _rag_arm = ""
         result = await rag_service.query(
             dataset_id=state.dataset_id,
             region=state.region,
@@ -106,6 +119,7 @@ async def node_rag_query(
             # r8_query_log row (when ENABLE_R8_QUERY_LOG ON) is attributable
             # to the originating task instead of always NULL.
             task_id=getattr(state, "task_id", None),
+            rag_ab_arm=_rag_arm,
         )
         
         duration_ms = int((time.time() - start_time) * 1000)
@@ -145,6 +159,9 @@ async def node_rag_query(
             "pitfalls": result.pitfalls,
             "dataset_description": description,
             "dataset_category": full_category,
+            # A/B arm for THIS round → state-merge so evaluation/persistence
+            # can stamp it onto alpha.metrics + alpha_failures.
+            "rag_ab_arm": _rag_arm,
             **trace_update
         }
         

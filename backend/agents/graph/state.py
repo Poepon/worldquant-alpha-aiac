@@ -181,6 +181,16 @@ class MiningState(BaseModel):
     # is OFF or no rows qualified — stamp key omitted in that case.
     g8_forest_referenced_ids: List[int] = Field(default_factory=list)
 
+    # RAG category-overlap A/B (2026-05-21): per-round experiment arm,
+    # "control" (layer1_pillar suppresses dataset-category derivation) or
+    # "category" (P0 behavior). Assigned in node_rag_query via
+    # hash((task_id, current_round)) % 2 when ENABLE_RAG_CATEGORY_AB is ON;
+    # "" when the flag is OFF (→ no A/B, category overlap always on). Copied
+    # onto alpha.metrics["_rag_ab_arm"] at evaluation (mirrors
+    # cognitive_layer_id_used) + alpha_failures.rag_ab_arm at workflow persist,
+    # so scripts/rag_ab_report.py can compute PASS-per-real-sim by arm.
+    rag_ab_arm: str = ""
+
     # G5 Phase A (2026-05-19): crossover offspring candidates carried from the
     # PRIOR round via task.config["g5_pending_offspring"] consume. Each entry:
     # {expression, combination_strategy, rationale, parent_a_alpha_id,
