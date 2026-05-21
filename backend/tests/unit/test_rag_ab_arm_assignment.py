@@ -37,29 +37,25 @@ async def test_flag_off_arm_empty(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_flag_on_deterministic_balanced(monkeypatch):
-    from backend.config import settings
-    monkeypatch.setattr(settings, "ENABLE_RAG_CATEGORY_AB", True, raising=False)
-
-    # (task_id + round) % 2 == 0 → category ; else control
-    cases = [(2, 0, "category"), (3, 0, "control"), (2, 1, "control"), (3, 1, "category"), (10, 4, "category")]
-    for tid, rnd, expected in cases:
-        rag = _mock_rag()
-        out = await node_rag_query(_state(tid, rnd), rag, config=None)
-        assert out["rag_ab_arm"] == expected, f"task={tid} round={rnd}"
-        assert rag.query.call_args.kwargs["rag_ab_arm"] == expected
-
-
-@pytest.mark.asyncio
-async def test_within_task_alternates_across_rounds(monkeypatch):
-    """Same task, consecutive rounds flip arm → within-task randomization."""
+async def test_flag_on_assigns_valid_arm_and_threads(monkeypatch):
     from backend.config import settings
     monkeypatch.setattr(settings, "ENABLE_RAG_CATEGORY_AB", True, raising=False)
     rag = _mock_rag()
-    arms = []
-    for rnd in range(6):
-        out = await node_rag_query(_state(7, rnd), rag, config=None)
-        arms.append(out["rag_ab_arm"])
-    # alternating pattern, both arms present
-    assert set(arms) == {"control", "category"}
-    assert all(arms[i] != arms[i + 1] for i in range(len(arms) - 1))
+    out = await node_rag_query(_state(3, 0), rag, config=None)
+    assert out["rag_ab_arm"] in ("control", "category")
+    # the same arm is threaded into rag_service.query()
+    assert rag.query.call_args.kwargs["rag_ab_arm"] == out["rag_ab_arm"]
+
+
+@pytest.mark.asyncio
+async def test_random_within_task_yields_both_arms(monkeypatch):
+    """True per-round randomization → a single FLAT task accrues BOTH arms
+    (fixes the per-task-fixed bug where current_round=0 stuck one arm)."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "ENABLE_RAG_CATEGORY_AB", True, raising=False)
+    rag = _mock_rag()
+    arms = set()
+    for _ in range(40):  # P(miss an arm) = 2 * 0.5^40 ≈ 0
+        out = await node_rag_query(_state(3, 0), rag, config=None)  # same task+round
+        arms.add(out["rag_ab_arm"])
+    assert arms == {"control", "category"}, f"expected both arms, got {arms}"

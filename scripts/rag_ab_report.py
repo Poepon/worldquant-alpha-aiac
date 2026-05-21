@@ -100,23 +100,12 @@ async def _report(days: int) -> dict:
 
             denom = den_alphas + den_fail
 
-            # cost: llm_call_log attributed by deterministic arm, restricted to
-            # task_ids that have arm-stamped rows (A/B window).
-            cost = (await db.execute(text(f"""
-                WITH ab_tasks AS (
-                    SELECT DISTINCT task_id FROM alphas
-                    WHERE metrics->>'_rag_ab_arm' IN ('control','category') AND {win}
-                    UNION
-                    SELECT DISTINCT task_id FROM alpha_failures
-                    WHERE rag_ab_arm IN ('control','category') AND {win}
-                )
-                SELECT COALESCE(sum(l.cost_usd),0)
-                FROM llm_call_log l
-                WHERE l.task_id IN (SELECT task_id FROM ab_tasks)
-                  AND l.task_id IS NOT NULL AND l.round_idx IS NOT NULL
-                  AND (CASE WHEN (l.task_id + l.round_idx) % 2 = 0 THEN 'category' ELSE 'control' END) = :arm
-                  AND l.created_at >= now() - interval '{int(days)} days'
-            """), {"arm": arm})).scalar() or 0.0
+            # cost-per-arm intentionally omitted: the arm is assigned by true
+            # per-round randomization (node_rag_query), so it can't be derived
+            # for llm_call_log rows (they're not arm-stamped). PASS-per-real-sim
+            # below is the headline metric. (To get cost-by-arm later, stamp
+            # the arm onto llm_call_log too.)
+            cost = 0.0
 
             lo, hi = _wilson_ci(num, denom)
             out["arms"][arm] = {
@@ -126,8 +115,7 @@ async def _report(days: int) -> dict:
                 "  (failures)": int(den_fail),
                 "pass_rate": round(num / denom, 4) if denom else None,
                 "wilson95": (round(lo, 4), round(hi, 4)) if denom else None,
-                "llm_cost_usd": round(float(cost), 4),
-                "cost_per_pass_usd": round(float(cost) / num, 4) if num else None,
+                "cost_per_pass_usd": "n/a (random arm; llm_call_log not arm-stamped)",
             }
 
     c, k = out["arms"]["control"], out["arms"]["category"]

@@ -947,6 +947,10 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
             # fallback for LangGraph propagation drops, identical to the
             # PASS path above).
             hypothesis_id=current_hypothesis_id,
+            # RAG A/B (2026-05-21): stamp the round's arm from state here (the
+            # reliable source — alphas use the same state.rag_ab_arm). Failures
+            # dominate the PASS-per-real-sim denominator, so this must be set.
+            rag_ab_arm=(getattr(state, "rag_ab_arm", "") or None),
         )
         fail_batch.append(rec)
     

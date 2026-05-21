@@ -85,6 +85,10 @@ class FailureRecord(BaseModel):
     # via the same hypothesis_id key; previously FAIL alphas were
     # attribution-orphaned (alpha_failures had no hypothesis_id column).
     hypothesis_id: Optional[int] = None
+    # RAG A/B (2026-05-21): per-round arm, stamped from state.rag_ab_arm at
+    # node_save_results so the FAIL-path persist (workflow.run_with_persistence)
+    # carries it reliably (the final-state `result` dict was not propagating it).
+    rag_ab_arm: Optional[str] = None
 
 
 class TraceStepData(BaseModel):

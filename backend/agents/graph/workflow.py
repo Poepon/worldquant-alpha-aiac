@@ -687,10 +687,10 @@ class MiningWorkflow:
                         # so PASS+FAIL both reflect the round's arm. NULL
                         # when flag OFF / round 1 / read failed (soft-fail).
                         bandit_arm_recommended=_g1_bandit_arm,
-                        # RAG A/B (2026-05-21): per-round arm for FAIL path —
-                        # symmetric with Alpha.metrics["_rag_ab_arm"]. NULL when
-                        # ENABLE_RAG_CATEGORY_AB OFF (_rag_ab_arm_buf == "").
-                        rag_ab_arm=(_rag_ab_arm_buf or None),
+                        # RAG A/B (2026-05-21): per-round arm for FAIL path.
+                        # Prefer the value stamped on the FailureRecord from
+                        # state (reliable); fall back to the final-state read.
+                        rag_ab_arm=(getattr(failure, "rag_ab_arm", None) or _rag_ab_arm_buf or None),
                     )
                     async with self.db.begin_nested():
                         self.db.add(fail_record)
