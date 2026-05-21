@@ -41,3 +41,44 @@ def test_two_proportion_z_empty_arm_safe():
 
 def test_arms_constant():
     assert rep._ARMS == ("control", "category")
+
+
+# --- continuous-metric stats (2026-05-21 measurement reinforcement) --------
+
+def test_welch_identical_means_no_signal():
+    t, p, df = rep._welch_from_summary(0.5, 1.0, 50, 0.5, 1.0, 50)
+    assert abs(t) < 1e-9 and p > 0.99
+
+
+def test_welch_clear_difference_significant():
+    # mean diff 1.0, var 1.0, n 50 each → t = 1/sqrt(0.04) = 5 → p tiny
+    t, p, df = rep._welch_from_summary(1.0, 1.0, 50, 0.0, 1.0, 50)
+    assert t > 4 and p < 0.05 and df > 0
+
+
+def test_welch_degenerate_small_n_safe():
+    assert rep._welch_from_summary(1.0, 1.0, 1, 0.0, 1.0, 50) == (0.0, 1.0, 0.0)
+
+
+def test_cohens_d_one_sd_apart():
+    # pooled sd = 1 → d = (1-0)/1 = 1.0
+    assert abs(rep._cohens_d(1.0, 1.0, 50, 0.0, 1.0, 50) - 1.0) < 1e-6
+
+
+def test_cohens_d_degenerate_zero():
+    assert rep._cohens_d(1.0, 0.0, 1, 0.0, 0.0, 1) == 0.0
+
+
+def test_required_n_medium_effect():
+    # d=0.5 at alpha .05 / power .80 → ~63 per arm
+    assert rep._required_n_per_arm(0.5) == 63
+
+
+def test_required_n_tiny_effect_is_huge():
+    # negligible effect → enormous required n (matches the live d≈0.02 ⇒ ~30k)
+    assert rep._required_n_per_arm(0.02) > 20000
+
+
+def test_required_n_zero_effect_returns_none():
+    assert rep._required_n_per_arm(0.0) is None
+    assert rep._required_n_per_arm(None) is None

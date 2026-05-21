@@ -67,6 +67,50 @@ def _two_proportion_z(p1: int, n1: int, p2: int, n2: int):
     return (z, p)
 
 
+# --- continuous-metric stats (Welch t, Cohen's d, required-n) --------------
+# Why: PASS-per-sim is a ~1.5%-base binary → needs thousands of sims/arm to read
+# out (months). A continuous quality signal (in-sample sharpe / composite score)
+# has far more power — readable at n~50-100. These are summary-stat (no row pull)
+# helpers; p is a normal approximation (df is typically >30 here, error small).
+_Z_ALPHA_2 = 1.959964   # two-sided alpha=0.05
+_Z_POWER_80 = 0.841621  # power=0.80
+
+
+def _welch_from_summary(m1, v1, n1, m2, v2, n2):
+    """Welch's t (unequal variance) from summary stats → (t, two-sided p, df).
+
+    p via normal approx (consistent with _two_proportion_z; df reported so the
+    reader can judge). v1/v2 are SAMPLE variances. Degenerate inputs → (0,1,0)."""
+    if n1 < 2 or n2 < 2:
+        return (0.0, 1.0, 0.0)
+    se2 = v1 / n1 + v2 / n2
+    if se2 <= 0:
+        return (0.0, 1.0, 0.0)
+    t = (m1 - m2) / math.sqrt(se2)
+    # Welch–Satterthwaite df (for transparency; p uses normal approx)
+    df = se2 * se2 / ((v1 / n1) ** 2 / (n1 - 1) + (v2 / n2) ** 2 / (n2 - 1))
+    p = 2 * (1 - 0.5 * (1 + math.erf(abs(t) / math.sqrt(2))))
+    return (t, p, df)
+
+
+def _cohens_d(m1, v1, n1, m2, v2, n2):
+    """Pooled-SD Cohen's d effect size from summary stats. 0 on degenerate."""
+    if n1 < 2 or n2 < 2:
+        return 0.0
+    sp2 = ((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2)
+    if sp2 <= 0:
+        return 0.0
+    return (m1 - m2) / math.sqrt(sp2)
+
+
+def _required_n_per_arm(d, z_alpha2=_Z_ALPHA_2, z_power=_Z_POWER_80):
+    """Approx per-arm n to detect effect size |d| at the given alpha/power
+    (two-sample, normal approx). Tiny |d| → huge n (returns None if ~0)."""
+    if not d or abs(d) < 1e-6:
+        return None
+    return int(math.ceil(2 * ((z_alpha2 + z_power) / abs(d)) ** 2))
+
+
 async def _report(days: int) -> dict:
     out = {"days": days, "arms": {}}
     async with AsyncSessionLocal() as db:
@@ -118,11 +162,63 @@ async def _report(days: int) -> dict:
                 "cost_per_pass_usd": "n/a (random arm; llm_call_log not arm-stamped)",
             }
 
+        # --- continuous quality signal per arm (higher statistical power) ---
+        # in-sample sharpe (typed column) is the primary signal; _score composite
+        # secondary; plus higher-frequency sub-bars (sharpe>0.5/1.0, OPTIMIZE/PASS).
+        # Same denominator as PASS (arm-stamped alphas that actually hit BRAIN).
+        cont = {}
+        for arm in _ARMS:
+            row = (await db.execute(text(f"""
+                SELECT count(*) n,
+                       avg(is_sharpe) sharpe_mean,
+                       var_samp(is_sharpe) sharpe_var,
+                       avg((metrics->>'_score')::numeric)
+                           FILTER (WHERE (metrics->>'_score') ~ '^-?[0-9.]+$') score_mean,
+                       count(*) FILTER (WHERE is_sharpe > 0.5) n_s05,
+                       count(*) FILTER (WHERE is_sharpe > 1.0) n_s10,
+                       count(*) FILTER (WHERE quality_status IN ('OPTIMIZE','PASS','PASS_PROVISIONAL')) n_op
+                FROM alphas
+                WHERE task_id IS NOT NULL
+                  AND metrics->>'_rag_ab_arm' = :arm
+                  AND COALESCE(metrics->>'_pre_brain_skip','') <> 'true'
+                  AND is_sharpe IS NOT NULL
+                  AND {win}
+            """), {"arm": arm})).first()
+            n = int(row[0] or 0)
+            cont[arm] = {
+                "n": n,
+                "sharpe_mean": round(float(row[1]), 4) if row[1] is not None else None,
+                "sharpe_var": float(row[2]) if row[2] is not None else None,
+                "score_mean": round(float(row[3]), 4) if row[3] is not None else None,
+                "sharpe_gt_0.5_rate": round(int(row[4]) / n, 4) if n else None,
+                "sharpe_gt_1.0_rate": round(int(row[5]) / n, 4) if n else None,
+                "optimize_or_pass_rate": round(int(row[6]) / n, 4) if n else None,
+            }
+        out["continuous"] = cont
+
     c, k = out["arms"]["control"], out["arms"]["category"]
     z, p = _two_proportion_z(k["passes"], k["real_sims"], c["passes"], c["real_sims"])
     out["z"] = round(z, 3)
     out["p_value"] = round(p, 4)
     out["insufficient_sample"] = (c["real_sims"] < _MIN_DENOM or k["real_sims"] < _MIN_DENOM)
+
+    # Continuous in-sample-sharpe contrast (Welch t + Cohen's d + required-n).
+    cc, ck = out["continuous"]["control"], out["continuous"]["category"]
+    if cc["sharpe_var"] is not None and ck["sharpe_var"] is not None and cc["n"] >= 2 and ck["n"] >= 2:
+        t, pc, df = _welch_from_summary(ck["sharpe_mean"], ck["sharpe_var"], ck["n"],
+                                        cc["sharpe_mean"], cc["sharpe_var"], cc["n"])
+        d = _cohens_d(ck["sharpe_mean"], ck["sharpe_var"], ck["n"],
+                      cc["sharpe_mean"], cc["sharpe_var"], cc["n"])
+        out["sharpe_welch_t"] = round(t, 3)
+        out["sharpe_p_value"] = round(pc, 4)
+        out["sharpe_welch_df"] = round(df, 1)
+        out["sharpe_cohens_d"] = round(d, 3)
+        out["sharpe_required_n_per_arm"] = _required_n_per_arm(d)
+    else:
+        out["sharpe_welch_t"] = None
+        out["sharpe_p_value"] = None
+        out["sharpe_cohens_d"] = None
+        out["sharpe_required_n_per_arm"] = None
     return out
 
 
@@ -138,16 +234,43 @@ def main() -> int:
         print(f"\n[{arm}]")
         for k, v in a.items():
             print(f"  {k}: {v}")
-    print(f"\nz={r['z']}  p={r['p_value']}  (category vs control pass-rate)")
+    print(f"\nz={r['z']}  p={r['p_value']}  (category vs control PASS-per-sim)")
     if r["insufficient_sample"]:
-        print(f"  ⚠️ INSUFFICIENT SAMPLE (need ≥{_MIN_DENOM} real_sims per arm) — "
-              f"accumulate more A/B rounds before concluding.")
+        print(f"  ⚠️ PASS-per-sim INSUFFICIENT SAMPLE (need ≥{_MIN_DENOM} real_sims per arm; "
+              f"~1.5% base rate ⇒ needs thousands — see continuous block below for a "
+              f"higher-power read).")
     elif r["p_value"] < 0.05:
         better = "category" if (r["arms"]["category"]["pass_rate"] or 0) > (r["arms"]["control"]["pass_rate"] or 0) else "control"
         print(f"  ✓ significant (p<0.05): '{better}' arm higher PASS-per-sim.")
     else:
         print(f"  = no significant difference (p≥0.05) — P0 category-overlap not "
               f"shown to move PASS-per-sim at current n.")
+
+    # --- continuous quality signal (higher power than rare PASS) ---
+    print("\n=== continuous quality signal (in-sample sharpe; higher power) ===")
+    for arm in _ARMS:
+        cm = r["continuous"][arm]
+        print(f"\n[{arm}]")
+        for k, v in cm.items():
+            print(f"  {k}: {v}")
+    d = r.get("sharpe_cohens_d")
+    pc = r.get("sharpe_p_value")
+    req = r.get("sharpe_required_n_per_arm")
+    if d is None:
+        print("\n  ⚠️ not enough arm-stamped sims with is_sharpe to compare yet.")
+    else:
+        print(f"\nis_sharpe: Welch t={r['sharpe_welch_t']} p={pc} df={r.get('sharpe_welch_df')} "
+              f"Cohen_d={d}")
+        if pc < 0.05:
+            better = "category" if (r['continuous']['category']['sharpe_mean'] or 0) > (r['continuous']['control']['sharpe_mean'] or 0) else "control"
+            print(f"  ✓ significant (p<0.05): '{better}' arm higher in-sample sharpe "
+                  f"(effect size d={d}).")
+        else:
+            msg = (f"  = no significant difference (p≥0.05). To detect the observed "
+                   f"effect (d={d}) at 80% power you'd need ~{req} sims/arm")
+            print(msg + "." if req else
+                  "  = effectively zero effect (d≈0) — category-overlap does not move "
+                  "in-sample sharpe; further RAG investment unlikely to pay off.")
     return 0
 
 
