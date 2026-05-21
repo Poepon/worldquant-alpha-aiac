@@ -161,13 +161,15 @@ cd frontend
 start "AIAC Frontend" cmd /k "npm run dev"
 cd ..
 
-REM Start 3 Celery workers in parallel — Windows --pool=solo means
-REM 1 task/worker, so 3 workers = 3 concurrent mining tasks. Hostnames
-REM and logfiles ensure each worker is independently inspectable.
-echo [INFO] Starting Celery Workers (3 instances)...
+REM Start a SINGLE Celery worker (2026-05-21). Was 3 parallel --pool=solo
+REM workers, but multiple worker PROCESSES each hold their own BrainAdapter
+REM session and thrash one shared BRAIN login (401 storm → zombie RUNNING
+REM tasks producing 0 alphas; see memory project_brain_session_thrash_fix).
+REM One worker = one BRAIN session = no inter-process thrash. Trade-off:
+REM concurrency 1 (one mining task at a time); --pool=solo already serialized
+REM each worker, so this only drops cross-task parallelism.
+echo [INFO] Starting Celery Worker (single instance)...
 start "AIAC Celery Worker 1" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -n worker1@%%h --logfile=.celery_worker1.log"
-start "AIAC Celery Worker 2" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -n worker2@%%h --logfile=.celery_worker2.log"
-start "AIAC Celery Worker 3" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app worker --loglevel=info --pool=solo -n worker3@%%h --logfile=.celery_worker3.log"
 
 REM Start Celery Beat — drives the scheduled tasks declared in
 REM celery_app.beat_schedule (V-19.7 watchdog every 5min, quota guard
