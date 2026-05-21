@@ -438,6 +438,11 @@ class BrainAdapter:
             
             if cookies_json:
                 cookies = json.loads(cookies_json)
+                # 2026-05-21: clear first. update()-ing into a jar that already
+                # holds a 't' cookie accumulates duplicates (different path/
+                # domain); simulate then sends multiple 't=' and BRAIN may resolve
+                # the STALE one → 401. Reset to exactly the shared session.
+                self.client.cookies.clear()
                 self.client.cookies.update(cookies)
                 logger.debug("Loaded session cookies from Redis")
                 # When loaded from Redis, we trust it aligns with expiry.
@@ -469,7 +474,16 @@ class BrainAdapter:
     async def _save_session_to_redis(self, expiry_seconds: int):
         """Save current cookies to Redis with TTL."""
         try:
-            cookies = dict(self.client.cookies)
+            # 2026-05-21: iterate the jar instead of dict(self.client.cookies).
+            # The long-lived global client accumulates DUPLICATE 't' cookies
+            # across repeated re-auths (BRAIN set-cookie on a slightly different
+            # path/domain each time), and dict(self.client.cookies) then raises
+            # CookieConflict ("Multiple cookies exist with name=t"). That
+            # exception was swallowed below → session NEVER written to Redis →
+            # the shared session stays empty → every process logs in on its own
+            # → BRAIN single-active mutual eviction (the task-3332 thrash). Take
+            # the last (newest) value per cookie name; never raise.
+            cookies = {c.name: c.value for c in self.client.cookies.jar}
             if not cookies:
                 return
                 
@@ -570,6 +584,16 @@ class BrainAdapter:
             if response.status_code == 201:
                 logger.info("BRAIN authentication successful")
 
+                # 2026-05-21: collapse the jar to the newest token. BRAIN's
+                # set-cookie accumulates a duplicate 't' on the long-lived global
+                # client across re-auths; left as-is it breaks _save_session_to_redis
+                # (CookieConflict → session never persisted → shared session empty
+                # → per-process login → single-active mutual eviction) and makes
+                # simulate send multiple 't='.
+                _latest = {c.name: c.value for c in self.client.cookies.jar}
+                self.client.cookies.clear()
+                self.client.cookies.update(_latest)
+
                 # Save session to Redis
                 data = response.json()
                 expiry = data.get("token", {}).get("expiry", 3600*4) # Default 4h if missing
@@ -611,12 +635,22 @@ class BrainAdapter:
         # short-circuits the whole LangGraph workflow so no LLM cost is burnt.
         if BRAIN_AUTH_CIRCUIT.is_open():
             status = BRAIN_AUTH_CIRCUIT.status()
+            _reopen = max(0, int((status.until_ts or 0) - time.time()))
+            # 2026-05-21: this fast-fail used to return SILENTLY (no logger), so a
+            # task whose every sim step was circuit-skipped showed nothing in the
+            # celery logs — the task-3332 blind spot. Log it so "0 successful
+            # simulations" is always greppable to a cause.
+            logger.warning(
+                f"[BrainAdapter] simulate FAST-FAIL: BRAIN_AUTH_CIRCUIT OPEN "
+                f"(reason={status.last_failure_reason!r} reopens_in={_reopen}s "
+                f"trip_count={status.trip_count}) expr={(expression or '')[:60]!r}"
+            )
             return {
                 "success": False,
                 "error": (
                     f"BRAIN auth circuit OPEN — fast-fail (reason="
                     f"{status.last_failure_reason!r}, "
-                    f"reopens_in={max(0, int((status.until_ts or 0) - time.time()))}s)"
+                    f"reopens_in={_reopen}s)"
                 ),
                 "retryable": True,
                 "retry_after_sec": max(30, int((status.until_ts or time.time() + 60) - time.time())),
