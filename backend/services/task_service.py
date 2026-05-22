@@ -604,6 +604,20 @@ class TaskService(BaseService):
                 f"region={region!r} not supported; choose one of {self.SUPPORTED_REGIONS}"
             )
 
+        # Pin hypothesis_centric level into the task config at CREATION time
+        # (2026-05-22 root-cause fix). _get_active_level falls back to
+        # settings.HYPOTHESIS_CENTRIC_LEVEL only when this key is ABSENT — and
+        # that setting lives in .env (not a refreshable flag), so a Celery
+        # worker started before .env was bumped runs at level 0 forever and
+        # every FLAT alpha persists with hypothesis_id=NULL (verified: explicit
+        # variant=2 tasks link at 98%, absent-variant FLAT at ~5-13%). Stamping
+        # it here in the FastAPI/caller process (which has the correct value)
+        # makes the worker read the pinned level from config, immune to its own
+        # stale .env. assign_variant (ONESHOT A/B) no longer fires once
+        # LEVEL==CANDIDATE, so FLAT must pin explicitly.
+        from backend.config import settings as _hge
+        _level = int(getattr(_hge, "HYPOTHESIS_CENTRIC_LEVEL", 0) or 0)
+
         task = MiningTask(
             task_name=f"flat-session-{region}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
             region=region,
@@ -612,7 +626,7 @@ class TaskService(BaseService):
             target_datasets=list(datasets or []),
             daily_goal=0,                # 0 = unlimited within FLAT_CONTINUOUS_MAX_ITERATIONS
             max_iterations=999999,
-            config={"flat_cursor": 0},
+            config={"flat_cursor": 0, "hypothesis_centric_variant": _level},
             status="RUNNING",
             schedule="FLAT",
         )

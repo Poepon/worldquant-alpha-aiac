@@ -926,6 +926,22 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "v1 目标=去优先 pv1+探索(非 submittable↑);残差 reward bump = phase-2。"
         ),
     ),
+    # --- Phase 2 hypothesis-centric level (2026-05-22: make it refreshable) ---
+    "HYPOTHESIS_CENTRIC_LEVEL": FlagSpec(
+        name="HYPOTHESIS_CENTRIC_LEVEL",
+        flag_type="int",
+        group="Phase2-Hypothesis",
+        description=(
+            "typed Hypothesis 生命周期等级。0=legacy(无 typed hypothesis);"
+            ">=1=node_hypothesis 注入假设;>=2=持久化 Hypothesis 行 + 把 alpha "
+            "链到 hypothesis_id(B4/B5 attribution + R1b CoSTEER 变异的前置)。"
+            "**2026-05-22 注册为可刷新**:此前只活在 .env、非受管 flag → worker "
+            "启动时读一次,在 .env bump 前起的 worker 永远 level=0 → FLAT alpha "
+            "全 hypothesis_id=NULL。注册后可经 /ops/flags 热改 + refresher 60s 传播,"
+            "免重启。无 override 行时仍回退 .env/默认值(零行为变化)。FLAT task 现在"
+            "创建时把此值钉进 config[hypothesis_centric_variant] 免疫 worker 漂移。"
+        ),
+    ),
 }
 
 
