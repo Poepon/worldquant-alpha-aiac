@@ -33,6 +33,13 @@ class DatasetArm:
     total_reward: float = 0.0
     success_count: int = 0
     fail_count: int = 0
+
+    # Dataset-steering bandit v1 (2026-05-22): discounted Beta-Bernoulli
+    # posterior over book-marginal yield. Default Beta(1,1) = uniform prior.
+    # Persisted to / loaded from bandit_state by DatasetSelector._save/_load.
+    alpha_param: float = 1.0
+    beta_param: float = 1.0
+    pulls_at_last_refresh: int = 0
     
     # Prior info (from platform metadata)
     pyramid_multiplier: float = 1.0
@@ -189,6 +196,82 @@ class DatasetBandit:
                 for a in sorted(self.arms.values(), key=lambda x: x.total_pulls)[:5]
             ]
         }
+
+
+# =============================================================================
+# Dataset-steering bandit v1 — discounted Thompson math (pure, testable)
+# (2026-05-22, plan dataset_steering_bandit_plan_v3 Tier A)
+# =============================================================================
+
+def discounted_thompson_update(
+    alpha: float, beta: float, s_d: int, t_d: int, gamma: float = 0.95
+) -> Tuple[float, float]:
+    """Pull-indexed discounted Beta-Bernoulli posterior update.
+
+    ``g = gamma ** t_d`` discounts the prior by ONE gamma per real pull (sim)
+    that happened in this refresh window — heavily-mined arms forget fast,
+    quiet arms barely drift (handles non-stationarity / self-mining-out)::
+
+        alpha' = g * alpha + s_d
+        beta'  = g * beta  + (t_d - s_d)
+
+    where ``s_d`` = #(book-marginal-positive submittable alphas) and ``t_d`` =
+    #(real BRAIN sims, excl _pre_brain_skip) in the window. Since the reward is
+    a single nested Bernoulli success count with ``0 <= s_d <= t_d`` and
+    ``g, alpha, beta >= 0``, ``beta'`` is provably >= 0 (review C1: the v1
+    invariant — no continuous bump that could drive beta negative).
+
+    ``t_d`` is the watermark-windowed real-sim count, which by construction
+    equals (cumulative pulls − pulls_at_last_refresh): pull-indexed, not
+    calendar — an arm that wasn't pulled this window has g=gamma**0=1.
+    """
+    s_d = max(0, int(s_d))
+    t_d = max(0, int(t_d))
+    s_d = min(s_d, t_d)  # clamp: s_d ⊆ t_d by construction; guard bad inputs
+    g = gamma ** t_d
+    new_alpha = g * float(alpha) + s_d
+    new_beta = g * float(beta) + (t_d - s_d)
+    return new_alpha, new_beta
+
+
+def thompson_sample_weight(
+    alpha: float,
+    beta: float,
+    pulls: int,
+    floor_c: float = 0.1,
+    tau: float = 500.0,
+    rng: Optional[random.Random] = None,
+) -> float:
+    """Sample θ~Beta(α,β) and add an anti-starvation floor.
+
+    ``floor = floor_c * exp(-pulls / tau)`` decays with cumulative exposure:
+    an under-mined source (small ``pulls``) keeps a floor bonus so weighted
+    sampling never starves it; a mined-out source (e.g. pv1 with thousands of
+    sims) decays to ≈0 floor and stands on its (tiny) θ alone. Returns a
+    positive mining_weight suitable for ORDER BY + weighted sampling.
+    """
+    _rng = rng or random
+    theta = _rng.betavariate(max(float(alpha), 1e-6), max(float(beta), 1e-6))
+    floor = float(floor_c) * math.exp(-max(0, int(pulls)) / max(1.0, float(tau)))
+    return theta + floor
+
+
+def weighted_choice(
+    items: List[Any], weights: List[float], rng: Optional[random.Random] = None
+) -> Any:
+    """Roulette-wheel pick of one item ∝ its (non-negative) weight.
+
+    Degrades to uniform when all weights are non-positive / empty so a misfed
+    weight map can never starve the loop. ``rng`` injectable for deterministic
+    tests (the ON path is otherwise unassertable position-wise — review SF-3).
+    """
+    if not items:
+        return None
+    _rng = rng or random
+    w = [max(0.0, float(x)) for x in weights] if weights else []
+    if len(w) != len(items) or sum(w) <= 0.0:
+        return _rng.choice(items)
+    return _rng.choices(items, weights=w, k=1)[0]
 
 
 # =============================================================================

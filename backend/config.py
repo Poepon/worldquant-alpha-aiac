@@ -1098,6 +1098,19 @@ class Settings(BaseSettings):
     BANDIT_PYRAMID_BONUS_WEIGHT: float = 0.3
     BANDIT_SATURATION_PENALTY_WEIGHT: float = 0.2
     BANDIT_TIME_DECAY_DAYS: int = 7
+
+    # --- Dataset-steering value bandit v1 (2026-05-22, breadth direction) ---
+    # plan dataset_steering_bandit_plan_v3 Tier A. Turns the dormant
+    # DatasetMetadata.mining_weight into a discounted Beta-Bernoulli posterior
+    # over per-dataset book-marginal yield, then weight-samples the FLAT
+    # mining loop. OFF (default) → byte-for-byte legacy (job no-ops, FLAT
+    # round-robins). Registered in feature_flag_service.SUPPORTED_FLAGS so it
+    # can be flipped from /ops without redeploy.
+    ENABLE_DATASET_VALUE_BANDIT: bool = False
+    DATASET_BANDIT_GAMMA: float = 0.95          # pull-indexed discount per real sim
+    DATASET_BANDIT_FLOOR_C: float = 0.1         # anti-starvation floor amplitude
+    DATASET_BANDIT_FLOOR_TAU: float = 500.0     # floor decay constant (cumulative sims)
+    DATASET_BANDIT_WINDOW_DAYS: int = 7         # watermark fallback window on first run
     
     # P1-2: Field Selection
     FIELD_COVERAGE_WEIGHT: float = 0.3

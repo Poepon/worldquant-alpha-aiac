@@ -1226,6 +1226,29 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
         mining_agent = MiningAgent(db, brain)
         operators = await _get_operators(db)
 
+        # Breadth dataset-steering bandit (2026-05-22, ENABLE_DATASET_VALUE_BANDIT):
+        # fetch per-dataset mining_weight once so the iteration loop can
+        # weight-sample the next dataset (∝ the bandit's discounted Beta
+        # posterior) instead of equal-probability round-robin. OFF →
+        # _ds_weight_map stays empty → round-robin (byte-for-byte legacy).
+        _bandit_on = bool(getattr(settings, "ENABLE_DATASET_VALUE_BANDIT", False))
+        _ds_weight_map: dict = {}
+        if _bandit_on:
+            try:
+                wrows = await db.execute(
+                    select(DatasetMetadata.dataset_id, DatasetMetadata.mining_weight).where(
+                        DatasetMetadata.region == task.region,
+                        DatasetMetadata.universe == task.universe,
+                        DatasetMetadata.dataset_id.in_(datasets),
+                    )
+                )
+                _ds_weight_map = {
+                    did: float(w if w is not None else 1.0) for did, w in wrows.all()
+                }
+            except Exception as _wm_err:  # noqa: BLE001 — degrade to round-robin
+                logger.warning(f"[flat] dataset-bandit weight fetch failed: {_wm_err}")
+                _ds_weight_map = {}
+
         # R6 PR3 (2026-05-18): init DAG state for flat path if flag ON.
         # Flat uses DAG selection for dataset choice (when ON); flat_cursor
         # stays dual-write as fallback per plan [V1.0-A2-2].
@@ -1271,6 +1294,19 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
 
             # R6 PR3: when DAG ON, select_next_parent for dataset; else flat_cursor.
             dataset_id = datasets[flat_cursor % len(datasets)]
+            # Breadth bandit: weight-sample ∝ mining_weight instead of equal
+            # round-robin (flag-gated). Steers frequency off the mined-out pv1
+            # toward high-marginal-value + under-mined sources. flat_cursor
+            # still advances (drives iteration_offset + counters + pause-resume
+            # cursor); only the dataset *choice* changes. DAG-UCB (below) still
+            # overrides when ENABLE_DAG_TRACE is ON (dormant; review ack).
+            if _bandit_on and _ds_weight_map:
+                from backend.selection_strategy import weighted_choice
+                _picked = weighted_choice(
+                    datasets, [_ds_weight_map.get(d, 1.0) for d in datasets]
+                )
+                if _picked is not None:
+                    dataset_id = _picked
             if dag_state is not None:
                 try:
                     from backend.agents.graph.dag_state import select_next_parent

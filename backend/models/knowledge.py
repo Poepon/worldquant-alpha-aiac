@@ -85,6 +85,20 @@ class BanditState(SQLAlchemyBase):
     last_reset = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
 
+    # --- dataset-steering bandit v1 (2026-05-22, plan dataset_steering_bandit_plan_v3) ---
+    # discounted Beta-Bernoulli posterior over per-dataset book-marginal yield.
+    # reward = S_d/T_d where S_d = #(can_submit & _iqc_marginal.delta_score>0)
+    # and T_d = #(real BRAIN sims, excl _pre_brain_skip) in the refresh window.
+    # alpha_param/beta_param are the discounted posterior counts; written by the
+    # ``run_dataset_weight_refresh`` beat job, sampled to set
+    # DatasetMetadata.mining_weight. pulls_at_last_refresh snapshots cumulative
+    # ``pulls`` after each refresh so (pulls − pulls_at_last_refresh) recovers the
+    # last window's real-sim count for audit (the discount g=γ^T_d uses the
+    # watermark-windowed T_d directly). Default 1.0/1.0 = uniform Beta(1,1) prior.
+    alpha_param = Column(Float, default=1.0, nullable=False, server_default="1.0")
+    beta_param = Column(Float, default=1.0, nullable=False, server_default="1.0")
+    pulls_at_last_refresh = Column(Integer, default=0, nullable=False, server_default="0")
+
 
 class OperatorPreference(SQLAlchemyBase):
     """

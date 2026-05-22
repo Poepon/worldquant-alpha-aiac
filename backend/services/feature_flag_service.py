@@ -908,6 +908,24 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "调它当前无行为变化。"
         ),
     ),
+    # --- Breadth: dataset-steering value bandit (2026-05-22) ---
+    "ENABLE_DATASET_VALUE_BANDIT": FlagSpec(
+        name="ENABLE_DATASET_VALUE_BANDIT",
+        flag_type="bool",
+        group="Breadth-DatasetBandit",
+        description=(
+            "Tier A 数据集导流 bandit (plan dataset_steering_bandit_plan_v3)。"
+            "把 dormant DatasetMetadata.mining_weight 变 discounted Beta-Bernoulli "
+            "后验:reward = S_d/T_d (S_d=#(can_submit & _iqc_marginal.delta_score>0),"
+            "T_d=#真 BRAIN sims 排除 _pre_brain_skip),pull-indexed 衰减 g=γ^T_d。"
+            "ON 后 (a) 日频 beat run_dataset_weight_refresh 算 S_d/T_d → 更新后验 "
+            "→ 采样 θ+floor 写回 mining_weight;(b) _run_flat_iteration 按 "
+            "mining_weight 加权采样 dataset(取代等概率 round-robin)→ 真频率导流"
+            "off 被挖烂的 pv1、向高边际价值+欠挖正交源。OFF (default) → beat no-op + "
+            "FLAT round-robin = byte-for-byte legacy。未解析 dataset_id 行排除。"
+            "v1 目标=去优先 pv1+探索(非 submittable↑);残差 reward bump = phase-2。"
+        ),
+    ),
 }
 
 

@@ -499,9 +499,17 @@ class DatasetSelector:
     async def _load_bandit_state(self):
         """W3: Load persisted Bandit state from bandit_state table.
 
-        Pre-populates each arm's pulls / total_reward from the row
-        matching (region, dataset_id). Missing rows are left at zero
-        (cold start)."""
+        Pre-populates each arm's pull/reward counts AND the dataset-steering
+        Beta posterior (alpha_param/beta_param/pulls_at_last_refresh) from the
+        row matching (region, dataset_id). Missing rows are left at the arm
+        defaults (cold start).
+
+        FIX (2026-05-22): the prior ``for arm in self.bandit.arms`` iterated the
+        dict's KEYS (strings) → ``arm.dataset_id`` raised AttributeError, was
+        swallowed by the except, and state NEVER loaded. It also wrote
+        ``arm.pulls`` (no such field) instead of the dataclass ``total_pulls``.
+        Now iterates ``.values()`` and maps to the real fields.
+        """
         if not self.bandit or not self.bandit.arms:
             return
         try:
@@ -510,11 +518,14 @@ class DatasetSelector:
             stmt = sa_select(BanditState).where(BanditState.region == self.region)
             result = await self.db.execute(stmt)
             rows = {r.dataset_id: r for r in result.scalars().all()}
-            for arm in self.bandit.arms:
+            for arm in self.bandit.arms.values():
                 row = rows.get(arm.dataset_id)
                 if row is not None:
-                    arm.pulls = row.pulls
-                    arm.total_reward = row.total_reward
+                    arm.total_pulls = int(row.pulls or 0)
+                    arm.total_reward = float(row.total_reward or 0.0)
+                    arm.alpha_param = float(getattr(row, "alpha_param", 1.0) or 1.0)
+                    arm.beta_param = float(getattr(row, "beta_param", 1.0) or 1.0)
+                    arm.pulls_at_last_refresh = int(getattr(row, "pulls_at_last_refresh", 0) or 0)
                     # Stash sim_count_today on arm so update_reward can use it
                     setattr(arm, "sim_count_today", row.sim_count_today)
             logger.debug(
@@ -525,20 +536,27 @@ class DatasetSelector:
             logger.warning(f"[DatasetSelector] _load_bandit_state failed: {e}")
 
     async def _save_bandit_state(self):
-        """W3: Persist arm state via INSERT ... ON CONFLICT atomic upsert."""
+        """W3: Persist arm state via INSERT ... ON CONFLICT atomic upsert.
+
+        FIX (2026-05-22): iterates ``.values()`` (was iterating dict keys →
+        silent AttributeError, never persisted) and now also writes the
+        dataset-steering Beta posterior columns.
+        """
         if not self.bandit or not self.bandit.arms:
             return
         try:
             from sqlalchemy.dialects.postgresql import insert as pg_insert
-            from sqlalchemy.sql import func as sa_func
             from backend.models import BanditState
-            for arm in self.bandit.arms:
+            for arm in self.bandit.arms.values():
                 values = {
                     "region": self.region,
                     "dataset_id": arm.dataset_id,
-                    "pulls": int(getattr(arm, "pulls", 0) or 0),
+                    "pulls": int(getattr(arm, "total_pulls", 0) or 0),
                     "total_reward": float(getattr(arm, "total_reward", 0.0) or 0.0),
                     "sim_count_today": int(getattr(arm, "sim_count_today", 0) or 0),
+                    "alpha_param": float(getattr(arm, "alpha_param", 1.0) or 1.0),
+                    "beta_param": float(getattr(arm, "beta_param", 1.0) or 1.0),
+                    "pulls_at_last_refresh": int(getattr(arm, "pulls_at_last_refresh", 0) or 0),
                 }
                 stmt = pg_insert(BanditState).values(**values)
                 stmt = stmt.on_conflict_do_update(
@@ -547,6 +565,9 @@ class DatasetSelector:
                         "pulls": stmt.excluded.pulls,
                         "total_reward": stmt.excluded.total_reward,
                         "sim_count_today": stmt.excluded.sim_count_today,
+                        "alpha_param": stmt.excluded.alpha_param,
+                        "beta_param": stmt.excluded.beta_param,
+                        "pulls_at_last_refresh": stmt.excluded.pulls_at_last_refresh,
                     },
                 )
                 await self.db.execute(stmt)

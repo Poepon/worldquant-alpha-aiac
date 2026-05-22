@@ -275,4 +275,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_canary_redflag_check",
         "schedule": crontab(hour="*/6", minute=15),
     },
+    # Breadth dataset-steering bandit (2026-05-22): daily 05:15 SH refresh of
+    # DatasetMetadata.mining_weight from the discounted Beta-Bernoulli posterior
+    # over per-dataset book-marginal yield. flag-gated by
+    # ENABLE_DATASET_VALUE_BANDIT (default OFF → task fires but no-ops). Slotted
+    # 05:15 — before sync_datasets (06:00, which does NOT touch mining_weight,
+    # verified) so the freshly-sampled weights steer the day's FLAT picks. Pure
+    # DB read/write, well under the 1h task_time_limit on the solo-pool worker.
+    "dataset-weight-refresh": {
+        "task": "backend.tasks.run_dataset_weight_refresh",
+        "schedule": crontab(hour=5, minute=15),
+    },
 }

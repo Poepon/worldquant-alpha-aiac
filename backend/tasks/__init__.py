@@ -77,6 +77,8 @@ from backend.tasks.canary_tasks import run_canary_redflag_check
 from backend.tasks.logic_distill_tasks import run_weekly_logic_distill  # noqa: F401
 # Phase 4 Tier E E1 (2026-05-20): Sunday 04:45 SH cognitive-layer bandit reward
 from backend.tasks.cognitive_layer_bandit_tasks import run_cognitive_layer_bandit_update  # noqa: F401
+# Breadth (2026-05-22): daily dataset-steering value-bandit mining_weight refresh
+from backend.tasks.dataset_weight_refresh import run_dataset_weight_refresh  # noqa: F401
 
 __all__ = [
     # Utilities
@@ -132,4 +134,5 @@ __all__ = [
     "run_weekly_logic_distill",
     # Phase 4 Tier E E1: Sunday 04:45 SH cognitive-layer bandit reward
     "run_cognitive_layer_bandit_update",
+    "run_dataset_weight_refresh",
 ]
