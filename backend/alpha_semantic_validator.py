@@ -653,12 +653,9 @@ _STANDARD_GROUP_TOKENS: frozenset = frozenset({
 # Restricted to group_neutralize (confident 2-arg signature) so a group op with
 # a different group position can't trip a mis-positioned false positive.
 _GROUP_NEUTRALIZE_OPS: Tuple[str, ...] = ("group_neutralize",)
-# Plain value-input ops where a GROUP field is always a unit error.
-_VALUE_ONLY_OPS: Tuple[str, ...] = (
-    "ts_delta", "ts_mean", "ts_zscore", "ts_rank", "ts_std_dev", "ts_sum",
-    "ts_decay_linear", "ts_delay", "ts_corr", "ts_regression", "ts_scale",
-    "add", "subtract", "multiply", "divide", "signed_power", "log", "abs",
-)
+# Check B scans ALL non-group_* operator calls (general rule), so no fixed
+# value-op list is needed — a bare GROUP field as a direct arg to anything
+# other than a group_* op is a unit error.
 _BARE_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -797,13 +794,23 @@ class AlphaSemanticValidator:
                         metadata={"operator": op, "bad_group": g},
                     ))
 
-        # B: a GROUP field used as a plain value input.
+        # B: a GROUP field used as a direct argument to ANY non-group_*
+        # operator (rank / zscore / ts_* / arithmetic / normalize / scale /
+        # ...). A GROUP field is only valid as the grouping argument of a
+        # group_* op, so a bare group field anywhere else is a unit error
+        # (BRAIN: 'Incompatible unit ... expected Unit[], found Unit[Group:1]').
+        # General op-scan (not a fixed list) so a missing op can't slip a
+        # group-field-as-value past pre-sim onto BRAIN (e.g. rank(<group>)).
         if group_fields:
-            for op in _VALUE_ONLY_OPS:
+            _seen_bf: Set[Tuple[str, str]] = set()
+            for op in set(re.findall(r"([a-z_][a-z0-9_]*)\s*\(", expr_l)):
+                if op.startswith("group_"):
+                    continue  # group_* legitimately takes a group field (group arg)
                 for call_args in _walk_call_args(expr_l, op):
                     for a in call_args:
                         a = a.strip()
-                        if a in group_fields:
+                        if a in group_fields and (op, a) not in _seen_bf:
+                            _seen_bf.add((op, a))
                             findings.append(Finding(
                                 rule_id=RuleId.GROUP_UNIT_MISMATCH, severity=sev,
                                 message=(

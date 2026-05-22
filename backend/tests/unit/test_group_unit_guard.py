@@ -57,6 +57,20 @@ class TestCheckB_GroupAsValue:
         r = _val().validate("ts_delta(close, 120)")
         assert not _gum(r)
 
+    def test_group_field_in_rank_rejected(self):
+        # Reported live BRAIN error: rank(<group field>) — "Incompatible unit
+        # for input of rank at index 0, found Unit[Group:1]". rank is a
+        # cross-sectional op (not in the old ts_*/arith list) → must still be
+        # caught by the general non-group_* op scan.
+        r = _val().validate("rank(sector_grp)")
+        assert _gum(r), "GROUP field as rank input must be flagged pre-sim"
+        assert r.valid is False
+
+    def test_group_field_nested_in_group_op_ok(self):
+        # group_neutralize legitimately takes the group field as its group arg.
+        r = _val().validate("group_neutralize(rank(close), sector_grp)")
+        assert not _gum(r)
+
 
 class TestSafety:
     def test_inert_without_field_catalog(self):
