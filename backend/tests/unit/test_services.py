@@ -150,5 +150,106 @@ class TestDashboardService:
     async def test_get_task_status_counts(self, dashboard_service, sample_task):
         """Test getting task status counts."""
         counts = await dashboard_service.get_task_status_counts()
-        
+
         assert isinstance(counts, dict)
+
+    @pytest.mark.asyncio
+    async def test_kpi_excludes_brain_synced_alphas(
+        self, dashboard_service, db_session, sample_task
+    ):
+        """KPI must not count BRAIN-synced alphas (task_id IS NULL).
+
+        Regression for the dashboard-data-inaccurate bug: sync_user_alphas
+        inserts user's BRAIN history with task_id=NULL. Counting them as
+        "today's simulations" inflated every KPI on first-sync day.
+        """
+        today = datetime.now()
+
+        # 3 BRAIN-synced (task_id=NULL) — must NOT count
+        for i in range(3):
+            db_session.add(
+                Alpha(
+                    alpha_id=f"brain-sync-{i}",
+                    task_id=None,
+                    expression="rank(close)",
+                    region="USA",
+                    universe="TOP3000",
+                    quality_status="PASS",
+                    is_sharpe=2.0,
+                )
+            )
+
+        # 2 AIAC-mined (task_id set, PASS) — must count
+        for i in range(2):
+            db_session.add(
+                Alpha(
+                    alpha_id=f"aiac-pass-{i}",
+                    task_id=sample_task.id,
+                    expression="rank(volume)",
+                    region="USA",
+                    universe="TOP3000",
+                    quality_status="PASS",
+                    is_sharpe=1.5,
+                )
+            )
+
+        # 1 AIAC-mined PENDING — counts in today_simulations, not in today_passed
+        db_session.add(
+            Alpha(
+                alpha_id="aiac-pending-0",
+                task_id=sample_task.id,
+                expression="rank(returns)",
+                region="USA",
+                universe="TOP3000",
+                quality_status="PENDING",
+            )
+        )
+        await db_session.commit()
+
+        kpi = await dashboard_service.get_kpi_metrics()
+
+        # 2 PASS + 1 PENDING AIAC-mined = 3 sims total. BRAIN-synced 3 excluded.
+        assert kpi.today_simulations == 3
+        # 2 PASS / 3 sims
+        assert kpi.today_success_rate == pytest.approx(2 / 3, rel=1e-3)
+        # avg sharpe over 2 AIAC PASS alphas = 1.5 (BRAIN sharpe 2.0 excluded)
+        assert kpi.today_avg_sharpe == pytest.approx(1.5, rel=1e-3)
+        # week total = 2 AIAC PASS (BRAIN-synced excluded)
+        assert kpi.week_total_alphas == 2
+
+    @pytest.mark.asyncio
+    async def test_daily_stats_excludes_brain_synced_alphas(
+        self, dashboard_service, db_session, sample_task
+    ):
+        """get_daily_stats must filter BRAIN-synced alphas the same way."""
+        # 5 BRAIN-synced PASS — must not be counted toward avg_sharpe
+        for i in range(5):
+            db_session.add(
+                Alpha(
+                    alpha_id=f"brain-{i}",
+                    task_id=None,
+                    expression="rank(close)",
+                    region="USA",
+                    universe="TOP3000",
+                    quality_status="PASS",
+                    is_sharpe=3.0,
+                )
+            )
+        # 1 AIAC PASS — only contributor to avg_sharpe
+        db_session.add(
+            Alpha(
+                alpha_id="aiac-pass",
+                task_id=sample_task.id,
+                expression="rank(volume)",
+                region="USA",
+                universe="TOP3000",
+                quality_status="PASS",
+                is_sharpe=1.0,
+            )
+        )
+        await db_session.commit()
+
+        stats = await dashboard_service.get_daily_stats()
+        # avg of the 1 AIAC alpha (1.0), not avg of 6 (BRAIN-polluted = ~2.67)
+        assert stats.avg_sharpe == pytest.approx(1.0, rel=1e-3)
+        assert stats.total_simulations == 1

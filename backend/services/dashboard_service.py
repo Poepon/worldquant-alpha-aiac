@@ -81,7 +81,11 @@ class DashboardService(BaseService):
             DailyStats dataclass
         """
         if target_date is None:
-            target_date = datetime.now().date()
+            # UTC day boundary to match Alpha.created_at (naive-UTC) and the
+            # quota_guard "today" convention. datetime.now() (naive local) would
+            # mis-window rows by the TZ offset (e.g. drop the prior UTC evening
+            # during Beijing 00:00-08:00).
+            target_date = datetime.utcnow().date()
         
         start_of_day = datetime.combine(target_date, datetime.min.time())
         end_of_day = start_of_day + timedelta(days=1)
@@ -93,15 +97,19 @@ class DashboardService(BaseService):
         )
         tasks_result = await self.db.execute(tasks_query)
         tasks = tasks_result.scalars().all()
-        
+
         total_goal = sum(t.daily_goal for t in tasks) if tasks else 4
         total_current = sum(t.progress_current for t in tasks) if tasks else 0
-        
-        # Get today's passed alphas
+
+        # Get today's passed alphas. task_id IS NOT NULL excludes BRAIN-synced
+        # historical alphas (sync_user_alphas in tasks/sync_tasks.py inserts
+        # them with task_id=NULL); first-sync day would otherwise dump hundreds
+        # of historical rows into "today's" KPI.
         alphas_query = select(Alpha).where(
             Alpha.created_at >= start_of_day,
             Alpha.created_at < end_of_day,
             Alpha.quality_status == "PASS",
+            Alpha.task_id.is_not(None),
         )
         alphas_result = await self.db.execute(alphas_query)
         alphas = alphas_result.scalars().all()
@@ -128,23 +136,29 @@ class DashboardService(BaseService):
         start: datetime,
         end: datetime,
     ) -> int:
-        """Count alphas created in a time range."""
+        """Count AIAC-mined alphas created in a time range.
+
+        BRAIN-synced alphas land with task_id=NULL via tasks/sync_tasks.py;
+        excluding them keeps dashboard KPIs scoped to AIAC's own output.
+        """
         query = select(func.count(Alpha.id)).where(
             Alpha.created_at >= start,
             Alpha.created_at < end,
+            Alpha.task_id.is_not(None),
         )
         result = await self.db.execute(query)
         return result.scalar() or 0
-    
+
     async def _count_failures_in_range(
         self,
         start: datetime,
         end: datetime,
     ) -> int:
-        """Count failures in a time range."""
+        """Count AIAC-mined failures in a time range."""
         query = select(func.count(AlphaFailure.id)).where(
             AlphaFailure.created_at >= start,
             AlphaFailure.created_at < end,
+            AlphaFailure.task_id.is_not(None),
         )
         result = await self.db.execute(query)
         return result.scalar() or 0
@@ -228,7 +242,10 @@ class DashboardService(BaseService):
         Returns:
             KPIMetrics dataclass
         """
-        today = datetime.now().date()
+        # UTC day boundary — match naive-UTC Alpha.created_at and quota_guard's
+        # "today" (datetime.now() local mis-windowed rows during 00:00-08:00 in
+        # Asia/Shanghai deployments).
+        today = datetime.utcnow().date()
         start_of_today = datetime.combine(today, datetime.min.time())
         start_of_week = start_of_today - timedelta(days=today.weekday())
         
@@ -238,27 +255,30 @@ class DashboardService(BaseService):
             start_of_today + timedelta(days=1),
         )
         
-        # Today's passed alphas
+        # Today's passed alphas (AIAC-mined only — see _count_alphas_in_range)
         today_passed_query = select(func.count(Alpha.id)).where(
             Alpha.created_at >= start_of_today,
             Alpha.quality_status == "PASS",
+            Alpha.task_id.is_not(None),
         )
         today_passed = (await self.db.execute(today_passed_query)).scalar() or 0
-        
+
         success_rate = today_passed / today_sims if today_sims > 0 else 0.0
-        
+
         # Today's average Sharpe
         today_alphas_query = select(Alpha).where(
             Alpha.created_at >= start_of_today,
             Alpha.quality_status == "PASS",
+            Alpha.task_id.is_not(None),
         )
         today_alphas = (await self.db.execute(today_alphas_query)).scalars().all()
         avg_sharpe = self._calculate_avg_sharpe(today_alphas)
-        
+
         # Week's total alphas
         week_total_query = select(func.count(Alpha.id)).where(
             Alpha.created_at >= start_of_week,
             Alpha.quality_status == "PASS",
+            Alpha.task_id.is_not(None),
         )
         week_total = (await self.db.execute(week_total_query)).scalar() or 0
         
