@@ -382,18 +382,25 @@ async def _node_hypothesis_inject_consumed(
         None,
     )
 
+    # CoSTEER loop-closure fix (2026-05-22): the consumed dict carries the
+    # mutated Hypothesis row id (r1b_loop._insert_mutated_hypothesis stamped it
+    # into pending["hypothesis_id"] on a successful INSERT). Propagate it as
+    # this round's current_hypothesis_id so (1) the alphas generated from the
+    # mutated hypothesis link to it (alpha.hypothesis_id = mutated id → the
+    # mutation actually drives next-round output, previously 0/10108 referenced
+    # IMPROVEMENT_RULE) and (2) when one of these alphas fails and triggers a
+    # further mutation, node_hypothesis_mutate finds a real parent → the chain
+    # deepens past depth 1 (previously parent_hypothesis_id was always None).
+    # Stays None when the parent INSERT had failed (no id) — downstream handles
+    # None gracefully exactly as before.
+    _consumed_hid = consumed.get("hypothesis_id")
     return {
         "hypotheses": hypotheses,
         "knowledge_transfer": {},
         "current_hypothesis_datasets": selected,
         "current_hypothesis_fields": [],
-        # Phase 2 typed Hypothesis persistence happens lazily on next round
-        # via the legacy path; v2 inject treats the consumed hypothesis as
-        # already-persisted-parent (the mutate node wrote it under
-        # parent_hypothesis_id). current_hypothesis_id stays None here —
-        # downstream nodes already handle None gracefully.
-        "current_hypothesis_id": None,
-        "current_hypothesis_ids": [],
+        "current_hypothesis_id": _consumed_hid,
+        "current_hypothesis_ids": [_consumed_hid] if _consumed_hid else [],
         # F4/F5 review fix: explicitly return cleared cognitive_layer_id_used
         # so LangGraph state-merge guarantees the reset takes effect on this
         # inject-path round (the in-place mutation at node_hypothesis entry

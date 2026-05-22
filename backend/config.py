@@ -690,6 +690,9 @@ class Settings(BaseSettings):
     # ----- R1b.5 — R6 DAG retry-aware reward -----
     # Pre-req R1b.1+R1b.2 GO gates + ≥14d observation.
     ENABLE_R1B_DAG_RETRY_REWARD: bool = False
+    # ----- R1b outcome reconciliation (Break 2 fix, 2026-05-22) -----
+    # Max pending r1b_retry_log rows reconcile_r1b_outcomes processes per run.
+    R1B_RECONCILE_MAX_ROWS: int = 1000
     # ----- Shared budget guard -----
     R1B_TOKEN_COST_CEILING_USD_PER_ALPHA: float = 0.05
     # ----- R1b.1 review LOW 2 — per-round cost cap -----

@@ -446,7 +446,18 @@ async def node_hypothesis_mutate(
     # failure: proceed (don't block on observability glitches).
     _primary_first_alpha = pending[primary_indices[0]]
     _primary_metrics = dict(getattr(_primary_first_alpha, "metrics", None) or {})
-    _parent_hyp_id = _primary_metrics.get("hypothesis_id")
+    # CoSTEER chain-deepening fix (2026-05-22): the parent of a mutated
+    # hypothesis is the hypothesis that PRODUCED the failed alpha = this round's
+    # current_hypothesis_id. The failed alpha's metrics dict almost never
+    # carries "hypothesis_id" (that's the alpha COLUMN, not a metrics key), so
+    # without this fallback parent_hypothesis_id was always None → the mutation
+    # chain never deepened past depth 1 (verified: parent_hypothesis_id 0/1271).
+    # Mirror persistence's scalar→list[0] recovery for the LangGraph scalar drop.
+    _parent_hyp_id = (
+        _primary_metrics.get("hypothesis_id")
+        or getattr(state, "current_hypothesis_id", None)
+        or (getattr(state, "current_hypothesis_ids", None) or [None])[0]
+    )
     if _parent_hyp_id is not None:
         try:
             from backend.database import AsyncSessionLocal as _DepthSL
@@ -627,7 +638,11 @@ async def node_hypothesis_mutate(
             if bool(getattr(_v2_settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)):
                 new_id = await _insert_mutated_hypothesis(
                     task_id=task_id,
-                    parent_hypothesis_id=primary_metrics.get("hypothesis_id"),
+                    # CoSTEER chain-deepening fix (2026-05-22): use the resolved
+                    # round parent (metrics → state.current_hypothesis_id →
+                    # list[0]) instead of the near-always-None metrics key, so
+                    # the parent FK + r1b_mutation_depth actually chain.
+                    parent_hypothesis_id=_parent_hyp_id,
                     pending=pending_new_hypothesis,
                     region=getattr(primary_alpha, "region", None) or getattr(state, "region", None),
                 )
@@ -640,6 +655,19 @@ async def node_hypothesis_mutate(
                     # LangGraph drops on the next node hop (state snapshots
                     # only consume the dict returned by the node).
                     _new_mutated_ids.append(new_id)
+                    # Break 2 outcome-reconcile fix (2026-05-22): stamp the
+                    # persisted Hypothesis id onto the matching mutate log row
+                    # (was NULL on 269/269 rows) so reconcile_r1b_outcomes can
+                    # fill outcome later via alphas linked to this hypothesis_id.
+                    _stmt = pending_new_hypothesis.get("statement")
+                    for _lr in log_rows:
+                        if (
+                            _lr.get("attempt_type") == "mutate_hyp"
+                            and not _lr.get("new_hypothesis_id")
+                            and _lr.get("new_hypothesis_statement") == _stmt
+                        ):
+                            _lr["new_hypothesis_id"] = new_id
+                            break
         except Exception as _ins_ex:
             logger.warning(
                 f"[r1b_loop mutate] R1b.3-v2 INSERT failed (round unaffected): {_ins_ex}"

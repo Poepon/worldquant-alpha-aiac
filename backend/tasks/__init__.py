@@ -79,6 +79,8 @@ from backend.tasks.logic_distill_tasks import run_weekly_logic_distill  # noqa: 
 from backend.tasks.cognitive_layer_bandit_tasks import run_cognitive_layer_bandit_update  # noqa: F401
 # Breadth (2026-05-22): daily dataset-steering value-bandit mining_weight refresh
 from backend.tasks.dataset_weight_refresh import run_dataset_weight_refresh  # noqa: F401
+# R1b CoSTEER (2026-05-22): outcome reconciliation — fills r1b_retry_log.outcome
+from backend.tasks.r1b_outcome_reconcile import reconcile_r1b_outcomes  # noqa: F401
 
 __all__ = [
     # Utilities
@@ -135,4 +137,5 @@ __all__ = [
     # Phase 4 Tier E E1: Sunday 04:45 SH cognitive-layer bandit reward
     "run_cognitive_layer_bandit_update",
     "run_dataset_weight_refresh",
+    "reconcile_r1b_outcomes",
 ]

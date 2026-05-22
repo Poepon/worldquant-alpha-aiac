@@ -286,4 +286,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_dataset_weight_refresh",
         "schedule": crontab(hour=5, minute=15),
     },
+    # R1b CoSTEER outcome reconciliation (Break 2 fix, 2026-05-22): daily
+    # 05:45 SH fill r1b_retry_log.outcome (pass/fail/sharpe) from the alphas
+    # each retry/mutate produced — the feedback half of the loop, previously
+    # never wired (355/355 pending). flag-gated (both R1b flags OFF → no-op).
+    # Idempotent: only touches outcome='pending' rows; alphas not yet
+    # simulated stay pending → reconciled next run. Slot after dataset-weight-
+    # refresh (05:15) on the solo-pool worker.
+    "r1b-outcome-reconcile": {
+        "task": "backend.tasks.reconcile_r1b_outcomes",
+        "schedule": crontab(hour=5, minute=45),
+    },
 }
