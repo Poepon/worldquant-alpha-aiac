@@ -99,20 +99,38 @@ STRING: /"[^"]*"/ | /'[^']*'/
 # causes a soft warning (still parses since the grammar accepts any
 # identifier; the validation layer reports the unknown-op as a
 # fail-safe). Extendable via YAML in fast-follow.
+# Synced to the live BRAIN `operators` table (66 active ops, 2026-05-22).
+# The pre-sync list was badly stale — it flagged real ops (multiply,
+# group_neutralize, subtract, ts_std_dev, ...) as "unknown" and listed
+# non-existent names (industry_neutralize, ts_std, ts_argmax), making the
+# `_g3v2_unknown_ops` telemetry pure noise. This is informational only
+# (unknown ops are stamped, never reject — see node_code_gen); HARD
+# operator-validity against the live registry is enforced separately by
+# alpha_semantic_validator (Tier 2b, plan a-streamed-wren). Keep this in
+# sync when operators are re-synced from BRAIN; YAML-driven loading is the
+# intended fast-follow (see module docstring).
 _KNOWN_OPS = frozenset({
-    # Time-series
-    "ts_rank", "ts_zscore", "ts_decay_linear", "ts_decay_exp",
-    "ts_corr", "ts_covariance", "ts_mean", "ts_std", "ts_delta",
-    "ts_argmax", "ts_argmin", "ts_max", "ts_min", "ts_sum",
-    "ts_regression", "ts_regression_residual", "ts_arg_max",
+    # Arithmetic
+    "abs", "add", "densify", "divide", "inverse", "log", "max", "min",
+    "multiply", "power", "reverse", "sign", "signed_power", "sqrt", "subtract",
     # Cross-sectional
-    "rank", "scale", "industry_neutralize", "sector_neutralize",
-    "country_neutralize", "subindustry_neutralize", "cross_sectional_median",
-    # Arithmetic / transforms
-    "sign", "abs", "log", "exp", "sqrt", "power", "min", "max",
-    "winsorize", "where", "if_else",
-    # Universe / regime
-    "vec_avg", "vec_sum", "subset", "trade_when",
+    "normalize", "quantile", "rank", "scale", "winsorize", "zscore",
+    # Group
+    "group_backfill", "group_mean", "group_neutralize", "group_rank",
+    "group_scale", "group_zscore",
+    # Logical
+    "and", "equal", "greater", "greater_equal", "if_else", "is_nan",
+    "less", "less_equal", "not", "not_equal", "or",
+    # Time-series
+    "days_from_last_change", "hump", "kth_element", "last_diff_value",
+    "ts_arg_max", "ts_arg_min", "ts_av_diff", "ts_backfill", "ts_corr",
+    "ts_count_nans", "ts_covariance", "ts_decay_linear", "ts_delay",
+    "ts_delta", "ts_mean", "ts_product", "ts_quantile", "ts_rank",
+    "ts_regression", "ts_scale", "ts_std_dev", "ts_step", "ts_sum", "ts_zscore",
+    # Transformational
+    "bucket", "trade_when",
+    # Vector
+    "vec_avg", "vec_sum",
 })
 
 
