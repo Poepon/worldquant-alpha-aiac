@@ -489,6 +489,45 @@ async def test_mutate_returns_r1b_mutated_hypothesis_ids_in_dict(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_mutate_log_row_captures_new_hypothesis_id_at_write(monkeypatch):
+    """Break 2 regression (2026-05-22): the mutate log row's new_hypothesis_id
+    must already be the persisted id WHEN _write_r1b_retry_log_rows is called.
+
+    The original order wrote the log rows BEFORE the INSERT produced the id,
+    then stamped the (already-persisted) in-memory dicts → DB row stayed NULL
+    on every mutate (verified 269/269 + live task 3400). Snapshot the rows at
+    write time (not after) so the ordering bug can't hide behind the in-place
+    mutation of the shared list."""
+    from backend.config import settings
+    monkeypatch.setattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", True)
+    alpha = _mk_alpha("0", "rank(close)", attribution="hypothesis")
+    state = _mk_state([alpha])
+    state.r1b_mutated_hypothesis_ids = []  # reducer accumulator (see prior test)
+    llm = _mk_llm_mutate_resp("REVISED low-vol momentum thesis")
+
+    snap = {}
+
+    async def _capture(rows):
+        snap["rows"] = [dict(r) for r in rows]  # copy AT CALL TIME
+
+    with _patch_depth_lookup(parent_depth=1), patch(
+        "backend.agents.graph.nodes.r1b_loop._insert_mutated_hypothesis",
+        new=AsyncMock(return_value=999),
+    ), patch(
+        "backend.agents.graph.nodes.r1b_loop._write_r1b_retry_log_rows",
+        new=_capture,
+    ):
+        await node_hypothesis_mutate(state, llm)
+
+    mrows = [r for r in snap.get("rows", []) if r.get("attempt_type") == "mutate_hyp"]
+    assert mrows, "expected a mutate_hyp log row to be written"
+    assert mrows[0]["new_hypothesis_id"] == 999, (
+        "mutate log row must carry the persisted hypothesis id at write time "
+        "(write-then-stamp ordering bug left it NULL)"
+    )
+
+
+@pytest.mark.asyncio
 async def test_mutate_omits_r1b_mutated_hypothesis_ids_when_no_insert(monkeypatch):
     """If INSERT branch didn't fire (flag OFF / no parent), the key MUST
     NOT appear in out — LangGraph would otherwise wipe prior ids."""

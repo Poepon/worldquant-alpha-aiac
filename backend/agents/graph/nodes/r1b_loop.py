@@ -618,7 +618,10 @@ async def node_hypothesis_mutate(
                 llm_cost_usd=cost_delta_usd, llm_tokens_used=tokens,
             ))
 
-    await _write_r1b_retry_log_rows(log_rows)
+    # NOTE: log rows are written AFTER the INSERT block below (not here), so
+    # the captured new_hypothesis_id is persisted instead of NULL (Break 2
+    # outcome-reconcile fix 2026-05-22 — the original write-here-then-stamp
+    # order left new_hypothesis_id NULL on every mutate row).
 
     # Review HIGH #2 fix accumulator — populated by the R1b.3-v2 INSERT block
     # below. Surfaces in the returned reducer dict so LangGraph propagates
@@ -672,6 +675,10 @@ async def node_hypothesis_mutate(
             logger.warning(
                 f"[r1b_loop mutate] R1b.3-v2 INSERT failed (round unaffected): {_ins_ex}"
             )
+
+    # Write retry-log rows now — AFTER the INSERT so the captured
+    # new_hypothesis_id is persisted (Break 2 reconcile key), not NULL.
+    await _write_r1b_retry_log_rows(log_rows)
 
     # R1b.3c (2026-05-18): on successful mutate, persist failure_tree to KB
     # so R8 RAG L2 surfaces it next round. Plan §7.1 — fires only when the
