@@ -117,6 +117,13 @@ class TestCanonicalStructureScaffold:
         assert "NEVER the universe name" in out
         assert "top3000" in out
 
+    def test_robust_denominator_rule_present(self):
+        # 2026-05-23: nudge away from raw divide-by-volatile-denom (the
+        # risk_divide_by_volatile_denom info warning) toward smoothed denoms.
+        out = build_strategy_constraints(PromptContext())
+        assert "ROBUST DENOMINATOR RULE" in out
+        assert "ts_mean(volume, 20)" in out
+
     def test_rule_present_in_full_prompt(self):
         ctx = PromptContext(
             fields=[{"id": "close", "type": "MATRIX"}],

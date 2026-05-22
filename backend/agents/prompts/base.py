@@ -298,6 +298,15 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
         "cross-sectionally comparable (a pure time-series factor-composite signal "
         "can pass on its own — see the FACTOR_COMPOSITE example above)."
     )
+    constraints.append(
+        "**ROBUST DENOMINATOR RULE**: dividing by a RAW volatile denominator "
+        "(volume, cap, adv5/adv20, eps, sharesout) amplifies extreme tails on "
+        "illiquid/low-volume days and hurts robustness. When you need such a "
+        "normalization, prefer a SMOOTHED denominator — e.g. "
+        "divide(x, ts_mean(volume, 20)) instead of divide(x, volume) — or a "
+        "cross-sectional normalizer (rank / zscore) instead of raw division. "
+        "Raw division by close/open/vwap (stable prices) is fine."
+    )
 
     # Syntax constraints (always apply)
     constraints.extend([
