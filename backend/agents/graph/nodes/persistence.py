@@ -367,6 +367,25 @@ async def _incremental_save_alphas(
         except Exception:
             fields_used_for_insert = None
 
+        # (B 2026-05-22) FLAT path leaves dataset_id empty (cross-dataset
+        # hypothesis mode) → alphas.dataset_id was NULL, making the dataset
+        # dimension invisible to dataset-level steering. Derive the dominant
+        # dataset from this alpha's fields. build_field_dataset_map is
+        # TTL-cached so per-alpha calls are cheap; soft-fail keeps NULL.
+        # See backend/dataset_attribution.py.
+        _row_dataset_id = dataset_id
+        if not _row_dataset_id:
+            try:
+                from backend.dataset_attribution import (
+                    build_field_dataset_map,
+                    derive_dataset_id,
+                )
+
+                _fdm = await build_field_dataset_map(db_session, region, universe)
+                _row_dataset_id = derive_dataset_id(fields_used_for_insert, _fdm)
+            except Exception:
+                _row_dataset_id = None
+
         values_dict = dict(
             task_id=task_id,
             run_id=run_id,
@@ -377,7 +396,7 @@ async def _incremental_save_alphas(
             logic_explanation=alpha.explanation,
             region=region,
             universe=universe,
-            dataset_id=dataset_id,
+            dataset_id=_row_dataset_id,
             quality_status=alpha.quality_status,
             metrics=alpha.metrics,
             is_sharpe=metrics_dict.get("sharpe"),
