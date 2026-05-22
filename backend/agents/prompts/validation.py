@@ -195,11 +195,34 @@ These similar errors were resolved before. Learn from these patterns:
 {''.join(examples)}
 """
 
+    # 2026-05-23: duplicate errors need STRUCTURAL novelty, not a minimal tweak.
+    # The dedup compares the SET of operators and SET of fields (ignoring window
+    # sizes, constants, and a leading multiply(-1, ...)), so changing a number /
+    # negating stays a 100% duplicate. Override the generic "minimal change"
+    # guidance with an explicit structure/field change directive.
+    _dup_blob = f"{legacy_error_type} {legacy_error_message}".lower()
+    _is_dup = "duplicate" in _dup_blob or "structurally similar" in _dup_blob
+    dup_directive = ""
+    if _is_dup:
+        dup_directive = (
+            "\n## ⚠️ DUPLICATE — structural novelty REQUIRED (not a minimal change)\n"
+            "The dedup compares the SET of operators and the SET of fields; it "
+            "IGNORES window sizes, numeric constants, and a leading "
+            "`multiply(-1, ...)`. So changing a window, negating, or reordering "
+            "stays a 100% duplicate. To resolve you MUST:\n"
+            "- use DIFFERENT field(s) from the Available Fields list (highest "
+            "impact — fields are 60% of the similarity score), AND/OR\n"
+            "- change the OPERATOR composition (swap/add/remove ops — a different "
+            "ts_* op, a different cross-sectional wrapper, or combine two signals).\n"
+            "Produce a genuinely different idea, not a re-skin of the same one.\n"
+        )
+
     return f"""## Failed Expression
 
 ```
 {expression}
 ```
+{dup_directive}
 
 ## Findings
 
