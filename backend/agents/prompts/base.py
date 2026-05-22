@@ -100,43 +100,60 @@ class PromptContext:
 
 
 def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
-    """Build concise field reference with type info."""
+    """Build concise field reference with type info.
+
+    Buckets by type over the FULL list (not a head slice) so GROUP-heavy
+    datasets (e.g. pv13: 135 GROUP vs 30 MATRIX) don't crowd MATRIX value
+    fields out of the rendered list. GROUP fields are rendered with explicit
+    "grouping-only" guidance — otherwise they landed in an unlabeled "Other"
+    bucket and the LLM used them as ts_*/arithmetic value inputs (BRAIN +
+    the group_unit guard then reject "GROUP field cannot be a value input").
+    """
     if not fields:
         return "No fields available."
-    
+
     matrix_fields = []
     vector_fields = []
+    group_fields = []
     other_fields = []
-    
-    for f in fields[:max_fields]:
+
+    for f in fields:
         field_id = f.get("id", f.get("name", "unknown"))
         field_type = f.get("type", "MATRIX").upper()
-        
         if field_type == "VECTOR":
             vector_fields.append(field_id)
         elif field_type == "MATRIX":
             matrix_fields.append(field_id)
+        elif field_type == "GROUP":
+            group_fields.append(field_id)
         else:
             other_fields.append(field_id)
-    
+
+    def _fmt(items, cap):
+        sample = ", ".join(items[:cap])
+        if len(items) > cap:
+            sample += f" ... (+{len(items) - cap} more)"
+        return sample
+
     lines = []
-    
     if matrix_fields:
-        sample = ", ".join(matrix_fields[:10])
-        if len(matrix_fields) > 10:
-            sample += f" ... (+{len(matrix_fields) - 10} more)"
-        lines.append(f"- **MATRIX fields** (time-series, use ts_* operators directly): {sample}")
-    
+        lines.append(
+            "- **MATRIX fields** (time-series VALUE inputs — use ts_* / arithmetic "
+            f"directly): {_fmt(matrix_fields, max(15, max_fields))}"
+        )
     if vector_fields:
-        sample = ", ".join(vector_fields[:10])
-        if len(vector_fields) > 10:
-            sample += f" ... (+{len(vector_fields) - 10} more)"
-        lines.append(f"- **VECTOR fields** (MUST use vec_* operators first!): {sample}")
-    
+        lines.append(
+            f"- **VECTOR fields** (MUST wrap in vec_* operators first!): {_fmt(vector_fields, 10)}"
+        )
+    if group_fields:
+        lines.append(
+            "- **GROUP fields** (categorical groupings — use ONLY as the grouping "
+            "argument of group_* operators, e.g. group_neutralize(signal, <group>); "
+            f"NEVER as a value input to ts_*/arithmetic): {_fmt(group_fields, 10)}"
+        )
     if other_fields:
-        sample = ", ".join(other_fields[:5])
-        lines.append(f"- Other: {sample}")
-    
+        lines.append(f"- Other: {_fmt(other_fields, 5)}")
+
     return "\n".join(lines)
 
 

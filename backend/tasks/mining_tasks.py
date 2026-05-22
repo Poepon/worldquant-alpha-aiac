@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, update, func
+from sqlalchemy import select, update, func, case
 from sqlalchemy.orm.attributes import flag_modified  # Phase 1.5-B JSONB dirty trigger
 from loguru import logger
 
@@ -783,9 +783,20 @@ async def _get_dataset_fields(db, dataset_id, region, universe):
     # Without this filter is_active was a dead flag and a stale catalog field
     # (e.g. pv96_eq_dvd_cash_cg_amt, 107 sim failures/wk once the dataset
     # bandit steered onto long-dormant pv96) kept being offered to the LLM.
-    fields_stmt = select(DataField).where(
-        DataField.dataset_id == ds_meta.id,
-        DataField.is_active.is_(True),
+    # Value fields first (2026-05-23): GROUP-heavy datasets (pv13: 135 GROUP /
+    # 30 MATRIX) would otherwise crowd MATRIX/VECTOR value fields out of the
+    # downstream [:60]/[:30] caps, leaving the LLM only group fields to (mis)use
+    # as value inputs. Order non-GROUP (value) fields ahead of GROUP.
+    fields_stmt = (
+        select(DataField)
+        .where(
+            DataField.dataset_id == ds_meta.id,
+            DataField.is_active.is_(True),
+        )
+        .order_by(
+            case((DataField.field_type == "GROUP", 1), else_=0),
+            DataField.field_id,
+        )
     )
     fields_res = await db.execute(fields_stmt)
     fields_objs = fields_res.scalars().all()
