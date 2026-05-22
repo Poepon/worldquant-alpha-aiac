@@ -81,6 +81,8 @@ from backend.tasks.cognitive_layer_bandit_tasks import run_cognitive_layer_bandi
 from backend.tasks.dataset_weight_refresh import run_dataset_weight_refresh  # noqa: F401
 # R1b CoSTEER (2026-05-22): outcome reconciliation — fills r1b_retry_log.outcome
 from backend.tasks.r1b_outcome_reconcile import reconcile_r1b_outcomes  # noqa: F401
+# Data quality (2026-05-22): self-heal invalid (BRAIN-rejected) data fields
+from backend.tasks.datafield_prune import prune_invalid_datafields  # noqa: F401
 
 __all__ = [
     # Utilities
@@ -138,4 +140,5 @@ __all__ = [
     "run_cognitive_layer_bandit_update",
     "run_dataset_weight_refresh",
     "reconcile_r1b_outcomes",
+    "prune_invalid_datafields",
 ]

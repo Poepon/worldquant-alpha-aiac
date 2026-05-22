@@ -778,7 +778,15 @@ async def _get_dataset_fields(db, dataset_id, region, universe):
     if not ds_meta:
         return []
 
-    fields_stmt = select(DataField).where(DataField.dataset_id == ds_meta.id)
+    # is_active == True (2026-05-22): exclude fields BRAIN rejects as
+    # "Invalid data field" — auto-deactivated by prune_invalid_datafields.
+    # Without this filter is_active was a dead flag and a stale catalog field
+    # (e.g. pv96_eq_dvd_cash_cg_amt, 107 sim failures/wk once the dataset
+    # bandit steered onto long-dormant pv96) kept being offered to the LLM.
+    fields_stmt = select(DataField).where(
+        DataField.dataset_id == ds_meta.id,
+        DataField.is_active.is_(True),
+    )
     fields_res = await db.execute(fields_stmt)
     fields_objs = fields_res.scalars().all()
 
@@ -826,6 +834,7 @@ async def _get_universal_pv_fields(db, region, universe):
         select(DataField)
         .where(DataField.dataset_id == pv_meta.id)
         .where(DataField.field_id.in_(_UNIVERSAL_PV_FIELDS))
+        .where(DataField.is_active.is_(True))
     )
     rows = (await db.execute(fields_stmt)).scalars().all()
     return [

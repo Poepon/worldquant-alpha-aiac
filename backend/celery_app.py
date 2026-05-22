@@ -297,4 +297,13 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.reconcile_r1b_outcomes",
         "schedule": crontab(hour=5, minute=45),
     },
+    # Self-healing data-field prune (2026-05-22): daily 06:20 SH deactivate
+    # datafields BRAIN rejects as "Invalid data field" (stale catalog rows the
+    # dataset bandit surfaces by steering onto dormant datasets). Slotted
+    # AFTER sync_datasets (06:00) so a fresh sync that re-adds a stale field is
+    # re-pruned the same morning. Deterministic + reversible; never raises.
+    "datafield-prune": {
+        "task": "backend.tasks.prune_invalid_datafields",
+        "schedule": crontab(hour=6, minute=20),
+    },
 }

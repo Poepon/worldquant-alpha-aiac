@@ -693,6 +693,9 @@ class Settings(BaseSettings):
     # ----- R1b outcome reconciliation (Break 2 fix, 2026-05-22) -----
     # Max pending r1b_retry_log rows reconcile_r1b_outcomes processes per run.
     R1B_RECONCILE_MAX_ROWS: int = 1000
+    # ----- Self-healing data-field prune (2026-05-22) -----
+    DATAFIELD_PRUNE_WINDOW_DAYS: int = 14
+    DATAFIELD_PRUNE_MAX_PER_RUN: int = 500
     # ----- Shared budget guard -----
     R1B_TOKEN_COST_CEILING_USD_PER_ALPHA: float = 0.05
     # ----- R1b.1 review LOW 2 — per-round cost cap -----
