@@ -44,6 +44,10 @@ class RuleId:
     LOW_COVERAGE_FIELD = "low_coverage_field"
     # Tier 2a (plan a-streamed-wren): ts_regression(x,x) / ts_corr(x,x) etc.
     DEGENERATE_SELF_REFERENCE = "degenerate_self_reference"
+    # 2026-05-22: group_* unit mismatch — a non-group field as the grouping
+    # argument, or a GROUP field used as a value input. BRAIN rejects these
+    # ("Incompatible unit ... expected Unit[Group:1]"); catch pre-simulate.
+    GROUP_UNIT_MISMATCH = "group_unit_mismatch"
     OTHER = "other"
 
     # risk (P1-E new — static max-loss inference)
@@ -640,6 +644,23 @@ def _aggregate_risk_bounds(findings: List[Finding]) -> Dict[str, Any]:
 # ~10/138 sims on ts_regression self-reference. See plan a-streamed-wren Tier 2a.
 _SELF_REFERENCE_DEGENERATE_OPS: Tuple[str, ...] = ("ts_regression", "ts_corr")
 
+# 2026-05-22 group-unit guard. Standard BRAIN group identifiers — always valid
+# as the grouping argument of a group_* operator.
+_STANDARD_GROUP_TOKENS: frozenset = frozenset({
+    "market", "sector", "industry", "subindustry", "country", "exchange",
+})
+# group_neutralize(value, group): grouping arg is the LAST positional arg.
+# Restricted to group_neutralize (confident 2-arg signature) so a group op with
+# a different group position can't trip a mis-positioned false positive.
+_GROUP_NEUTRALIZE_OPS: Tuple[str, ...] = ("group_neutralize",)
+# Plain value-input ops where a GROUP field is always a unit error.
+_VALUE_ONLY_OPS: Tuple[str, ...] = (
+    "ts_delta", "ts_mean", "ts_zscore", "ts_rank", "ts_std_dev", "ts_sum",
+    "ts_decay_linear", "ts_delay", "ts_corr", "ts_regression", "ts_scale",
+    "add", "subtract", "multiply", "divide", "signed_power", "log", "abs",
+)
+_BARE_ID_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
 
 def _infer_degenerate_findings(expression: str) -> List[Finding]:
     """Hard Findings for mathematically degenerate self-reference calls.
@@ -731,7 +752,70 @@ class AlphaSemanticValidator:
         # Regex patterns for parsing
         self._field_pattern = re.compile(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\b')
         self._func_pattern = re.compile(r'\b([a-zA-Z_][a-zA-Z0-9_]*)\s*\(')
-        
+
+    def _infer_group_unit_findings(self, expression: str) -> List["Finding"]:
+        """Pre-sim findings for group_* UNIT misuse (2026-05-22).
+
+        BRAIN rejects two patterns with "Incompatible unit ... Unit[Group:1]":
+          A. group_neutralize(value, G) where G is a non-group data field;
+          B. a GROUP-classified field used as a plain value input (ts_*/arith).
+        Catching them pre-simulate routes the round to SELF_CORRECT instead of
+        burning a BRAIN sim. Severity follows ``reject_unknown_operators`` (hard
+        only on the mining pre-sim path, soft elsewhere) and the guard is INERT
+        when the field catalog is empty — it only ever flags KNOWN field types,
+        so false-positives can't hard-reject a valid alpha on a fieldless call.
+        """
+        findings: List[Finding] = []
+        if not expression or not self.field_map:
+            return findings
+        sev = "hard" if self.reject_unknown_operators else "soft"
+        expr_l = expression.lower()
+        group_fields = {
+            fid for fid, info in self.field_map.items()
+            if info.field_type == FieldType.GROUP
+        }
+        valid_group = _STANDARD_GROUP_TOKENS | group_fields
+
+        # A: group_neutralize last arg must be a valid group token.
+        for op in _GROUP_NEUTRALIZE_OPS:
+            for call_args in _walk_call_args(expr_l, op):
+                if len(call_args) < 2:
+                    continue
+                g = call_args[-1].strip()
+                if not _BARE_ID_RE.fullmatch(g) or g in valid_group:
+                    continue  # nested expr (skip) or already valid
+                info = self.field_map.get(g)
+                if info is not None and info.field_type != FieldType.GROUP:
+                    findings.append(Finding(
+                        rule_id=RuleId.GROUP_UNIT_MISMATCH, severity=sev,
+                        message=(
+                            f"{op} grouping argument '{g}' is a "
+                            f"{info.field_type.value} field, not a group — use "
+                            f"market/sector/industry/subindustry or a GROUP field"
+                        ),
+                        category="semantics", location=f"{op}(..., {g})",
+                        metadata={"operator": op, "bad_group": g},
+                    ))
+
+        # B: a GROUP field used as a plain value input.
+        if group_fields:
+            for op in _VALUE_ONLY_OPS:
+                for call_args in _walk_call_args(expr_l, op):
+                    for a in call_args:
+                        a = a.strip()
+                        if a in group_fields:
+                            findings.append(Finding(
+                                rule_id=RuleId.GROUP_UNIT_MISMATCH, severity=sev,
+                                message=(
+                                    f"GROUP field '{a}' cannot be a value input to "
+                                    f"{op} — group fields are only valid as the "
+                                    f"grouping argument of group_* operators"
+                                ),
+                                category="semantics", location=f"{op}(..., {a}, ...)",
+                                metadata={"operator": op, "group_field": a},
+                            ))
+        return findings
+
     def validate(self, expression: str) -> SemanticValidationResult:
         """
         Perform semantic validation on an expression.
@@ -870,6 +954,19 @@ class AlphaSemanticValidator:
                 category=df.category,
                 location=df.location,
                 metadata=df.metadata,
+            )
+
+        # 9. group_* UNIT guard (2026-05-22): non-group field as grouping arg /
+        # GROUP field as value input → BRAIN "Incompatible unit Unit[Group:1]".
+        # Field-type-aware (uses field_map), so inert without a field catalog.
+        for gf in self._infer_group_unit_findings(expression):
+            result._emit_finding(
+                rule_id=gf.rule_id,
+                severity=gf.severity,
+                message=gf.message,
+                category=gf.category,
+                location=gf.location,
+                metadata=gf.metadata,
             )
 
         return result
