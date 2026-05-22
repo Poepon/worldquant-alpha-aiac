@@ -110,6 +110,13 @@ class TestCanonicalStructureScaffold:
         assert "CROSS-SECTIONAL NEUTRALIZATION RULE" in out
         assert "group_neutralize" in out
 
+    def test_group_arg_prohibition_present(self):
+        # 2026-05-23: explicit negative constraint so the LLM stops using the
+        # universe name (top3000) / a data field as the grouping argument.
+        out = build_strategy_constraints(PromptContext())
+        assert "NEVER the universe name" in out
+        assert "top3000" in out
+
     def test_rule_present_in_full_prompt(self):
         ctx = PromptContext(
             fields=[{"id": "close", "type": "MATRIX"}],

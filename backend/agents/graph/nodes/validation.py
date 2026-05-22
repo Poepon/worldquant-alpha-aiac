@@ -106,9 +106,19 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
     
     logger.info(f"[{node_name}] Starting batch validation | count={len(state.pending_alphas)}")
     
+    # Effective field scope (2026-05-23 fix): validate against the SAME field
+    # set node_code_gen generated against. For a cross-dataset hypothesis,
+    # node_hypothesis fetches the pool-union fields into
+    # state.current_hypothesis_fields and code_gen uses them — but validation
+    # used only the anchor state.fields, so a legitimate pool field (e.g.
+    # socialmedia8's snt_social_value used on a non-social anchor) got a false
+    # "Field not found in dataset" → 4/4 rejected → wasteful self-correct churn.
+    # Prefer the union when present; fall back to the anchor.
+    _effective_fields = list(getattr(state, "current_hypothesis_fields", None) or []) or state.fields
+
     # Build field list for validators
     allowed_fields = []
-    for f in state.fields:
+    for f in _effective_fields:
         if isinstance(f, dict):
             allowed_fields.append(f.get("id", f.get("name")))
         else:
@@ -133,7 +143,7 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
         if isinstance(o, dict) and o.get("name")
     ]
     semantic_validator = AlphaSemanticValidator(
-        fields=state.fields,
+        fields=_effective_fields,
         operators=_allowed_op_names or None,
         strict_field_check=False,
         strict_type_check=True,
@@ -565,10 +575,14 @@ async def node_self_correct(
 
     logger.info(f"[{node_name}] Starting batch fix | count={len(invalid_indices)} pass={state.retry_count + 1}/{state.max_retries}")
     
-    # Build allowed fields list
+    # Build allowed fields list — same effective scope as node_validate
+    # (pool-union when a cross-dataset hypothesis selected it), so self-correct
+    # tells the LLM the real valid fields instead of forcing every fix back onto
+    # the anchor dataset (which would discard the cross-dataset hypothesis).
+    _effective_fields = list(getattr(state, "current_hypothesis_fields", None) or []) or state.fields
     allowed_fields = []
-    for f in state.fields[:50]:
-        fid = f.get('id', f.get('name', ''))
+    for f in _effective_fields[:50]:
+        fid = f.get('id', f.get('name', '')) if isinstance(f, dict) else str(f)
         if fid:
             allowed_fields.append(fid)
     
@@ -666,7 +680,7 @@ async def node_self_correct(
                             from backend.alpha_semantic_validator import validate_alpha_semantically  # noqa: E402
                             _new_val = validate_alpha_semantically(
                                 expression=fixed,
-                                fields=state.fields[:50],
+                                fields=_effective_fields[:50],
                                 operators=None,
                                 strict=False,
                             )
