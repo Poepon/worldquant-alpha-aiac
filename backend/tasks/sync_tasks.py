@@ -566,6 +566,86 @@ def sync_operators_from_brain():
     return run_async(_run())
 
 
+async def _reconcile_dataset_fields(db, dataset, fields, *, region, universe, delay):
+    """Upsert BRAIN-returned fields + (re-)activate them (user 2026-05-22):
+    a field BRAIN currently returns → is_active=True, undoing any earlier prune.
+
+    Fields BRAIN no longer returns KEEP their current is_active — deactivation
+    is delegated to the mining-driven prune (prune_invalid_datafields), which
+    deactivates ONLY fields BRAIN actually rejects at SIMULATE time ("Invalid
+    data field"). So sync never wipes a dataset on a transient/sliced metadata
+    response; the loop self-identifies dead fields as they fail. Caller commits.
+    Pure DB-side → unit-testable on the sqlite fixture.
+
+    Returns {"new", "updated", "returned"}.
+    """
+    from sqlalchemy import func as sqla_func
+
+    count = 0
+    updated = 0
+    for f_data in fields:
+        fid = f_data.get("id")
+        if not fid:
+            continue
+        category_obj = f_data.get("category") or {}
+        subcategory_obj = f_data.get("subcategory") or {}
+        category_id = category_obj.get("id") if isinstance(category_obj, dict) else category_obj
+        category_name = category_obj.get("name") if isinstance(category_obj, dict) else None
+        subcategory_id = subcategory_obj.get("id") if isinstance(subcategory_obj, dict) else subcategory_obj
+        subcategory_name = subcategory_obj.get("name") if isinstance(subcategory_obj, dict) else None
+
+        existing = (await db.execute(
+            select(DataField).where(
+                DataField.dataset_id == dataset.id,
+                DataField.field_id == fid,
+            )
+        )).scalar_one_or_none()
+
+        if existing:
+            existing.description = f_data.get("description")
+            existing.field_name = f_data.get("name", fid)
+            existing.field_type = f_data.get("type")
+            existing.date_coverage = f_data.get("dateCoverage")
+            existing.coverage = f_data.get("coverage")
+            existing.pyramid_multiplier = f_data.get("pyramidMultiplier")
+            existing.user_count = f_data.get("userCount")
+            existing.alpha_count = f_data.get("alphaCount", 0)
+            existing.category = category_id
+            existing.category_name = category_name
+            existing.subcategory = subcategory_id
+            existing.subcategory_name = subcategory_name
+            existing.themes = f_data.get("themes", [])
+            existing.is_active = True  # BRAIN returns it → valid → (re-)activate
+            updated += 1
+        else:
+            db.add(DataField(
+                dataset_id=dataset.id, region=region, universe=universe, delay=delay,
+                field_id=fid, field_name=f_data.get("name", fid),
+                description=f_data.get("description"), field_type=f_data.get("type"),
+                date_coverage=f_data.get("dateCoverage"), coverage=f_data.get("coverage"),
+                pyramid_multiplier=f_data.get("pyramidMultiplier"),
+                user_count=f_data.get("userCount"), alpha_count=f_data.get("alphaCount", 0),
+                category=category_id, category_name=category_name,
+                subcategory=subcategory_id, subcategory_name=subcategory_name,
+                themes=f_data.get("themes", []),
+            ))
+            count += 1
+
+    returned_ids = {f.get("id") for f in fields if f.get("id")}
+    # Fields BRAIN no longer returns are intentionally left as-is — the mining
+    # prune deactivates the truly-invalid ones when BRAIN rejects them at sim.
+
+    # field_count reflects ACTIVE fields (what mining actually sees).
+    dataset.field_count = (await db.execute(
+        select(sqla_func.count(DataField.id)).where(
+            DataField.dataset_id == dataset.id,
+            DataField.is_active.is_(True),
+        )
+    )).scalar() or 0
+    dataset.last_synced_at = func.now()
+    return {"new": count, "updated": updated, "returned": len(returned_ids)}
+
+
 @celery_app.task(name="backend.tasks.sync_fields_from_brain")
 def sync_fields_from_brain(dataset_id: str, region: str = "USA", universe: str = "TOP3000", delay: int = 1):
     """
@@ -602,81 +682,17 @@ def sync_fields_from_brain(dataset_id: str, region: str = "USA", universe: str =
                     delay=delay
                 )
                 
-                count = 0
-                updated = 0
-                
-                for f_data in fields:
-                    fid = f_data.get("id")
-                    if not fid:
-                        continue
-                    
-                    # Extract nested category/subcategory objects
-                    category_obj = f_data.get("category") or {}
-                    subcategory_obj = f_data.get("subcategory") or {}
-                    
-                    category_id = category_obj.get("id") if isinstance(category_obj, dict) else category_obj
-                    category_name = category_obj.get("name") if isinstance(category_obj, dict) else None
-                    subcategory_id = subcategory_obj.get("id") if isinstance(subcategory_obj, dict) else subcategory_obj
-                    subcategory_name = subcategory_obj.get("name") if isinstance(subcategory_obj, dict) else None
-                        
-                    stmt = select(DataField).where(
-                        DataField.dataset_id == dataset.id,
-                        DataField.field_id == fid
-                    )
-                    result = await db.execute(stmt)
-                    existing = result.scalar_one_or_none()
-                    
-                    if existing:
-                        existing.description = f_data.get("description")
-                        existing.field_name = f_data.get("name", fid)
-                        existing.field_type = f_data.get("type")
-                        existing.date_coverage = f_data.get("dateCoverage")
-                        existing.coverage = f_data.get("coverage")
-                        existing.pyramid_multiplier = f_data.get("pyramidMultiplier")
-                        existing.user_count = f_data.get("userCount")
-                        existing.alpha_count = f_data.get("alphaCount", 0)
-                        existing.category = category_id
-                        existing.category_name = category_name
-                        existing.subcategory = subcategory_id
-                        existing.subcategory_name = subcategory_name
-                        existing.themes = f_data.get("themes", [])
-                        updated += 1
-                    else:
-                        new_field = DataField(
-                            dataset_id=dataset.id,
-                            region=region,
-                            universe=universe,
-                            delay=delay,
-                            field_id=fid,
-                            field_name=f_data.get("name", fid),
-                            description=f_data.get("description"),
-                            field_type=f_data.get("type"),
-                            date_coverage=f_data.get("dateCoverage"),
-                            coverage=f_data.get("coverage"),
-                            pyramid_multiplier=f_data.get("pyramidMultiplier"),
-                            user_count=f_data.get("userCount"),
-                            alpha_count=f_data.get("alphaCount", 0),
-                            category=category_id,
-                            category_name=category_name,
-                            subcategory=subcategory_id,
-                            subcategory_name=subcategory_name,
-                            themes=f_data.get("themes", [])
-                        )
-                        db.add(new_field)
-                        count += 1
-                
-                # Update dataset field count
-                from sqlalchemy import func as sqla_func
-                total_fields_query = await db.execute(
-                    select(sqla_func.count(DataField.id)).where(DataField.dataset_id == dataset.id)
+                stats = await _reconcile_dataset_fields(
+                    db, dataset, fields,
+                    region=region, universe=universe, delay=delay,
                 )
-                actual_field_count = total_fields_query.scalar() or 0
-                dataset.field_count = actual_field_count
-                dataset.last_synced_at = func.now()
-                
                 await db.commit()
-                logger.info(f"Field sync for {dataset_id}: {count} new, {updated} updated")
-                return {"new": count, "updated": updated}
+                logger.info(
+                    f"Field sync for {dataset_id}: {stats['new']} new, "
+                    f"{stats['updated']} updated/(re)activated "
+                    f"(BRAIN returned {stats['returned']})"
+                )
+                return {k: stats[k] for k in ("new", "updated")}
     
     return run_async(_run())
 
