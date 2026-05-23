@@ -91,3 +91,21 @@ def derive_dataset_id(
         return None
     best_n = max(counts.values())
     return sorted(d for d, n in counts.items() if n == best_n)[0]
+
+
+def resolve_dataset_id(
+    field_ids: Optional[Sequence[str]],
+    field_map: Dict[str, str],
+    anchor: Optional[str] = None,
+) -> Optional[str]:
+    """Attribute an alpha to the dataset of its ACTUAL fields, falling back to
+    the FLAT/ONESHOT ``anchor`` only when no field resolves.
+
+    a-fix 2026-05-23: a cross-dataset hypothesis (HYPOTHESIS_CENTRIC) anchors on
+    one dataset but the LLM may generate fields from another; stamping the anchor
+    mis-attributes the alpha and corrupts the dataset bandit's per-dataset reward.
+    Fields are ground truth → derive wins. For ONESHOT (anchor == mined dataset)
+    derive returns the same value, so the anchor fallback is a no-op there; it
+    only kicks in on a catalog gap / fieldless expression.
+    """
+    return derive_dataset_id(field_ids, field_map) or anchor

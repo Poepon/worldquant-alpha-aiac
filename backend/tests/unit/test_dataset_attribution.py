@@ -10,6 +10,7 @@ from backend.dataset_attribution import (
     _clear_cache,
     build_field_dataset_map,
     derive_dataset_id,
+    resolve_dataset_id,
 )
 
 
@@ -32,6 +33,27 @@ class TestDeriveDatasetId:
 
     def test_unmapped_fields_return_none(self):
         assert derive_dataset_id(["unknown_field"], {"a": "x"}) is None
+
+
+class TestResolveDatasetId:
+    # a-fix 2026-05-23: fields are ground truth; anchor is only a fallback.
+    def test_fields_win_over_differing_anchor(self):
+        # The 3406 bug: anchored on pv96 but fields are analyst4 → analyst4 wins.
+        m = {"anl4_cfps": "analyst4"}
+        assert resolve_dataset_id(["anl4_cfps"], m, anchor="pv96") == "analyst4"
+
+    def test_falls_back_to_anchor_when_no_field_resolves(self):
+        # Catalog gap / fieldless expr → keep the anchor (legacy behavior).
+        assert resolve_dataset_id(["unknown"], {"a": "x"}, anchor="pv13") == "pv13"
+        assert resolve_dataset_id([], {}, anchor="pv13") == "pv13"
+
+    def test_oneshot_anchor_equals_derived_is_noop(self):
+        # ONESHOT: anchor == the mined dataset → derive returns the same → no-op.
+        m = {"fn_assets": "fundamental2"}
+        assert resolve_dataset_id(["fn_assets"], m, anchor="fundamental2") == "fundamental2"
+
+    def test_no_anchor_no_resolve_returns_none(self):
+        assert resolve_dataset_id(["unknown"], {"a": "x"}, anchor=None) is None
 
 
 @pytest.mark.asyncio
