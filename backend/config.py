@@ -1067,6 +1067,26 @@ class Settings(BaseSettings):
     # (Retired ENABLE_PRE_SIMULATE_FILTER flag 2026-05-19 — hard-wired ON.)
     PRE_SIMULATE_FILTER_THRESHOLD: float = 0.10
 
+    # Soft regularizer (P1, 2026-05-23): AlphaAgent-style soft penalty over
+    # code-gen candidates instead of a hard field/operator cap. Two legs in
+    # P1 — complexity + originality (alignment=R5 reserved for P2, w=0).
+    # Acts at the pre_simulate_filter call site (evaluation.py). Mode mirrors
+    # QLIB_PRESCREEN_MODE / FACTOR_LENS_MODE:
+    #   "off"    → block inert (no compute, byte-for-byte legacy)
+    #   "shadow" → compute + stamp alpha.metrics['_soft_reg_*'] only (DEFAULT)
+    #   "soft"   → also down-weight pre-sim P(PASS): p*(1-lambda*penalty)
+    # No "hard" mode — by design we never reject on complexity (per decision
+    # 2026-05-23: dropped the hard 3/8 cap in favour of soft regularization).
+    CODE_GEN_SOFT_REG_MODE: str = "shadow"  # off | shadow | soft
+    CODE_GEN_SOFT_REG_LAMBDA: float = 0.5   # max P(PASS) fraction a fully-penalized cand loses
+    CODE_GEN_SOFT_REG_W_COMPLEXITY: float = 0.5
+    CODE_GEN_SOFT_REG_W_ORIGINALITY: float = 0.5
+    CODE_GEN_SOFT_REG_W_ALIGNMENT: float = 0.0   # reserved for P2 (R5 c1/c2)
+    # Complexity ramp: complexity_score = n_operators + 0.5*n_fields.
+    # 0 penalty at/below C0 (free), linear up to 1 at CMAX (saturates beyond).
+    CODE_GEN_SOFT_REG_COMPLEXITY_C0: float = 6.0
+    CODE_GEN_SOFT_REG_COMPLEXITY_CMAX: float = 16.0
+
     # V-24.E (2026-05-13): FIELD_INSIGHT / HYPOTHESIS_INSIGHT writes gated.
     # kb_hit_audit found 4170 historical rows of these types had 0% retrieve
     # rate — feedback_agent persists them but rag_service has no _get_*_insights

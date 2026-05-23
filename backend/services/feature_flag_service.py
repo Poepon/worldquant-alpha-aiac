@@ -253,6 +253,55 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "~5d shadow → 3d soft → hard per plan §10 stage gates."
         ),
     ),
+    # --- SoftReg-P1 软正则 (2026-05-23): AlphaAgent-style 复杂度+原创软惩罚 ---
+    "CODE_GEN_SOFT_REG_MODE": FlagSpec(
+        name="CODE_GEN_SOFT_REG_MODE",
+        flag_type="str",
+        group="SoftReg-P1",
+        description=(
+            "Soft regularizer over code-gen candidates at pre_simulate_filter: "
+            "'off' (inert) | 'shadow' (compute + stamp alpha.metrics['_soft_reg_*'] "
+            "only, default) | 'soft' (also down-weight pre-sim P(PASS) = "
+            "p*(1-lambda*penalty)). P1 legs = complexity + originality (alignment "
+            "= R5 reserved for P2). No 'hard' mode by design (no complexity reject)."
+        ),
+    ),
+    "CODE_GEN_SOFT_REG_LAMBDA": FlagSpec(
+        name="CODE_GEN_SOFT_REG_LAMBDA",
+        flag_type="float",
+        group="SoftReg-P1",
+        description="soft 模式 P(PASS) 最大降权比例 (0=无效, 1=penalty=1 的候选完全压制)。",
+    ),
+    "CODE_GEN_SOFT_REG_W_COMPLEXITY": FlagSpec(
+        name="CODE_GEN_SOFT_REG_W_COMPLEXITY",
+        flag_type="float",
+        group="SoftReg-P1",
+        description="复杂度腿权重 (在活跃腿间归一化;只有与其他权重的比值有意义)。",
+    ),
+    "CODE_GEN_SOFT_REG_W_ORIGINALITY": FlagSpec(
+        name="CODE_GEN_SOFT_REG_W_ORIGINALITY",
+        flag_type="float",
+        group="SoftReg-P1",
+        description="原创腿权重 (AST min-distance → 1-dist 惩罚;活跃腿间归一化)。",
+    ),
+    "CODE_GEN_SOFT_REG_W_ALIGNMENT": FlagSpec(
+        name="CODE_GEN_SOFT_REG_W_ALIGNMENT",
+        flag_type="float",
+        group="SoftReg-P1",
+        description="对齐腿权重 (R5 c1/c2),P1 恒为 0 — 预留 P2。",
+    ),
+    "CODE_GEN_SOFT_REG_COMPLEXITY_C0": FlagSpec(
+        name="CODE_GEN_SOFT_REG_COMPLEXITY_C0",
+        flag_type="float",
+        group="SoftReg-P1",
+        description="复杂度斜坡下限:complexity_score (=n_ops+0.5*n_fields) 在此及以下惩罚为 0。",
+    ),
+    "CODE_GEN_SOFT_REG_COMPLEXITY_CMAX": FlagSpec(
+        name="CODE_GEN_SOFT_REG_COMPLEXITY_CMAX",
+        flag_type="float",
+        group="SoftReg-P1",
+        description="复杂度斜坡上限:complexity_score 达此值惩罚=1 (之后饱和)。",
+    ),
     # --- R1b CoSTEER loop (5 sub-stages — independent rollback, ordered deps) ---
     # 设计:5 个 sub-stage 各自独立 flag。Ship 顺序 stage 1→5 但任一可 OFF 单独回滚。
     # 依赖关系在 description 中标注;ops UI 按 group 排序看到完整 stage 列表。
