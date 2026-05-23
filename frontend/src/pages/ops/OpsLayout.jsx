@@ -14,7 +14,6 @@ import CoSTEERMonitor from './CoSTEERMonitor'
 import BrainRoleSwitch from './BrainRoleSwitch'
 import SimulationCacheMonitor from './SimulationCacheMonitor'
 import LLMJudgeMonitor from './LLMJudgeMonitor'
-import DagMonitor from './DagMonitor'
 import CostMonitor from './CostMonitor'
 import DirectionBanditMonitor from './DirectionBanditMonitor'
 import G3OriginalityMonitor from './G3OriginalityMonitor'
@@ -81,8 +80,6 @@ export default function OpsLayout() {
         <Route path="r9-cache" element={<SimulationCacheMonitor />} />
         {/* Phase 2 R5 — LLM judge cost + c1/c2 telemetry (2026-05-18) */}
         <Route path="r5-judge" element={<LLMJudgeMonitor />} />
-        {/* Phase 2 R6 — DAG trace telemetry (2026-05-18) */}
-        <Route path="r6-dag" element={<DagMonitor />} />
         {/* G2 Phase A — LLM cost telemetry (2026-05-19) */}
         <Route path="cost-monitor" element={<CostMonitor />} />
         {/* G1 Phase A — direction-bandit telemetry (2026-05-19) */}

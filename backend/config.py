@@ -562,9 +562,7 @@ class Settings(BaseSettings):
     # ----- flat-F2 default mining_mode flip (Phase 3, 2026-05-18) -----
     # 默认 mining_mode 翻 CONTINUOUS_CASCADE → FLAT_CONTINUOUS — POST
     # /mining-session/start 不再创建 cascade task,改创 flat task。
-    # 前置:ENABLE_FLAT_CONTINUOUS + ENABLE_DAG_TRACE 都 ON(R6 给 flat
-    # reward-guided exploration,避 linear cursor regression)+ flat-F1
-    # 2 周灰度 PASS。决策 5A lock。
+    # 前置:ENABLE_FLAT_CONTINUOUS ON + flat-F1 2 周灰度 PASS。决策 5A lock。
     # 默认 OFF — 翻 ON 后新 task 走 flat,既有 cascade task 不影响。
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     ENABLE_DEFAULT_FLAT_SESSION: bool = False
@@ -687,9 +685,6 @@ class Settings(BaseSettings):
     # hypothesis_centric_variant=3 task opt-in;coexists with R1b.1/R1b.2.
     ENABLE_R1B_TYPED_PIPELINE: bool = False
     R1B_TYPED_NUM_ITER_PER_ROUND: int = 3  # how many run_iteration calls per outer round
-    # ----- R1b.5 — R6 DAG retry-aware reward -----
-    # Pre-req R1b.1+R1b.2 GO gates + ≥14d observation.
-    ENABLE_R1B_DAG_RETRY_REWARD: bool = False
     # ----- R1b outcome reconciliation (Break 2 fix, 2026-05-22) -----
     # Max pending r1b_retry_log rows reconcile_r1b_outcomes processes per run.
     R1B_RECONCILE_MAX_ROWS: int = 1000
@@ -762,23 +757,6 @@ class Settings(BaseSettings):
     # 留 R7-v2 等 R6 DAG ship 后再做)。
     # 默认 OFF — flag ON 后 retry_count 行为不变(LLM 仍 1-3 次,reject 占 1 次)。
     ENABLE_SELF_CORRECT_SEMI_ACCEPT: bool = False
-
-    # ----- Phase 2 R6 DAG Trace (MCTS-lite, 2026-05-18) -----
-    # 替换 linear T1→T2→T3 cascade_phase scalar 推进为 DAG-structured
-    # multi-branch trace persisted in experiment_runs.runtime_state["dag"] JSONB
-    # (Phase 1.5-A 已加 col,无 Alembic 需要)。R6-v1 简化-MCTS(best-path expand
-    # + reward backprop);full UCT 推 R6-v2。
-    # 落地:backend/agents/graph/dag_state.py 纯函数 helpers + mining_tasks.py
-    # 集成 + _resolve_cascade_phase 3-层 fallback(DAG → current_tier → cascade_phase)。
-    # 默认 OFF — 翻 OFF 时 phase15-C 路径不变 byte-equivalent。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    # plan: ~/.claude/plans/phase2-r6-dag-2026-05-18.md v1.0
-    ENABLE_DAG_TRACE: bool = False
-    DAG_MAX_NODES: int = 100               # write-side hard cap (~25KB at avg 250B/node)
-    DAG_MAX_DEPTH: int = 10                # parent-chain depth cap
-    DAG_UCB_EXPLORATION_C: float = 1.4     # UCB1 c parameter (warm leaves)
-    DAG_COLD_THRESHOLD: int = 3            # n_pulls < this → Thompson sampling
-    DAG_PRUNE_LRU_KEEP_FRACTION: float = 0.7  # prune keeps top 70% by reward/LRU
 
     # ----- Phase 2 R10 Family-cap (Hubble v2 Table 1, 2026-05-18) -----
     # 同 pillar 同 family(operator-sequence signature)只保留 top-K=2 by score。

@@ -10,8 +10,7 @@ Pure-helpers + ``cached_simulate_batch`` wrapper around
   5. Reassembles in original order.
 
 Soft-fail: any cache DB error → fall back to direct BRAIN call. NEVER
-blocks a sim. Mirrors r5_judge / dag_state / family_classifier soft-fail
-philosophy.
+blocks a sim. Mirrors r5_judge / family_classifier soft-fail philosophy.
 
 Per master plan §4.5 R9 (1-2/3 人日; this PR ships the read/write/integration
 in one go since scope is crisp).

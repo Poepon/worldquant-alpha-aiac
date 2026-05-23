@@ -161,8 +161,8 @@ async def test_telemetry_empty_log_returns_zero_rates(client_factory):
 
 
 @pytest.mark.asyncio
-async def test_telemetry_exposes_all_5_r1b_flags(client_factory):
-    """flags dict must include exactly the 5 ENABLE_R1B_* keys."""
+async def test_telemetry_exposes_all_4_r1b_flags(client_factory):
+    """flags dict must include exactly the 4 ENABLE_R1B_* keys."""
     client = await client_factory([[], []])
     async with client as ac:
         r = await ac.get("/api/v1/ops/r1b/telemetry")
@@ -170,7 +170,6 @@ async def test_telemetry_exposes_all_5_r1b_flags(client_factory):
     expected = {
         "ENABLE_R1B_RETRY_LOOP", "ENABLE_R1B_HYPOTHESIS_MUTATE",
         "ENABLE_R1B_FAILURE_TREE", "ENABLE_R1B_TYPED_PIPELINE",
-        "ENABLE_R1B_DAG_RETRY_REWARD",
     }
     assert set(flags.keys()) == expected
     for v in flags.values():

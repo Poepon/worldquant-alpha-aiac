@@ -1578,7 +1578,6 @@ async def r1b_telemetry(
         "ENABLE_R1B_HYPOTHESIS_MUTATE": bool(getattr(_stg, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)),
         "ENABLE_R1B_FAILURE_TREE": bool(getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False)),
         "ENABLE_R1B_TYPED_PIPELINE": bool(getattr(_stg, "ENABLE_R1B_TYPED_PIPELINE", False)),
-        "ENABLE_R1B_DAG_RETRY_REWARD": bool(getattr(_stg, "ENABLE_R1B_DAG_RETRY_REWARD", False)),
     }
 
     # Aggregation 1: per-attempt-type per-outcome counts + cost/token sums.
@@ -2317,7 +2316,6 @@ async def costeer_deploy_recommendation(
         "ENABLE_R1B_HYPOTHESIS_MUTATE": bool(getattr(_stg, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)),
         "ENABLE_R1B_FAILURE_TREE": bool(getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False)),
         "ENABLE_R1B_TYPED_PIPELINE": bool(getattr(_stg, "ENABLE_R1B_TYPED_PIPELINE", False)),
-        "ENABLE_R1B_DAG_RETRY_REWARD": bool(getattr(_stg, "ENABLE_R1B_DAG_RETRY_REWARD", False)),
     }
 
     # --- 2. R1a non_unknown_pct + total in window ---
@@ -2438,12 +2436,6 @@ async def costeer_deploy_recommendation(
         f"mutate attempts={mutate_attempts}<{g['r1b_mutate_attempts_min']} or "
         f"pass rate={mutate_pass_rate:.3f}<{g['r1b_mutate_pass_rate_min']}",
     )
-    _check(
-        "ENABLE_R1B_DAG_RETRY_REWARD",
-        state["ENABLE_R1B_RETRY_LOOP"] and chain_max_depth > g["r1b_chain_max_depth_min"],
-        f"DAG retry reward: chain max_depth={chain_max_depth} (need >{g['r1b_chain_max_depth_min']})",
-    )
-
     # next_action picks the first ready flag (deploy order matters per plan §10)
     if ready:
         next_action = f"Flip {ready[0]} via PATCH /ops/flags/{ready[0]} — gates met."
@@ -3374,141 +3366,6 @@ async def r5_judge_stats(
         window_days=int(days),
     )
 
-
-# =============================================================================
-# Phase 2 R6 — DAG trace telemetry (2026-05-18)
-# =============================================================================
-# R6 DAG lives in experiment_runs.runtime_state['dag'] JSONB (not a separate
-# table). Top-level keys node_count + max_depth_seen are cheap aggregates;
-# we deliberately don't iterate the nodes dict for status breakdown — that
-# would require jsonb_each per row. Operators wanting per-node detail can
-# pull a single run via /api/v1/runs/{run_id} (existing) and inspect the
-# raw runtime_state.dag JSONB.
-
-
-class R6RunSummary(BaseModel):
-    run_id: int
-    task_id: Optional[int] = None
-    node_count: int
-    max_depth: int
-    root_id: Optional[str] = None
-    current_selection: Optional[str] = None
-    created_at: Optional[str] = None
-
-
-class R6DepthBucket(BaseModel):
-    depth: int
-    run_count: int
-
-
-class R6DagStatsOut(BaseModel):
-    flags: Dict[str, bool]
-    total_runs_with_dag: int
-    total_nodes_across_runs: int
-    avg_nodes_per_run: float
-    max_node_count: int
-    max_depth_observed: int
-    depth_distribution: List[R6DepthBucket]
-    recent_runs: List[R6RunSummary]
-    window_days: int
-
-
-@router.get("/r6/dag-stats", response_model=R6DagStatsOut)
-async def r6_dag_stats(
-    days: int = 7,
-    _token: str = Depends(_require_ops_token),
-    db: AsyncSession = Depends(get_db),
-) -> R6DagStatsOut:
-    """R6 DAG trace telemetry — node count + depth distribution per run.
-
-    Reads ``experiment_runs.runtime_state->'dag'`` JSONB. Healthy R6
-    deployment: ``avg_nodes_per_run`` between 5 and 40 (too few = bandit
-    not exploring; too many = pruning broken), ``max_depth_observed`` >= 3
-    (DAG actually multi-level not just root + flat children), and depth
-    distribution showing some spread (mining diverse expression families).
-
-    ``window_days`` filters by ExperimentRun.started_at. Top-level JSONB
-    keys (``node_count``, ``max_depth_seen``) are populated/maintained by
-    backend/agents/graph/dag_state.py — empty/legacy runs (pre-R6 or
-    ENABLE_DAG_TRACE=False) have no ``dag`` sub-key and are filtered out.
-    """
-    from sqlalchemy import text as _text
-    from backend.config import settings as _stg
-
-    flags = {
-        "ENABLE_DAG_TRACE": bool(getattr(_stg, "ENABLE_DAG_TRACE", False)),
-    }
-
-    overall = (await db.execute(_text(
-        "SELECT "
-        "  COUNT(*) AS runs_with_dag, "
-        "  COALESCE(SUM((runtime_state->'dag'->>'node_count')::int), 0) AS total_nodes, "
-        "  COALESCE(MAX((runtime_state->'dag'->>'node_count')::int), 0) AS max_nodes, "
-        "  COALESCE(MAX((runtime_state->'dag'->>'max_depth_seen')::int), 0) AS max_depth "
-        "FROM experiment_runs "
-        "WHERE started_at > now() - (:days || ' day')::interval "
-        "  AND runtime_state ? 'dag' "
-        "  AND runtime_state->'dag' ? 'node_count'"
-    ), {"days": str(int(days))})).one()
-
-    runs_with_dag, total_nodes, max_nodes, max_depth_global = overall
-    runs_int = int(runs_with_dag or 0)
-    total_nodes_int = int(total_nodes or 0)
-    avg_nodes = round(total_nodes_int / runs_int, 2) if runs_int > 0 else 0.0
-
-    depth_rows = (await db.execute(_text(
-        "SELECT (runtime_state->'dag'->>'max_depth_seen')::int AS d, "
-        "       COUNT(*) AS n "
-        "FROM experiment_runs "
-        "WHERE started_at > now() - (:days || ' day')::interval "
-        "  AND runtime_state ? 'dag' "
-        "  AND runtime_state->'dag' ? 'max_depth_seen' "
-        "GROUP BY d "
-        "ORDER BY d ASC"
-    ), {"days": str(int(days))})).all()
-    depth_distribution = [
-        R6DepthBucket(depth=int(d or 0), run_count=int(n or 0))
-        for d, n in depth_rows
-    ]
-
-    recent_rows = (await db.execute(_text(
-        "SELECT id, task_id, "
-        "  (runtime_state->'dag'->>'node_count')::int AS nc, "
-        "  COALESCE((runtime_state->'dag'->>'max_depth_seen')::int, 0) AS md, "
-        "  runtime_state->'dag'->>'root_id' AS root, "
-        "  runtime_state->'dag'->>'current_selection' AS sel, "
-        "  to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS ts "
-        "FROM experiment_runs "
-        "WHERE started_at > now() - (:days || ' day')::interval "
-        "  AND runtime_state ? 'dag' "
-        "  AND runtime_state->'dag' ? 'node_count' "
-        "ORDER BY started_at DESC "
-        "LIMIT 20"
-    ), {"days": str(int(days))})).all()
-    recent = [
-        R6RunSummary(
-            run_id=int(rid),
-            task_id=int(tid) if tid is not None else None,
-            node_count=int(nc or 0),
-            max_depth=int(md or 0),
-            root_id=root or None,
-            current_selection=sel or None,
-            created_at=ts or None,
-        )
-        for rid, tid, nc, md, root, sel, ts in recent_rows
-    ]
-
-    return R6DagStatsOut(
-        flags=flags,
-        total_runs_with_dag=runs_int,
-        total_nodes_across_runs=total_nodes_int,
-        avg_nodes_per_run=avg_nodes,
-        max_node_count=int(max_nodes or 0),
-        max_depth_observed=int(max_depth_global or 0),
-        depth_distribution=depth_distribution,
-        recent_runs=recent,
-        window_days=int(days),
-    )
 
 
 # =============================================================================

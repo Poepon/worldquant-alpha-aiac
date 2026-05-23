@@ -70,7 +70,6 @@ const menuItems = [
       { key: '/ops/llm-op-monitor', label: 'LLM 算子监控' },
       { key: '/ops/costeer', label: '归因与重试' },
       { key: '/ops/r5-judge', icon: <ExperimentOutlined />, label: 'LLM 评判' },
-      { key: '/ops/r6-dag', icon: <BranchesOutlined />, label: '挖掘 DAG' },
       { key: '/ops/g8-monitor', icon: <ApartmentOutlined />, label: '假设森林' },
       { key: '/ops/direction-bandit-monitor', icon: <BranchesOutlined />, label: '方向 Bandit' },
       { key: '/ops/g3-monitor', icon: <CopyOutlined />, label: 'AST 原创性' },

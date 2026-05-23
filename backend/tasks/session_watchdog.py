@@ -5,16 +5,12 @@ Two beat-driven Celery tasks:
 1. `watchdog_revive_dead_sessions` (every 5 min)
    Detects DEAD-but-RUNNING tasks (worker crashed / hibernated mid-round)
    and re-dispatches them so mining keeps making progress without user
-   intervention. Covers two task families:
-
-   (a) V-19 CONTINUOUS_CASCADE sessions: dead = status=RUNNING AND
-       last_alpha_persisted_at < NOW() - DEAD_THRESHOLD_MIN
-   (b) V-22.9 (2026-05-13) DISCRETE tasks (AUTONOMOUS_TIER1/2/3,
-       SPECIFIC, AUTO): dead = status=RUNNING AND latest_trace_step
-       < NOW() - DEAD_THRESHOLD_MIN. Without this, a worker crash on a
-       discrete T1 task leaves it RUNNING forever — user has to manually
-       reset+restart. Tasks 528-535 in the V-22.6 spike all needed
-       manual revive after worker restarts.
+   intervention. Covers DISCRETE + FLAT tasks: dead = status=RUNNING AND
+   latest_trace_step < NOW() - DEAD_THRESHOLD_MIN. Without this, a worker
+   crash leaves a task RUNNING forever — user has to manually reset+restart
+   (the V-22.6 spike tasks 528-535 all needed manual revive after restarts).
+   Cascade revive was retired with the tier system (2026-05-19); cascade
+   tasks can no longer be created, so there is nothing to revive there.
 
    Grace: skip tasks whose task.created_at > NOW() - GRACE_MIN
           (a fresh task may not have written its first trace_step yet — IX-6
@@ -22,12 +18,11 @@ Two beat-driven Celery tasks:
 
 2. `quota_guard_pause_at_threshold` (every 10 min)
    Counts today's alpha rows (UTC date). When >= 90% of BRAIN_DAILY_SIMULATE_LIMIT,
-   pauses every active CONTINUOUS_CASCADE session as a defensive measure.
+   pauses every active (RUNNING) session as a defensive measure.
    Logs a clear reason; user can resume next day or after raising the limit.
 """
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timedelta, timezone
 
 from loguru import logger
@@ -66,50 +61,13 @@ async def _watchdog_revive_async() -> dict:
 
     revived = []
     async with AsyncSessionLocal() as db:
-        # phase15-D PR3c (2026-05-18): cascade probe retired
-        # unconditionally. Cascade tasks can no longer be created
-        # post-PR3c (mining_session router deleted + run_mining_task
-        # dispatch refuses cascade with FAILED). Any historical
-        # CONTINUOUS_CASCADE row that survives in RUNNING state is
-        # a stale artifact + cannot be revived. Discrete probe (block b)
-        # below still runs for DISCRETE-historical sessions.
-        cascade_rows: list = []
-        for task in cascade_rows:
-            if not _is_cascade_schedule(task):
-                # flag ON + schedule mismatch → defer to discrete loop below
-                continue
-            # Skip fresh sessions (grace period) — they may not have persisted
-            # their first alpha yet.
-            if task.created_at and task.created_at > grace_cutoff:
-                continue
-            # Heartbeat fresh enough?
-            if task.last_alpha_persisted_at and task.last_alpha_persisted_at > dead_cutoff:
-                continue
-            # V-27.2: already revived within the dead-threshold window —
-            # give the freshly-dispatched worker time to come alive.
-            if await _recently_revived(db, task.id, dead_cutoff):
-                continue
-            # Dead — re-dispatch
-            await _redispatch_task(
-                db, task, now,
-                reason_payload={
-                    "last_alpha_persisted_at": (
-                        task.last_alpha_persisted_at.isoformat()
-                        if task.last_alpha_persisted_at else None
-                    ),
-                    # phase15-D PR3b dropped cascade_phase / cascade_round_idx
-                    # ORM cols; this branch is now dead (cascade always-refuse
-                    # per PR3c) so reason_payload need not carry phase data.
-                    "kind": "CONTINUOUS_CASCADE",
-                },
-                revived=revived,
-            )
-
-        # --- (b) DISCRETE / FLAT tasks (non-cascade) ---
-        # These don't update last_alpha_persisted_at every round; use latest
-        # trace_step as the liveness signal instead. Post tier-system removal
-        # (2026-05-18) cascade is permanently retired so the SQL now only
-        # filters by status RUNNING.
+        # Cascade revive retired (tier-system removal, 2026-05-19): cascade
+        # tasks can no longer be created (mining_session router deleted +
+        # run_mining_task refuses CASCADE with FAILED), so there is nothing to
+        # revive. Only the DISCRETE / FLAT liveness probe below runs.
+        #
+        # DISCRETE / FLAT tasks don't update last_alpha_persisted_at every
+        # round; use the latest trace_step as the liveness signal instead.
         stmt = select(MiningTask).where(MiningTask.status == "RUNNING")
         discrete_rows = (await db.execute(stmt)).scalars().all()
         for task in discrete_rows:
@@ -183,39 +141,9 @@ async def _recently_revived(db, task_id: int, cutoff: datetime) -> bool:
 async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list) -> None:
     """Common re-dispatch path used by both CONTINUOUS and DISCRETE handlers."""
     try:
-        # V-27.1: cascade lock handling. Only CONTINUOUS_CASCADE tasks hold a
-        # cascade lock; discrete tasks acquire none, so skip them entirely.
-        #
-        # Takeover path (flag on): pre-generate a takeover token now. The
-        # atomic takeover itself runs AFTER the new ExperimentRun is created
-        # (so run.id lands in the lock value) but BEFORE the worker is
-        # dispatched. The token is threaded to the new worker via
-        # config_snapshot["cascade_lock_token"] — the worker CLAIMS this lock
-        # instead of acquiring a fresh one, and the old (possibly still-alive)
-        # worker's release becomes a CAS no-op + its next round-boundary
-        # ownership self-check sees LOST and exits. This roots out the V-27.1
-        # double-run race that force_clear + re-acquire introduced (V-26.5).
-        #
-        # Flag-off path: revert to the pre-V-27.1 force_clear + re-acquire.
-        is_cascade = reason_payload.get("kind") == "CONTINUOUS_CASCADE"
-        takeover_enabled = getattr(settings, "CASCADE_LOCK_TAKEOVER_ENABLED", True)
-        lock_key = f"cascade_lock:task:{task.id}"
-        takeover_token = None
-        if is_cascade and takeover_enabled:
-            takeover_token = "watchdog-takeover:" + uuid.uuid4().hex
-        elif is_cascade:
-            try:
-                from backend.tasks.redis_pool import force_clear_cascade_lock
-                cleared = force_clear_cascade_lock(lock_key)
-                if cleared:
-                    logger.warning(
-                        f"[watchdog] evicted stale cascade lock for task={task.id} "
-                        f"before revive (takeover flag off; original worker presumed dead)"
-                    )
-            except Exception as _lock_e:
-                logger.warning(
-                    f"[watchdog] cascade lock evict skipped for task={task.id}: {_lock_e}"
-                )
+        # Discrete/flat revive: no lock takeover. Cascade lock handling was
+        # removed with cascade retirement — discrete tasks acquire no lock and
+        # flat tasks re-acquire fresh on dispatch.
 
         # V-26.33 (2026-05-13): inherit the dead ExperimentRun's config /
         # strategy snapshots so the revival preserves audit lineage. Pre-fix
@@ -244,29 +172,23 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
         }
         if prior_run is not None:
             inherited_config["watchdog_revive"]["prior_run_id"] = prior_run.id
-        # V-27.1: hand the pre-generated takeover token to the new worker so
-        # it claims the lock (verify_lock_ownership) rather than acquiring a
-        # fresh one. Absent → the worker takes the normal acquire path.
-        if takeover_token is not None:
-            inherited_config["cascade_lock_token"] = takeover_token
         inherited_strategy = (
             dict(prior_run.strategy_snapshot) if (prior_run and isinstance(prior_run.strategy_snapshot, dict)) else {}
         )
 
-        # Phase 1.5-C [V1.2-B3 NEW] (2026-05-18): inherit scheduling state
-        # from prior run's runtime_state. Without this, every watchdog revive
-        # creates a run with runtime_state={}, and the cascade worker resume
-        # v2 path (mining_tasks.py:_resolve_cascade_phase) restarts at T1 —
-        # losing T2/T3 progress accumulated since the last successful round.
-        # progress / iteration / last_persisted_at intentionally NOT inherited
-        # — heartbeat will repopulate them on first successful round of new
-        # run; inheriting stale values risks watchdog mis-judging liveness.
+        # Phase 1.5-C [V1.2-B3] (2026-05-18): inherit scheduling state from the
+        # prior run's runtime_state. Without this, every watchdog revive creates
+        # a run with runtime_state={}, and a revived FLAT session restarts at
+        # flat_cursor=0 — losing the dataset-iteration progress accumulated
+        # since the last successful round. progress / iteration /
+        # last_persisted_at intentionally NOT inherited — heartbeat repopulates
+        # them on the first successful round of the new run; inheriting stale
+        # values risks the watchdog mis-judging liveness.
         prior_runtime_state: dict = {}
         if prior_run is not None and isinstance(prior_run.runtime_state, dict):
             prior_runtime_state = prior_run.runtime_state
-        # Post tier-system removal (2026-05-18): current_tier runtime key
-        # dropped; round_idx + flat_cursor remain. Cascade revive path is dead
-        # (cascade always-refuse since phase15-D PR3c).
+        # round_idx + flat_cursor are the only live scheduling keys
+        # (current_tier was dropped with the tier system).
         inherited_runtime_state = {
             "round_idx": prior_runtime_state.get("round_idx", 0),
         }
@@ -285,35 +207,6 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
         db.add(run)
         await db.commit()
         await db.refresh(run)
-
-        # V-27.1: atomic lock takeover — overwrite whatever the (possibly
-        # still-alive) old worker holds with our token + reset the TTL. Done
-        # after run creation so run.id lands in the lock value for diagnostics,
-        # and before dispatch so the lock is already ours when the worker
-        # comes up to claim it.
-        if takeover_token is not None:
-            try:
-                from backend.tasks.redis_pool import takeover_cascade_lock
-                ttl = getattr(settings, "CASCADE_LOCK_TTL_SEC", 10800)
-                res = takeover_cascade_lock(
-                    lock_key, takeover_token, ttl, run_id=run.id
-                )
-                if res.get("ok"):
-                    prev = res.get("prev") or {}
-                    logger.warning(
-                        f"[watchdog] took over cascade lock for task={task.id} "
-                        f"(prev_token={prev.get('token', '<none>')} "
-                        f"created={res.get('created')})"
-                    )
-                else:
-                    logger.warning(
-                        f"[watchdog] cascade lock takeover failed for task={task.id} "
-                        f"— new worker will fall back to acquire on a MISSING lock"
-                    )
-            except Exception as _lock_e:
-                logger.warning(
-                    f"[watchdog] cascade lock takeover skipped for task={task.id}: {_lock_e}"
-                )
 
         from backend.tasks import run_mining_task
         celery_task = run_mining_task.delay(task.id, run.id)
@@ -344,7 +237,7 @@ async def _redispatch_task(db, task, now, *, reason_payload: dict, revived: list
 
 @celery_app.task(name="backend.tasks.quota_guard_pause_at_threshold")
 def quota_guard_pause_at_threshold():
-    """Beat-scheduled. Pause CONTINUOUS_CASCADE sessions if today's alpha count
+    """Beat-scheduled. Pause active (RUNNING) sessions if today's alpha count
     approaches BRAIN_DAILY_SIMULATE_LIMIT.
     """
     return run_async(_quota_guard_async())
@@ -424,7 +317,7 @@ async def _quota_guard_async() -> dict:
                 "paused": [],
             }
 
-        # Over threshold — pause all active CONTINUOUS_CASCADE sessions.
+        # Over threshold — pause all active (RUNNING) sessions.
         # V-26.32 (2026-05-13): in-flight BRAIN sims can't be cancelled
         # server-side, so the PAUSE here only stops the NEXT round from
         # being scheduled. The in-flight sims (up to 3 per the global

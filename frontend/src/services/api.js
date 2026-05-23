@@ -586,12 +586,6 @@ const api = {
     return data
   },
 
-  // R6 DAG trace telemetry (2026-05-18) — node count / depth distribution
-  // across experiment_runs.runtime_state->'dag' JSONB
-  getOpsR6DagStats: async (days = 7) => {
-    const { data } = await client.get('/ops/r6/dag-stats', { params: { days } })
-    return data
-  },
 
   // G2 Phase A cost telemetry (2026-05-19) — per-call LLM cost across all callers
   // (普通 round + R1b + macro + R5 + future). Window-aggregated by_model /

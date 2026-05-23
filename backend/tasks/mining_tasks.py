@@ -43,76 +43,6 @@ def _is_cascade_schedule(task) -> bool:
     return sched.upper() == "CASCADE"
 
 
-async def _dag_update_after_round(
-    db,
-    run,
-    dag_state,
-    *,
-    round_result: dict,
-    tier: int,
-    dataset_id: str,
-    round_idx: int,
-) -> None:
-    """Phase 2 R6 PR3 (plan §5.1 c): per-round DAG update + persist to JSONB.
-
-    Called from `_run_cascade_phase` after each `_run_one_round_inline` /
-    after `_stamp_heartbeat`. Adds one DAG child per alpha produced this
-    round (alpha-as-node per plan §4.7 [V1.0-A2-1]), updates reward, marks
-    R10 family-capped, prunes to cap, persists via flag_modified.
-
-    Soft-fail: any error logged but never raised — DAG bookkeeping must NOT
-    crash the mining round.
-    """
-    if dag_state is None or run is None:
-        return
-    try:
-        from backend.agents.graph.dag_state import (
-            add_children_for_phase,
-            compute_reward_for_node,
-            mark_family_capped_children,
-            prune_to_cap,
-            update_reward,
-        )
-        alphas = (round_result or {}).get("all_alphas") or []
-        if not alphas:
-            return
-        parent_id = dag_state.get("current_selection") or dag_state.get("root_id")
-        if not parent_id:
-            logger.debug("[R6 dag] no parent_id available, skip round update")
-            return
-        loop_id = int(getattr(run, "id", 0) or 0)
-        child_ids = add_children_for_phase(
-            dag_state,
-            parent_id=parent_id,
-            round_idx=round_idx,
-            tier=tier,
-            dataset_id=dataset_id or "",
-            loop_id=loop_id,
-            alphas=alphas,
-            max_nodes=int(getattr(settings, "DAG_MAX_NODES", 100)),
-        )
-        for cid, alpha in zip(child_ids, alphas):
-            reward = compute_reward_for_node(alpha)
-            update_reward(dag_state, cid, reward)
-        marked = mark_family_capped_children(dag_state, child_ids, alphas)
-        prune_to_cap(dag_state, max_nodes=int(getattr(settings, "DAG_MAX_NODES", 100)))
-        # Persist
-        if isinstance(run.runtime_state, dict):
-            run.runtime_state["dag"] = dag_state
-            flag_modified(run, "runtime_state")
-            await db.commit()
-        logger.info(
-            f"[R6 dag] task_run={loop_id} round={round_idx} tier={tier} "
-            f"added={len(child_ids)} family_capped={marked} total_nodes={dag_state['node_count']}"
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning(f"[R6 dag] update_after_round failed (non-fatal): {e}")
-        try:
-            await db.rollback()
-        except Exception:
-            pass
-
-
 @celery_app.task(bind=True, name="backend.tasks.run_mining_task")
 def run_mining_task(self, task_id: int, run_id: int | None = None):
     """
@@ -1269,25 +1199,6 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 logger.warning(f"[flat] dataset-bandit weight fetch failed: {_wm_err}")
                 _ds_weight_map = {}
 
-        # R6 PR3 (2026-05-18): init DAG state for flat path if flag ON.
-        # Flat uses DAG selection for dataset choice (when ON); flat_cursor
-        # stays dual-write as fallback per plan [V1.0-A2-2].
-        dag_state = None
-        if getattr(settings, "ENABLE_DAG_TRACE", False) and run is not None:
-            try:
-                from backend.agents.graph.dag_state import load_or_init
-                dag_state = load_or_init(
-                    (run.runtime_state or {}).get("dag") if isinstance(run.runtime_state, dict) else None,
-                    run_id=int(run.id),
-                )
-                logger.info(
-                    f"[R6 dag flat] task={task.id} run={run.id} init: "
-                    f"nodes={dag_state['node_count']} root={dag_state['root_id']}"
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"[R6 dag flat] init failed (non-fatal): {e}")
-                dag_state = None
-
         while iterations < max_iters and total_alphas < daily_goal:
             await db.refresh(task)
             if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
@@ -1312,14 +1223,13 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 )
                 break
 
-            # R6 PR3: when DAG ON, select_next_parent for dataset; else flat_cursor.
+            # Dataset choice: round-robin baseline, optionally overridden by
+            # the breadth bandit (weight-sample ∝ mining_weight, flag-gated).
+            # Steers frequency off the mined-out pv1 toward high-marginal-value
+            # + under-mined sources. flat_cursor still advances (drives
+            # iteration_offset + counters + pause-resume cursor); only the
+            # dataset *choice* changes.
             dataset_id = datasets[flat_cursor % len(datasets)]
-            # Breadth bandit: weight-sample ∝ mining_weight instead of equal
-            # round-robin (flag-gated). Steers frequency off the mined-out pv1
-            # toward high-marginal-value + under-mined sources. flat_cursor
-            # still advances (drives iteration_offset + counters + pause-resume
-            # cursor); only the dataset *choice* changes. DAG-UCB (below) still
-            # overrides when ENABLE_DAG_TRACE is ON (dormant; review ack).
             if _bandit_on and _ds_weight_map:
                 from backend.selection_strategy import weighted_choice
                 _picked = weighted_choice(
@@ -1327,23 +1237,6 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 )
                 if _picked is not None:
                     dataset_id = _picked
-            if dag_state is not None:
-                try:
-                    from backend.agents.graph.dag_state import select_next_parent
-                    sel_id = select_next_parent(
-                        dag_state,
-                        cold_threshold=int(getattr(settings, "DAG_COLD_THRESHOLD", 3)),
-                        ucb_c=float(getattr(settings, "DAG_UCB_EXPLORATION_C", 1.4)),
-                    )
-                    if sel_id is not None:
-                        node = dag_state["nodes"][sel_id]
-                        ds_from_node = node.get("dataset_id") or ""
-                        # Use node's dataset if non-empty (cold-start root has empty)
-                        if ds_from_node and ds_from_node in datasets:
-                            dataset_id = ds_from_node
-                        dag_state["current_selection"] = sel_id
-                except Exception as e:  # noqa: BLE001
-                    logger.warning(f"[R6 dag flat] select_next_parent failed (non-fatal): {e}")
 
             result = await _run_one_round_inline(
                 db, task, run, brain, mining_agent, operators,
@@ -1384,16 +1277,6 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 run.runtime_state["flat_iterations"] = iterations
                 flag_modified(run, "runtime_state")
                 await db.commit()
-
-            # R6 PR3: DAG update with this iter's alphas (soft-fail in helper).
-            # ``tier`` is kept as a legacy 1 for DAG node bookkeeping (read by
-            # DagMonitor frontend); no longer derived from the dropped
-            # task.starting_tier column.
-            await _dag_update_after_round(
-                db, run, dag_state,
-                round_result=result, tier=1, dataset_id=dataset_id,
-                round_idx=iterations,
-            )
 
             logger.info(
                 f"[flat] task={task.id} iter={iterations} dataset={dataset_id} "

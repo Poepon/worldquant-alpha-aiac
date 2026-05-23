@@ -16,10 +16,11 @@ Three reasons this lives in its own module:
    we'd then delete their lock. The Lua block below runs server-side
    in one operation.
 
-3. **Watchdog can force-clear** (V-26.5): when the watchdog revives a
-   session whose worker died between lock acquire and ``finally``,
-   the stale lock would still sit for 10800s blocking the replacement.
-   `force_clear_cascade_lock` is the explicit override.
+3. **Stale-lock recovery via TTL**: if a worker dies between lock acquire
+   and its ``finally`` release, the lock self-expires after the TTL
+   (CASCADE_LOCK_TTL_SEC, default 10800s), after which a replacement can
+   re-acquire. (The watchdog force-clear / takeover overrides were removed
+   with cascade retirement, 2026-05-24.)
 """
 from __future__ import annotations
 
@@ -94,17 +95,6 @@ else
     tok = cur
 end
 if tok == ARGV[1] then return redis.call('expire', KEYS[1], tonumber(ARGV[2])) else return 0 end
-"""
-
-# Lua: unconditionally overwrite the value and reset the TTL, returning the
-# previous raw value ('' when the key didn't exist). Used by the watchdog to
-# atomically *take over* a lock instead of force_clear + re-acquire — which
-# left a falsely-presumed-dead worker free to keep running while the
-# replacement grabbed the freed lock (the V-27.1 race).
-_TAKEOVER_LUA = """
-local prev = redis.call('get', KEYS[1])
-redis.call('set', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
-if prev == false then return '' else return prev end
 """
 
 
@@ -216,66 +206,6 @@ def renew_cascade_lock(key: str, token: str, ttl_sec: int) -> bool:
     except Exception as exc:
         logger.warning(f"[cascade-lock] renew failed for key={key}: {exc}")
         return False
-
-
-def force_clear_cascade_lock(key: str) -> bool:
-    """DEPRECATED (V-27.1): unconditional DELETE regardless of token.
-
-    The watchdog no longer calls this — it now uses takeover_cascade_lock
-    for an atomic ownership transfer (force_clear + re-acquire was the
-    V-27.1 double-run race). Kept for the CASCADE_LOCK_TAKEOVER_ENABLED
-    flag-off path and as a manual ops escape hatch.
-
-    Returns True if the key existed and was removed."""
-    try:
-        cli = get_redis_client()
-        return bool(cli.delete(key))
-    except Exception as exc:
-        logger.warning(f"[cascade-lock] force-clear failed for key={key}: {exc}")
-        return False
-
-
-def takeover_cascade_lock(
-    key: str,
-    new_token: str,
-    ttl_sec: int,
-    *,
-    run_id: Optional[int] = None,
-    worker_pid: Optional[int] = None,
-) -> dict:
-    """Watchdog-only: atomically overwrite the lock value with `new_token`
-    regardless of who (or what format) held it before, and reset the TTL.
-    Replaces the force_clear + re-acquire two-step that let a falsely-
-    presumed-dead worker keep running while a replacement acquired the
-    freed lock (V-27.1).
-
-    Returns {"ok": bool, "prev": dict|None, "created": bool}:
-      - ok      : the takeover SET succeeded
-      - prev    : decoded previous lock value (None if the key was absent)
-      - created : True if there was no prior key
-
-    Swallows Redis errors → {"ok": False, ...} so the watchdog can log and
-    continue its revive sweep rather than crash."""
-    try:
-        cli = get_redis_client()
-        value = _encode_lock_value(
-            new_token,
-            run_id=run_id,
-            worker_pid=worker_pid,
-            lineage="WATCHDOG_TAKEOVER",
-        )
-        prev_raw = cli.eval(_TAKEOVER_LUA, 1, key, value, int(ttl_sec))
-        # Lua returns '' (empty string) when there was no prior key.
-        if prev_raw in (b"", "", None):
-            return {"ok": True, "prev": None, "created": True}
-        return {
-            "ok": True,
-            "prev": _decode_lock_value(prev_raw),
-            "created": False,
-        }
-    except Exception as exc:
-        logger.warning(f"[cascade-lock] takeover failed for key={key}: {exc}")
-        return {"ok": False, "prev": None, "created": False}
 
 
 def verify_lock_ownership(key: str, token: str) -> str:

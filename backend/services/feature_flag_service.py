@@ -389,17 +389,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "Experiment2Feedback. Coexists with R1b.1+R1b.2 — opt-in per task."
         ),
     ),
-    "ENABLE_R1B_DAG_RETRY_REWARD": FlagSpec(
-        name="ENABLE_R1B_DAG_RETRY_REWARD",
-        flag_type="bool",
-        group="R1b-CoSTEER",
-        description=(
-            "[stage 5/5 — deps: RETRY_LOOP + HYPOTHESIS_MUTATE + DAG_TRACE all ON, "
-            "≥14d obs] R1b.5 (2026-05-18): R6 DAG UCB1 includes retry rewards in "
-            "node selection. Pre-req R1b.1+R1b.2 GO gates PASS + ≥14d production "
-            "observation per [V1.2-A2-3]."
-        ),
-    ),
     "R1B_MAX_COST_USD_PER_ROUND": FlagSpec(
         name="R1B_MAX_COST_USD_PER_ROUND",
         flag_type="float",
@@ -526,10 +515,9 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         flag_type="bool",
         group="Flat-Mode",
         description=(
-            "[entry routing — deps: FLAT_CONTINUOUS + DAG_TRACE both ON] "
+            "[entry routing — deps: FLAT_CONTINUOUS ON] "
             "Phase 3 flat-F2: POST /mining-session/start 默认创建 flat task。"
-            "前置 ENABLE_FLAT_CONTINUOUS + ENABLE_DAG_TRACE 都 ON 才生效 "
-            "(R6 给 flat reward-guided exploration)。"
+            "前置 ENABLE_FLAT_CONTINUOUS ON 才生效。"
         ),
     ),
     "ENABLE_FLAT_CONTINUOUS": FlagSpec(
@@ -541,21 +529,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "启用 FLAT 持续 session。Hypothesis-driven — dataset × hypothesis "
             "迭代。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume "
             "入口。"
-        ),
-    ),
-    # --- Phase 2 R6: DAG Trace (MCTS-lite) ---
-    "ENABLE_DAG_TRACE": FlagSpec(
-        name="ENABLE_DAG_TRACE",
-        flag_type="bool",
-        group="Phase2-R6",
-        description=(
-            "Phase 2 R6 (RD-Agent v0.8.0 MCTS-lite): 启用 DAG-structured "
-            "multi-branch trace persisted in experiment_runs.runtime_state['dag'] "
-            "JSONB。Selection: UCB1-lite + Thompson cold-start(per-leaf)。"
-            "Reward fallback: composite_score (R5+R1a) > sharpe > 0.0。"
-            "Family-cap (R10) dropped 标 status='inactive' 不复用。"
-            "100-node write-side hard cap,prune LRU+reward 保 parent chain。"
-            "Rollback flip OFF: in-flight DAG 数据保留(forensic)。"
         ),
     ),
     # --- Phase 2 R7: Co-STEER self-correct 半接受 ---

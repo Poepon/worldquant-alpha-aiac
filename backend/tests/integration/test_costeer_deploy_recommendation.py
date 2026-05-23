@@ -63,7 +63,6 @@ def _isolate_flag_state():
         "ENABLE_HIERARCHICAL_RAG",
         "ENABLE_R1B_RETRY_LOOP", "ENABLE_R1B_HYPOTHESIS_MUTATE",
         "ENABLE_R1B_FAILURE_TREE", "ENABLE_R1B_TYPED_PIPELINE",
-        "ENABLE_R1B_DAG_RETRY_REWARD",
     ]
     saved = {k: getattr(_stg, k, False) for k in keys}
     yield
@@ -107,7 +106,6 @@ async def test_empty_db_blocks_on_r1a_sample_size(client_factory):
             "ENABLE_R1B_RETRY_LOOP": False,
             "ENABLE_R1B_HYPOTHESIS_MUTATE": False,
             "ENABLE_R1B_FAILURE_TREE": False,
-            "ENABLE_R1B_DAG_RETRY_REWARD": False,
         },
     )
     async with client as ac:
@@ -191,50 +189,6 @@ async def test_r8_blocked_when_pillar_diversity_low(client_factory):
 
 
 # ---------------------------------------------------------------------------
-# R1b chain logic — DAG retry reward needs chain depth > 1
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_dag_retry_reward_ready_when_chain_grew(client_factory):
-    """ENABLE_R1B_RETRY_LOOP ON + max_depth=2 → DAG retry reward ready."""
-    client = await client_factory(
-        r1a_rows=[],
-        r8_kb_pair=(0, 0),
-        r5_count=0,
-        r1b_rows=[],
-        chain_max_depth=2,
-        flags={
-            "ENABLE_R1B_RETRY_LOOP": True,
-            "ENABLE_R1B_DAG_RETRY_REWARD": False,
-        },
-    )
-    async with client as ac:
-        r = await ac.get("/api/v1/ops/costeer/deploy-recommendation")
-    body = r.json()
-    assert "ENABLE_R1B_DAG_RETRY_REWARD" in body["ready_flags_to_flip"]
-
-
-@pytest.mark.asyncio
-async def test_dag_retry_reward_blocked_when_chain_flat(client_factory):
-    """max_depth=1 (no chain growth) → DAG retry reward NOT ready."""
-    client = await client_factory(
-        r1a_rows=[],
-        r8_kb_pair=(0, 0),
-        r5_count=0,
-        r1b_rows=[],
-        chain_max_depth=1,
-        flags={
-            "ENABLE_R1B_RETRY_LOOP": True,
-            "ENABLE_R1B_DAG_RETRY_REWARD": False,
-        },
-    )
-    async with client as ac:
-        r = await ac.get("/api/v1/ops/costeer/deploy-recommendation")
-    body = r.json()
-    assert "ENABLE_R1B_DAG_RETRY_REWARD" not in body["ready_flags_to_flip"]
-
-
-# ---------------------------------------------------------------------------
 # R1b mutate requires retry flag ON + sample + rate
 # ---------------------------------------------------------------------------
 
@@ -283,7 +237,6 @@ async def test_all_flags_on_returns_hold_verdict(client_factory):
             "ENABLE_R1B_HYPOTHESIS_MUTATE": True,
             "ENABLE_R1B_FAILURE_TREE": True,
             "ENABLE_R1B_TYPED_PIPELINE": True,
-            "ENABLE_R1B_DAG_RETRY_REWARD": True,
         },
     )
     async with client as ac:
