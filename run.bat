@@ -49,42 +49,52 @@ goto :eof
 :stop_services
 echo [INFO] Stopping all AIAC services...
 
-REM Kill uvicorn (backend)
-for /f "tokens=2" %%a in ('tasklist /fi "imagename eq python.exe" /v 2^>nul ^| findstr /i "uvicorn"') do (
-    echo [INFO] Killing backend process: %%a
-    taskkill /pid %%a /f >nul 2>&1
-)
+REM ---------------------------------------------------------------------------
+REM Kill the PYTHON / NODE workers by COMMAND LINE — not by window title.
+REM
+REM Why (2026-05-23 root-cause): services launch via `start "AIAC Celery..." cmd
+REM /k "...celery..."`. The window title lives on the cmd.exe WRAPPER, not on the
+REM python.exe child. The old logic (a) `tasklist python.exe /v | findstr celery`
+REM matched nothing — python's window title is not "celery" — and (b) `taskkill
+REM /fi "WINDOWTITLE eq AIAC Celery*"` killed only the cmd wrapper, ORPHANING the
+REM python worker. A pre-restart celery worker thus survived run.bat --restart and
+REM served a mining session with stale code (task 3405: 42 alphas with NULL
+REM dataset_id from the zombie worker). Matching the python/node command line
+REM kills every worker regardless of how it was launched (run.bat OR manual dev
+REM command), which tasklist cannot do (no command line) and wmic is deprecated
+REM on Win11 — so we shell out to PowerShell + CIM.
+REM ---------------------------------------------------------------------------
 
-REM Kill celery
-for /f "tokens=2" %%a in ('tasklist /fi "imagename eq python.exe" /v 2^>nul ^| findstr /i "celery"') do (
-    echo [INFO] Killing celery process: %%a
-    taskkill /pid %%a /f >nul 2>&1
-)
+echo [INFO] Killing Celery workers + Beat (by command line)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'backend\.celery_app' } | ForEach-Object { Write-Host ('  [kill] celery PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
-REM Kill node (frontend)
-for /f "tokens=2" %%a in ('tasklist /fi "imagename eq node.exe" /v 2^>nul ^| findstr /i "vite"') do (
-    echo [INFO] Killing frontend process: %%a
-    taskkill /pid %%a /f >nul 2>&1
-)
+echo [INFO] Killing Backend (uvicorn, by command line)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'uvicorn' } | ForEach-Object { Write-Host ('  [kill] backend PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
-REM Kill by window title (fallback)
+echo [INFO] Killing Frontend (vite/npm, by command line)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -match 'vite' } | ForEach-Object { Write-Host ('  [kill] frontend PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+
+REM Close the now-childless cmd.exe wrapper windows (cosmetic).
 taskkill /fi "WINDOWTITLE eq AIAC Backend*" /f >nul 2>&1
 taskkill /fi "WINDOWTITLE eq AIAC Frontend*" /f >nul 2>&1
 taskkill /fi "WINDOWTITLE eq AIAC Celery*" /f >nul 2>&1
 
-REM Kill processes on specific ports
-for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":%PORT%"') do (
+REM Port fallback: free the backend port if anything still holds it.
+for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":%PORT% "') do (
     if not "%%a"=="0" (
-        echo [INFO] Killing process on port %PORT%: %%a
+        echo [INFO] Killing leftover process on port %PORT%: %%a
         taskkill /pid %%a /f >nul 2>&1
     )
 )
 for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":5173 :5174"') do (
     if not "%%a"=="0" (
-        echo [INFO] Killing process on frontend port: %%a
+        echo [INFO] Killing leftover process on frontend port: %%a
         taskkill /pid %%a /f >nul 2>&1
     )
 )
+
+REM Verify nothing survived — the orphan-worker bug was silent before, so make it loud.
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Milliseconds 600; $left = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'backend\.celery_app|uvicorn' }); if ($left.Count -gt 0) { Write-Host ('[WARN] ' + $left.Count + ' service process(es) STILL ALIVE after kill: ' + ($left.ProcessId -join ', ') + ' — retrying'); $left | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue } } else { Write-Host '[OK] verified: no celery/uvicorn python processes remain' }"
 
 echo [OK] All services stopped.
 if "%ACTION%"=="stop" goto :eof
