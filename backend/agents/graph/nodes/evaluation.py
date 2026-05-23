@@ -854,6 +854,159 @@ async def _evaluate_single_alpha(
 # NODE: Simulate
 # =============================================================================
 
+async def _apply_soft_regularizer(
+    state,
+    indices_to_simulate: list,
+    cand_exprs: list,
+    probas: list,
+    keep_local: list,
+    skip_local: list,
+    threshold: float,
+    *,
+    node_name: str = "node_simulate",
+):
+    """AlphaAgent-style soft regularizer over pre-simulate candidates (P1+P2).
+
+    P1 legs = complexity + originality (cheap, every candidate). P2 leg = R5
+    c1/c2 alignment (LLM, only the top-N most-promising candidates, gated on
+    W_ALIGNMENT>0). Legs blend into a [0,1] penalty; the alignment leg is
+    one-sided (may only raise it). shadow → stamp alpha.metrics['_soft_reg_*']
+    only; soft → also down-weight P(PASS) = p*(1-lambda*penalty) and re-derive
+    keep/skip (can only skip MORE, never resurrect a classifier-skip).
+
+    Returns (keep_local, skip_local, probas). Soft-fail invariant: when mode is
+    off (not shadow|soft) or on ANY error, returns the inputs unchanged —
+    byte-for-byte what filter_candidates produced.
+    """
+    _sr_mode = (getattr(settings, "CODE_GEN_SOFT_REG_MODE", "shadow") or "shadow").lower()
+    if _sr_mode not in ("shadow", "soft") or not cand_exprs:
+        return keep_local, skip_local, probas
+    try:
+        from backend.agents.services import soft_regularizer as _softreg
+        from backend.alpha_originality import OriginalityChecker as _SRChecker
+
+        _sr_checker = _SRChecker()
+        try:
+            await _sr_checker.load_history(
+                task_id=getattr(state, "task_id", None),
+                region=getattr(state, "region", None),
+            )
+        except Exception as _sr_hist_e:  # noqa: BLE001
+            logger.debug(f"[{node_name}] soft-reg history load failed: {_sr_hist_e}")
+
+        _sr_w_c = float(getattr(settings, "CODE_GEN_SOFT_REG_W_COMPLEXITY", 0.5))
+        _sr_w_o = float(getattr(settings, "CODE_GEN_SOFT_REG_W_ORIGINALITY", 0.5))
+        _sr_w_a = float(getattr(settings, "CODE_GEN_SOFT_REG_W_ALIGNMENT", 0.0))
+        _sr_c0 = float(getattr(settings, "CODE_GEN_SOFT_REG_COMPLEXITY_C0", 6.0))
+        _sr_cmax = float(getattr(settings, "CODE_GEN_SOFT_REG_COMPLEXITY_CMAX", 16.0))
+        _sr_lambda = float(getattr(settings, "CODE_GEN_SOFT_REG_LAMBDA", 0.5))
+
+        # Originality AST-distance per candidate (cheap legs need it).
+        _dists = []
+        for _expr in cand_exprs:
+            try:
+                _dists.append(_sr_checker.check(_expr or "").min_distance)
+            except Exception:  # noqa: BLE001
+                _dists.append(None)
+
+        # P2 alignment leg (R5 c1/c2). Master switch = W_ALIGNMENT > 0 (default
+        # 0 → leg dormant, no LLM cost). R5 is 2 LLM calls/candidate so only the
+        # most-promising candidates earn it: rank by the cheap 2-leg effective
+        # P(PASS) and judge the top-N (TOPK in soft, SHADOW_SAMPLE in shadow).
+        _judge_idx: set = set()
+        if _sr_w_a > 0.0:
+            _n_judge = int(
+                getattr(settings, "CODE_GEN_SOFT_REG_ALIGNMENT_TOPK", 3)
+                if _sr_mode == "soft"
+                else getattr(settings, "CODE_GEN_SOFT_REG_ALIGNMENT_SHADOW_SAMPLE", 1)
+            )
+            if _n_judge > 0:
+                _cheap_eff = [
+                    _softreg.evaluate_candidate(
+                        _expr or "", _dists[_li], float(probas[_li]),
+                        w_complexity=_sr_w_c, w_originality=_sr_w_o, w_alignment=0.0,
+                        c0=_sr_c0, cmax=_sr_cmax, lam=_sr_lambda, mode="soft",
+                    ).p_pass_adjusted
+                    for _li, _expr in enumerate(cand_exprs)
+                ]
+                _judge_idx = set(_softreg.select_topk_indices(_cheap_eff, _n_judge))
+
+        # Run the top-N R5 alignment judges concurrently — each is 2 sequential
+        # LLM calls (c1, c2); gathering across the K candidates collapses
+        # K×latency → ~1×. return_exceptions keeps the per-candidate soft-fail:
+        # a failed judge → composite None → 0 alignment penalty.
+        _r5_by_idx: dict = {}
+        if _judge_idx:
+            from backend.agents.graph.r5_judge import run_r5_judge
+            from backend.agents.services.llm_service import get_llm_service
+            _r5_llm = get_llm_service()
+            _judge_order = sorted(_judge_idx)
+            _r5_results = await asyncio.gather(*[
+                run_r5_judge(
+                    hypothesis_statement=getattr(
+                        state.pending_alphas[indices_to_simulate[_ji]], "hypothesis", "") or "",
+                    description=getattr(
+                        state.pending_alphas[indices_to_simulate[_ji]], "explanation", "") or "",
+                    expression=cand_exprs[_ji] or "",
+                    llm_service=_r5_llm,
+                )
+                for _ji in _judge_order
+            ], return_exceptions=True)
+            _r5_by_idx = dict(zip(_judge_order, _r5_results))
+
+        _sr_adj = list(probas)
+        for _li, _expr in enumerate(cand_exprs):
+            _a = state.pending_alphas[indices_to_simulate[_li]]
+            # Only the top-N judged candidates get the costly alignment leg;
+            # the rest use the cheap 2-leg blend (w_alignment=0).
+            _judged = _li in _judge_idx
+            _a_pen = 0.0
+            _w_a_eff = 0.0
+            _r5_extra: dict = {"_soft_reg_alignment_judged": _judged}
+            if _judged:
+                _r5p = _r5_by_idx.get(_li)
+                _composite = None
+                _r5_cost = 0.0
+                if isinstance(_r5p, dict):
+                    _composite = _r5p.get("r5_composite_score")
+                    _r5_cost = float(_r5p.get("r5_cost_usd", 0.0) or 0.0)
+                elif isinstance(_r5p, Exception):
+                    logger.debug(f"[{node_name}] soft-reg R5 judge failed: {_r5p}")
+                _a_pen = _softreg.alignment_penalty(_composite)
+                _w_a_eff = _sr_w_a
+                _r5_extra["_soft_reg_r5_composite"] = (
+                    round(_composite, 4) if _composite is not None else None
+                )
+                _r5_extra["_soft_reg_r5_cost_usd"] = round(_r5_cost, 6)
+            _res = _softreg.evaluate_candidate(
+                _expr or "", _dists[_li], float(probas[_li]),
+                w_complexity=_sr_w_c, w_originality=_sr_w_o, w_alignment=_w_a_eff,
+                alignment_pen=_a_pen, c0=_sr_c0, cmax=_sr_cmax,
+                lam=_sr_lambda, mode=_sr_mode,
+            )
+            if _sr_mode == "soft":
+                _sr_adj[_li] = _res.p_pass_adjusted
+            if not isinstance(_a.metrics, dict):
+                _a.metrics = {}
+            _a.metrics.update(_res.to_metrics_dict())
+            _a.metrics.update(_r5_extra)
+
+        if _sr_mode == "soft":
+            # Re-derive keep/skip from the down-weighted probas (threshold
+            # unchanged). Soft-reg only lowers P(PASS), so it can only skip
+            # MORE, never resurrect a classifier-skipped candidate.
+            probas = _sr_adj
+            keep_local = [i for i, p in enumerate(probas) if p >= threshold]
+            skip_local = [i for i, p in enumerate(probas) if p < threshold]
+            logger.info(
+                f"[{node_name}] soft-reg mode=soft lambda={_sr_lambda} "
+                f"keep={len(keep_local)} skip={len(skip_local)}"
+            )
+    except Exception as _sr_e:  # noqa: BLE001
+        logger.warning(f"[{node_name}] soft regularizer failed (non-fatal): {_sr_e}")
+    return keep_local, skip_local, probas
+
+
 async def node_simulate(
     state: MiningState,
     brain: BrainAdapter,
@@ -1211,67 +1364,13 @@ async def node_simulate(
             cand_exprs, threshold=threshold,
         )
 
-        # === Soft regularizer (P1, 2026-05-23): complexity + originality ===
-        # AlphaAgent-style soft penalty in place of a hard field/operator cap.
-        # Two legs blended into a [0,1] penalty; alignment (R5) reserved for P2
-        # (w=0). shadow → stamp alpha.metrics['_soft_reg_*'] only; soft → also
-        # down-weight P(PASS) = p*(1-lambda*penalty) and re-derive keep/skip.
-        # Soft-fail invariant: any error leaves probas/keep_local/skip_local
-        # exactly as filter_candidates returned them (byte-for-byte legacy).
-        _sr_mode = (getattr(settings, "CODE_GEN_SOFT_REG_MODE", "shadow") or "shadow").lower()
-        if _sr_mode in ("shadow", "soft") and cand_exprs:
-            try:
-                from backend.agents.services import soft_regularizer as _softreg
-                from backend.alpha_originality import OriginalityChecker as _SRChecker
-
-                _sr_checker = _SRChecker()
-                try:
-                    await _sr_checker.load_history(
-                        task_id=getattr(state, "task_id", None),
-                        region=getattr(state, "region", None),
-                    )
-                except Exception as _sr_hist_e:  # noqa: BLE001
-                    logger.debug(f"[{node_name}] soft-reg history load failed: {_sr_hist_e}")
-
-                _sr_w_c = float(getattr(settings, "CODE_GEN_SOFT_REG_W_COMPLEXITY", 0.5))
-                _sr_w_o = float(getattr(settings, "CODE_GEN_SOFT_REG_W_ORIGINALITY", 0.5))
-                _sr_w_a = float(getattr(settings, "CODE_GEN_SOFT_REG_W_ALIGNMENT", 0.0))
-                _sr_c0 = float(getattr(settings, "CODE_GEN_SOFT_REG_COMPLEXITY_C0", 6.0))
-                _sr_cmax = float(getattr(settings, "CODE_GEN_SOFT_REG_COMPLEXITY_CMAX", 16.0))
-                _sr_lambda = float(getattr(settings, "CODE_GEN_SOFT_REG_LAMBDA", 0.5))
-
-                _sr_adj = list(probas)
-                for _li, _expr in enumerate(cand_exprs):
-                    try:
-                        _dist = _sr_checker.check(_expr or "").min_distance
-                    except Exception:  # noqa: BLE001
-                        _dist = None
-                    _res = _softreg.evaluate_candidate(
-                        _expr or "", _dist, float(probas[_li]),
-                        w_complexity=_sr_w_c, w_originality=_sr_w_o, w_alignment=_sr_w_a,
-                        c0=_sr_c0, cmax=_sr_cmax, lam=_sr_lambda, mode=_sr_mode,
-                    )
-                    if _sr_mode == "soft":
-                        _sr_adj[_li] = _res.p_pass_adjusted
-                    _a = state.pending_alphas[indices_to_simulate[_li]]
-                    if not isinstance(_a.metrics, dict):
-                        _a.metrics = {}
-                    _a.metrics.update(_res.to_metrics_dict())
-
-                if _sr_mode == "soft":
-                    # Re-derive keep/skip from down-weighted probas (threshold
-                    # unchanged). Soft-reg only lowers P(PASS), so it can only
-                    # skip MORE, never resurrect a classifier-skipped candidate.
-                    probas = _sr_adj
-                    keep_local = [i for i, p in enumerate(probas) if p >= threshold]
-                    skip_local = [i for i, p in enumerate(probas) if p < threshold]
-                    logger.info(
-                        f"[{node_name}] soft-reg mode=soft lambda={_sr_lambda} "
-                        f"keep={len(keep_local)} skip={len(skip_local)}"
-                    )
-            except Exception as _sr_e:  # noqa: BLE001
-                logger.warning(f"[{node_name}] soft regularizer failed (non-fatal): {_sr_e}")
-        # === end soft regularizer ===
+        # Soft regularizer (P1 complexity+originality, P2 R5 alignment); see
+        # _apply_soft_regularizer. Returns (keep, skip, probas) unchanged when
+        # mode=off / on any error (byte-for-byte the filter_candidates result).
+        keep_local, skip_local, probas = await _apply_soft_regularizer(
+            state, indices_to_simulate, cand_exprs, probas,
+            keep_local, skip_local, threshold, node_name=node_name,
+        )
 
         if skip_local:
             # Translate skip_local positions back to original indices_to_simulate

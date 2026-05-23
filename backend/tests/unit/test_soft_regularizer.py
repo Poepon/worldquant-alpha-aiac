@@ -182,3 +182,104 @@ class TestEvaluateCandidate:
         # rank(close): 1 op, 1 field → score 1.5 < c0 → complexity_pen 0 too
         assert res.penalty == 0.0
         assert res.p_pass_adjusted == pytest.approx(0.9)  # no penalty → unchanged
+
+    def test_alignment_leg_bad_alignment_raises_penalty(self):
+        # P2: bad alignment (high pen) must raise penalty above the 2-leg base
+        # → here the 3-leg blend exceeds base, so penalty == the 3-leg blend.
+        expr = "ts_rank(ts_zscore(ts_sum(ts_delta(close, 5), 20), 20), 10)"
+        res = sr.evaluate_candidate(
+            expr, min_distance=0.2, p_pass=0.8, alignment_pen=0.9,
+            w_complexity=1.0, w_originality=1.0, w_alignment=1.0,
+            c0=6.0, cmax=16.0, lam=0.5, mode="soft",
+        )
+        nf, no = sr.count_complexity(expr)
+        cpen = sr.complexity_penalty(nf, no, c0=6.0, cmax=16.0)
+        open_ = sr.originality_penalty(0.2)
+        three_leg = sr.combine_penalty(
+            cpen, open_, 0.9, w_complexity=1.0, w_originality=1.0, w_alignment=1.0,
+        )
+        assert res.alignment_pen == pytest.approx(0.9)
+        assert res.penalty == pytest.approx(three_leg)  # bad align → 3-leg > base
+
+    def test_alignment_leg_is_one_sided_good_alignment_no_bonus(self):
+        # MUST-fix regression: the alignment leg may only ADD penalty, never
+        # reward. A judged candidate with GOOD alignment (low pen) must NOT get
+        # a diluted (lower) penalty than its 2-leg base — without the max-clamp,
+        # renormalizing in a 0.0 alignment leg would drag the average down.
+        expr = "ts_rank(ts_zscore(ts_sum(ts_delta(close, 5), 20), 20), 10)"
+        base = sr.evaluate_candidate(
+            expr, min_distance=0.2, p_pass=0.8,
+            w_complexity=1.0, w_originality=1.0, w_alignment=0.0, mode="soft",
+        ).penalty
+        good = sr.evaluate_candidate(
+            expr, min_distance=0.2, p_pass=0.8, alignment_pen=0.0,
+            w_complexity=1.0, w_originality=1.0, w_alignment=1.0, mode="soft",
+        ).penalty
+        assert good == pytest.approx(base)  # clamped to base; no bonus
+        # and a judged candidate can never beat (have lower penalty than) the
+        # 2-leg base purely from being scored
+        bad = sr.evaluate_candidate(
+            expr, min_distance=0.2, p_pass=0.8, alignment_pen=0.95,
+            w_complexity=1.0, w_originality=1.0, w_alignment=1.0, mode="soft",
+        ).penalty
+        assert bad > base
+
+    def test_full_pen_stamped_only_when_clamp_fires(self):
+        expr = "ts_rank(ts_zscore(ts_sum(ts_delta(close, 5), 20), 20), 10)"
+        # good alignment → clamped → _soft_reg_full_pen present and < penalty
+        good = sr.evaluate_candidate(
+            expr, min_distance=0.2, p_pass=0.8, alignment_pen=0.0,
+            w_complexity=1.0, w_originality=1.0, w_alignment=1.0, mode="soft",
+        ).to_metrics_dict()
+        assert "_soft_reg_full_pen" in good
+        assert good["_soft_reg_full_pen"] < good["_soft_reg_penalty"]
+        # bad alignment → penalty == full → key omitted (no clamp)
+        bad = sr.evaluate_candidate(
+            expr, min_distance=0.2, p_pass=0.8, alignment_pen=0.95,
+            w_complexity=1.0, w_originality=1.0, w_alignment=1.0, mode="soft",
+        ).to_metrics_dict()
+        assert "_soft_reg_full_pen" not in bad
+        # un-judged (w_alignment=0) → full == base == penalty → key omitted
+        unjudged = sr.evaluate_candidate(
+            expr, min_distance=0.2, p_pass=0.8,
+            w_complexity=1.0, w_originality=1.0, w_alignment=0.0, mode="soft",
+        ).to_metrics_dict()
+        assert "_soft_reg_full_pen" not in unjudged
+
+
+class TestAlignmentPenalty:
+    def test_none_no_penalty(self):
+        assert sr.alignment_penalty(None) == 0.0
+
+    def test_perfect_alignment_no_penalty(self):
+        assert sr.alignment_penalty(1.0) == 0.0
+
+    def test_zero_alignment_full_penalty(self):
+        assert sr.alignment_penalty(0.0) == 1.0
+
+    def test_partial(self):
+        assert sr.alignment_penalty(0.4) == pytest.approx(0.6)
+
+    def test_clamps(self):
+        assert sr.alignment_penalty(-0.2) == 1.0
+        assert sr.alignment_penalty(1.3) == 0.0
+
+
+class TestSelectTopkIndices:
+    def test_picks_highest_scores_in_index_order(self):
+        # scores: idx2=0.9, idx0=0.7, idx3=0.5, idx1=0.1 → top-2 = {0,2}
+        assert sr.select_topk_indices([0.7, 0.1, 0.9, 0.5], 2) == [0, 2]
+
+    def test_k_zero_or_negative(self):
+        assert sr.select_topk_indices([0.7, 0.1], 0) == []
+        assert sr.select_topk_indices([0.7, 0.1], -1) == []
+
+    def test_k_ge_len_returns_all(self):
+        assert sr.select_topk_indices([0.3, 0.9], 5) == [0, 1]
+
+    def test_empty(self):
+        assert sr.select_topk_indices([], 3) == []
+
+    def test_tie_break_by_lower_index(self):
+        # all equal → first k indices win, returned ascending
+        assert sr.select_topk_indices([0.5, 0.5, 0.5], 2) == [0, 1]

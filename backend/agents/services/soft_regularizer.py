@@ -120,6 +120,30 @@ def originality_penalty(min_distance: Optional[float]) -> float:
     return _clamp01(1.0 - float(min_distance))
 
 
+def alignment_penalty(composite_score: Optional[float]) -> float:
+    """P2 alignment leg. R5's composite (AlphaAgent C = 0.5*c1 + 0.5*c2, in
+    [0,1], higher = hypothesis↔factor better aligned) → penalty. ``None``
+    (candidate not judged / R5 abstained or failed) → 0 penalty, same
+    "don't punish on absent evidence" rule as originality_penalty.
+    """
+    if composite_score is None:
+        return 0.0
+    return _clamp01(1.0 - float(composite_score))
+
+
+def select_topk_indices(scores: list, k: int) -> list:
+    """Indices of the top-``k`` entries by score (desc), tie-broken by index
+    asc; result returned in ascending index order. ``k<=0`` / empty → ``[]``.
+    Used to pick the most-promising candidates that earn an R5 alignment judge
+    (the costly leg), so token spend lands on the candidates competing for the
+    scarce BRAIN sim slots.
+    """
+    if k <= 0 or not scores:
+        return []
+    ranked = sorted(range(len(scores)), key=lambda i: (-scores[i], i))
+    return sorted(ranked[:k])
+
+
 @dataclass
 class SoftRegResult:
     """Per-candidate soft-regularization legs + composite penalty.
@@ -137,6 +161,11 @@ class SoftRegResult:
     mode: str = "shadow"
     p_pass_orig: Optional[float] = None
     p_pass_adjusted: Optional[float] = None
+    # The raw 3-leg penalty BEFORE the one-sided max-clamp. Only differs from
+    # ``penalty`` when the alignment leg was clamped out (good alignment, which
+    # a regularizer must not reward). Stamped only in that case so shadow-mode
+    # calibration can see the leg's would-be effect without recomputing.
+    full_penalty: Optional[float] = None
 
     def to_metrics_dict(self) -> Dict[str, float]:
         d: Dict[str, float] = {
@@ -152,6 +181,13 @@ class SoftRegResult:
             d["_soft_reg_p_pass_orig"] = round(self.p_pass_orig, 4)
         if self.p_pass_adjusted is not None:
             d["_soft_reg_p_pass_adjusted"] = round(self.p_pass_adjusted, 4)
+        # Surface the pre-clamp penalty only when the clamp actually fired
+        # (alignment leg diluted, then discarded) — otherwise it equals penalty.
+        if (
+            self.full_penalty is not None
+            and round(self.full_penalty, 4) != round(self.penalty, 4)
+        ):
+            d["_soft_reg_full_pen"] = round(self.full_penalty, 4)
         return d
 
 
@@ -214,14 +250,26 @@ def evaluate_candidate(
     n_fields, n_operators = count_complexity(expression)
     c_pen = complexity_penalty(n_fields, n_operators, c0=c0, cmax=cmax)
     o_pen = originality_penalty(min_distance)
-    penalty = combine_penalty(
+    # The alignment leg is ONE-SIDED: it may only ADD penalty, never remove it.
+    # combine_penalty renormalizes over active legs, so a third (alignment) leg
+    # whose value is below the complexity/originality average would DILUTE the
+    # composite — letting a judged candidate with good alignment outrank an
+    # equal un-judged peer purely from being scored. A regularizer must never
+    # reward, so clamp to the base 2-leg penalty as a floor. When w_alignment=0
+    # (P1 / un-judged) base == full, so this is a no-op for those candidates.
+    base_pen = combine_penalty(
+        c_pen, o_pen, 0.0,
+        w_complexity=w_complexity, w_originality=w_originality, w_alignment=0.0,
+    )
+    full_pen = combine_penalty(
         c_pen, o_pen, alignment_pen,
         w_complexity=w_complexity, w_originality=w_originality, w_alignment=w_alignment,
     )
+    penalty = max(base_pen, full_pen)
     p_adj = effective_p_pass(p_pass, penalty, lam) if mode == "soft" else None
     return SoftRegResult(
         n_fields=n_fields, n_operators=n_operators,
         complexity_pen=c_pen, originality_pen=o_pen, alignment_pen=alignment_pen,
         penalty=penalty, mode=mode,
-        p_pass_orig=p_pass, p_pass_adjusted=p_adj,
+        p_pass_orig=p_pass, p_pass_adjusted=p_adj, full_penalty=full_pen,
     )

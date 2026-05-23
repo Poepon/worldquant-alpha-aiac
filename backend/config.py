@@ -1086,6 +1086,14 @@ class Settings(BaseSettings):
     # 0 penalty at/below C0 (free), linear up to 1 at CMAX (saturates beyond).
     CODE_GEN_SOFT_REG_COMPLEXITY_C0: float = 6.0
     CODE_GEN_SOFT_REG_COMPLEXITY_CMAX: float = 16.0
+    # P2 alignment leg (R5 c1/c2). Master switch is W_ALIGNMENT > 0 (default 0
+    # = leg dormant, zero LLM cost). R5 = 2 LLM calls/candidate, so only the
+    # most-promising candidates (ranked by the cheap complexity+originality
+    # effective P(PASS)) are judged: TOPK in 'soft' mode, SHADOW_SAMPLE in
+    # 'shadow' (small, just to accrue the alignment distribution for
+    # calibration). 0 disables R5 entirely in that mode.
+    CODE_GEN_SOFT_REG_ALIGNMENT_TOPK: int = 3
+    CODE_GEN_SOFT_REG_ALIGNMENT_SHADOW_SAMPLE: int = 1
 
     # V-24.E (2026-05-13): FIELD_INSIGHT / HYPOTHESIS_INSIGHT writes gated.
     # kb_hit_audit found 4170 historical rows of these types had 0% retrieve

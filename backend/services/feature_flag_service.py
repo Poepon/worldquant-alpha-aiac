@@ -287,8 +287,11 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     "CODE_GEN_SOFT_REG_W_ALIGNMENT": FlagSpec(
         name="CODE_GEN_SOFT_REG_W_ALIGNMENT",
         flag_type="float",
-        group="SoftReg-P1",
-        description="对齐腿权重 (R5 c1/c2),P1 恒为 0 — 预留 P2。",
+        group="SoftReg-P2",
+        description=(
+            "对齐腿权重 (R5 c1/c2)。**P2 总开关**:>0 才激活对齐腿 (跑 R5 + 计入"
+            "penalty);默认 0 = P2 休眠、零 LLM 成本。对齐腿单向:只增不减 penalty。"
+        ),
     ),
     "CODE_GEN_SOFT_REG_COMPLEXITY_C0": FlagSpec(
         name="CODE_GEN_SOFT_REG_COMPLEXITY_C0",
@@ -301,6 +304,25 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         flag_type="float",
         group="SoftReg-P1",
         description="复杂度斜坡上限:complexity_score 达此值惩罚=1 (之后饱和)。",
+    ),
+    # --- SoftReg-P2 对齐腿 (R5 c1/c2);总开关 = W_ALIGNMENT>0 ---
+    "CODE_GEN_SOFT_REG_ALIGNMENT_TOPK": FlagSpec(
+        name="CODE_GEN_SOFT_REG_ALIGNMENT_TOPK",
+        flag_type="int",
+        group="SoftReg-P2",
+        description=(
+            "soft 模式下对 effective-P(PASS) 排名 top-K 的候选跑 R5 对齐判 "
+            "(每候选 2 次 LLM)。0=关闭对齐腿。仅在 W_ALIGNMENT>0 时生效。"
+        ),
+    ),
+    "CODE_GEN_SOFT_REG_ALIGNMENT_SHADOW_SAMPLE": FlagSpec(
+        name="CODE_GEN_SOFT_REG_ALIGNMENT_SHADOW_SAMPLE",
+        flag_type="int",
+        group="SoftReg-P2",
+        description=(
+            "shadow 模式下每轮跑 R5 的候选数 (小采样,只为攒 alignment 分布做"
+            "校准)。0=shadow 不跑 R5。仅在 W_ALIGNMENT>0 时生效。"
+        ),
     ),
     # --- R1b CoSTEER loop (5 sub-stages — independent rollback, ordered deps) ---
     # 设计:5 个 sub-stage 各自独立 flag。Ship 顺序 stage 1→5 但任一可 OFF 单独回滚。
