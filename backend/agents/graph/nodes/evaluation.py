@@ -854,6 +854,36 @@ async def _evaluate_single_alpha(
 # NODE: Simulate
 # =============================================================================
 
+# Pre-simulate candidate.metrics annotations that must survive node_simulate's
+# wholesale `updated.metrics = res["metrics"]` overwrite. The BRAIN sim result
+# is authoritative — _carry_pre_sim_metrics uses setdefault, so it never
+# clobbers a key the result already set — this only rescues additive,
+# namespaced telemetry the sim result never emits: node_validate findings /
+# risk-bounds, plus pre-sim shadow/inject stamps (soft-reg P1/P2, Q10 prescreen,
+# G10 inject, G3-v2 grammar, assistant-mode A1.3). Without it they're silently
+# dropped before persistence (only post-simulate node_evaluate stamps survive),
+# which is why shadow soft-reg telemetry never reached the DB. Extend this when
+# adding a new pre-sim `_xxx_` telemetry family.
+_CARRY_PRE_SIM_METRIC_PREFIXES = (
+    "_validation_", "_risk_bounds",
+    "_soft_reg", "_qlib_prescreen", "_g10_", "_g3v2_",
+    "llm_mode_used", "assistant_template",
+)
+
+
+def _carry_pre_sim_metrics(result_metrics: dict, candidate_metrics) -> dict:
+    """Merge BRAIN ``result_metrics`` (authoritative) with the allow-listed
+    pre-simulate ``candidate_metrics`` annotations that the wholesale metrics
+    overwrite would otherwise drop. ``setdefault`` → result wins on collision.
+    """
+    merged = dict(result_metrics or {})
+    if isinstance(candidate_metrics, dict):
+        for _k, _v in candidate_metrics.items():
+            if _k.startswith(_CARRY_PRE_SIM_METRIC_PREFIXES):
+                merged.setdefault(_k, _v)
+    return merged
+
+
 async def _apply_soft_regularizer(
     state,
     indices_to_simulate: list,
@@ -1539,7 +1569,7 @@ async def node_simulate(
     # Update alphas
     updated_alphas = state.pending_alphas.copy()
     success_count = 0
-    
+
     for i, idx in enumerate(indices_to_simulate):
         res = results[i] if i < len(results) else {"success": False, "error": "Missing result"}
         
@@ -1548,21 +1578,11 @@ async def node_simulate(
         
         updated.simulation_success = res.get("success", False)
         updated.alpha_id = res.get("alpha_id")
-        updated.metrics = res.get("metrics", {}) or {}
+        # Replace metrics with the BRAIN result, but carry the allow-listed
+        # pre-simulate annotations across (see _carry_pre_sim_metrics) — else
+        # soft-reg/Q10/G10/G3-v2/validation stamps are dropped before persist.
+        updated.metrics = _carry_pre_sim_metrics(res.get("metrics", {}) or {}, current.metrics)
         updated.simulation_error = res.get("error")
-
-        # P1-E follow-up (M-4 incomplete fix): node_validate stamps
-        # `_validation_findings` and `_risk_bounds` into pre-simulate
-        # alpha.metrics so persistence (which writes alpha.metrics to
-        # JSONB) can carry them to KB. The unconditional `updated.metrics =
-        # res.get("metrics")` above DROPS those annotations before
-        # persistence ever sees them. Carry them across explicitly.
-        # `setdefault` so a (hypothetical) BRAIN metrics dict containing
-        # the same key does not get overwritten by stale validation data.
-        if isinstance(current.metrics, dict):
-            for _k, _v in current.metrics.items():
-                if _k.startswith("_validation_") or _k == "_risk_bounds":
-                    updated.metrics.setdefault(_k, _v)
 
         # V-27.61: a retryable failure (429 / slot-acquire timeout / stale
         # slot counter — brain_adapter.simulate_alpha returns retryable=True

@@ -116,39 +116,47 @@ class TestNodeValidateStructuredFindings:
         # validation_error is a single string (not List[Finding]).
         assert isinstance(alpha.validation_error, str)
 
-    @pytest.mark.asyncio
-    async def test_findings_survive_node_simulate_metrics_replacement(self):
-        """P1-E follow-up regression: node_simulate replaces
-        ``alpha.metrics`` wholesale with the BRAIN result. Without the
-        carry-over fix in evaluation.py L1090+, ``_validation_findings``
-        and ``_risk_bounds`` get clobbered before persistence ever sees
-        them. Simulate the same merge step here to lock the contract.
+    def test_findings_survive_node_simulate_metrics_replacement(self):
+        """P1-E + soft-reg follow-up regression: node_simulate replaces
+        ``alpha.metrics`` wholesale with the BRAIN result. The real
+        ``_carry_pre_sim_metrics`` helper must rescue the allow-listed
+        pre-simulate annotations — node_validate findings/risk-bounds AND the
+        shadow/inject telemetry (soft-reg, Q10, …) — while the BRAIN result
+        wins on any key collision and non-allow-listed stale keys are dropped.
+        Imports the real helper (not a mirror) so the whitelist can't drift.
         """
-        # 1. Pre-simulate state — node_validate has stamped findings.
-        validated_metrics = {
+        from backend.agents.graph.nodes.evaluation import _carry_pre_sim_metrics
+
+        # Pre-simulate candidate.metrics: node_validate findings + the broadened
+        # shadow/inject stamps + a stale value that must NOT survive.
+        candidate_metrics = {
             "_validation_findings": [
                 {"rule_id": RuleId.LOW_COVERAGE_FIELD, "severity": "soft",
                  "message": "Low coverage", "category": "semantics",
                  "location": None, "metadata": {}},
             ],
-            "_risk_bounds": {"max_loss_hint": "high",
-                             "rationale": [RuleId.RISK_DIVIDE_BY_VOLATILE_DENOM],
-                             "confidence": 0.25,
-                             "severity_distribution": {"hard": 0, "soft": 0, "info": 1}},
+            "_risk_bounds": {"max_loss_hint": "high", "confidence": 0.25},
+            "_soft_reg_alignment_judged": True,   # carried (absent from result)
+            "_soft_reg_penalty": 0.42,            # collides with result → result wins
+            "_qlib_prescreen_warned": True,       # carried
+            "_not_allowlisted_stale": -999,       # dropped (no matching prefix)
         }
-        # 2. Simulated BRAIN response — fresh metrics dict (no findings).
-        sim_metrics = {"sharpe": 1.6, "fitness": 1.1, "turnover": 0.4}
+        # BRAIN result — authoritative; emits a colliding _soft_reg_penalty.
+        sim_metrics = {"sharpe": 1.6, "fitness": 1.1, "_soft_reg_penalty": 0.99}
 
-        # 3. Replicate node_simulate's merge logic verbatim.
-        post_sim_metrics = dict(sim_metrics)
-        for k, v in validated_metrics.items():
-            if k.startswith("_validation_") or k == "_risk_bounds":
-                post_sim_metrics.setdefault(k, v)
+        merged = _carry_pre_sim_metrics(sim_metrics, candidate_metrics)
 
-        # 4. Assert findings + risk_bounds survived alongside sim metrics.
-        assert post_sim_metrics["sharpe"] == 1.6
-        assert post_sim_metrics["_validation_findings"] == validated_metrics["_validation_findings"]
-        assert post_sim_metrics["_risk_bounds"]["max_loss_hint"] == "high"
+        # BRAIN result wins on collision + survives.
+        assert merged["sharpe"] == 1.6
+        assert merged["_soft_reg_penalty"] == 0.99
+        # node_validate annotations survive (original P1-E contract).
+        assert merged["_validation_findings"] == candidate_metrics["_validation_findings"]
+        assert merged["_risk_bounds"]["max_loss_hint"] == "high"
+        # broadened: soft-reg + Q10 shadow telemetry now survive.
+        assert merged["_soft_reg_alignment_judged"] is True
+        assert merged["_qlib_prescreen_warned"] is True
+        # non-allow-listed stale candidate key is NOT carried.
+        assert "_not_allowlisted_stale" not in merged
 
     @pytest.mark.asyncio
     async def test_node_validate_does_not_writethrough_to_input_state(self):
