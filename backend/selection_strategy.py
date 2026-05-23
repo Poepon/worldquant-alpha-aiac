@@ -204,7 +204,7 @@ class DatasetBandit:
 # =============================================================================
 
 def discounted_thompson_update(
-    alpha: float, beta: float, s_d: int, t_d: int, gamma: float = 0.95
+    alpha: float, beta: float, s_d: float, t_d: int, gamma: float = 0.95
 ) -> Tuple[float, float]:
     """Pull-indexed discounted Beta-Bernoulli posterior update.
 
@@ -225,8 +225,8 @@ def discounted_thompson_update(
     equals (cumulative pulls − pulls_at_last_refresh): pull-indexed, not
     calendar — an arm that wasn't pulled this window has g=gamma**0=1.
     """
-    s_d = max(0, int(s_d))
-    t_d = max(0, int(t_d))
+    s_d = max(0.0, float(s_d))   # float: reward may be fractional (graded-reward forward-compat)
+    t_d = max(0, int(t_d))       # pull count stays integer (g=gamma**t_d exponent + pulls)
     s_d = min(s_d, t_d)  # clamp: s_d ⊆ t_d by construction; guard bad inputs
     g = gamma ** t_d
     new_alpha = g * float(alpha) + s_d

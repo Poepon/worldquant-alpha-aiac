@@ -1142,9 +1142,17 @@ class Settings(BaseSettings):
     # can be flipped from /ops without redeploy.
     ENABLE_DATASET_VALUE_BANDIT: bool = False
     DATASET_BANDIT_GAMMA: float = 0.95          # pull-indexed discount per real sim
-    DATASET_BANDIT_FLOOR_C: float = 0.1         # anti-starvation floor amplitude
-    DATASET_BANDIT_FLOOR_TAU: float = 500.0     # floor decay constant (cumulative sims)
+    # v6 grid-tuned (2026-05-23): low floor so the rare can_submit signal (pv1
+    # 10.6%) isn't drowned by exploration; proven submitters stay above the weak
+    # 0-submit datasets. fc=0.03 keeps weak (~0.06) below pv1 (0.108).
+    DATASET_BANDIT_FLOOR_C: float = 0.03        # anti-starvation floor amplitude
+    DATASET_BANDIT_FLOOR_TAU: float = 100.0     # floor decay constant (cumulative sims)
     DATASET_BANDIT_WINDOW_DAYS: int = 7         # watermark fallback window on first run
+    # v6: pessimistic cold-start prior β for zero-history catalog datasets seeded
+    # on a re-seed run. mean=1/(1+β); β=5 → 0.167 so an untested source (e.g.
+    # pv96 — burned quota once on a stale field) explores via the floor but
+    # doesn't outrank the proven analyst4/news12 band.
+    DATASET_BANDIT_COLDSTART_BETA: float = 5.0
     
     # P1-2: Field Selection
     FIELD_COVERAGE_WEIGHT: float = 0.3

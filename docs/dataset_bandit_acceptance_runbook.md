@@ -14,17 +14,19 @@
 | flag | `ENABLE_DATASET_VALUE_BANDIT`（config + SUPPORTED_FLAGS）|
 | dry-run 预览 | `scripts/dataset_bandit_dryrun.py`（只读）|
 
-## reward 语义
+## reward 语义（v6 2026-05-23：可提交收益）
 
 ```
-S_d = #(can_submit AND metrics._iqc_marginal.delta_score > 0)   # book-marginal 正
-T_d = #(真 BRAIN sim, 排除 metrics._pre_brain_skip)             # PRESIM_SKIP 不算
+S_d = #(can_submit)   — AIAC-mined (task_id NOT NULL) 且 BRAIN is.checks 全 PASS
+T_d = #(真 AIAC sim, 排除 metrics._pre_brain_skip)              # PRESIM_SKIP 不算
 g   = γ^T_d   ;   α' = g·α + S_d   ;   β' = g·β + (T_d − S_d)    # pull-indexed 折扣
 mining_weight = θ~Beta(α,β) + floor_c·exp(−pulls/τ)
 ```
+**v6 = binary can_submit**（之前 v2-v5 用 graded edge,但 edge≠价值:model16 高 sharpe 却 0/110 可提交[CONCENTRATED_WEIGHT],pv1 才 61 可提交。且 can_submit 已含 sharpe/fitness/turnover/concentration check,graded 在此 gate 下是死代码）。两处关键:① 加 `task_id NOT NULL`(剔 BRAIN-synced 用户 alpha,否则污染);② 丢 v1 的 `delta_score>0` AND-子句(太稀疏 ~20→崩)。局限:can_submit≠边际价值。
+
 窗口由 SystemConfig watermark `dataset_bandit_watermark` 划 `(lower, run_started]`（幂等、非重叠）。
-首次无 bandit_state 行 → 从**全历史** seed（α=1+S_hist, β=1+(T_hist−S_hist)）+ watermark=now（不抹 seed）。
-未解析 dataset_id（NULL）行**排除**出所有臂。
+首次无 bandit_state 行 → 臂 = (有 AIAC 历史) ∪ (**全部 active catalog 数据集**);从全历史 seed,**零历史源用悲观冷启 `Beta(1, COLDSTART_BETA)`**(s=t=0 时;否则停在默认 1.0 会碾压 bandit 权重) + watermark=now。
+未解析 dataset_id(NULL) 与 synced(task_id NULL) 行**排除**出所有臂。
 
 ## 上线步骤
 
@@ -61,6 +63,8 @@ mining_weight = θ~Beta(α,β) + floor_c·exp(−pulls/τ)
 ```
 1. flag OFF:  PATCH /ops/flags/ENABLE_DATASET_VALUE_BANDIT {"value": false}
               （停 beat 写 + FLAT 回等概率 round-robin）
-2. 恢复权重:  跑 docs/dataset_bandit_mining_weight_backup_2026-05-22.sql
-              （候选池 ORDER BY mining_weight 无条件读它，仅 flag OFF 不够）
+2. 恢复三样（缺一不全 — v6 re-seed 用 TRUNCATE，且 watermark 已前移）:
+   a. datasets.mining_weight  ← 备份 SQL（候选池 ORDER BY mining_weight 无条件读它，仅 flag OFF 不够）
+   b. bandit_state            ← 备份表 bandit_state_bak_*（TRUNCATE 前快照）
+   c. system_configs 的 dataset_bandit_watermark 行 ← 否则下次 beat 漏掉 watermark 前移期间的 sim
 ```

@@ -5,11 +5,14 @@ Layers:
     weight / weighted_choice) — dialect-free, assert the β≥0 invariant + the
     seed-preservation (C-1) + floor decay + weighted-pick distribution.
   - reward classification (dataset_weight_refresh._classify) — PRESIM_SKIP
-    exclusion + the can_submit/delta_score book-marginal gate.
+    exclusion + the v6 binary can_submit reward (1.0 if can_submit else 0.0;
+    NULL→0; high-edge-but-unsubmittable model16 case → 0). The v2-v5 graded edge
+    gate retired: edge ≠ submittable value (see _classify docstring).
   - the full beat-job flow on the in-memory aiosqlite fixture (the job is
     dialect-free Python-side aggregation + ORM upsert by design, so it runs on
     sqlite): seed-from-history → discounted incremental update → idempotent
-    re-run → unresolved-dataset exclusion → flag-OFF no-op.
+    re-run → unresolved-dataset exclusion → flag-OFF no-op → zero-history catalog
+    cold-start seed (H1) → synced-user-alpha exclusion (B1).
   - DatasetSelector._load_bandit_state real-ORM round-trip (the iteration-bug
     fix — it previously iterated dict keys → silent AttributeError → never
     loaded; per [[feedback_orm_constructor_real_test]]).
@@ -73,6 +76,14 @@ class TestDiscountedThompsonUpdate:
         _, b2 = discounted_thompson_update(1.0, 1.0, 99, 3, gamma=0.95)
         assert b2 >= 0.0
 
+    def test_fractional_s_d_not_truncated(self):
+        # v6 forward-compat: s_d may be fractional (graded reward) — the int()
+        # cast was removed, so 2.7 must NOT truncate to 2.
+        a2, b2 = discounted_thompson_update(2.0, 2280.0, 2.7, 5, gamma=0.95)
+        g = 0.95 ** 5
+        assert abs(a2 - (g * 2.0 + 2.7)) < 1e-9
+        assert abs(b2 - (g * 2280.0 + (5 - 2.7))) < 1e-9
+
 
 class TestThompsonSampleWeight:
     def test_minedout_weight_tiny(self):
@@ -125,28 +136,26 @@ class TestWeightedChoice:
 # Reward classification
 # =============================================================================
 class TestClassify:
+    # v6 reward = binary can_submit (1.0 / 0.0); _classify(metrics, can_submit).
     def test_presim_skip_excluded(self):
-        assert _classify({"_pre_brain_skip": True}, True) == (False, False)
+        # PRESIM_SKIP never hit BRAIN — excluded even when submittable.
+        assert _classify({"_pre_brain_skip": True}, True) == (False, 0.0)
 
-    def test_real_sim_no_marginal(self):
-        assert _classify({}, True) == (True, False)
+    def test_can_submit_true(self):
+        assert _classify({}, True) == (True, 1.0)
 
-    def test_book_marginal_positive(self):
-        assert _classify({"_iqc_marginal": {"delta_score": 0.3}}, True) == (True, True)
+    def test_can_submit_false(self):
+        assert _classify({}, False) == (True, 0.0)
 
-    def test_marginal_nonpositive(self):
-        assert _classify({"_iqc_marginal": {"delta_score": -0.1}}, True) == (True, False)
-        assert _classify({"_iqc_marginal": {"delta_score": 0.0}}, True) == (True, False)
+    def test_can_submit_none_is_zero(self):
+        # NULL can_submit (not yet refreshed from BRAIN) → real sim, 0 reward.
+        assert _classify({}, None) == (True, 0.0)
 
-    def test_marginal_requires_can_submit(self):
-        assert _classify({"_iqc_marginal": {"delta_score": 0.3}}, False) == (True, False)
-
-    def test_bool_delta_not_numeric(self):
-        # True is an int subclass — must not count as a positive delta_score.
-        assert _classify({"_iqc_marginal": {"delta_score": True}}, True) == (True, False)
-
-    def test_missing_iqc(self):
-        assert _classify({"is_sharpe": 1.2}, True) == (True, False)
+    def test_high_edge_but_unsubmittable_scores_zero(self):
+        # The model16 case: edge alphas (high sharpe in metrics) but
+        # can_submit=False (CONCENTRATED_WEIGHT) → reward 0, NOT rewarded.
+        m = {"sharpe": 16.2, "fitness": 13.0}
+        assert _classify(m, False) == (True, 0.0)
 
 
 # =============================================================================
@@ -173,20 +182,20 @@ def session_factory(db_session):
     return lambda: _SharedSessionCM(db_session)
 
 
-async def _mk_alpha(db, dataset_id, region="USA", *, can_submit=False,
-                    delta=None, presim=False, created_at=None):
+async def _mk_alpha(db, dataset_id, region="USA", *, edge=False,
+                    presim=False, created_at=None, task_id=1):
+    """v6 reward = binary can_submit. edge=True → can_submit=True (counts as S);
+    edge=False → can_submit=False (T only). task_id non-NULL by default so the
+    AIAC-only filter (B1) keeps the row (FK enforcement is OFF in the sqlite
+    fixtures, so a bare int is fine)."""
     from backend.models import Alpha
 
-    metrics = {}
-    if presim:
-        metrics["_pre_brain_skip"] = True
-    if delta is not None:
-        metrics["_iqc_marginal"] = {"delta_score": delta}
+    metrics = {"_pre_brain_skip": True} if presim else {}
     a = Alpha(
-        region=region, universe="TOP3000", dataset_id=dataset_id,
+        region=region, universe="TOP3000", dataset_id=dataset_id, task_id=task_id,
         expression="rank(close)", status="simulated", quality_status="PENDING",
-        human_feedback="NONE", can_submit=can_submit, metrics=metrics,
-        created_at=created_at or datetime.utcnow(),
+        human_feedback="NONE", can_submit=bool(edge),
+        metrics=metrics, created_at=created_at or datetime.utcnow(),
     )
     db.add(a)
     await db.flush()
@@ -211,17 +220,17 @@ class TestBeatJobFlow:
         return {(r.region, r.dataset_id): r for r in rows}
 
     async def test_seed_from_history(self, db_session, session_factory):
-        # pv1: 1 book-marginal + 3 plain real + 1 presim-skip → T=4, S=1.
+        # pv1: 1 can_submit + 3 non-submit real + 1 presim-skip → T=4, S=1.
         await _mk_dataset(db_session, "pv1")
         await _mk_dataset(db_session, "fundamental6")
-        await _mk_alpha(db_session, "pv1", can_submit=True, delta=0.2)
+        await _mk_alpha(db_session, "pv1", edge=True)
         for _ in range(3):
-            await _mk_alpha(db_session, "pv1", can_submit=True, delta=-0.1)
+            await _mk_alpha(db_session, "pv1", edge=False)
         await _mk_alpha(db_session, "pv1", presim=True)  # excluded from T
-        # fundamental6: 2 book-marginal + 1 plain → T=3, S=2.
-        await _mk_alpha(db_session, "fundamental6", can_submit=True, delta=0.5)
-        await _mk_alpha(db_session, "fundamental6", can_submit=True, delta=0.1)
-        await _mk_alpha(db_session, "fundamental6", can_submit=False)
+        # fundamental6: 2 can_submit + 1 non-submit → T=3, S=2.
+        await _mk_alpha(db_session, "fundamental6", edge=True)
+        await _mk_alpha(db_session, "fundamental6", edge=True)
+        await _mk_alpha(db_session, "fundamental6", edge=False)
         await db_session.commit()
 
         out = await _refresh_async(
@@ -263,8 +272,8 @@ class TestBeatJobFlow:
 
     async def test_unresolved_dataset_excluded(self, db_session, session_factory):
         await _mk_dataset(db_session, "pv1")
-        await _mk_alpha(db_session, "pv1", can_submit=True, delta=0.2)
-        await _mk_alpha(db_session, None, can_submit=True, delta=0.9)  # NULL dataset_id
+        await _mk_alpha(db_session, "pv1", edge=True)
+        await _mk_alpha(db_session, None, edge=True)  # NULL dataset_id
         await db_session.commit()
 
         await _refresh_async(
@@ -279,8 +288,8 @@ class TestBeatJobFlow:
         # window captures only the new sims.
         old = datetime.utcnow() - timedelta(days=10)
         await _mk_dataset(db_session, "pv1")
-        await _mk_alpha(db_session, "pv1", can_submit=True, delta=0.2, created_at=old)
-        await _mk_alpha(db_session, "pv1", can_submit=False, created_at=old)
+        await _mk_alpha(db_session, "pv1", edge=True, created_at=old)
+        await _mk_alpha(db_session, "pv1", edge=False, created_at=old)
         await db_session.commit()
         # First run seeds from history: T=2, S=1 → α=2, β=2, pulls=2.
         await _refresh_async(gamma=0.95, floor_c=0.1, tau=500.0, window_days=7,
@@ -294,8 +303,8 @@ class TestBeatJobFlow:
             select(SystemConfig).where(SystemConfig.config_key == _WM_KEY)
         )).scalar_one()
         wm.config_value = (datetime.utcnow() - timedelta(hours=1)).isoformat()
-        for _ in range(3):  # 3 new real sims, 0 marginal → S=0, T=3
-            await _mk_alpha(db_session, "pv1", can_submit=False, created_at=datetime.utcnow())
+        for _ in range(3):  # 3 new real sims, 0 edge-positive → S=0, T=3
+            await _mk_alpha(db_session, "pv1", edge=False, created_at=datetime.utcnow())
         await db_session.commit()
 
         await _refresh_async(gamma=0.95, floor_c=0.1, tau=500.0, window_days=7,
@@ -312,8 +321,8 @@ class TestBeatJobFlow:
     async def test_idempotent_rerun_no_double_count(self, db_session, session_factory):
         old = datetime.utcnow() - timedelta(days=10)
         await _mk_dataset(db_session, "pv1")
-        await _mk_alpha(db_session, "pv1", can_submit=True, delta=0.2, created_at=old)
-        await _mk_alpha(db_session, "pv1", can_submit=False, created_at=old)
+        await _mk_alpha(db_session, "pv1", edge=True, created_at=old)
+        await _mk_alpha(db_session, "pv1", edge=False, created_at=old)
         await db_session.commit()
         await _refresh_async(gamma=0.95, floor_c=0.1, tau=500.0, window_days=7,
                              session_factory=session_factory, rng=random.Random(0))
@@ -325,6 +334,48 @@ class TestBeatJobFlow:
                              session_factory=session_factory, rng=random.Random(1))
         a2 = (await self._state(db_session))[("USA", "pv1")]
         assert (a2.alpha_param, a2.beta_param, a2.pulls) == snap
+
+    async def test_zero_history_catalog_seeded_coldstart(self, db_session, session_factory):
+        # H1 (v6): a catalog dataset with NO alphas must still be enrolled as an
+        # arm on the seed run with the pessimistic cold-start prior, so it never
+        # sits at the column default mining_weight=1.0 (which would dominate).
+        await _mk_dataset(db_session, "pv1")
+        await _mk_dataset(db_session, "pv96")  # zero-history catalog dataset
+        await _mk_alpha(db_session, "pv1", edge=True)
+        await db_session.commit()
+
+        await _refresh_async(
+            gamma=0.95, floor_c=0.1, tau=500.0, window_days=7, coldstart_beta=2.0,
+            session_factory=session_factory, rng=random.Random(0),
+        )
+        st = await self._state(db_session)
+        assert set(st.keys()) == {("USA", "pv1"), ("USA", "pv96")}
+        pv96 = st[("USA", "pv96")]
+        # cold-start spec (r5): s=t=0 → α=1, β=coldstart_beta (NOT 1.0+max(0,0)=1.0).
+        assert (pv96.alpha_param, pv96.beta_param, pv96.pulls) == (1.0, 2.0, 0)
+        # mining_weight written off the raw 1.0 default (floor-driven, positive).
+        from backend.models import DatasetMetadata
+        w = (await db_session.execute(
+            select(DatasetMetadata.mining_weight).where(DatasetMetadata.dataset_id == "pv96")
+        )).scalar_one()
+        assert w > 0.0
+
+    async def test_synced_user_alpha_excluded(self, db_session, session_factory):
+        # B1 (v6): BRAIN-synced user alphas (task_id NULL) must NOT count toward
+        # the reward — only AIAC-mined sims (task_id NOT NULL).
+        await _mk_dataset(db_session, "pv1")
+        await _mk_alpha(db_session, "pv1", edge=True, task_id=None)   # synced + can_submit
+        await _mk_alpha(db_session, "pv1", edge=False, task_id=7)     # AIAC, not submit
+        await db_session.commit()
+
+        await _refresh_async(
+            gamma=0.95, floor_c=0.1, tau=500.0, window_days=7,
+            session_factory=session_factory, rng=random.Random(0),
+        )
+        pv1 = (await self._state(db_session))[("USA", "pv1")]
+        # Only the 1 AIAC sim counts (S=0 not-submit, T=1): α=1, β=2, pulls=1.
+        # If the synced can_submit row leaked in, α would be 2 — guards against it.
+        assert (pv1.alpha_param, pv1.beta_param, pv1.pulls) == (1.0, 2.0, 1)
 
     async def test_flag_off_task_noops(self, monkeypatch):
         # The celery entrypoint returns early (no DB touch) when flag OFF.

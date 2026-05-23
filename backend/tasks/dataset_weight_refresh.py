@@ -7,10 +7,30 @@ FLAT mining loop off the mined-out pv1 toward high-marginal-value + under-mined
 orthogonal sources.
 
 reward (per (region, dataset_id), over the refresh window):
-    S_d = #(can_submit  AND  _iqc_marginal.delta_score > 0)   # book-marginal-positive
-    T_d = #(real BRAIN sims)  — excludes metrics._pre_brain_skip (PRESIM_SKIP)
-S_d ⊆ T_d by construction → Beta β stays ≥ 0 (review C1: single nested Bernoulli
-success count, no continuous bump in v1).
+    S_d = #(can_submit)        — AIAC-mined alphas (task_id NOT NULL) whose
+          BRAIN is.checks all PASS (no FAIL). T_d = #(real AIAC sims),
+          excludes metrics._pre_brain_skip (PRESIM_SKIP).
+S_d ⊆ T_d by construction → Beta β stays ≥ 0 (single nested Bernoulli count).
+
+reward = binary can_submit (v6, 2026-05-23). Evolution:
+- v1 used (can_submit AND _iqc_marginal.delta_score>0): ~20 hits across all USA
+  → too sparse → posterior collapsed to prior → mining_weight degenerated to the
+  pure exploration floor → steered FLAT onto proven-weak under-mined datasets.
+- v2-v5 chased an EDGE signal (graded sharpe/fitness). But edge ≠ value:
+  model16 has 110 sharpe≥1.25 alphas yet 0/110 can_submit (all fail
+  CONCENTRATED_WEIGHT — sparse fscore fields concentrate book weight), while pv1
+  has 61 can_submit. Steering on edge points at fool's gold.
+- v6 targets SUBMITTABLE yield directly: reward = (can_submit ? 1 : 0). A graded
+  edge term is dead under this gate anyway — can_submit ⟹ sharpe≥1.25 ∧
+  fitness≥1.0 ⟹ any min(sharpe/1.25,fitness/1.0) caps at 1.0. So the whole
+  graded/convex apparatus retires; binary is honest + matches "yield = count of
+  submittable alphas". Two reward fixes vs v1: (a) drop the over-sparse
+  delta_score AND-clause (can_submit alone = 69 hits, denser); (b) ONLY count
+  AIAC-mined (task_id NOT NULL) — the v1 _iqc_marginal stamp accidentally
+  excluded BRAIN-synced user alphas; a pure can_submit read would ingest 4665
+  synced rows and re-pollute, so the task_id filter is mandatory.
+Limitation: can_submit ≠ portfolio-marginal value (a submittable-but-redundant
+alpha still scores 1); the v1 delta_score captured that but was too sparse.
 
 Discounted, pull-indexed (selection_strategy.discounted_thompson_update):
     g = γ^T_d ;  α' = g·α + S_d ;  β' = g·β + (T_d − S_d)
@@ -19,13 +39,21 @@ barely drift. Then mining_weight = θ~Beta(α,β) + floor·exp(−pulls/τ).
 
 Windowing: SystemConfig watermark ``dataset_bandit_watermark`` bounds the
 window (lower, run_started] — re-run / double-fire safe (cf. cognitive-layer
-bandit). On the first run for a (region, dataset_id) there is no bandit_state
-row → SEED from ALL history (α=1+S_hist, β=1+(T_hist−S_hist), pulls=T_hist) and
-set the watermark to now, so the *next* window only covers post-seed sims and
-g=γ^(small)≈1 — the seed isn't wiped (plan review C-1).
+bandit). On the first run (bandit_state empty — e.g. after a re-seed TRUNCATE)
+SEED from ALL history (α=1+S_hist, β=1+(T_hist−S_hist), pulls=T_hist) and set
+the watermark to now, so the *next* window only covers post-seed sims (g≈1).
 
-Unresolved-dataset_id alphas (derive_dataset_id returned None → dataset_id
-NULL) are EXCLUDED from every arm's T_d — never folded into pv1 (review N-2).
+First-run arms = (datasets with AIAC history) ∪ (all active catalog datasets).
+A zero-history catalog dataset (s=t=0) seeds α=1, β=COLDSTART_BETA (pessimistic,
+mean 1/(1+β)≈0.33 at β=2), pulls=0 → its mining_weight is driven by the
+exploration floor, NOT left at the column default 1.0 (which would dominate the
+bandit's sub-1.0 weights in ORDER BY / weighted_choice). Pessimistic (not
+Beta(1,1)) so an untested source can't outrank a proven submitter; the floor
+(full at pulls=0, decays with mining) still gives it exploration budget above a
+tried-and-failed source. [H1, plan review C]
+
+Unresolved-dataset_id alphas (dataset_id NULL) AND BRAIN-synced user alphas
+(task_id NULL) are EXCLUDED from every arm's S_d/T_d — only AIAC-mined sims count.
 
 flag-gated: no-op unless ENABLE_DATASET_VALUE_BANDIT is ON. Never raises.
 """
@@ -42,25 +70,24 @@ from backend.tasks import run_async
 
 _WM_KEY = "dataset_bandit_watermark"
 
-def _classify(metrics: Any, can_submit: Any) -> Tuple[bool, bool]:
-    """Return ``(is_real_sim, is_book_marginal_positive)`` for one alpha row.
+def _classify(metrics: Any, can_submit: Any) -> Tuple[bool, float]:
+    """Return ``(is_real_sim, reward)`` for one alpha row.
 
-    The two canonical reward signals (mirrors the three-gate submission rule):
-      real sim       = NOT metrics._pre_brain_skip   (PRESIM_SKIP never hit BRAIN)
-      book-marginal  = can_submit AND _iqc_marginal.delta_score > 0
+    real sim = NOT metrics._pre_brain_skip   (PRESIM_SKIP never hit BRAIN)
+    reward   = 1.0 if can_submit else 0.0     (v6: SUBMITTABLE yield)
 
-    ``delta_score`` is the codebase's canonical "adds value to the team
-    portfolio" gate (config IQC_AUTO_AUDIT + frontend filter + the
-    can_submit/self-corr/IQC three-gate). Pure + dialect-free so the
-    PRESIM_SKIP exclusion and the marginal gate are unit-testable without PG.
+    ``can_submit`` = BRAIN is.checks all PASS (no FAIL) — already encodes
+    LOW_SHARPE / LOW_FITNESS / HIGH_TURNOVER / CONCENTRATED_WEIGHT / sub-universe,
+    so a graded edge term is dead under this gate (can_submit ⟹ above-threshold).
+    NULL/None can_submit (not yet refreshed from BRAIN) → treated as 0 (unknown =
+    not-submittable, conservative) but still counts as a real pull. See module
+    docstring for why v6 is binary + why edge (v2-v5) pointed at fool's gold.
+    Pure + dialect-free so the PRESIM_SKIP exclusion stays unit-testable w/o PG.
     """
     m = metrics if isinstance(metrics, dict) else {}
     if m.get("_pre_brain_skip"):
-        return False, False  # pre-sim skip — never consumed a BRAIN sim
-    iqc = m.get("_iqc_marginal")
-    delta = iqc.get("delta_score") if isinstance(iqc, dict) else None
-    book = bool(can_submit) and isinstance(delta, (int, float)) and not isinstance(delta, bool) and delta > 0
-    return True, book
+        return False, 0.0  # pre-sim skip — never consumed a BRAIN sim
+    return True, (1.0 if can_submit is True else 0.0)
 
 
 @celery_app.task(name="backend.tasks.run_dataset_weight_refresh")
@@ -82,20 +109,24 @@ def run_dataset_weight_refresh() -> Dict[str, Any]:
             floor_c=float(getattr(settings, "DATASET_BANDIT_FLOOR_C", 0.1)),
             tau=float(getattr(settings, "DATASET_BANDIT_FLOOR_TAU", 500.0)),
             window_days=int(getattr(settings, "DATASET_BANDIT_WINDOW_DAYS", 7)),
+            # v6: pessimistic cold-start prior for zero-history catalog datasets.
+            coldstart_beta=float(getattr(settings, "DATASET_BANDIT_COLDSTART_BETA", 2.0)),
         ))
     except Exception as ex:  # noqa: BLE001
         logger.error(f"[dataset-bandit] refresh failed: {ex}")
         return {"updated_datasets": 0, "error": str(ex)[:200]}
 
 
-async def _aggregate(db, *, lower=None, upper=None) -> Dict[Tuple[str, str], Tuple[int, int]]:
+async def _aggregate(db, *, lower=None, upper=None) -> Dict[Tuple[str, str], Tuple[float, int]]:
     """Return {(region, dataset_id): (s_d, t_d)} over (lower, upper] window.
 
-    When lower/upper are None this is the ALL-HISTORY aggregation (seed). Rows
-    with dataset_id NULL (unresolved attribution) are excluded — never folded
-    into pv1 (review N-2). Classification is Python-side (``_classify``) so the
-    query is plain SELECT (dialect-free, sqlite-testable; mirrors the
-    cognitive-layer bandit cron) — no JSONB-cast SQL.
+    When lower/upper are None this is the ALL-HISTORY aggregation (seed).
+    EXCLUDED (B1, v6): rows with dataset_id NULL (unresolved attribution) AND
+    BRAIN-synced user alphas (``task_id`` NULL) — only AIAC-mined sims count.
+    Without the task_id filter the v6 can_submit reward would ingest ~4665 synced
+    user alphas (they carry dataset_id + can_submit) and re-pollute the signal.
+    Classification is Python-side (``_classify``) so the query is plain SELECT
+    (dialect-free, sqlite-testable). ``s_d`` = Σ reward = #(can_submit AIAC sims).
     """
     from sqlalchemy import select
 
@@ -103,7 +134,7 @@ async def _aggregate(db, *, lower=None, upper=None) -> Dict[Tuple[str, str], Tup
 
     stmt = select(
         Alpha.region, Alpha.dataset_id, Alpha.can_submit, Alpha.metrics
-    ).where(Alpha.dataset_id.isnot(None))
+    ).where(Alpha.dataset_id.isnot(None), Alpha.task_id.isnot(None))
     if lower is not None:
         stmt = stmt.where(Alpha.created_at > lower)
     if upper is not None:
@@ -111,18 +142,18 @@ async def _aggregate(db, *, lower=None, upper=None) -> Dict[Tuple[str, str], Tup
 
     agg: Dict[Tuple[str, str], list] = {}
     for region, dataset_id, can_submit, metrics in (await db.execute(stmt)).all():
-        real, book = _classify(metrics, can_submit)
+        real, reward = _classify(metrics, can_submit)
         if not real:
             continue
-        bucket = agg.setdefault((region, dataset_id), [0, 0])  # [s_d, t_d]
+        bucket = agg.setdefault((region, dataset_id), [0.0, 0])  # [s_d, t_d]
+        bucket[0] += reward
         bucket[1] += 1
-        if book:
-            bucket[0] += 1
     return {k: (v[0], v[1]) for k, v in agg.items()}
 
 
 async def _refresh_async(
     *, gamma: float, floor_c: float, tau: float, window_days: int,
+    coldstart_beta: float = 2.0,
     session_factory=None, rng=None, dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Core refresh. ``session_factory``/``rng`` are injectable for tests
@@ -135,7 +166,7 @@ async def _refresh_async(
     flag is flipped."""
     from sqlalchemy import select, text
 
-    from backend.models import BanditState, SystemConfig
+    from backend.models import BanditState, DatasetMetadata, SystemConfig
     from backend.selection_strategy import (
         discounted_thompson_update,
         thompson_sample_weight,
@@ -167,17 +198,29 @@ async def _refresh_async(
         states = {(r.region, r.dataset_id): r for r in state_rows}
 
         window = await _aggregate(db, lower=lower, upper=run_started)
-        # First run (no posteriors yet): seed EVERY historical arm from
-        # all-time value-yield — pv1's 2280 sims are mostly older than the
-        # window, so a window-only seed would miss it (plan: seed from the
-        # 5776 backfilled rows). Subsequent runs need only the window: arms
-        # in states get a discounted update; a newly-appeared dataset (in
-        # window, not in states) is seeded from its window counts (≈ its full
-        # history since it's brand new). Watermark→now after seeding so the
-        # next window covers only post-seed sims (g=γ^small≈1; review C-1).
+        # First run (no posteriors yet — e.g. after a re-seed TRUNCATE): seed
+        # EVERY historical arm from all-time value-yield (pv1's sims are mostly
+        # older than the window, so a window-only seed would miss it). Subsequent
+        # runs need only the window: arms in states get a discounted update; a
+        # newly-appeared dataset (in window, not in states) is seeded from its
+        # window counts. Watermark→now after seeding so the next window covers
+        # only post-seed sims (g=γ^small≈1; review C-1).
         first_run = not states
         history = await _aggregate(db) if first_run else {}
-        arms = set(history) if first_run else (set(window) | set(states))
+        # H1 (v6): on the seed run, also enroll ALL active catalog datasets so
+        # none is left at the column default mining_weight=1.0 (which would
+        # dominate the bandit's sub-1.0 weights). Zero-history ones seed from a
+        # pessimistic cold-start (s=t=0 → β=coldstart_beta). DISTINCT collapses
+        # multi-universe rows to the (region, dataset_id) arm key.
+        catalog_arms: set = set()
+        if first_run:
+            cat_rows = (await db.execute(
+                select(DatasetMetadata.region, DatasetMetadata.dataset_id)
+                .where(DatasetMetadata.is_active.is_(True))
+                .distinct()
+            )).all()
+            catalog_arms = {(r[0], r[1]) for r in cat_rows if r[0] and r[1]}
+        arms = (set(history) | catalog_arms) if first_run else (set(window) | set(states))
 
         seeded = updated = 0
         details: Dict[str, Dict[str, Any]] = {}
@@ -189,8 +232,12 @@ async def _refresh_async(
             if row is None:
                 # SEED: all-time on first run, else this window (new arm).
                 s_seed, t_seed = history.get(key, (0, 0)) if first_run else (s_d, t_d)
+                s_seed = min(s_seed, t_seed)  # defensive (this branch skips the update clamp)
                 alpha = 1.0 + s_seed
-                beta = 1.0 + max(0, t_seed - s_seed)
+                # Zero-history catalog arm (t_seed==0): pessimistic cold-start
+                # β=coldstart_beta so an untested source can't outrank a proven
+                # submitter; otherwise the all-history Bernoulli posterior. [H1]
+                beta = float(coldstart_beta) if t_seed == 0 else 1.0 + max(0, t_seed - s_seed)
                 pulls = t_seed
                 seeded += 1
                 _kind = "seed"
