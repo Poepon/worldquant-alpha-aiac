@@ -958,8 +958,18 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
                 err_type = "QUALITY_CHECK_FAILED"
                 err_msg = "Metrics below threshold"
         else:
+            # 2026-05-24: enrich the catch-all so an "OTHER" failure self-describes
+            # rather than logging an opaque "Unknown failure". raw_response is NULL
+            # on the mining path (never plumbed), so error_message is the only
+            # diagnostic we keep — carry the alpha's actual verdict + sim signals.
             err_type = "OTHER"
-            err_msg = "Unknown failure"
+            err_msg = (
+                alpha.simulation_error
+                or (
+                    f"Unclassified: quality_status={alpha.quality_status or '<none>'} "
+                    f"is_simulated={alpha.is_simulated} sim_success={alpha.simulation_success}"
+                )
+            )
 
         rec = FailureRecord(
             expression=alpha.expression,

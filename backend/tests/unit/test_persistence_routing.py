@@ -202,6 +202,36 @@ async def test_5_flag_on_fail_with_alpha_id_but_no_sim_success_routes_to_fail_ba
 
 
 @pytest.mark.asyncio
+async def test_else_branch_enriches_unclassified_failure_message(monkeypatch):
+    """2026-05-24: the catch-all OTHER failure must self-describe (quality_status
+    + sim signals) instead of an opaque 'Unknown failure'. raw_response is NULL on
+    the mining path, so error_message is the only diagnostic kept."""
+    from backend.config import settings
+    from backend.agents.graph.nodes.persistence import node_save_results
+
+    monkeypatch.setattr(settings, "ENABLE_FAIL_ALPHA_PERSIST", True, raising=False)
+    monkeypatch.setattr(settings, "T2_INCREMENTAL_PERSISTENCE", False, raising=False)
+
+    # REJECT verdict, valid + simulated + sim-success → falls through every
+    # specific branch into the catch-all else.
+    alpha = _mk_alpha(
+        quality_status="REJECT", alpha_id="A9",
+        is_simulated=True, simulation_success=True,
+    )
+    state = _mk_state([alpha])
+
+    out = await node_save_results(state, config={"configurable": {}})
+
+    failures = out["failures"]
+    assert len(failures) == 1
+    assert failures[0].error_type == "OTHER"
+    msg = failures[0].error_message
+    assert msg != "Unknown failure"
+    assert "Unclassified" in msg
+    assert "REJECT" in msg  # carries the real quality_status
+
+
+@pytest.mark.asyncio
 async def test_6_simulation_error_still_routes_to_fail_batch(monkeypatch):
     """SIMULATION_ERROR (is_simulated=True + simulation_success=False) unchanged
     by P1 — stays in fail_batch."""

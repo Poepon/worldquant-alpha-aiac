@@ -104,6 +104,39 @@ def test_update_existing_derives_quality_only_when_pending():
     assert existing.quality_status == "FAIL"
 
 
+def test_update_existing_preserves_dataset_id_when_brain_empty():
+    """2026-05-24: FLAT (cross-dataset) alphas have an empty BRAIN
+    settings.datasetId; sync must NOT wipe the AIAC field-derived dataset_id
+    (else every 6h sync zeroes the dataset bandit's per-dataset attribution).
+    Empty / None / missing datasetId → preserve the existing stamp."""
+    from backend.tasks.sync_tasks import _update_existing_alpha
+
+    a_data = {"status": "UNSUBMITTED", "is": {"checks": []}}
+    is_metrics = {"sharpe": 1.5, "fitness": 1.3, "turnover": 0.2}
+
+    for empty_settings in ({"datasetId": ""}, {"datasetId": None}, {}):
+        existing = _mk_existing(quality_status="PASS_PROVISIONAL")
+        existing.dataset_id = "pv1"  # AIAC-derived stamp
+        with patch("backend.can_submit.compute_can_submit", return_value=(True, [], [])):
+            _update_existing_alpha(existing, a_data, "IS", empty_settings,
+                                   is_metrics, {}, None)
+        assert existing.dataset_id == "pv1", f"dataset_id wiped by settings={empty_settings}"
+
+
+def test_update_existing_overwrites_dataset_id_when_brain_present():
+    """When BRAIN actually returns a datasetId, it wins (genuine reconciliation)."""
+    from backend.tasks.sync_tasks import _update_existing_alpha
+
+    existing = _mk_existing(quality_status="PASS_PROVISIONAL")
+    existing.dataset_id = "pv1"
+    a_data = {"status": "UNSUBMITTED", "is": {"checks": []}}
+    is_metrics = {"sharpe": 1.5, "fitness": 1.3, "turnover": 0.2}
+    with patch("backend.can_submit.compute_can_submit", return_value=(True, [], [])):
+        _update_existing_alpha(existing, a_data, "IS", {"datasetId": "analyst4"},
+                               is_metrics, {}, None)
+    assert existing.dataset_id == "analyst4"
+
+
 # ---------------------------------------------------------------------------
 # sync_user_alphas — BRAIN_AUTH_CIRCUIT skip guard [V1.2-R1]
 # ---------------------------------------------------------------------------

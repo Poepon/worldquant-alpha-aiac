@@ -29,6 +29,47 @@ from backend.tasks import run_async
 from backend.tasks._role_helpers import read_role_snapshot
 
 
+def _should_promote_provisional(
+    *,
+    quality_status,
+    can_submit,
+    routing_reason,
+    is_sharpe,
+    is_fitness,
+    is_turnover,
+    thresholds: Dict,
+) -> bool:
+    """Pure predicate: should a PASS_PROVISIONAL alpha be promoted to PASS?
+
+    2026-05-24: closes the one-way ratchet (refresh_kb only DEMOTES). An alpha
+    held PASS_PROVISIONAL purely because BRAIN's ``is.checks`` were still empty at
+    sim-time (routing reason ``brain_checks_unverified``) was otherwise frozen
+    forever even after BRAIN confirmed it. Promote ONLY when:
+
+      - it is currently PASS_PROVISIONAL, AND
+      - the hold reason was the empty-checks timing artifact, AND
+      - BRAIN now confirms ``can_submit`` is True (so BRAIN doesn't reject it —
+        a still-PENDING BRAIN SELF_CORRELATION is fine because the verified local
+        self_corr already satisfied that gate at eval time; this is the
+        local-OR-BRAIN self_corr the gate intends), AND
+      - the full hard band is met (not just the provisional band).
+
+    Deliberately does NOT promote ``near_pass`` / ``v16_hard_flags`` /
+    originality holds — those carry a different routing reason.
+    """
+    if quality_status != "PASS_PROVISIONAL":
+        return False
+    if can_submit is not True:
+        return False
+    if routing_reason != "brain_checks_unverified":
+        return False
+    return (
+        (is_sharpe or 0) >= thresholds["sharpe_min"]
+        and (is_fitness or 0) >= thresholds["fitness_min"]
+        and thresholds["turnover_min"] <= (is_turnover or 0) <= thresholds["turnover_max"]
+    )
+
+
 @celery_app.task(name="backend.tasks.refresh_kb_referenced_alphas")
 def refresh_kb_referenced_alphas() -> Dict:
     """Beat-triggered wrapper around the async implementation."""
@@ -282,6 +323,60 @@ async def _refresh_can_submit_async(alpha_pk: int) -> Dict:
                 logger.warning(
                     f"[refresh_can_submit] V-22.12 IQC audit enqueue failed for "
                     f"alpha_pk={alpha_pk}: {e}"
+                )
+
+        # 2026-05-24: promote PASS_PROVISIONAL → PASS when the provisional hold was
+        # purely the empty-BRAIN-checks timing artifact (routing reason
+        # `brain_checks_unverified`) and BRAIN now confirms submission-grade. This
+        # 30s refresh is exactly when the previously-empty `is.checks` resolve.
+        # Closes the one-way ratchet: refresh_kb only DEMOTES, so an alpha held
+        # provisional at sim-time (checks not yet computed) was otherwise frozen
+        # forever even after BRAIN confirmed it. Local self_corr already satisfied
+        # the self-corr gate at eval time, so a still-PENDING BRAIN SELF_CORRELATION
+        # does not block — can_submit=True means BRAIN doesn't reject it (the
+        # local-OR-BRAIN self_corr the gate intends). Tightly scoped: only this
+        # routing reason, only when the full hard band is met; no-op (audited) else.
+        if (
+            alpha is not None
+            and alpha.quality_status == "PASS_PROVISIONAL"
+            and result.get("can_submit") is True
+            and (alpha.metrics or {}).get("_routing_reason") == "brain_checks_unverified"
+        ):
+            try:
+                from backend.agents.graph.nodes.evaluation import _eval_thresholds
+                _snap = await read_role_snapshot(alpha.task_id, db)
+                _t = _eval_thresholds(
+                    sharpe_submit_min_override=_snap.get("effective_sharpe_submit_min")
+                )
+                if _should_promote_provisional(
+                    quality_status=alpha.quality_status,
+                    can_submit=result.get("can_submit"),
+                    routing_reason=(alpha.metrics or {}).get("_routing_reason"),
+                    is_sharpe=alpha.is_sharpe,
+                    is_fitness=alpha.is_fitness,
+                    is_turnover=alpha.is_turnover,
+                    thresholds=_t,
+                ):
+                    promoted = await svc.apply_quality_status_change(
+                        alpha_id=alpha_pk,
+                        new_status="PASS",
+                        reason=(
+                            f"can_submit_refresh: BRAIN checks verified post-sim "
+                            f"(can_submit=True, sharpe={alpha.is_sharpe:.2f} "
+                            f"fitness={alpha.is_fitness:.2f} turnover={alpha.is_turnover:.2f}); "
+                            f"was held provisional on brain_checks_unverified"
+                        ),
+                        source="can_submit_refresh",
+                    )
+                    if promoted:
+                        await db.commit()
+                        logger.info(
+                            f"[refresh_can_submit] promoted alpha_pk={alpha_pk} "
+                            f"PASS_PROVISIONAL→PASS (BRAIN checks now verified)"
+                        )
+            except Exception as e:
+                logger.warning(
+                    f"[refresh_can_submit] promote alpha_pk={alpha_pk} failed: {e}"
                 )
 
         return {

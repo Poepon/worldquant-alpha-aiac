@@ -940,7 +940,15 @@ def _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_met
     if date_submitted:
         existing.date_submitted = date_submitted
 
-    existing.dataset_id = settings.get("datasetId")
+    # P2.C follow-up (2026-05-24): MERGE not REPLACE. BRAIN's settings.datasetId
+    # is empty for FLAT cross-dataset alphas, so blindly overwriting wipes the
+    # AIAC field-derived dataset_id every 6h sync — defeating the dataset bandit's
+    # per-dataset reward attribution. Same class as the metrics MERGE fix below
+    # (950-955): keep BRAIN's value only when it actually provides one, else
+    # preserve the AIAC-derived stamp.
+    _brain_ds = settings.get("datasetId")
+    if _brain_ds:
+        existing.dataset_id = _brain_ds
 
     can_sub, failed, pending = compute_can_submit(a_data)
     if can_sub is not None:
