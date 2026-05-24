@@ -324,7 +324,13 @@ def _safe_float(value: Any) -> float:
 def _determine_optimization_priorities(context: OptimizationContext) -> Dict[str, bool]:
     """Determine which optimization types to prioritize based on context."""
     priorities = {
-        "sign": True,  # Always try sign flip
+        # Sign flip ONLY when the signal direction itself may be wrong
+        # (train_sharpe < 0). For an already-positive-sharpe alpha, flipping
+        # the sign deterministically produces a negative-sharpe variant — a
+        # guaranteed wasted BRAIN simulation (a scarce 3-slot quota). Was
+        # unconditionally True ("always try"), which spent a sim slot flipping
+        # healthy positive-sharpe alphas every optimization round.
+        "sign": context.train_sharpe < 0,
         "window": True,  # Always try window adjustment
         "wrapper": True,  # Always try wrapper changes
         "structure": False,  # Only for specific cases
