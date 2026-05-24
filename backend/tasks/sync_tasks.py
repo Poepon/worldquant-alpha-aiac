@@ -903,30 +903,125 @@ def _parse_to_beijing(iso_str):
         return None
 
 
-def _derive_quality_status_from_metrics(sharpe, fitness, turnover):
-    """P2.C [V1.1-S1/S2] (2026-05-20): derive a quality_status from BRAIN
-    metrics so sync-imported alphas land classified instead of dumped as
-    PENDING (which loses the gate signal already present in the metrics).
+def _derive_verdict_from_brain(a_data, is_metrics, os_metrics, expression, can_sub):
+    """Feature 1 (2026-05-24): derive a synced alpha's quality_status through the
+    SAME verdict logic the runtime evaluator uses (compute_verdict_from_signals),
+    replacing the old sharpe/fitness/turnover-only band function.
 
-    Mirrors the EVAL_* / EVAL_PROVISIONAL_* bands used by the runtime
-    evaluator (_eval_thresholds). Conservative: never returns full PASS
-    (composite_score isn't recomputed here) — only PASS_PROVISIONAL or FAIL.
-    Missing metrics → PENDING (can't evaluate). Provisional band has no
-    turnover lower bound (matches config: only EVAL_PROVISIONAL_TURNOVER_MAX
-    exists, no _MIN).
+    Returns a VerdictResult, or None when a core metric is missing (caller keeps
+    PENDING). score=0 / should_opt=False → sync never emits OPTIMIZE. BRAIN-gate
+    signals come from evaluate_with_brain_checks (mirrors mining); self_corr is
+    read from BRAIN's SELF_CORRELATION check (no PnL fetch). A sync-side guardrail
+    demotes a full PASS to PASS_PROVISIONAL when compute_can_submit reports the
+    alpha unsubmittable, so sync's PASS never exceeds the BRAIN submission gate.
+
+    See plan synchronous-rolling-lagoon.md (v4). Lazy cross-layer imports match
+    the established pattern (sync_tasks already lazy-imports _eval_thresholds);
+    evaluation.py has no top-level backend.tasks import so there is no cycle.
     """
-    from backend.config import settings as _cfg
-    if sharpe is None or fitness is None or turnover is None:
-        return "PENDING"
-    if (sharpe >= _cfg.EVAL_SHARPE_MIN
-            and fitness >= _cfg.EVAL_FITNESS_MIN
-            and _cfg.EVAL_TURNOVER_MIN <= turnover <= _cfg.EVAL_TURNOVER_MAX):
-        return "PASS_PROVISIONAL"
-    if (sharpe >= _cfg.EVAL_PROVISIONAL_SHARPE_MIN
-            and fitness >= _cfg.EVAL_PROVISIONAL_FITNESS_MIN
-            and turnover <= _cfg.EVAL_PROVISIONAL_TURNOVER_MAX):
-        return "PASS_PROVISIONAL"
-    return "FAIL"
+    from backend.agents.graph.nodes.evaluation import (
+        compute_verdict_from_signals,
+        _unpack_eval_thresholds,
+        _eval_thresholds,
+        _safe_metric,
+    )
+    from backend.alpha_scoring import evaluate_with_brain_checks
+    from backend.services.correlation_service import CorrSource
+
+    # B#5: raw-None guard FIRST. A missing core metric → PENDING (unevaluable),
+    # exactly as the old function did. _safe_metric coerces None→0.0, which would
+    # mis-route these to FAIL, so the raw check must precede normalization.
+    if (is_metrics.get("sharpe") is None
+            or is_metrics.get("fitness") is None
+            or is_metrics.get("turnover") is None):
+        return None
+
+    # T5: a single checks reference feeds the verdict (sub_universe/concentrated),
+    # evaluate_with_brain_checks, AND compute_can_submit — all read a_data's
+    # is.checks. is_metrics IS a_data["is"], so is_metrics["checks"] is that array.
+    _checks = is_metrics.get("checks", [])
+
+    # B#3: fresh dict carrying is_metrics' checks + the OS leg for V-12. Does NOT
+    # mutate is_metrics (persisted as-is).
+    verdict_metrics = {**is_metrics, "os_sharpe": os_metrics.get("sharpe")}
+
+    # T6: one throwaway fallback list; sync does NOT persist _metrics_fallback_flags.
+    _fb = []
+    sharpe = _safe_metric(verdict_metrics, "sharpe", 0.0, _fb)
+    fitness = _safe_metric(verdict_metrics, "fitness", 0.0, _fb)
+    turnover = _safe_metric(verdict_metrics, "turnover", 0.0, _fb)
+
+    # Minimal sim_result mirror (evaluation.py:413-434) for evaluate_with_brain_checks.
+    # T5: checks at is.checks + top level are the same reference as verdict_metrics'.
+    sim_result = {
+        "is": {"checks": _checks},
+        "checks": _checks,
+        "can_submit": is_metrics.get("can_submit", False),
+    }
+    brain_eval = evaluate_with_brain_checks(sim_result)
+    brain_can_submit = brain_eval.get("can_submit", False)
+    brain_failed_checks = brain_eval.get("failed_checks", [])
+    brain_check_details_present = bool(brain_eval.get("check_details"))
+
+    th = _unpack_eval_thresholds(_eval_thresholds())
+
+    # meets_thresholds — mirror evaluation.py:455-464.
+    if brain_check_details_present:
+        meets_thresholds = brain_can_submit or (not brain_failed_checks)
+    else:
+        meets_thresholds = (
+            sharpe >= th["sharpe_min"]
+            and turnover <= th["turnover_max"]
+            and fitness >= th["fitness_min"]
+        )
+
+    # self_corr from BRAIN's SELF_CORRELATION check. On synced alphas this is
+    # ~always PENDING-no-value → UNKNOWN (hard_gate then fails on
+    # self_corr_verified; near_pass still reachable — matches mining unverified).
+    self_corr = 0.0
+    self_corr_source = CorrSource.UNKNOWN
+    _sc = next(
+        (c for c in _checks
+         if isinstance(c, dict) and c.get("name") == "SELF_CORRELATION"),
+        None,
+    )
+    if (_sc is not None
+            and _sc.get("result") in ("PASS", "FAIL")
+            and _sc.get("value") is not None):
+        self_corr = float(_sc.get("value") or 0.0)
+        self_corr_source = CorrSource.BRAIN
+
+    vr = compute_verdict_from_signals(
+        metrics=verdict_metrics,
+        sharpe=sharpe,
+        fitness=fitness,
+        turnover=turnover,
+        self_corr=self_corr,
+        self_corr_source=self_corr_source,
+        meets_thresholds=meets_thresholds,
+        brain_check_details_present=brain_check_details_present,
+        brain_failed_checks=brain_failed_checks,
+        brain_can_submit=brain_can_submit,
+        score=0.0,
+        should_opt=False,
+        expression=expression or "",
+        th=th,
+        check_self_corr=True,
+        check_concentrated=True,
+    )
+
+    # S1 guardrail (T4): sync's full PASS must never exceed the BRAIN submission
+    # gate. compute_can_submit treats ERROR as FAIL while evaluate_with_brain_checks
+    # files ERROR under pending, so a verdict PASS can outrun can_submit — demote
+    # it. `is False` (not `not can_sub`): None = "no BRAIN signal", leave PASS be.
+    if vr.decision.status == "PASS" and can_sub is False:
+        vr.decision.status = "PASS_PROVISIONAL"
+        vr.decision.reason = "brain_unsubmittable"
+        logger.info(
+            f"[sync] verdict PASS→PASS_PROVISIONAL (brain_unsubmittable) "
+            f"| {a_data.get('id')}"
+        )
+    return vr
 
 
 def _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_metrics, date_submitted):
@@ -985,16 +1080,24 @@ def _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_met
         "_brain_pending_checks": pending,
     }
 
-    # P2.C [V1.1-S2] (2026-05-20): derive quality_status from metrics, but
-    # ONLY when the row is still PENDING — never overwrite a mining-direct
-    # PASS/PASS_PROVISIONAL/OPTIMIZE/FAIL verdict (anti-pattern guard: sync
-    # is reconciliation, the mining write is authoritative).
+    # P2.C [V1.1-S2] (2026-05-20) + Feature 1 (2026-05-24): derive quality_status
+    # via the shared verdict logic, but ONLY when the row is still PENDING — never
+    # overwrite a mining-direct PASS/PASS_PROVISIONAL/OPTIMIZE/FAIL verdict (sync
+    # is reconciliation, the mining write is authoritative). Runs AFTER the metrics
+    # MERGE above so the _routing_reason stamp survives. T3: stamp _routing_reason
+    # only for PASS/PASS_PROVISIONAL (mirrors evaluation.py:737-738).
     if existing.quality_status == "PENDING":
-        _derived = _derive_quality_status_from_metrics(
-            is_metrics.get("sharpe"), is_metrics.get("fitness"), is_metrics.get("turnover")
+        _vr = _derive_verdict_from_brain(
+            a_data, is_metrics, os_metrics, existing.expression, can_sub
         )
-        if _derived != "PENDING":
-            existing.quality_status = _derived
+        if _vr is not None:
+            existing.quality_status = _vr.decision.status
+            if _vr.decision.status in ("PASS", "PASS_PROVISIONAL"):
+                _m = dict(existing.metrics or {})
+                _m["_routing_reason"] = _vr.decision.reason
+                if _vr.decision.reason == "brain_actionable_fails":
+                    _m["_brain_pass_downgrade"] = _vr.brain_actionable_fails
+                existing.metrics = _m
 
     existing.is_margin = is_metrics.get("margin")
     existing.is_long_count = is_metrics.get("longCount")
@@ -1019,6 +1122,24 @@ def _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_crea
     expr_hash = compute_expression_hash(expr_code) if expr_code != "N/A" else None
 
     can_sub, failed, pending = compute_can_submit(a_data)
+
+    # Feature 1 (2026-05-24, B#4): classify a brand-new synced alpha via the
+    # shared verdict logic. Compute it BEFORE the constructor (status + metrics
+    # can't both be built inside one Alpha(...) call). vr is None → no core
+    # metrics → PENDING (a new row has no prior status to "keep").
+    _vr = _derive_verdict_from_brain(a_data, is_metrics, os_metrics, expr_code, can_sub)
+    _quality_status = _vr.decision.status if _vr is not None else "PENDING"
+    _metrics = {
+        **(is_metrics or {}),
+        "_brain_can_submit": can_sub,
+        "_brain_failed_checks": failed,
+        "_brain_pending_checks": pending,
+    }
+    # T3: stamp _routing_reason only for PASS/PASS_PROVISIONAL (mirror evaluation.py:737-738).
+    if _vr is not None and _vr.decision.status in ("PASS", "PASS_PROVISIONAL"):
+        _metrics["_routing_reason"] = _vr.decision.reason
+        if _vr.decision.reason == "brain_actionable_fails":
+            _metrics["_brain_pass_downgrade"] = _vr.brain_actionable_fails
 
     return Alpha(
         alpha_id=a_data.get("id"),
@@ -1047,16 +1168,7 @@ def _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_crea
         date_created=date_created,
         date_submitted=date_submitted,
         can_submit=can_sub,
-        # P2.C [V1.1-S1] (2026-05-20): classify on import instead of dumping
-        # as PENDING — the BRAIN metrics already carry the gate signal.
-        quality_status=_derive_quality_status_from_metrics(
-            is_metrics.get("sharpe"), is_metrics.get("fitness"), is_metrics.get("turnover")
-        ),
+        quality_status=_quality_status,
         metrics_snapshot_at=datetime.now(timezone.utc),
-        metrics={
-            **(is_metrics or {}),
-            "_brain_can_submit": can_sub,
-            "_brain_failed_checks": failed,
-            "_brain_pending_checks": pending,
-        },
+        metrics=_metrics,
     )

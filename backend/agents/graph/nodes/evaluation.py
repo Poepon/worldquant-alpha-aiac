@@ -82,7 +82,7 @@ from backend.agents.prompts import (
     quick_alignment_check,
     determine_attribution_heuristic,
 )
-from backend.alpha_routing import route_alpha_action
+from backend.alpha_routing import route_alpha_action, RoutingDecision
 from backend.alpha_scoring import (
     calculate_alpha_score,
     should_optimize,
@@ -135,6 +135,60 @@ def _eval_thresholds(*, sharpe_submit_min_override: Optional[float] = None) -> D
             "turnover_max": settings.EVAL_PROVISIONAL_TURNOVER_MAX,
             "subuniv_min": settings.EVAL_PROVISIONAL_SUBUNIV_MIN,
         },
+    }
+
+
+def _unpack_eval_thresholds(tier_cfg: Dict) -> Dict:
+    """Unpack a (possibly regime-adjusted) ``_eval_thresholds()`` dict into the
+    flat numeric threshold bundle the verdict logic consumes.
+
+    Feature 1 (2026-05-24): extracted verbatim from node_evaluate's inline
+    mapping (was evaluation.py:1803-1824) so the runtime evaluator AND the
+    /alphas/sync reconciliation derive the same band thresholds from a single
+    source of truth.
+
+    Returns exactly the 11 NUMERIC keys read by compute_verdict_from_signals:
+    sharpe_min / fitness_min / turnover_min / turnover_max / max_correlation /
+    prov_sharpe_min / prov_fitness_min / prov_turnover_min / prov_turnover_max /
+    score_pass_threshold / score_optimize_threshold.
+
+    NOTE (Feature 1 T1): `check_self_corr` / `check_concentrated` (read straight
+    from tier_cfg) and `corr_check_threshold` (read straight from settings) are
+    deliberately NOT produced here — node_evaluate keeps reading those inline so
+    this helper has a stable, verdict-only contract. The golden test asserts the
+    output key set is exactly these 11.
+
+    Depends on `settings` (non-pure): the `or settings.MAX_CORRELATION` /
+    SCORE_*_THRESHOLD fallbacks mirror the original inline behavior byte-for-byte.
+    The provisional fallbacks are order-dependent — prov_*_min fall back to the
+    already-resolved main-band scalar — so the main-band values are computed first.
+    """
+    sharpe_min = tier_cfg["sharpe_min"]
+    fitness_min = tier_cfg["fitness_min"]
+    turnover_min = tier_cfg["turnover_min"]
+    turnover_max = tier_cfg["turnover_max"]
+    max_correlation = tier_cfg.get("self_corr_max") or getattr(settings, "MAX_CORRELATION", 0.7)
+    prov_cfg = tier_cfg.get("provisional") or {}
+    prov_sharpe_min = prov_cfg.get("sharpe_min", sharpe_min)
+    prov_fitness_min = prov_cfg.get("fitness_min", 0.6)
+    # V-26.80: symmetric provisional turnover band — lower bound defaults to the
+    # regular turnover_min unless the tier override supplies its own.
+    prov_turnover_min = prov_cfg.get("turnover_min", turnover_min)
+    prov_turnover_max = prov_cfg.get("turnover_max", 0.85)
+    score_pass_threshold = tier_cfg.get("score_pass", getattr(settings, "SCORE_PASS_THRESHOLD", 0.8))
+    score_optimize_threshold = tier_cfg.get("score_optimize", getattr(settings, "SCORE_OPTIMIZE_THRESHOLD", 0.3))
+    return {
+        "sharpe_min": sharpe_min,
+        "fitness_min": fitness_min,
+        "turnover_min": turnover_min,
+        "turnover_max": turnover_max,
+        "max_correlation": max_correlation,
+        "prov_sharpe_min": prov_sharpe_min,
+        "prov_fitness_min": prov_fitness_min,
+        "prov_turnover_min": prov_turnover_min,
+        "prov_turnover_max": prov_turnover_max,
+        "score_pass_threshold": score_pass_threshold,
+        "score_optimize_threshold": score_optimize_threshold,
     }
 
 
@@ -313,6 +367,150 @@ def _run_suspicion_checks(metrics: Dict, expression: str) -> list:
 
 
 from dataclasses import dataclass, field as _dc_field
+
+
+@dataclass
+class VerdictResult:
+    """Output of compute_verdict_from_signals (Feature 1, 2026-05-24).
+
+    decision                — RoutingDecision (status/reason/band)
+    v16_flags               — full V-16 suspicion flag list (node writes
+                              alpha.metrics["_v16_suspicion_flags"])
+    brain_actionable_fails  — actionable BRAIN fail names (node writes
+                              "_brain_pass_downgrade" / "_brain_actionable_fails")
+    hard_gate_pass          — informational only; no mining consumer reads it
+                              (kept for sync telemetry / debugging).
+    """
+    decision: RoutingDecision
+    v16_flags: list
+    brain_actionable_fails: list
+    hard_gate_pass: bool
+
+
+def compute_verdict_from_signals(
+    *,
+    metrics: Dict,
+    sharpe: float,
+    fitness: float,
+    turnover: float,
+    self_corr: float,
+    self_corr_source: object,
+    meets_thresholds: bool,
+    brain_check_details_present: bool,
+    brain_failed_checks: list,
+    brain_can_submit: bool,
+    score: float,
+    should_opt: bool,
+    expression: str,
+    th: Dict,
+    check_self_corr: bool,
+    check_concentrated: bool,
+) -> VerdictResult:
+    """Map already-computed alpha signals to a routing decision.
+
+    Feature 1 (2026-05-24): verbatim extraction of node_evaluate's verdict block
+    (was evaluation.py:559-639) so the runtime evaluator AND /alphas/sync derive
+    quality_status through the SAME logic. The mining caller passes the live
+    signals it just computed; sync builds equivalent signals from BRAIN data and
+    passes score=0 / should_opt=False (so sync never emits OPTIMIZE).
+
+    `th` is the 11-key bundle from _unpack_eval_thresholds().
+
+    The ONLY change vs the original block is the brain_actionable_fails name
+    extraction (T1 of the 3rd review): `_n = c.get("name") if isinstance(c, dict)
+    else c`. evaluate_with_brain_checks returns failed_checks as list[str], so the
+    original `c.get("name")` would crash on a non-empty list — dormant in mining
+    (checks empty at eval time) but live in sync (checks populated). The dict
+    branch is defensive; both real callers feed str-lists.
+    """
+    sub_universe_check = next(
+        (c for c in metrics.get("checks", [])
+         if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
+        None,
+    )
+    sub_universe_ok = (
+        sub_universe_check is None
+        or sub_universe_check.get("result") != "FAIL"
+    )
+    concentrated_check = next(
+        (c for c in metrics.get("checks", [])
+         if c.get("name") == "CONCENTRATED_WEIGHT"),
+        None,
+    )
+    if check_concentrated:
+        concentrated_ok = (
+            concentrated_check is None
+            or concentrated_check.get("result") != "FAIL"
+        )
+    else:
+        concentrated_ok = True
+
+    # PR2: tier-aware self_corr gate
+    if check_self_corr:
+        self_corr_ok = self_corr < th["max_correlation"]
+        self_corr_verified = self_corr_source not in (CorrSource.UNKNOWN, "unknown")
+    else:
+        self_corr_ok = True
+        self_corr_verified = True  # tier_skipped, not unknown
+
+    is_overfit_safe = _check_is_os_consistency(metrics)
+
+    hard_gate_pass = (
+        sharpe >= th["sharpe_min"]
+        and fitness >= th["fitness_min"]
+        and th["turnover_min"] <= turnover <= th["turnover_max"]
+        and sub_universe_ok
+        and concentrated_ok
+        and self_corr_ok
+        and self_corr_verified
+        and is_overfit_safe
+    )
+
+    self_corr_acceptable = self_corr_ok or not self_corr_verified
+    near_pass = (
+        sharpe >= th["prov_sharpe_min"]
+        and fitness >= th["prov_fitness_min"]
+        and th["prov_turnover_min"] <= turnover <= th["prov_turnover_max"]
+        and sub_universe_ok
+        and concentrated_ok
+        and self_corr_acceptable
+    )
+
+    v16_flags = _run_suspicion_checks(metrics, expression or "")
+    hard_v16_flags = [f for f in v16_flags if f.get("severity") == "hard"]
+    brain_actionable_fails_list = []
+    for c in brain_failed_checks or []:
+        _n = c.get("name") if isinstance(c, dict) else c
+        if _n in (
+            "LOW_FITNESS",
+            "LOW_SHARPE",
+            "CONCENTRATED_WEIGHT",
+            "HIGH_TURNOVER",
+            "LOW_TURNOVER",
+            "MATCHES_PYRAMID",
+            "HIGH_CORRELATION",
+            "SELF_CORRELATION",
+        ):
+            brain_actionable_fails_list.append(_n)
+    decision = route_alpha_action(
+        hard_gate_pass=hard_gate_pass,
+        meets_thresholds=meets_thresholds,
+        score=score,
+        score_pass_threshold=th["score_pass_threshold"],
+        has_v16_hard_flags=bool(hard_v16_flags),
+        brain_checks_present=brain_check_details_present,
+        brain_actionable_fails=bool(brain_actionable_fails_list),
+        brain_can_submit=brain_can_submit,
+        near_pass=near_pass,
+        should_optimize=should_opt,
+        score_optimize_threshold=th["score_optimize_threshold"],
+    )
+    return VerdictResult(
+        decision=decision,
+        v16_flags=v16_flags,
+        brain_actionable_fails=brain_actionable_fails_list,
+        hard_gate_pass=hard_gate_pass,
+    )
 
 
 @dataclass
@@ -556,87 +754,45 @@ async def _evaluate_single_alpha(
     should_opt, opt_reason = should_optimize(sim_result)
     failed_tests = get_failed_tests(sim_result)
 
-    sub_universe_check = next(
-        (c for c in metrics.get("checks", [])
-         if c.get("name") == "LOW_SUB_UNIVERSE_SHARPE"),
-        None,
-    )
-    sub_universe_ok = (
-        sub_universe_check is None
-        or sub_universe_check.get("result") != "FAIL"
-    )
-    concentrated_check = next(
-        (c for c in metrics.get("checks", [])
-         if c.get("name") == "CONCENTRATED_WEIGHT"),
-        None,
-    )
-    if check_concentrated:
-        concentrated_ok = (
-            concentrated_check is None
-            or concentrated_check.get("result") != "FAIL"
-        )
-    else:
-        concentrated_ok = True
-
-    # PR2: tier-aware self_corr gate
-    if check_self_corr:
-        self_corr_ok = self_corr < max_correlation
-        self_corr_verified = self_corr_source not in (CorrSource.UNKNOWN, "unknown")
-    else:
-        self_corr_ok = True
-        self_corr_verified = True  # tier_skipped, not unknown
-
-    is_overfit_safe = _check_is_os_consistency(metrics)
-
-    hard_gate_pass = (
-        sharpe >= sharpe_min
-        and fitness >= fitness_min
-        and turnover_min <= turnover <= turnover_max
-        and sub_universe_ok
-        and concentrated_ok
-        and self_corr_ok
-        and self_corr_verified
-        and is_overfit_safe
-    )
-
-    self_corr_acceptable = self_corr_ok or not self_corr_verified
-    near_pass = (
-        sharpe >= prov_sharpe_min
-        and fitness >= prov_fitness_min
-        and prov_turnover_min <= turnover <= prov_turnover_max
-        and sub_universe_ok
-        and concentrated_ok
-        and self_corr_acceptable
-    )
-
-    v16_flags = _run_suspicion_checks(metrics, alpha.expression or "")
-    hard_v16_flags = [f for f in v16_flags if f.get("severity") == "hard"]
-    brain_actionable_fails_list = [
-        c.get("name") for c in brain_failed_checks or []
-        if c.get("name") in (
-            "LOW_FITNESS",
-            "LOW_SHARPE",
-            "CONCENTRATED_WEIGHT",
-            "HIGH_TURNOVER",
-            "LOW_TURNOVER",
-            "MATCHES_PYRAMID",
-            "HIGH_CORRELATION",
-            "SELF_CORRELATION",
-        )
-    ]
-    decision = route_alpha_action(
-        hard_gate_pass=hard_gate_pass,
+    # Feature 1 (2026-05-24): verdict logic extracted to the shared
+    # compute_verdict_from_signals so /alphas/sync derives quality_status
+    # through the SAME band/route logic. Behaviour here is unchanged — the
+    # threshold scalars below were unpacked into ctx by node_evaluate via
+    # _unpack_eval_thresholds; we repack them into the verdict bundle.
+    _th = {
+        "sharpe_min": sharpe_min,
+        "fitness_min": fitness_min,
+        "turnover_min": turnover_min,
+        "turnover_max": turnover_max,
+        "max_correlation": max_correlation,
+        "prov_sharpe_min": prov_sharpe_min,
+        "prov_fitness_min": prov_fitness_min,
+        "prov_turnover_min": prov_turnover_min,
+        "prov_turnover_max": prov_turnover_max,
+        "score_pass_threshold": score_pass_threshold,
+        "score_optimize_threshold": score_optimize_threshold,
+    }
+    _verdict = compute_verdict_from_signals(
+        metrics=metrics,
+        sharpe=sharpe,
+        fitness=fitness,
+        turnover=turnover,
+        self_corr=self_corr,
+        self_corr_source=self_corr_source,
         meets_thresholds=meets_thresholds,
-        score=score,
-        score_pass_threshold=score_pass_threshold,
-        has_v16_hard_flags=bool(hard_v16_flags),
-        brain_checks_present=bool(brain_eval['check_details']),
-        brain_actionable_fails=bool(brain_actionable_fails_list),
+        brain_check_details_present=bool(brain_eval['check_details']),
+        brain_failed_checks=brain_failed_checks,
         brain_can_submit=brain_can_submit,
-        near_pass=near_pass,
-        should_optimize=should_opt,
-        score_optimize_threshold=score_optimize_threshold,
+        score=score,
+        should_opt=should_opt,
+        expression=alpha.expression or "",
+        th=_th,
+        check_self_corr=check_self_corr,
+        check_concentrated=check_concentrated,
     )
+    decision = _verdict.decision
+    v16_flags = _verdict.v16_flags
+    brain_actionable_fails_list = _verdict.brain_actionable_fails
     alpha.quality_status = decision.status
 
     if decision.status == "FAIL":
@@ -1800,28 +1956,25 @@ async def node_evaluate(
                 f"(non-fatal): {_p2c_ex}"
             )
 
-    sharpe_min = tier_cfg["sharpe_min"]
-    fitness_min = tier_cfg["fitness_min"]
-    turnover_min = tier_cfg["turnover_min"]
-    turnover_max = tier_cfg["turnover_max"]
-    max_correlation = tier_cfg.get("self_corr_max") or getattr(settings, "MAX_CORRELATION", 0.7)
+    # Feature 1 (2026-05-24): the 11 numeric verdict thresholds are now unpacked
+    # by the shared _unpack_eval_thresholds (single source of truth with sync).
+    # Behaviour is unchanged — this is a verbatim move of the prior inline
+    # mapping. T1: check_self_corr/check_concentrated stay sourced from tier_cfg,
+    # corr_check_threshold from settings — they are NOT verdict thresholds.
+    _th = _unpack_eval_thresholds(tier_cfg)
+    sharpe_min = _th["sharpe_min"]
+    fitness_min = _th["fitness_min"]
+    turnover_min = _th["turnover_min"]
+    turnover_max = _th["turnover_max"]
+    max_correlation = _th["max_correlation"]
+    prov_sharpe_min = _th["prov_sharpe_min"]
+    prov_fitness_min = _th["prov_fitness_min"]
+    prov_turnover_min = _th["prov_turnover_min"]
+    prov_turnover_max = _th["prov_turnover_max"]
+    score_pass_threshold = _th["score_pass_threshold"]
+    score_optimize_threshold = _th["score_optimize_threshold"]
     check_self_corr = tier_cfg["check_self_corr"]
     check_concentrated = tier_cfg["check_concentrated"]
-    # PROVISIONAL config: tier-specific looser bar for near-PASS pool (KB / island GA seeds).
-    prov_cfg = tier_cfg.get("provisional") or {}
-    prov_sharpe_min = prov_cfg.get("sharpe_min", sharpe_min)
-    prov_fitness_min = prov_cfg.get("fitness_min", 0.6)
-    # V-26.80 (2026-05-13): symmetric provisional turnover band. Pre-fix used
-    # the regular `turnover_min` as lower bound and `prov_turnover_max` as
-    # upper bound, mixing two tiers' policies — a near_pass alpha could
-    # have an upper-loose / lower-tight gate that no PASS path explicitly
-    # asks for. Default to the same min unless the tier override supplies
-    # its own.
-    prov_turnover_min = prov_cfg.get("turnover_min", turnover_min)
-    prov_turnover_max = prov_cfg.get("turnover_max", 0.85)
-
-    score_pass_threshold = tier_cfg.get("score_pass", getattr(settings, 'SCORE_PASS_THRESHOLD', 0.8))
-    score_optimize_threshold = tier_cfg.get("score_optimize", getattr(settings, 'SCORE_OPTIMIZE_THRESHOLD', 0.3))
     corr_check_threshold = getattr(settings, 'CORR_CHECK_THRESHOLD', 0.5)
     logger.info(
         f"[{node_name}] flat-eval sharpe>={sharpe_min} fitness>={fitness_min} "
