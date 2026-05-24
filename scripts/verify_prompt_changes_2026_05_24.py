@@ -34,13 +34,19 @@ from dotenv import load_dotenv
 PASS = "quality_status IN ('PASS','PASS_PROVISIONAL')"
 MIN_N = 30  # below this a verdict is statistically meaningless
 
+# Verdict thresholds (named so they aren't scattered magic numbers).
+CORR_REAL_MIN = 0.30        # P1: |corr| above this = CoT is real, keep 5-slot
+BLEND_OK_SHARE = 20         # 命题4: blended-mechanism share below this = good
+PV_SWEET_OK_SHARE = 25      # P2: % of price/volume output in the 0.40-0.70 band
+MAIN_UNCLASSIFIED_OK = 10   # pillar: main-gen (null)+other share below this = good
+PV_FAM = "price/volume"        # MUST match the SQL CASE label in check_p2_turnover
+PV_SWEET_BUCKET = "3.0.40-0.70"  # MUST match the SQL turnover-bucket label
+
 # Pre-change baselines measured this session (2026-05-24), for before/after context.
 BASELINE = {
-    "stmt_ge240_pass": 2.5,    # 命题4: ≥240-char statements PASS rate
-    "stmt_lt180_pass": 50.0,   # 命题4: <180-char (within one pillar)
+    "stmt_lt180_pass": 50.0,   # 命题4: <180-char PASS rate (within one pillar)
     "single_pass": 10.5,       # single-mechanism PASS rate
     "blend_pass": 0.8,         # add-blended PASS rate
-    "unknown_share": 17.0,     # unknown pillar share of hypotheses (approx)
     "pv_sweet_pass": 24.1,     # P2: price/volume at 0.40-0.70 PASS rate
 }
 
@@ -72,7 +78,8 @@ def check_thesis4(cur, since, region_clause):
 
     cur.execute(
         f"""
-        SELECT CASE WHEN length(h.statement)<180 THEN '<180' ELSE '>=180' END b,
+        SELECT CASE WHEN length(h.statement)<180 THEN '1.<180'
+                    WHEN length(h.statement)<240 THEN '2.180-240' ELSE '3.>=240' END b,
                count(a.id) n,
                round(100.0*count(*) FILTER (WHERE a.{PASS})/NULLIF(count(a.id),0),1) pr
         FROM alphas a JOIN hypotheses h ON a.hypothesis_id=h.id
@@ -83,19 +90,18 @@ def check_thesis4(cur, since, region_clause):
     )
     rows = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
     n_total = sum(v[0] for v in rows.values())
-    print(f"  statement 长度 vs PASS率 (baseline <180≈{BASELINE['stmt_lt180_pass']}% / "
-          f">=180 断崖):")
-    for b in ("<180", ">=180"):
+    print(f"  statement 长度 vs PASS率 (baseline <180≈{BASELINE['stmt_lt180_pass']}% / >=240 断崖):")
+    for b in ("1.<180", "2.180-240", "3.>=240"):
         if b in rows:
-            print(f"    {b:<7} n={rows[b][0]:<5} PASS率={rows[b][1]}%")
+            print(f"    {b:<10} n={rows[b][0]:<5} PASS率={rows[b][1]}%")
     if n_total < MIN_N:
         _verdict("INSUFFICIENT", f"仅 {n_total} 个新 alpha,需 ≥{MIN_N}")
     else:
-        short_pr = rows.get("<180", (0, 0))[1] or 0
-        long_pr = rows.get(">=180", (0, 0))[1] or 0
+        short_pr = rows.get("1.<180", (0, 0))[1] or 0
+        long_pr = rows.get("3.>=240", (0, 0))[1] or 0
         if short_pr > long_pr:
             _verdict("✅ 短 statement PASS 更高,命题4 方向成立",
-                     f"{short_pr}% vs {long_pr}%")
+                     f"<180 {short_pr}% vs >=240 {long_pr}%")
         else:
             _verdict("⚠️ 未见短>长优势,复查 prompt 是否生效")
 
@@ -105,7 +111,9 @@ def check_thesis4(cur, since, region_clause):
         SELECT CASE
                  WHEN expression ~ 'trade_when|if_else' THEN '条件交互'
                  WHEN expression ~ 'add\\(' THEN '线性混合add'
-                 WHEN expression ~ 'multiply\\(' AND expression !~ 'multiply\\(\\s*-1' THEN '乘法耦合'
+                 -- coarse syntactic bucket, first-match precedence; exclude BOTH
+                 -- sign-flip forms multiply(-1,x) and multiply(x,-1)
+                 WHEN expression ~ 'multiply\\(' AND expression !~ 'multiply\\(\\s*-1|,\\s*-1\\s*\\)' THEN '乘法耦合'
                  ELSE '单一信号链' END typ,
                count(*) n,
                round(100.0*count(*) FILTER (WHERE {PASS})/NULLIF(count(*),0),1) pr
@@ -125,39 +133,48 @@ def check_thesis4(cur, since, region_clause):
             blend_total += n
     if grand >= MIN_N:
         share = 100.0 * blend_total / grand
-        if share < 20:
+        if share < BLEND_OK_SHARE:
             _verdict("✅ 复合机制占比下降", f"复合 {share:.0f}% of 产出")
         else:
             _verdict("⚠️ 复合机制仍 ≥20%", f"复合 {share:.0f}% — prompt 约束未完全生效")
 
 
 # ---------------------------------------------------------------------------
-# 命题4 unknown share (0f33826 should reduce it at the source)
+# Pillar classification (review H1, 2026-05-24): unknown's TRUE source is the
+# r1b_mutate path (r1b_loop.py:906 fallback), NOT main generation — verified
+# 265/265 unknown have r1b_mutation_depth>0, 0 from main gen. node_hypothesis
+# never emits 'unknown'. So 命题4 (which only edits HYPOTHESIS_SYSTEM) CANNOT
+# reduce it; the main-gen unclassified bucket is (null)/other instead. Diagnose
+# the two code paths separately so the verdict attributes correctly.
 # ---------------------------------------------------------------------------
-def check_unknown_share(cur, since):
-    _hdr("命题4 衍生 — unknown pillar 占比 (决定 P-A② 是否还需要)")
+def check_pillar_classification(cur, since):
+    _hdr("Pillar 分类 — unknown 真实来源 (修正: unknown=r1b_mutate 缺陷,非命题4)")
     cur.execute(
         """
-        SELECT COALESCE(pillar,'(null)') p, count(*) n
-        FROM hypotheses WHERE created_at > %s GROUP BY 1
+        SELECT COALESCE(pillar,'(null)') p,
+               count(*) FILTER (WHERE r1b_mutation_depth=0 AND parent_hypothesis_id IS NULL) main_gen,
+               count(*) FILTER (WHERE r1b_mutation_depth>0) r1b_mutate
+        FROM hypotheses WHERE created_at > %s GROUP BY 1 ORDER BY 2 DESC
         """,
         (since,),
     )
-    rows = dict(cur.fetchall())
-    total = sum(rows.values())
-    unk = rows.get("unknown", 0)
-    print(f"  baseline unknown 占比 ≈{BASELINE['unknown_share']}%")
-    if total < MIN_N:
-        _verdict("INSUFFICIENT", f"仅 {total} 个新假设")
+    rows = cur.fetchall()
+    main_total = sum(r[1] for r in rows)
+    r1b_unknown = sum(r[2] for r in rows if r[0] == "unknown")
+    main_unclassified = sum(r[1] for r in rows if r[0] in ("(null)", "other"))
+    for p, mg, r1b in rows:
+        print(f"    {p:<12} 主生成={mg:<5} r1b_mutate={r1b}")
+    print("  注: pillar='unknown' 仅 r1b_mutate fallback 产生,与命题4/主生成无关 (region-agnostic)")
+    if main_total < MIN_N:
+        _verdict("INSUFFICIENT", f"主生成假设仅 {main_total} 个")
         return
-    share = 100.0 * unk / total
-    print(f"  unknown {unk}/{total} = {share:.1f}%")
-    if share < 8:
-        _verdict("✅ unknown 占比显著下降 → P-A② 不需要", f"{share:.1f}%")
-    elif share < BASELINE["unknown_share"]:
-        _verdict("🔶 unknown 下降但仍偏高 → 可考虑 node 侧 unknown→重试", f"{share:.1f}%")
+    mg_unc = 100.0 * main_unclassified / main_total
+    print(f"  主生成未分类率((null)+other) = {mg_unc:.1f}%  |  r1b unknown = {r1b_unknown}")
+    if mg_unc < MAIN_UNCLASSIFIED_OK:
+        _verdict("✅ 主生成分类良好 → 命题4 不靠减 unknown 起效;治 unknown 应改 r1b_mutate(非主生成过滤)",
+                 f"主生成未分类 {mg_unc:.1f}%")
     else:
-        _verdict("⚠️ unknown 未降 → 命题4 未生效或 unknown 另有来源")
+        _verdict("⚠️ 主生成未分类率偏高 → 复查 pillar 归类逻辑", f"{mg_unc:.1f}%")
 
 
 # ---------------------------------------------------------------------------
@@ -184,17 +201,22 @@ def check_p1_cot(cur, since, region_clause):
         SELECT corr((metrics->>'_reasoning_predicted_turnover')::float, is_turnover) r,
                round(avg(abs((metrics->>'_reasoning_predicted_turnover')::float - is_turnover))::numeric,3) mae,
                count(*) n
-        FROM alphas
-        WHERE created_at > %s {region_clause} AND is_turnover IS NOT NULL
-          AND metrics->>'_reasoning_predicted_turnover' ~ '^[0-9.]+$'
+        FROM alphas a
+        WHERE a.created_at > %s {region_clause} AND is_turnover IS NOT NULL
+          AND jsonb_typeof(metrics->'_reasoning_predicted_turnover') = 'number'
         """,
         (since,),
     )
     r, mae, n = cur.fetchone()
-    print(f"  predicted vs actual turnover: n={n} corr={r} MAE={mae}")
-    if n is None or n < MIN_N or r is None:
+    n = n or 0
+    # predicted_turnover is float-coerced on write (JSON number), so filter by
+    # jsonb_typeof='number' — a char-class regex would silently drop negatives /
+    # sci-notation. Print has_slot vs n so an INSUFFICIENT is explainable.
+    print(f"  predicted vs actual turnover: 数值样本 n={n} "
+          f"(落库 {has_slot} 中 {has_slot - n} 个非数值/缺 turnover 被排除) corr={r} MAE={mae}")
+    if n < MIN_N or r is None:
         _verdict("INSUFFICIENT", f"仅 {n} 个数值样本,需 ≥{MIN_N}")
-    elif abs(r) >= 0.3:
+    elif abs(r) >= CORR_REAL_MIN:
         _verdict("✅ CoT 真实(predicted 与 actual 相关) → 保留 5-slot + 喂 P2 校准",
                  f"corr={r:.2f}")
     else:
@@ -237,14 +259,14 @@ def check_p2_turnover(cur, since, region_clause):
             print(f"  --- {f} ---")
             fam = f
         print(f"    TO {tb:<12} n={n:<4} PASS率={pr}% can_submit={cs}")
-        if f == "price/volume":
+        if f == PV_FAM:
             pv_total += n
-            if tb == "3.0.40-0.70":
+            if tb == PV_SWEET_BUCKET:
                 pv_sweet_n = n
     print(f"  baseline 价量 0.40-0.70 PASS≈{BASELINE['pv_sweet_pass']}%")
     if pv_total >= MIN_N:
         share = 100.0 * pv_sweet_n / pv_total
-        if share >= 25:
+        if share >= PV_SWEET_OK_SHARE:
             _verdict("✅ 价量产出向 0.40-0.70 迁移", f"{share:.0f}% of 价量在甜区")
         else:
             _verdict("🔶 价量甜区占比偏低,观察更多数据", f"{share:.0f}%")
@@ -278,12 +300,17 @@ def check_foolsgold(cur, since, region_clause):
         cs_rate = 100.0 * cs / n if n else 0
         print(f"    {b:<8} n={n:<5} PASS_PROVISIONAL={prov} PASS={hp} can_submit={cs} ({cs_rate:.1f}%)")
     short = next((r for r in rows if r[0] == "短<180"), None)
-    if short and short[1] >= MIN_N:
-        prov, hp, cs = short[2], short[3], short[4]
-        if cs == 0 and prov > 0:
-            _verdict("⚠️ 短 statement 只产 PASS_PROVISIONAL 0 can_submit → 疑似愚人金,需查 self-corr")
-        else:
-            _verdict("✅ 短 statement 有真 can_submit,非纯愚人金", f"can_submit={cs}")
+    if not short or short[1] < MIN_N:
+        _verdict("INSUFFICIENT", "短<180 样本不足,未判定愚人金")
+        return
+    prov, hp, cs = short[2], short[3], short[4]
+    if prov > 0 and hp == 0 and cs == 0:
+        _verdict("⚠️ 短 statement 只产 PASS_PROVISIONAL(0 PASS/0 can_submit) → 疑似愚人金,查 self-corr")
+    elif cs == 0 and hp > 0:
+        _verdict("🔶 短 statement 有 PASS 但 0 can_submit → 提交被 self-corr/prod-corr 阻挡"
+                 "(非愚人金,是提交多样性问题)")
+    else:
+        _verdict("✅ 短 statement 有真 can_submit,非愚人金", f"can_submit={cs}")
 
 
 def main():
@@ -296,6 +323,8 @@ def main():
     since = args.since or (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d %H:%M")
     region_clause = ""
     if args.region:
+        if not args.region.isalnum():
+            raise SystemExit(f"--region 必须是字母数字 (防 SQL 注入): {args.region!r}")
         region_clause = f"AND a.region = '{args.region}'"
 
     print(f"分析 created_at > {since}" + (f" region={args.region}" if args.region else "")
@@ -305,7 +334,7 @@ def main():
     cur = conn.cursor()
     try:
         check_thesis4(cur, since, region_clause)
-        check_unknown_share(cur, since)
+        check_pillar_classification(cur, since)
         check_p1_cot(cur, since, region_clause)
         check_p2_turnover(cur, since, region_clause)
         check_foolsgold(cur, since, region_clause)
