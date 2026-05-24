@@ -158,10 +158,21 @@ def build_fields_context(fields: List[Dict], max_fields: int = 30) -> str:
 
 
 def build_operators_context(operators: List[Dict], max_ops: int = 120) -> str:
-    """Build operator reference grouped by category."""
+    """Build operator reference grouped by category, with full call signatures.
+
+    Each operator is rendered using its ``definition`` (the full call
+    signature, e.g. ``ts_regression(y, x, d, lag = 0, rettype = 0)``) when the
+    catalog row carries one, falling back to the bare name otherwise. The
+    signature is the single highest-leverage piece of code-gen context for
+    getting arity right: without it the LLM only sees ``ts_regression`` and
+    routinely passes 2 args to a 3-arg operator, which BRAIN rejects with
+    "Invalid number of inputs : 2, should be exactly 3 input(s)". The
+    ``definition`` column is fully populated in the DB and already threaded
+    through ``state.operators`` (tasks/mining_tasks.py:_get_operators).
+    """
     if not operators:
         return "Use standard operators."
-    
+
     by_category: Dict[str, List[str]] = {}
     for op in operators[:max_ops]:
         # `or "Other"` (not get default): category column is nullable, so a
@@ -171,15 +182,26 @@ def build_operators_context(operators: List[Dict], max_ops: int = 120) -> str:
         if cat not in by_category:
             by_category[cat] = []
         op_name = op.get("name", op.get("id", "unknown"))
-        by_category[cat].append(op_name)
+        # Prefer the full signature; fall back to the bare name when the row
+        # has no definition (test fixtures / the DB-empty fallback set).
+        raw_sig = op.get("definition") or op_name
+        # `definition` is copied verbatim from BRAIN docs — a few entries span
+        # multiple lines (e.g. bucket's "...\nor\n..."), which would split a
+        # category across several output lines and scramble the "- {cat}: ..."
+        # layout. Collapse all internal whitespace (incl. newlines) to single
+        # spaces so each operator stays on its category line.
+        sig = " ".join(str(raw_sig).split())
+        by_category[cat].append(sig)
 
     lines = []
-    for cat, op_names in sorted(by_category.items()):
+    for cat, sigs in sorted(by_category.items()):
         # Per-category cap of 30 (was 10): callers now pass the full catalog
         # ORDER BY category, name, so an alphabetical [:10] would drop the
         # workhorse Time Series ops (ts_mean/ts_rank/ts_zscore/ts_scale/...
         # all sort after ts_delta). 30 > the largest real category (~24 ops).
-        lines.append(f"- {cat}: {', '.join(op_names[:30])}")
+        # Signatures are joined with "; " (not ", ") because a signature can
+        # itself contain commas (e.g. "ts_regression(y, x, d, lag = 0)").
+        lines.append(f"- {cat}: {'; '.join(sigs[:30])}")
 
     return "\n".join(lines)
 
@@ -281,10 +303,21 @@ def build_strategy_constraints(ctx: PromptContext) -> str:
         )
     
     # CRITICAL TYPE CONSTRAINTS
+    # NOTE: do NOT hard-code a vec_* whitelist here. The operator catalog
+    # rendered above is the single source of truth for which Vector operators
+    # actually exist in this deployment (only vec_avg / vec_sum are active);
+    # the old hard-coded list named vec_max/vec_min/vec_count/vec_range/
+    # vec_stddev, none of which are in the catalog — which actively taught the
+    # LLM to emit operators that BRAIN/the validator then reject as unknown.
     constraints.append(
-        "**VECTOR FIELD RULE**: VECTOR-type fields MUST be processed with vec_* operators "
-        "(vec_sum, vec_avg, vec_max, vec_min, vec_count, vec_range, vec_stddev, etc.) "
-        "BEFORE using ts_* operators. Example: ts_rank(vec_sum(vector_field), 20) - NOT ts_rank(vector_field, 20)"
+        "**VECTOR FIELD RULE**: VECTOR-type fields MUST first be reduced to a "
+        "scalar with one of the **Vector** operators shown in the operator list "
+        "above — and ONLY those listed exist (do NOT invent vec_* names such as "
+        "vec_max / vec_min / vec_median / vec_stddev if they are not in the list) "
+        "— BEFORE applying any ts_*/arithmetic operator. "
+        "Example: ts_rank(vec_avg(vector_field), 20) — NOT ts_rank(vector_field, 20). "
+        "NEVER fuse the two steps into a vec_ts_* operator (e.g. vec_ts_rank, "
+        "vec_ts_delta): no such operator exists."
     )
     constraints.append(
         "**MATRIX FIELD RULE**: MATRIX-type fields can use ts_* operators directly. "

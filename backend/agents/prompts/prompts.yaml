@@ -96,53 +96,6 @@ hypothesis_generation:
     the selected_datasets. Do NOT pick datasets outside the pool.
 
 # ==============================================================================
-# Alpha Generation (Implementing Hypotheses)
-# ==============================================================================
-
-alpha_generation:
-  system: |-
-    You are a quantitative researcher implementing alpha expressions to test investment hypotheses.
-    
-    Your role is to translate hypotheses into mathematical expressions that can be backtested.
-    
-    **Core Principles**:
-    1. **Precision**: Each expression should test exactly one hypothesis
-    2. **Simplicity First**: Start with simple implementations; complexity can be added if needed
-    3. **Objectivity**: Do not assume certain operators or patterns are inherently better
-    4. **Testability**: Every expression should produce measurable results
-    
-    **Implementation Guidelines**:
-    - Use only the provided fields and operators
-    - Ensure syntactic correctness
-    - Document the reasoning clearly
-    - Consider multiple ways to implement the same hypothesis
-
-  output_format: |-
-    {
-      "implementation_notes": "Brief notes on the overall approach taken",
-      "alphas": [
-        {
-          "hypothesis_tested": "The specific hypothesis this expression tests",
-          "expression": "Valid expression using only provided fields and operators",
-          "explanation": {
-            "approach": "How the hypothesis is translated into code",
-            "market_logic": "What market inefficiency or behavior this captures",
-            "assumptions": "Key assumptions this relies on"
-          },
-          "fields_used": ["field1", "field2"],
-          "complexity": "simple | moderate | complex",
-          "novelty_level": "established | variation | experimental"
-        }
-      ],
-      "alternatives_considered": [
-        {
-          "expression": "Alternative implementation not used",
-          "reason_not_chosen": "Why this wasn't the primary choice"
-        }
-      ]
-    }
-
-# ==============================================================================
 # Experiment Feedback
 # ==============================================================================
 
@@ -180,6 +133,10 @@ feedback_generation:
 
 # ==============================================================================
 # Self-Correction
+# NOTE: system below must stay byte-identical to _FALLBACK_SELF_CORRECT_SYSTEM in
+# backend/agents/prompts/validation.py (the load-failure fallback); the
+# "OPERATOR REALITY" rules are also mirrored in ALPHA_GENERATION_SYSTEM +
+# R1B_RETRY_SYSTEM — keep all in sync.
 # ==============================================================================
 
 self_correction:
@@ -202,9 +159,11 @@ self_correction:
     - BRAIN is FASTEXPR, NOT Python/numpy/pandas. The following do NOT exist:
       sequence(N), range(N), linspace(N), arange(N), time_index(),
       np.arange, pd.Series.shift, etc.
-    - vec_* are AGGREGATIONS over the vector dimension. They EXIST as:
-      vec_avg, vec_sum, vec_max, vec_min, vec_l2_norm, vec_count, vec_median.
-      They DO NOT exist as vec_ts_*. So `vec_ts_delta(...)` is INVALID.
+    - vec_* are AGGREGATIONS over the vector dimension. Only the Vector operators
+      in the provided operator list exist — in this deployment that is vec_avg and
+      vec_sum. Do NOT assume other vec_* names (e.g. vec_max / vec_min / vec_median /
+      vec_l2_norm / vec_mean) exist. They DO NOT exist as vec_ts_*. So
+      `vec_ts_delta(...)` is INVALID.
     - VECTOR-typed fields (e.g. nws12_*, anl4_*v110_mean) cannot go directly
       into a time-series operator. Wrap with vec_* first:
       - WRONG: ts_delta(nws12_prez_4l, 20)

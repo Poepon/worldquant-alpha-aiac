@@ -225,3 +225,22 @@ class TestUnknownOperatorGuard:
         r = v.validate("frobnicate(whatever)")
         unk = [f for f in r.findings if f.rule_id == RuleId.UNKNOWN_OPERATOR]
         assert unk == []
+
+
+# ============================================================================
+# Tier 3 — self_correct system prompt: YAML ↔ Python fallback parity
+# ============================================================================
+
+
+class TestSelfCorrectYamlFallbackParity:
+    def test_self_correct_fallback_matches_yaml(self):
+        """_FALLBACK_SELF_CORRECT_SYSTEM is the load-failure fallback for the
+        YAML-sourced self_correction.system; the two MUST stay byte-identical
+        or a YAML parse failure would silently ship a stale prompt. Guards the
+        operator-reality whitelist edit (2026-05-24) against single-side drift
+        — editing one copy of the vec_* rules without the other now fails CI."""
+        from backend.agents.prompts.validation import _FALLBACK_SELF_CORRECT_SYSTEM
+        from backend.agents.prompts.loader import get_prompt_loader
+        yaml_text = get_prompt_loader().get_system_prompt("self_correction")
+        assert yaml_text, "prompts.yaml self_correction.system failed to load"
+        assert yaml_text.rstrip() == _FALLBACK_SELF_CORRECT_SYSTEM.rstrip()

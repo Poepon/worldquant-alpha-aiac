@@ -202,6 +202,9 @@ async def node_code_gen_retry(
                 r1a_evidence=original_metrics.get("_r1a_attribution_evidence") or [],
                 r5_c2_reason=original_metrics.get("_r5_c2_reason") or "",
                 allowed_fields=allowed_fields,
+                # Parity with code_gen: show operator signatures so the rewrite
+                # doesn't re-introduce arity / hallucinated-operator failures.
+                operators=getattr(state, "operators", None),
             )
             resp = await llm_service.call(
                 system_prompt=sys_p, user_prompt=user_p,

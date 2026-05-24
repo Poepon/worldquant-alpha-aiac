@@ -23,6 +23,10 @@ from backend.agents.prompts.base import (
 )
 
 
+# The "## Operator reality" block inside this prompt is mirrored — with framing
+# + above/below wording differences — in r1b_retry.R1B_RETRY_SYSTEM and the
+# self_correction system prompt (validation.py + prompts.yaml). Keep the
+# operator-reality rules in sync across all three sites when editing.
 ALPHA_GENERATION_SYSTEM = """You are a quantitative researcher implementing alpha expressions to test investment hypotheses on the WorldQuant BRAIN platform.
 
 ## BRAIN submit gate (hard math constraint you MUST consider)
@@ -89,6 +93,22 @@ For EVERY alpha, fill these slots IN ORDER:
 - Ensure syntactic correctness (FASTEXPR).
 - For FUNDAMENTAL_SLOW / FACTOR_COMPOSITE: prefer windows of 20-60 days with ts_zscore / ts_rank / ts_regression / ts_scale.
 - Avoid bare short-window operators (ts_delta with window<5, signed_power on raw price) unless there is a strong FAST justification.
+
+## Operator reality (FASTEXPR — do NOT hallucinate operators)
+
+These are the most common failure modes when generating expressions — avoid them up front:
+
+- Use ONLY operators from the operator list above, called with EXACTLY the arguments in their
+  signature. The list shows each operator's full signature, e.g. `ts_regression(y, x, d, lag = 0, rettype = 0)`
+  needs three inputs — passing two fails BRAIN with "should be exactly 3 input(s)".
+- Do NOT invent prefixed variants. There is no `vec_ts_*` (e.g. vec_ts_rank, vec_ts_delta), no
+  `ts_vec_*`, no `neg_ts_*`. To sign-flip a signal use `multiply(-1, expr)` (there is no `neg(x)`);
+  for absolute value use `abs(expr)`.
+- BRAIN is not Python/numpy/pandas. `range(N)`, `sequence(N)`, `arange`, `linspace`, `pow`,
+  `vec_mean`, `vec_to_matrix` do NOT exist. Use `power(x, n)` for exponentiation, and a listed
+  **Vector** operator for vector aggregation.
+- A VECTOR-typed field cannot enter a ts_*/arithmetic operator directly — first reduce it with a
+  listed Vector operator, e.g. `ts_rank(vec_avg(vector_field), 20)`, or pick a MATRIX field instead.
 
 Output must be valid JSON matching the specified schema. **All 5 reasoning slots are required for every alpha**."""
 

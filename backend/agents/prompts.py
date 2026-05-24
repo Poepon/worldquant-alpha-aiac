@@ -11,7 +11,6 @@ Module Organization:
 - prompts/validation.py: Self-correction and optimization prompts
 - prompts/analysis.py: Round and failure analysis prompts
 - prompts/legacy.py: Legacy templates for backward compatibility
-- prompts/registry.py: PromptRegistry for dynamic selection
 """
 
 # Re-export everything from the prompts package for backward compatibility
@@ -46,8 +45,6 @@ from backend.agents.prompts import (
     ALPHA_GENERATION_USER,
     SELF_CORRECT_USER,
     ROUND_ANALYSIS_USER,
-    # Registry
-    PromptRegistry,
 )
 
 __all__ = [
@@ -81,6 +78,4 @@ __all__ = [
     "ALPHA_GENERATION_USER",
     "SELF_CORRECT_USER",
     "ROUND_ANALYSIS_USER",
-    # Registry
-    "PromptRegistry",
 ]

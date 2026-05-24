@@ -14,7 +14,6 @@ This package organizes prompt templates by responsibility:
 - validation: Self-correction and validation prompts
 - analysis: Round analysis, failure analysis, and feedback prompts
 - legacy: Backward-compatible legacy templates
-- registry: Dynamic prompt selection
 
 For backward compatibility, all exports are re-exported here.
 """
@@ -83,9 +82,6 @@ from backend.agents.prompts.legacy import (
     ROUND_ANALYSIS_USER,
 )
 
-# Registry
-from backend.agents.prompts.registry import PromptRegistry
-
 # Loader (YAML-based prompts)
 from backend.agents.prompts.loader import (
     PromptLoader,
@@ -138,8 +134,6 @@ __all__ = [
     "ALPHA_GENERATION_USER",
     "SELF_CORRECT_USER",
     "ROUND_ANALYSIS_USER",
-    # Registry
-    "PromptRegistry",
     # Loader
     "PromptLoader",
     "get_prompt_loader",

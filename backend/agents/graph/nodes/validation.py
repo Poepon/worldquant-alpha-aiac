@@ -635,6 +635,9 @@ async def node_self_correct(
             error_type=error_type,
             available_fields=allowed_fields,
             similar_errors=similar_errors if similar_errors else None,
+            # Parity with code_gen / r1b_retry: show operator signatures so the
+            # fix uses correct arity and only catalog operators.
+            operators=getattr(state, "operators", None),
         )
         
         try:

@@ -25,7 +25,13 @@ if TYPE_CHECKING:
 # failure — if the loader can't read self_correction.system the live
 # value gracefully falls back to the in-code text.
 from backend.agents.prompts.loader import get_prompt_loader as _get_prompt_loader
+from backend.agents.prompts.base import build_operators_context
 
+# This text must stay byte-identical to prompts.yaml self_correction.system —
+# it is the load-failure fallback (asserted by test_operator_visibility_and_
+# guards.test_self_correct_fallback_matches_yaml). The "BRAIN OPERATOR REALITY"
+# rules are also mirrored in generation.ALPHA_GENERATION_SYSTEM + r1b_retry.
+# R1B_RETRY_SYSTEM — keep operator-reality rules in sync across all sites.
 _FALLBACK_SELF_CORRECT_SYSTEM = """You are a code debugger helping to fix alpha expressions.
 
 Your role is to:
@@ -44,9 +50,11 @@ Be precise and targeted in your corrections.
 - BRAIN is FASTEXPR, NOT Python/numpy/pandas. The following do NOT exist:
   sequence(N), range(N), linspace(N), arange(N), time_index(),
   np.arange, pd.Series.shift, etc.
-- vec_* are AGGREGATIONS over the vector dimension. They EXIST as:
-  vec_avg, vec_sum, vec_max, vec_min, vec_l2_norm, vec_count, vec_median.
-  They DO NOT exist as vec_ts_*. So `vec_ts_delta(...)` is INVALID.
+- vec_* are AGGREGATIONS over the vector dimension. Only the Vector operators
+  in the provided operator list exist — in this deployment that is vec_avg and
+  vec_sum. Do NOT assume other vec_* names (e.g. vec_max / vec_min / vec_median /
+  vec_l2_norm / vec_mean) exist. They DO NOT exist as vec_ts_*. So
+  `vec_ts_delta(...)` is INVALID.
 - VECTOR-typed fields (e.g. nws12_*, anl4_*v110_mean) cannot go directly
   into a time-series operator. Wrap with vec_* first:
   - WRONG: ts_delta(nws12_prez_4l, 20)
@@ -94,6 +102,7 @@ def build_self_correct_prompt(
     # as a pair; we coerce them into a single synthetic Finding.
     error_message: Optional[str] = None,
     error_type: Optional[str] = None,
+    operators: Optional[List[Dict]] = None,
 ) -> str:
     """Build prompt for self-correction (P1-E: structured-finding aware).
 
@@ -217,6 +226,17 @@ These similar errors were resolved before. Learn from these patterns:
             "Produce a genuinely different idea, not a re-skin of the same one.\n"
         )
 
+    # Operator signatures (parity with code_gen): when the caller passes the
+    # operator catalog, render it so the fix calls operators with the right
+    # arity and never invents operators outside the list. None → empty string
+    # so legacy callers render byte-for-byte as before.
+    operators_section = ""
+    if operators:
+        operators_section = (
+            "\n## Available Operators (with signatures — call with EXACTLY these arguments)\n\n"
+            f"{build_operators_context(operators)}\n"
+        )
+
     return f"""## Failed Expression
 
 ```
@@ -244,6 +264,7 @@ The following fields are valid in this context:
 ```
 
 {f"(... and {len(available_fields) - 50} more)" if len(available_fields) > 50 else ""}
+{operators_section}
 {similar_section}
 
 ## Task
