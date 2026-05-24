@@ -133,6 +133,13 @@ class TestMarginalContribution:
         # partitionName is surfaced in the envelope
         assert result["partition_name"] == "EQUITY:USA:1"
 
+        # analysis: mock has Δsharpe=-0.05 (drags portfolio) → SKIP
+        analysis = result["analysis"]
+        assert analysis["recommendation"] == "SKIP"
+        assert analysis["label"] == "不推荐提交"
+        assert analysis["signals"]["sharpe"] == -1
+        assert isinstance(analysis["reasons"], list) and analysis["reasons"]
+
     @pytest.mark.asyncio
     async def test_scope_defaults_to_users_self(self, pg_session, test_alpha):
         svc = AlphaService(pg_session)

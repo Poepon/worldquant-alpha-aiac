@@ -734,6 +734,18 @@ class AlphaService(BaseService):
                 return round(a - b, 6)
             return None
 
+        deltas = {
+            "sharpe": _delta("sharpe"),
+            "fitness": _delta("fitness"),
+            "turnover": _delta("turnover"),
+            "returns": _delta("returns"),
+            "pnl": _delta("pnl"),
+            "drawdown": _delta("drawdown"),
+        }
+        # Marginal-contribution → submit recommendation (pure, sharpe-led).
+        from backend.marginal_analysis import analyze_marginal_contribution
+        analysis = analyze_marginal_contribution(deltas, merged=after)
+
         return {
             "alpha_pk": alpha_pk,
             "alpha_brain_id": alpha.alpha_id,
@@ -743,14 +755,8 @@ class AlphaService(BaseService):
             ),
             "partition_name": payload.get("partitionName"),
             "raw": payload,
-            "deltas": {
-                "sharpe": _delta("sharpe"),
-                "fitness": _delta("fitness"),
-                "turnover": _delta("turnover"),
-                "returns": _delta("returns"),
-                "pnl": _delta("pnl"),
-                "drawdown": _delta("drawdown"),
-            },
+            "deltas": deltas,
+            "analysis": analysis,
         }
 
     async def get_alpha_by_brain_id(self, brain_alpha_id: str) -> Optional[AlphaDetail]:

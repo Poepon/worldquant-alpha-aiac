@@ -665,6 +665,37 @@ function LineageSection({ alphaId }) {
                 )}
                 {marginal && (
                   <>
+                    {marginal.analysis && (
+                      <Alert
+                        type={
+                          { SUBMIT: 'success', SKIP: 'error', NEUTRAL: 'warning' }[
+                            marginal.analysis.recommendation
+                          ] || 'info'
+                        }
+                        showIcon
+                        style={{ marginBottom: 16 }}
+                        message={
+                          <Space>
+                            <Text strong style={{ fontSize: 15 }}>
+                              {marginal.analysis.label}
+                            </Text>
+                            {marginal.analysis.marginal_score != null && (
+                              <Tag>
+                                边际评分 {marginal.analysis.marginal_score > 0 ? '+' : ''}
+                                {marginal.analysis.marginal_score}
+                              </Tag>
+                            )}
+                          </Space>
+                        }
+                        description={
+                          <Space direction="vertical" size={2} style={{ fontSize: 12 }}>
+                            {(marginal.analysis.reasons || []).map((r, i) => (
+                              <span key={i}>• {r}</span>
+                            ))}
+                          </Space>
+                        }
+                      />
+                    )}
                     <Descriptions
                       title={`Scope: ${marginal.scope}`}
                       bordered
