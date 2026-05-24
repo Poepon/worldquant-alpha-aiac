@@ -225,6 +225,78 @@ def enqueue_can_submit_refresh(alpha_pk: int, brain_alpha_id: str | None = None,
         logger.warning(f"[refresh_can_submit] enqueue failed for alpha_pk={alpha_pk}: {e}")
 
 
+# ---------------------------------------------------------------------------
+# alpha_pnl persistence (2026-05-24) — the table was empty; PnL was fetched for
+# self_corr at eval time then discarded. Mining stores it inline at the post-sim
+# refresh; sync enqueues an incremental backfill (skip-if-exists) so it does NOT
+# re-fetch the whole pool every 6h cycle.
+# ---------------------------------------------------------------------------
+
+async def _fetch_and_store_pnl(db, svc, alpha_pk: int, brain_alpha_id: str) -> int:
+    """Fetch an alpha's PnL from BRAIN and persist it to alpha_pnl.
+
+    Own BrainAdapter; soft-fail so a PnL hiccup never affects the caller. Empty
+    fetch → no-op (upsert_alpha_pnl never wipes on empty). Commits on a non-empty
+    write. Returns rows written (0 on empty / failure)."""
+    if not brain_alpha_id:
+        return 0
+    try:
+        from backend.adapters.brain_adapter import BrainAdapter
+        from backend.services.correlation_service import CorrelationService
+        async with BrainAdapter() as _ba:
+            series = await CorrelationService(_ba)._fetch_pnl_series(brain_alpha_id)
+        n = await svc.upsert_alpha_pnl(alpha_pk, series)
+        if n:
+            await db.commit()
+            logger.info(f"[alpha_pnl] stored {n} rows for alpha_pk={alpha_pk}")
+        return n
+    except Exception as e:
+        logger.warning(f"[alpha_pnl] persist failed for alpha_pk={alpha_pk}: {e}")
+        return 0
+
+
+@celery_app.task(name="backend.tasks.store_alpha_pnl_for_alpha")
+def store_alpha_pnl_for_alpha(alpha_pk: int) -> Dict:
+    """Fetch + persist one alpha's daily PnL. Enqueued by sync for alphas that
+    lack stored PnL — INCREMENTAL: skips if PnL already exists, so sync does not
+    re-fetch the whole pool every cycle. Idempotent."""
+    return run_async(_store_alpha_pnl_async(alpha_pk))
+
+
+async def _store_alpha_pnl_async(alpha_pk: int) -> Dict:
+    from sqlalchemy import func as _f
+
+    from backend.database import AsyncSessionLocal
+    from backend.models import Alpha, AlphaPnl
+    from backend.services.alpha_service import AlphaService
+
+    async with AsyncSessionLocal() as db:
+        existing_cnt = (await db.execute(
+            select(_f.count(AlphaPnl.id)).where(AlphaPnl.alpha_id == alpha_pk)
+        )).scalar() or 0
+        if existing_cnt > 0:
+            return {"alpha_pk": alpha_pk, "stored": 0, "skipped": "already_has_pnl"}
+        alpha = await db.get(Alpha, alpha_pk)
+        if alpha is None or not alpha.alpha_id:
+            return {"alpha_pk": alpha_pk, "stored": 0, "skipped": True}
+        svc = AlphaService(db)
+        n = await _fetch_and_store_pnl(db, svc, alpha_pk, alpha.alpha_id)
+        return {"alpha_pk": alpha_pk, "stored": n}
+
+
+def enqueue_alpha_pnl_store(
+    alpha_pk: int, brain_alpha_id: str | None = None, countdown: int = 10
+) -> None:
+    """Fire-and-forget: schedule an incremental PnL store. Skips when no BRAIN id.
+    Wrapped so a broker outage cannot break the sync pipeline."""
+    if not brain_alpha_id:
+        return
+    try:
+        store_alpha_pnl_for_alpha.apply_async(args=[alpha_pk], countdown=countdown)
+    except Exception as e:
+        logger.warning(f"[alpha_pnl] enqueue failed for alpha_pk={alpha_pk}: {e}")
+
+
 @celery_app.task(name="backend.tasks.refresh_can_submit_for_alpha")
 def refresh_can_submit_for_alpha(alpha_pk: int) -> Dict:
     """Auto-triggered post-simulation refresh of can_submit.
@@ -378,6 +450,11 @@ async def _refresh_can_submit_async(alpha_pk: int) -> Dict:
                 logger.warning(
                     f"[refresh_can_submit] promote alpha_pk={alpha_pk} failed: {e}"
                 )
+
+        # 2026-05-24: persist the alpha's daily PnL into alpha_pnl (the table sat
+        # empty — PnL was fetched for self_corr at eval time then discarded).
+        if alpha is not None and alpha.alpha_id:
+            await _fetch_and_store_pnl(db, svc, alpha_pk, alpha.alpha_id)
 
         return {
             "alpha_pk": alpha_pk,

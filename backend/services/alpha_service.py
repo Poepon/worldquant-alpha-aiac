@@ -1001,3 +1001,47 @@ class AlphaService(BaseService):
             f"(source={source}, reason={reason!r})"
         )
         return True
+
+    async def upsert_alpha_pnl(self, alpha_db_id: int, pnl_series) -> int:
+        """Full-refresh persist of an alpha's daily PnL into alpha_pnl (2026-05-24).
+
+        ``pnl_series``: a date-indexed CUMULATIVE PnL Series, exactly as
+        CorrelationService._fetch_pnl_series returns (BRAIN's recordset `pnl`
+        column is cumulative). Stored per trade_date:
+          - cumulative_pnl = the BRAIN cumulative value
+          - pnl            = daily diff (NaN/first-day → NULL)
+
+        Delete-then-insert: BRAIN returns the full backtest series on every
+        fetch, so a non-empty fetch is the complete authoritative series and a
+        full refresh is correct (no growth window to lose).
+
+        EMPTY GUARD: an empty / failed fetch is a NO-OP — it never deletes
+        existing rows, so a transient BRAIN rate-limit soft-fail cannot wipe
+        stored PnL. The caller owns the commit (this only flushes). Returns the
+        number of rows written (0 on empty).
+        """
+        if pnl_series is None or len(pnl_series) == 0:
+            return 0
+        import pandas as pd
+        from sqlalchemy import delete as _sql_delete
+
+        from backend.models import AlphaPnl
+
+        daily = pnl_series.diff()
+        await self.db.execute(
+            _sql_delete(AlphaPnl).where(AlphaPnl.alpha_id == alpha_db_id)
+        )
+        rows = 0
+        for ts, cum in pnl_series.items():
+            if cum is None or pd.isna(cum):
+                continue
+            d = daily.get(ts)
+            self.db.add(AlphaPnl(
+                alpha_id=alpha_db_id,
+                trade_date=ts.to_pydatetime() if hasattr(ts, "to_pydatetime") else ts,
+                pnl=(None if d is None or pd.isna(d) else float(d)),
+                cumulative_pnl=float(cum),
+            ))
+            rows += 1
+        await self.db.flush()
+        return rows

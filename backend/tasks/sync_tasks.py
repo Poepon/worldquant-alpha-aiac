@@ -789,6 +789,9 @@ def sync_user_alphas():
 
                         logger.info(f"Syncing {len(results)} alphas from {stage} (offset {offset})...")
 
+                        # 2026-05-24: collect processed alphas → incremental PnL
+                        # backfill enqueued after the batch commit (ids assigned).
+                        _pnl_targets = []
                         for a_data in results:
                             alpha_id = a_data.get("id")
                             if not alpha_id:
@@ -816,6 +819,7 @@ def sync_user_alphas():
                                     submission_flip_regions.add(existing.region)
                                 _update_existing_alpha(existing, a_data, stage, settings, is_metrics, os_metrics, date_submitted)
                                 updated += 1
+                                _pnl_targets.append(existing)
                             else:
                                 # V-23.E: if BRAIN reports a newly-created
                                 # alpha already submitted (rare but possible
@@ -826,9 +830,21 @@ def sync_user_alphas():
                                 new_alpha = _create_new_alpha(a_data, stage, settings, is_metrics, os_metrics, date_created, date_submitted)
                                 db.add(new_alpha)
                                 count += 1
+                                _pnl_targets.append(new_alpha)
 
                         await db.commit()
                         logger.info(f"Committed {len(results)} updates/inserts.")
+
+                        # 2026-05-24: incremental PnL backfill — enqueue store for
+                        # processed alphas (the task skips any that already have
+                        # PnL, so sync does NOT re-fetch the whole pool each cycle).
+                        try:
+                            from backend.tasks.refresh_tasks import enqueue_alpha_pnl_store
+                            for _a in _pnl_targets:
+                                if getattr(_a, "id", None) and getattr(_a, "alpha_id", None):
+                                    enqueue_alpha_pnl_store(_a.id, _a.alpha_id)
+                        except Exception as _pnl_e:
+                            logger.warning(f"[sync] PnL enqueue batch failed: {_pnl_e}")
 
                         offset += limit
                         if offset >= alphas_data.get("count", 0):
