@@ -679,19 +679,62 @@ function LineageSection({ alphaId }) {
                             <Text strong style={{ fontSize: 15 }}>
                               {marginal.analysis.label}
                             </Text>
-                            {marginal.analysis.marginal_score != null && (
-                              <Tag>
-                                边际评分 {marginal.analysis.marginal_score > 0 ? '+' : ''}
-                                {marginal.analysis.marginal_score}
+                            {marginal.analysis.composite_score != null && (
+                              <Tag
+                                color={
+                                  marginal.analysis.composite_score > 0
+                                    ? 'green'
+                                    : marginal.analysis.composite_score < 0
+                                      ? 'red'
+                                      : 'default'
+                                }
+                              >
+                                综合边际评分 {marginal.analysis.composite_score > 0 ? '+' : ''}
+                                {marginal.analysis.composite_score}
                               </Tag>
                             )}
                           </Space>
                         }
                         description={
-                          <Space direction="vertical" size={2} style={{ fontSize: 12 }}>
-                            {(marginal.analysis.reasons || []).map((r, i) => (
-                              <span key={i}>• {r}</span>
-                            ))}
+                          <Space direction="vertical" size={6} style={{ fontSize: 12, width: '100%' }}>
+                            {marginal.analysis.rationale && (
+                              <Text>{marginal.analysis.rationale}</Text>
+                            )}
+                            {(marginal.analysis.guardrails || []).length > 0 && (
+                              <div>
+                                {marginal.analysis.guardrails.map((g, i) => (
+                                  <div key={i} style={{ color: '#cf1322' }}>
+                                    ⚠ {g}
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                            <Row gutter={16}>
+                              <Col span={12}>
+                                <Text strong style={{ color: '#389e0d' }}>
+                                  ✓ 正向贡献 ({(marginal.analysis.positives || []).length})
+                                </Text>
+                                {(marginal.analysis.positives || []).length === 0 ? (
+                                  <div style={{ color: '#999' }}>—</div>
+                                ) : (
+                                  marginal.analysis.positives.map((p) => (
+                                    <div key={p.metric}>· {p.text}</div>
+                                  ))
+                                )}
+                              </Col>
+                              <Col span={12}>
+                                <Text strong style={{ color: '#cf1322' }}>
+                                  ✗ 负向拖累 ({(marginal.analysis.negatives || []).length})
+                                </Text>
+                                {(marginal.analysis.negatives || []).length === 0 ? (
+                                  <div style={{ color: '#999' }}>—</div>
+                                ) : (
+                                  marginal.analysis.negatives.map((n) => (
+                                    <div key={n.metric}>· {n.text}</div>
+                                  ))
+                                )}
+                              </Col>
+                            </Row>
                           </Space>
                         }
                       />
@@ -710,7 +753,7 @@ function LineageSection({ alphaId }) {
                       </Descriptions.Item>
                     </Descriptions>
                     <Row gutter={16}>
-                      {['sharpe', 'fitness', 'turnover', 'returns', 'pnl', 'drawdown'].map((k) => {
+                      {['sharpe', 'fitness', 'margin', 'returns', 'pnl', 'turnover', 'drawdown'].map((k) => {
                         const before = marginal.raw?.stats?.before?.[k]
                         const after = marginal.raw?.stats?.after?.[k]
                         const delta = marginal.deltas?.[k]

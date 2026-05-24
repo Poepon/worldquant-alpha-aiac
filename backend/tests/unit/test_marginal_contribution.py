@@ -119,12 +119,14 @@ class TestMarginalContribution:
         assert result["scope"] == "competitions/IQC2026S1"
 
         deltas = result["deltas"]
-        # MockBrainAdapter returns before sharpe=3.19, after=3.14 → -0.05
-        assert deltas["sharpe"] == pytest.approx(-0.05, abs=0.01)
-        # before fitness=2.67, after=2.57 → -0.10
-        assert deltas["fitness"] == pytest.approx(-0.10, abs=0.01)
-        # before pnl=5_387_851, after=6_066_501 → +678_650
-        assert deltas["pnl"] == pytest.approx(678_650, abs=10)
+        # MockBrainAdapter: before sharpe=3.19, after=3.16 → -0.03
+        assert deltas["sharpe"] == pytest.approx(-0.03, abs=0.01)
+        # before fitness=2.60, after=2.62 → +0.02
+        assert deltas["fitness"] == pytest.approx(0.02, abs=0.01)
+        # before pnl=5_387_851, after=6_000_000 → +612_149
+        assert deltas["pnl"] == pytest.approx(612_149, abs=10)
+        # margin now extracted: 0.0016 → 0.0019 → +0.0003
+        assert deltas["margin"] == pytest.approx(0.0003, abs=1e-5)
         # 2026-05-24: BRAIN removed `score` — no longer in deltas or raw payload
         assert "score" not in deltas
         assert "score" not in result["raw"]
@@ -133,12 +135,16 @@ class TestMarginalContribution:
         # partitionName is surfaced in the envelope
         assert result["partition_name"] == "EQUITY:USA:1"
 
-        # analysis: mock has Δsharpe=-0.05 (drags portfolio) → SKIP
+        # analysis: multi-dimensional — Δsharpe slightly negative but returns/
+        # margin/pnl up + drawdown down → a good diversifier → SUBMIT (the fix
+        # vs the old Sharpe-led SKIP). Sharpe still surfaced as a negative.
         analysis = result["analysis"]
-        assert analysis["recommendation"] == "SKIP"
-        assert analysis["label"] == "不推荐提交"
+        assert analysis["recommendation"] == "SUBMIT"
+        assert analysis["label"] == "推荐提交"
+        assert analysis["composite_score"] > 0
         assert analysis["signals"]["sharpe"] == -1
-        assert isinstance(analysis["reasons"], list) and analysis["reasons"]
+        assert "sharpe" in {n["metric"] for n in analysis["negatives"]}
+        assert {p["metric"] for p in analysis["positives"]} >= {"returns", "pnl_norm"}
 
     @pytest.mark.asyncio
     async def test_scope_defaults_to_users_self(self, pg_session, test_alpha):

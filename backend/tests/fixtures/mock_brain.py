@@ -524,28 +524,38 @@ class MockBrainAdapter:
             "scope": scope,
         })
         # Mirrors the live shape verified 2026-05-24: no `score` field, a
-        # partitionName label, schema+records-wrapped pnl/yearlyStats.
+        # partitionName label, margin/bookSize in stats, schema+records-wrapped
+        # pnl/yearlyStats. This sample is a "good diversifier": Δsharpe slightly
+        # negative (portfolio dilution) but returns/margin/pnl up + drawdown down
+        # → the multi-dimensional analysis should NOT blanket-SKIP it.
+        _yr_props = [{"name": "year"}, {"name": "sharpe"}]
         return {
             "partitionName": "EQUITY:USA:1",
             "stats": {
                 "before": {
-                    "sharpe": 3.19, "fitness": 2.67, "turnover": 0.156,
+                    "sharpe": 3.19, "fitness": 2.60, "turnover": 0.156,
                     "returns": 0.109, "pnl": 5_387_851, "drawdown": 0.032,
+                    "margin": 0.0016, "bookSize": 20_000_000,
+                    "longCount": 1600, "shortCount": 1240,
                 },
                 "after": {
-                    "sharpe": 3.14, "fitness": 2.57, "turnover": 0.183,
-                    "returns": 0.123, "pnl": 6_066_501, "drawdown": 0.029,
+                    "sharpe": 3.16, "fitness": 2.62, "turnover": 0.160,
+                    "returns": 0.122, "pnl": 6_000_000, "drawdown": 0.029,
+                    "margin": 0.0019, "bookSize": 20_000_000,
+                    "longCount": 1610, "shortCount": 1250,
                 },
             },
             "yearlyStats": {
-                "before": {"schema": {"properties": []}, "records": []},
-                "after": {"schema": {"properties": []}, "records": []},
+                "before": {"schema": {"properties": _yr_props},
+                           "records": [["2023", 1.50], ["2024", 1.60]]},
+                "after": {"schema": {"properties": _yr_props},
+                          "records": [["2023", 1.52], ["2024", 1.58]]},
             },
             "pnl": {
                 "schema": {"properties": [
                     {"name": "date"}, {"name": "beforePnL"}, {"name": "afterPnL"},
                 ]},
-                "records": [],
+                "records": [["2024-01-02", 11625.0, 11800.0]],
             },
             "partition": ["settings.instrumentType", "settings.region"],
         }

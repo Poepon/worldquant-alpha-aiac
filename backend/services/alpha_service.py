@@ -721,19 +721,23 @@ class AlphaService(BaseService):
         if not payload:
             return None
 
-        # Compute deltas for quick UI display (and KB-feedback later).
-        # 2026-05-24: BRAIN removed the `score` field from this endpoint, so the
-        # marginal score delta is no longer available here — only the stats
-        # deltas remain.
+        # Compute deltas for quick UI display + the multi-dimensional analysis.
+        # 2026-05-24: BRAIN removed the `score` field from this endpoint; the
+        # marginal signal is now the standalone-vs-merged stats deltas across
+        # return AND risk dimensions (see backend.marginal_analysis).
+        import math as _math
         stats = payload.get("stats") or {}
         before = stats.get("before") or {}
         after = stats.get("after") or {}
+
         def _delta(k: str):
             b, a = before.get(k), after.get(k)
-            if isinstance(b, (int, float)) and isinstance(a, (int, float)):
+            if (isinstance(b, (int, float)) and not isinstance(b, bool) and _math.isfinite(b)
+                    and isinstance(a, (int, float)) and not isinstance(a, bool) and _math.isfinite(a)):
                 return round(a - b, 6)
             return None
 
+        # Raw stats deltas (also drive the per-metric before→after cards in the UI).
         deltas = {
             "sharpe": _delta("sharpe"),
             "fitness": _delta("fitness"),
@@ -741,10 +745,31 @@ class AlphaService(BaseService):
             "returns": _delta("returns"),
             "pnl": _delta("pnl"),
             "drawdown": _delta("drawdown"),
+            "margin": _delta("margin"),
         }
-        # Marginal-contribution → submit recommendation (pure, sharpe-led).
-        from backend.marginal_analysis import analyze_marginal_contribution
-        analysis = analyze_marginal_contribution(deltas, merged=after)
+
+        # Derived dimensions for the analysis: PnL normalised by book size (turns
+        # dollar PnL into a comparable return-contribution), and the recent-year
+        # marginal-sharpe trend (robustness / decay flag).
+        from backend.marginal_analysis import (
+            analyze_marginal_contribution,
+            recent_yearly_sharpe_delta,
+        )
+        _book = before.get("bookSize") or after.get("bookSize")
+        d_pnl = deltas.get("pnl")
+        pnl_norm = (
+            round(d_pnl / _book, 6)
+            if isinstance(d_pnl, (int, float)) and isinstance(_book, (int, float)) and _book
+            else None
+        )
+        analysis_deltas = {
+            **deltas,
+            "pnl_norm": pnl_norm,
+            "recent_yearly_sharpe": recent_yearly_sharpe_delta(payload.get("yearlyStats")),
+        }
+        analysis = analyze_marginal_contribution(
+            analysis_deltas, merged=after, baseline=before
+        )
 
         return {
             "alpha_pk": alpha_pk,
