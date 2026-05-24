@@ -44,9 +44,7 @@ from backend.agents.prompts.hypothesis import (
 # Validation prompts
 from backend.agents.prompts.validation import (
     SELF_CORRECT_SYSTEM,
-    OPTIMIZATION_SYSTEM,
     build_self_correct_prompt,
-    build_optimization_prompt,
 )
 
 # Analysis prompts
@@ -107,9 +105,7 @@ __all__ = [
     "build_distill_prompt",
     # Validation
     "SELF_CORRECT_SYSTEM",
-    "OPTIMIZATION_SYSTEM",
     "build_self_correct_prompt",
-    "build_optimization_prompt",
     # Analysis
     "ROUND_ANALYSIS_SYSTEM",
     "FAILURE_ANALYSIS_SYSTEM",
