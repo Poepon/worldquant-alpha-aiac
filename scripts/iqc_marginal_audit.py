@@ -1,18 +1,21 @@
 """Batch IQC marginal-contribution audit.
 
 Calls BRAIN before-and-after-performance for every can_submit=True alpha
-in the DB (default scope: IQC2026S1 competition), records standalone-vs-merged
-stats deltas, sorts by Δsharpe descending. Output: docs/iqc_audit/audit_<date>.md
-+ JSON dump.
+in the DB, records standalone-vs-merged stats deltas, sorts by Δsharpe
+descending. Output: docs/iqc_audit/audit_<date>.md + JSON dump.
+
+Scope: pass --competition or --team. When neither is given the configured
+default scope is used (settings.iqc_audit_scope() → team deLkl06 after BRAIN
+deleted the IQC2026S1 competition on 2026-05-24).
 
 NOTE (2026-05-24): BRAIN removed the competition `score` from this endpoint, so
 the audit ranks by Δsharpe (marginal sharpe contribution to the merged portfolio)
 instead of the retired Δscore.
 
 Usage:
-  venv/Scripts/python.exe scripts/iqc_marginal_audit.py
-  venv/Scripts/python.exe scripts/iqc_marginal_audit.py --competition IQC2026S1
-  venv/Scripts/python.exe scripts/iqc_marginal_audit.py --limit 10  # test on 10
+  venv/Scripts/python.exe scripts/iqc_marginal_audit.py              # default scope
+  venv/Scripts/python.exe scripts/iqc_marginal_audit.py --team deLkl06
+  venv/Scripts/python.exe scripts/iqc_marginal_audit.py --limit 10   # test on 10
 """
 from __future__ import annotations
 
@@ -33,8 +36,22 @@ from backend.models import Alpha
 from backend.services.alpha_service import AlphaService
 
 
-async def main(competition: str | None, limit: int | None) -> None:
-    print(f"=== IQC marginal-contribution audit (competition={competition}) ===\n")
+async def main(competition: str | None, team_id: str | None, limit: int | None) -> None:
+    # Normalize empty/whitespace flags to None so `--competition ""` also falls
+    # back to the default scope instead of reaching the adapter as a "" scope.
+    competition = (competition or "").strip() or None
+    team_id = (team_id or "").strip() or None
+    # Fall back to the configured default scope when neither flag is given —
+    # single source of truth, no hard-coded competition/team in the script.
+    if competition is None and team_id is None:
+        from backend.config import settings
+        competition, team_id = settings.iqc_audit_scope()
+    # Canonical scope label matching the service's result["scope"] convention.
+    scope_label = (
+        f"competitions/{competition}" if competition
+        else (f"teams/{team_id}" if team_id else "users/self")
+    )
+    print(f"=== IQC marginal-contribution audit (scope={scope_label}) ===\n")
 
     async with AsyncSessionLocal() as db:
         stmt = (
@@ -59,6 +76,7 @@ async def main(competition: str | None, limit: int | None) -> None:
                     r = await svc.get_marginal_contribution(
                         alpha_pk=alpha.id,
                         competition=competition,
+                        team_id=team_id,
                         brain_adapter=brain,
                     )
                 except Exception as e:
@@ -110,13 +128,13 @@ async def main(competition: str | None, limit: int | None) -> None:
     docs_dir.mkdir(parents=True, exist_ok=True)
 
     json_path = docs_dir / f"audit_{today}.json"
-    json_path.write_text(json.dumps({"competition": competition, "results": results, "failures": failures}, indent=2), encoding="utf-8")
+    json_path.write_text(json.dumps({"scope": scope_label, "results": results, "failures": failures}, indent=2), encoding="utf-8")
 
     md_path = docs_dir / f"audit_{today}.md"
     lines = [
         f"# IQC marginal-contribution audit — {today}",
         "",
-        f"**Competition**: `{competition or 'users/self'}`",
+        f"**Scope**: `{scope_label}`",
         f"**Audited alphas (can_submit=True, unsubmitted)**: {len(alphas)}",
         f"**Successfully fetched**: {len(results)}",
         f"**Failures**: {len(failures)}",
@@ -192,7 +210,15 @@ async def main(competition: str | None, limit: int | None) -> None:
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--competition", default="IQC2026S1")
+    ap.add_argument(
+        "--competition", default=None,
+        help="Competition id (takes precedence over --team). Default: none.",
+    )
+    ap.add_argument(
+        "--team", default=None,
+        help="Team id for team-scoped audit (e.g. deLkl06). When both --competition "
+             "and --team are omitted, the configured default scope is used.",
+    )
     ap.add_argument("--limit", type=int, default=None)
     args = ap.parse_args()
-    asyncio.run(main(args.competition, args.limit))
+    asyncio.run(main(args.competition, args.team, args.limit))

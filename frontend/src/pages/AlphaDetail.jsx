@@ -566,7 +566,9 @@ function LineageSection({ alphaId }) {
 
   // IQC marginal contribution — lazy fetch (BRAIN poll can be slow)
   const [marginalEnabled, setMarginalEnabled] = useState(false)
-  const [marginalCompetition, setMarginalCompetition] = useState('IQC2026S1')
+  // Empty → backend falls back to its configured default scope (team deLkl06
+  // after IQC2026S1 was deleted 2026-05-24). Type a competition id here to override.
+  const [marginalCompetition, setMarginalCompetition] = useState('')
   const {
     data: marginal,
     isLoading: marginalLoading,
@@ -630,7 +632,7 @@ function LineageSection({ alphaId }) {
                 />
                 <Space style={{ marginBottom: 16 }}>
                   <Input
-                    placeholder="competition ID (空=个人组合)"
+                    placeholder="competition ID（空=默认 team 范围 deLkl06）"
                     value={marginalCompetition}
                     onChange={(e) => setMarginalCompetition(e.target.value)}
                     style={{ width: 200 }}

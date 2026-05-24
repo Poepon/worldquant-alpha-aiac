@@ -7,7 +7,7 @@ import os
 import json
 import logging
 from pydantic_settings import BaseSettings
-from typing import Any, Optional, Dict
+from typing import Any, Optional, Dict, Tuple
 
 _config_logger = logging.getLogger(__name__)
 
@@ -902,12 +902,37 @@ class Settings(BaseSettings):
     # 2 = typed Hypothesis + lifecycle (Phase 2, 9-12 day)
     # 3 = main-loop invert (Phase 3, deferred to Q3 re-evaluation)
     # V-22.12 (2026-05-13): when a can_submit refresh flips True, automatically
-    # call BRAIN /competitions/{comp}/before-and-after-performance and stash
-    # the deltas in alpha.metrics._iqc_marginal. Empty string disables the
-    # auto-audit. The marginal signal is the standalone-vs-merged stats deltas
-    # (sharpe/fitness/turnover/...). NOTE (2026-05-24): BRAIN removed the
-    # competition `score` field, so delta_score is no longer available/stored.
-    IQC_AUTO_AUDIT_COMPETITION: str = "IQC2026S1"
+    # call BRAIN /{scope}/alphas/{id}/before-and-after-performance and stash the
+    # deltas in alpha.metrics._iqc_marginal. The marginal signal is the
+    # standalone-vs-merged stats deltas (sharpe/fitness/turnover/...). NOTE
+    # (2026-05-24): BRAIN removed the competition `score` field, so delta_score
+    # is no longer available/stored.
+    #
+    # Scope migration (2026-05-24): BRAIN deleted the IQC2026S1 competition, so
+    # its per-competition endpoint is gone. The auto-audit now runs against the
+    # team scope (deLkl06) by default. Use `iqc_audit_scope()` — the single
+    # source of truth — to resolve the active (competition, team_id): competition
+    # wins when non-empty (set it to revive a future live competition), else the
+    # team scope; both empty disables the audit entirely.
+    IQC_AUTO_AUDIT_COMPETITION: str = ""        # non-empty → overrides the team scope
+    IQC_AUTO_AUDIT_TEAM: str = "deLkl06"        # standing scope after IQC2026S1 was deleted
+
+    def iqc_audit_scope(self) -> Tuple[Optional[str], Optional[str]]:
+        """Resolve the active IQC marginal-audit scope as (competition, team_id).
+
+        Competition wins when set (a live competition still ranks teams by the
+        merged score); otherwise the team scope is used. Both empty → the
+        auto-audit is disabled and callers treat (None, None) as "skip". Keeps
+        the BRAIN before-and-after scope in one place so callers stop hard-coding
+        the deleted IQC2026S1 competition.
+        """
+        comp = (self.IQC_AUTO_AUDIT_COMPETITION or "").strip()
+        if comp:
+            return comp, None
+        team = (self.IQC_AUTO_AUDIT_TEAM or "").strip()
+        if team:
+            return None, team
+        return None, None
 
     HYPOTHESIS_CENTRIC_LEVEL: int = 0
     # V-22.11 (2026-05-13): Phase 2 A/B activation. CANDIDATE=2 enables 50/50

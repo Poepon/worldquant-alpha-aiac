@@ -109,15 +109,18 @@ class TestMarginalContribution:
     async def test_returns_payload_with_deltas(self, pg_session, test_alpha):
         svc = AlphaService(pg_session)
         mock = MockBrainAdapter()
+        # 2026-05-24: IQC2026S1 competition was deleted; the standing scope is
+        # team deLkl06. Drive the comprehensive payload assertions through the
+        # team scope.
         result = await svc.get_marginal_contribution(
             alpha_pk=test_alpha.id,
-            competition="IQC2026S1",
+            team_id="deLkl06",
             brain_adapter=mock,
         )
         assert result is not None
         assert result["alpha_pk"] == test_alpha.id
         assert result["alpha_brain_id"] == test_alpha.alpha_id
-        assert result["scope"] == "competitions/IQC2026S1"
+        assert result["scope"] == "teams/deLkl06"
 
         deltas = result["deltas"]
         # MockBrainAdapter: before sharpe=3.19, after=3.16 → -0.03
@@ -159,6 +162,27 @@ class TestMarginalContribution:
         )
         assert result is not None
         assert result["scope"] == "users/self"
+
+    @pytest.mark.asyncio
+    async def test_response_model_preserves_analysis(self, pg_session, test_alpha):
+        """Regression: MarginalContributionResponse must keep `analysis` +
+        `partition_name`. The service returns them, but a response_model that
+        omits them makes Pydantic silently drop them on serialization → the
+        AlphaDetail recommendation card (reads `analysis.*`) never renders.
+        """
+        from backend.routers.alphas import MarginalContributionResponse
+
+        svc = AlphaService(pg_session)
+        mock = MockBrainAdapter()
+        result = await svc.get_marginal_contribution(
+            alpha_pk=test_alpha.id, team_id="deLkl06", brain_adapter=mock,
+        )
+        assert result is not None
+        dumped = MarginalContributionResponse(**result).model_dump()
+        # The whole recommendation card hangs off these — they must survive.
+        assert dumped.get("analysis") is not None
+        assert dumped["analysis"]["recommendation"] == "SUBMIT"
+        assert dumped["partition_name"] == "EQUITY:USA:1"
 
     @pytest.mark.asyncio
     async def test_scope_team_id(self, pg_session, test_alpha):

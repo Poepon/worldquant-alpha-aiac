@@ -315,7 +315,13 @@ class MarginalContributionResponse(BaseModel):
     alpha_pk: int
     alpha_brain_id: str
     scope: str
+    # partition_name + analysis are produced by the service and consumed by the
+    # AlphaDetail marginal card (the SUBMIT/NEUTRAL/SKIP recommendation Alert
+    # reads `analysis.*`). They MUST be declared here or Pydantic's response_model
+    # serialization silently drops them and the card never renders.
+    partition_name: Optional[str] = None
     deltas: MarginalContributionDelta
+    analysis: Optional[dict] = None
     raw: dict
     message: Optional[str] = None
 
@@ -328,8 +334,10 @@ async def get_alpha_marginal_contribution(
     alpha_id: int,
     competition: Optional[str] = Query(
         None,
-        description="Competition ID (e.g. IQC2026S1). Mutually exclusive with team_id; "
-                    "when both omitted, BRAIN returns the user's personal portfolio delta.",
+        description="Competition ID. Mutually exclusive with team_id. When both "
+                    "are omitted the configured default scope is used "
+                    "(settings.iqc_audit_scope() → team deLkl06 after IQC2026S1 "
+                    "was deleted 2026-05-24).",
     ),
     team_id: Optional[str] = Query(
         None, description="Team ID for team-scoped comparison."
@@ -338,16 +346,33 @@ async def get_alpha_marginal_contribution(
 ):
     """Fetch BRAIN marginal performance (standalone vs merged) for an alpha.
 
-    IQC submission workflow: competition leaderboard ranks teams by the
-    MERGED score (after-merge), not by the standalone IS sharpe each alpha
-    shows in the alphas table. This endpoint surfaces that delta so the user
-    can pick which can_submit alphas actually help team score before sending
-    them to the submission queue.
+    IQC submission workflow: the leaderboard ranks teams by the MERGED score
+    (after-merge), not by the standalone IS sharpe each alpha shows in the
+    alphas table. This endpoint surfaces that delta so the user can pick which
+    can_submit alphas actually help team score before sending them to the
+    submission queue.
+
+    Scope resolution: an explicit `competition` / `team_id` query param wins.
+    When neither is supplied we fall back to the configured default scope
+    (`settings.iqc_audit_scope()`) so the frontend defaults to the team scope
+    without hard-coding it. If that is also unset, the service defaults to the
+    user's personal portfolio (users/self).
 
     Performance: BRAIN computes the comparison asynchronously and may serve
     Retry-After while computing; the adapter polls up to 30× internally.
     Typical first call ~5-20s, subsequent calls ~1-3s (BRAIN-side cache).
     """
+    # Normalize empty/whitespace query params to None — FastAPI binds a bare
+    # `?competition=` to "" (not None), which would skip the fallback below and
+    # reach the adapter as a "" scope (→ malformed `competitions/` URL). An
+    # explicit non-empty param is still honored as-is so the UI can override.
+    competition = (competition or "").strip() or None
+    team_id = (team_id or "").strip() or None
+    # Fall back to the configured default scope only when the caller specified
+    # neither.
+    if competition is None and team_id is None:
+        from backend.config import settings as _cfg
+        competition, team_id = _cfg.iqc_audit_scope()
     result = await service.get_marginal_contribution(
         alpha_id, competition=competition, team_id=team_id,
     )
@@ -579,7 +604,7 @@ async def refresh_can_submit_batch(
 
 class IqcRefreshResponse(BaseModel):
     enqueued: int
-    competition: str
+    scope: str          # resolved BRAIN scope label, e.g. "teams/deLkl06"
     message: str
 
 
@@ -607,7 +632,19 @@ async def refresh_iqc_batch(
     from backend.models import Alpha
     from backend.tasks.refresh_tasks import audit_iqc_marginal_for_alpha
 
-    competition = settings.IQC_AUTO_AUDIT_COMPETITION or "IQC2026S1"
+    # Resolve the BRAIN scope from config (competition wins, else team) — no more
+    # hard-coded IQC2026S1 fallback (that competition was deleted 2026-05-24).
+    competition, team_id = settings.iqc_audit_scope()
+    if not (competition or team_id):
+        raise HTTPException(
+            status_code=400,
+            detail="IQC audit scope unset (IQC_AUTO_AUDIT_COMPETITION + "
+                   "IQC_AUTO_AUDIT_TEAM both empty).",
+        )
+    # Canonical scope label, matching the service's result["scope"] convention
+    # (competitions/{c} | teams/{t}) so the API response, logs, and persisted
+    # _iqc_marginal["scope"] all agree. At least one is set (guarded above).
+    scope_label = f"competitions/{competition}" if competition else f"teams/{team_id}"
 
     q = _select(Alpha.id).where(
         Alpha.can_submit.is_(True),
@@ -624,7 +661,9 @@ async def refresh_iqc_batch(
     for i, aid in enumerate(ids):
         try:
             audit_iqc_marginal_for_alpha.apply_async(
-                args=[aid, competition], countdown=i * 2,
+                args=[aid],
+                kwargs={"competition": competition, "team_id": team_id},
+                countdown=i * 2,
             )
             enqueued += 1
             last_countdown = i * 2
@@ -634,9 +673,9 @@ async def refresh_iqc_batch(
     eta = last_countdown
     return IqcRefreshResponse(
         enqueued=enqueued,
-        competition=competition,
+        scope=scope_label,
         message=(
             f"已触发 {enqueued} 个 IQC 审计（错开排队，约 {eta}s 内完成）；"
-            f"稍后刷新表格查看更新后的 Δscore"
+            f"稍后刷新表格查看更新后的 Δsharpe"
         ),
     )

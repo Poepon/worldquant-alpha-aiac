@@ -382,14 +382,13 @@ async def _refresh_can_submit_async(alpha_pk: int) -> Dict:
         # never blocks the refresh result.
         if result.get("can_submit") is True:
             try:
-                competition = getattr(
-                    __import__("backend.config", fromlist=["settings"]).settings,
-                    "IQC_AUTO_AUDIT_COMPETITION",
-                    "IQC2026S1",
-                )
-                if competition:
+                from backend.config import settings as _cfg
+                competition, team_id = _cfg.iqc_audit_scope()
+                if competition or team_id:
                     audit_iqc_marginal_for_alpha.apply_async(
-                        args=[alpha_pk, competition], countdown=5,
+                        args=[alpha_pk],
+                        kwargs={"competition": competition, "team_id": team_id},
+                        countdown=5,
                     )
             except Exception as e:
                 logger.warning(
@@ -473,26 +472,42 @@ async def _refresh_can_submit_async(alpha_pk: int) -> Dict:
 # ---------------------------------------------------------------------------
 
 @celery_app.task(name="backend.tasks.audit_iqc_marginal_for_alpha")
-def audit_iqc_marginal_for_alpha(alpha_pk: int, competition: str = "IQC2026S1") -> Dict:
+def audit_iqc_marginal_for_alpha(
+    alpha_pk: int,
+    competition: str | None = None,
+    team_id: str | None = None,
+) -> Dict:
     """Auto-triggered after can_submit refresh flips True.
 
-    Calls BRAIN /competitions/{competition}/alphas/{alpha_id}/before-and-after
-    -performance and stores the resulting Δsharpe / Δfitness / Δturnover into
+    Calls BRAIN /{scope}/alphas/{alpha_id}/before-and-after-performance and
+    stores the resulting Δsharpe / Δfitness / Δturnover into
     alpha.metrics._iqc_marginal. Doesn't change submission state — the user
     still decides; this just surfaces the team-impact signal.
+
+    Scope: pass `competition` (a live competition) or `team_id`; the service
+    resolves the BRAIN scope. 2026-05-24 — IQC2026S1 was deleted, so callers
+    pass team_id="deLkl06" via `settings.iqc_audit_scope()`. Both None → the
+    audit runs against the user's personal portfolio (users/self).
 
     2026-05-24: BRAIN removed the competition `score` from this endpoint, so
     delta_score is no longer stored (it was always advisory and the dataset
     bandit already moved off it to binary can_submit). The standalone-vs-merged
     stats deltas + merged sharpe/fitness remain the team-impact signal.
 
+    Callers MUST enqueue with kwargs (apply_async(args=[pk], kwargs={...})) so
+    the positional `team_id` never lands in the `competition` slot.
+
     Idempotent: re-runs overwrite the metric. Failure is silent (logged at
     warning level) — IQC audit is a nice-to-have, not blocking.
     """
-    return run_async(_audit_iqc_marginal_async(alpha_pk, competition))
+    return run_async(_audit_iqc_marginal_async(alpha_pk, competition, team_id))
 
 
-async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
+async def _audit_iqc_marginal_async(
+    alpha_pk: int,
+    competition: str | None = None,
+    team_id: str | None = None,
+) -> Dict:
     from datetime import datetime, timezone
     from sqlalchemy import update
     from backend.adapters.brain_adapter import BrainAdapter
@@ -507,6 +522,7 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
                 result = await svc.get_marginal_contribution(
                     alpha_pk=alpha_pk,
                     competition=competition,
+                    team_id=team_id,
                     brain_adapter=brain,
                 )
                 if result is None:
@@ -522,7 +538,10 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
             analysis = result.get("analysis") or {}
             new_metrics = dict(alpha.metrics or {})
             new_metrics["_iqc_marginal"] = {
-                "competition": competition,
+                # Resolved BRAIN scope (e.g. "teams/deLkl06" / "users/self" /
+                # "competitions/<id>"). Replaces the old `competition` key
+                # (2026-05-24 scope migration — IQC2026S1 was deleted).
+                "scope": result.get("scope"),
                 "audited_at": datetime.now(timezone.utc).isoformat(),
                 # delta_score dropped 2026-05-24 (BRAIN removed `score` from the
                 # before-and-after endpoint). partition_name is the new label.
@@ -558,7 +577,7 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
                 pass
             return {
                 "alpha_pk": alpha_pk,
-                "competition": competition,
+                "scope": result.get("scope"),
                 "delta_sharpe": deltas.get("sharpe"),
                 "delta_fitness": deltas.get("fitness"),
             }
@@ -634,9 +653,9 @@ async def _iqc_audit_backfill_sweep_async() -> Dict:
     from backend.config import settings
     from backend.database import AsyncSessionLocal
 
-    competition = getattr(settings, "IQC_AUTO_AUDIT_COMPETITION", "IQC2026S1")
-    if not competition:
-        return {"skipped": True, "reason": "IQC_AUTO_AUDIT_COMPETITION empty"}
+    competition, team_id = settings.iqc_audit_scope()
+    if not (competition or team_id):
+        return {"skipped": True, "reason": "IQC audit scope unset (competition + team empty)"}
 
     enqueued = 0
     async with AsyncSessionLocal() as db:
@@ -702,19 +721,25 @@ async def _iqc_audit_backfill_sweep_async() -> Dict:
             continue
         try:
             audit_iqc_marginal_for_alpha.apply_async(
-                args=[pk, competition], countdown=countdown_sec,
+                args=[pk],
+                kwargs={"competition": competition, "team_id": team_id},
+                countdown=countdown_sec,
             )
             enqueued += 1
         except Exception as e:
             logger.warning(
                 f"[iqc_audit_backfill_sweep] enqueue failed for alpha_pk={pk}: {e}"
             )
+    # Canonical scope label (competitions/{c} | teams/{t}) — matches the
+    # service's result["scope"] and the persisted _iqc_marginal["scope"].
+    _scope_label = f"competitions/{competition}" if competition else f"teams/{team_id}"
     logger.info(
         f"[iqc_audit_backfill_sweep] enqueued={enqueued} "
-        f"skipped_inflight={skipped_inflight} competition={competition}"
+        f"skipped_inflight={skipped_inflight} scope={_scope_label}"
     )
     return {
         "enqueued": enqueued,
         "skipped_inflight": skipped_inflight,
         "competition": competition,
+        "team_id": team_id,
     }
