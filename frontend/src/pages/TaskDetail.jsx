@@ -712,7 +712,44 @@ export default function TaskDetail() {
                                     ))}
                                  </div>
                                )}
-                               
+
+                               {/* SELF_CORRECT: show original → corrected expression for each fix */}
+                               {step.step_type === 'SELF_CORRECT' && (
+                                 <div style={{ marginTop: 8 }}>
+                                   <Tag color={step.output_data?.fixed_count > 0 ? 'green' : 'default'}>
+                                     修正 {step.output_data?.fixed_count ?? 0} / {step.input_data?.fix_targets ?? 0}
+                                   </Tag>
+                                   {(step.output_data?.corrections || []).length === 0 ? (
+                                     <Text type="secondary" style={{ fontSize: 11, display: 'block', marginTop: 4 }}>
+                                       本步无成功修正
+                                     </Text>
+                                   ) : (
+                                     step.output_data.corrections.map((c, i) => (
+                                       <div key={i} style={{ marginTop: 6 }}>
+                                         {c.error && (
+                                           <Text type="secondary" style={{ fontSize: 10, display: 'block' }}>
+                                             错误: {c.error}
+                                           </Text>
+                                         )}
+                                         <pre style={{
+                                           fontSize: 11, background: '#2a1717', color: '#ff9c9c',
+                                           padding: 4, borderRadius: 4, margin: '2px 0', overflowX: 'auto',
+                                         }}>− {c.original}</pre>
+                                         <pre style={{
+                                           fontSize: 11, background: '#172a17', color: '#9cff9c',
+                                           padding: 4, borderRadius: 4, margin: '2px 0', overflowX: 'auto',
+                                         }}>+ {c.fixed}</pre>
+                                         {c.changes && (
+                                           <Text type="secondary" style={{ fontSize: 10, display: 'block' }}>
+                                             改动: {c.changes}
+                                           </Text>
+                                         )}
+                                       </div>
+                                     ))
+                                   )}
+                                 </div>
+                               )}
+
                                {/* VALIDATE: syntax/semantic check counts + warnings + failure details */}
                                {step.step_type === 'VALIDATE' && step.output_data && (
                                  <div style={{ marginTop: 8 }}>
