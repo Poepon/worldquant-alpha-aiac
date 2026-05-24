@@ -125,18 +125,23 @@ class TestNodeEvaluateRegime:
 
     @pytest.mark.asyncio
     async def test_regime_threshold_adjust_only_when_flag(self):
-        """E1: alpha sharpe=0.95 under T1 (base sharpe_min=1.25,
-        PROV sharpe_min=0.80), regime='crisis' (PASS×0.70=0.875,
-        PROV×0.70=0.56).
+        """E1: a borderline alpha (sharpe=0.95) sits just below the PROVISIONAL
+        sharpe bar with no regime, but the crisis multiplier (×0.70) relaxes the
+        bars enough that it clears PROVISIONAL.
 
-        - flag=False → quality_status='PASS_PROVISIONAL' (PASS bar=1.25
-          fails BUT PROV bar=0.80 passes; sharpe=0.95 is in [0.80, 1.25)).
-        - flag=True  → quality_status='PASS' or stronger (PASS bar drops
-          to 0.875, sharpe=0.95>0.875).
+        The invariant is config-ROBUST and intentionally avoids hardcoding an
+        absolute band (the prior version asserted PASS, which silently broke when
+        EVAL_SHARPE_MIN moved 1.25→1.5): with the current config
+        (EVAL_SHARPE_MIN=1.5, EVAL_PROVISIONAL_SHARPE_MIN=1.25) sharpe=0.95 is
+        below the provisional bar 1.25 → flag-OFF lands at OPTIMIZE/FAIL; the
+        crisis ×0.70 drops the provisional bar to 0.875 → flag-ON reaches
+        PASS_PROVISIONAL.
 
-        The decisive comparison is **flag-on quality MUST be at least as
-        strong as flag-off quality** (PASS > PASS_PROVISIONAL > OPTIMIZE
-        > FAIL), proving the multipliers flipped the gate verdict.
+        The decisive checks are therefore (a) flag-ON verdict is STRICTLY
+        stronger than flag-OFF (PASS > PASS_PROVISIONAL > OPTIMIZE > FAIL),
+        proving the multipliers flipped the gate, and (b) flag-ON reaches at
+        least PASS_PROVISIONAL (the alpha entered the pass pool). Neither pins an
+        exact band, so this survives future threshold-config moves.
         """
         from backend.config import settings
 
@@ -163,7 +168,7 @@ class TestNodeEvaluateRegime:
         original_enabled = settings.ENABLE_REGIME
         original_stage = settings.REGIME_STAGE
 
-        # ---- flag OFF: PASS bar=1.25 → not PASS, but PROV bar=0.80 → PROV ----
+        # ---- flag OFF: sharpe=0.95 below the provisional bar → not in pass pool ----
         settings.ENABLE_REGIME = False
         try:
             out_off = await node_evaluate(state_off, brain=None, config=cfg)
@@ -171,13 +176,13 @@ class TestNodeEvaluateRegime:
             settings.ENABLE_REGIME = original_enabled
             settings.REGIME_STAGE = original_stage
         alpha_off = out_off["pending_alphas"][0]
-        # flag=OFF should NOT land at PASS (sharpe<1.25)
-        assert alpha_off.quality_status != "PASS", (
-            f"flag=OFF: expected NOT-PASS with sharpe=0.95<1.25, got "
+        # flag=OFF must not reach the pass pool (sharpe below provisional bar)
+        assert alpha_off.quality_status not in ("PASS", "PASS_PROVISIONAL"), (
+            f"flag=OFF: expected below-provisional with sharpe=0.95, got "
             f"{alpha_off.quality_status}"
         )
 
-        # ---- flag ON: PASS bar drops to 0.875 → sharpe=0.95 can reach PASS ----
+        # ---- flag ON: crisis ×0.70 relaxes the provisional bar → reaches pass pool ----
         settings.ENABLE_REGIME = True
         settings.REGIME_STAGE = "thresholds"
         try:
@@ -187,18 +192,18 @@ class TestNodeEvaluateRegime:
             settings.REGIME_STAGE = original_stage
         alpha_on = out_on["pending_alphas"][0]
 
-        # The DECISIVE assertion: flag=ON quality must be >= flag=OFF
-        # quality. With sharpe=0.95 above the relaxed PASS bar=0.875 the
-        # alpha should land at PASS (4) while flag=OFF lands at most
-        # PASS_PROVISIONAL (3) since sharpe<1.25.
+        # DECISIVE (config-robust): flag=ON verdict is STRICTLY stronger than
+        # flag=OFF, AND flag=ON reaches at least PASS_PROVISIONAL — proving the
+        # multipliers relaxed the gate. We deliberately do NOT assert an exact
+        # band (that coupling to EVAL_SHARPE_MIN is what broke the old version).
         rank_off = _STATUS_ORDER.get(alpha_off.quality_status, 0)
         rank_on = _STATUS_ORDER.get(alpha_on.quality_status, 0)
         assert rank_on > rank_off, (
             f"P2-C threshold flip didn't improve verdict: "
             f"off={alpha_off.quality_status} on={alpha_on.quality_status}"
         )
-        assert alpha_on.quality_status == "PASS", (
-            f"flag=ON: expected PASS with sharpe=0.95>0.875, got "
+        assert rank_on >= _STATUS_ORDER["PASS_PROVISIONAL"], (
+            f"flag=ON: expected at least PASS_PROVISIONAL, got "
             f"{alpha_on.quality_status}"
         )
 
