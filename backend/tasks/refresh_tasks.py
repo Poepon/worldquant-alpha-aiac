@@ -519,6 +519,7 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
 
             deltas = result.get("deltas") or {}
             stats = (result.get("raw") or {}).get("stats") or {}
+            analysis = result.get("analysis") or {}
             new_metrics = dict(alpha.metrics or {})
             new_metrics["_iqc_marginal"] = {
                 "competition": competition,
@@ -533,6 +534,11 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
                 "delta_pnl": deltas.get("pnl"),
                 "merged_sharpe": (stats.get("after") or {}).get("sharpe"),
                 "merged_fitness": (stats.get("after") or {}).get("fitness"),
+                # Multi-dimensional verdict (3rd review): persist so the "可提交"
+                # list + bandit can sort/flag by it without re-hitting BRAIN.
+                "recommendation": analysis.get("recommendation"),
+                "composite_score": analysis.get("composite_score"),
+                "guardrails": analysis.get("guardrails"),
                 # V-23.E: explicit fresh-after-audit flag (default false).
                 # sync_user_alphas flips this to true on submission flip;
                 # sweep prioritises stale=true to refresh first.

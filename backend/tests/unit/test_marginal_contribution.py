@@ -144,7 +144,7 @@ class TestMarginalContribution:
         assert analysis["composite_score"] > 0
         assert analysis["signals"]["sharpe"] == -1
         assert "sharpe" in {n["metric"] for n in analysis["negatives"]}
-        assert {p["metric"] for p in analysis["positives"]} >= {"returns", "pnl_norm"}
+        assert {p["metric"] for p in analysis["positives"]} >= {"returns", "margin"}
 
     @pytest.mark.asyncio
     async def test_scope_defaults_to_users_self(self, pg_session, test_alpha):

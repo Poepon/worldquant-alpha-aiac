@@ -1,15 +1,13 @@
 """Unit tests for analyze_marginal_contribution (multi-dimensional, 2026-05-24).
 
-The recommendation is a weighted scorecard across return + risk + robustness
-dimensions (positive AND negative), NOT a Sharpe-only gate: adding an alpha to a
-mature high-sharpe portfolio almost always dilutes Δsharpe, so a Sharpe-led rule
-SKIPs nearly everything. These tests pin the multi-dim behaviour: a diversifier
-that lifts returns/margin/pnl + lowers drawdown is not blanket-SKIPped, positive
-Sharpe cannot override severe risk/cost deterioration, and the yearly-decay /
-cost-erosion / return-dilution guardrails cap the verdict.
+The recommendation is a weighted scorecard across return + risk dimensions
+(positive AND negative), NOT a Sharpe-only gate. Scales are calibrated from the
+live |Δ| distribution; pnl_norm was dropped (collinear with returns) and
+recent_yearly_sharpe is display+guardrail only (weight 0, collinear with sharpe).
+These tests pin: a diversifier that lifts returns/margin + lowers drawdown is not
+blanket-SKIPped, positive Sharpe cannot override severe risk/cost, guardrails only
+DOWNGRADE (never upgrade), and neutral dims abstain from the composite.
 """
-import math
-
 import pytest
 
 from backend.marginal_analysis import (
@@ -23,25 +21,22 @@ def _rec(deltas, **kw):
 
 
 def test_good_diversifier_submits_despite_negative_sharpe():
-    """Δsharpe slightly negative (dilution) but returns/margin/pnl up + drawdown
-    down → multi-dim should SUBMIT (the core fix vs the old Sharpe-led SKIP)."""
+    """Δsharpe slightly negative (dilution) but returns/margin up + drawdown down
+    → multi-dim SUBMIT (the core fix vs the old Sharpe-led SKIP)."""
     a = _rec({
         "sharpe": -0.03, "fitness": 0.02, "returns": 0.013, "margin": 0.0003,
-        "pnl_norm": 0.03, "drawdown": -0.003, "turnover": 0.004,
+        "drawdown": -0.003, "turnover": 0.004,
     }, merged={"sharpe": 3.16})
     assert a["recommendation"] == "SUBMIT"
     assert a["composite_score"] > 0
-    pos_metrics = {p["metric"] for p in a["positives"]}
-    neg_metrics = {n["metric"] for n in a["negatives"]}
-    assert "returns" in pos_metrics and "pnl_norm" in pos_metrics
-    assert "sharpe" in neg_metrics  # surfaced as a negative, not hidden
+    assert "sharpe" in {n["metric"] for n in a["negatives"]}  # surfaced, not hidden
+    assert "returns" in {p["metric"] for p in a["positives"]}
 
 
 def test_all_negative_skips():
-    """Drags the portfolio across the board → SKIP."""
     a = _rec({
         "sharpe": -0.05, "fitness": -0.04, "returns": -0.02, "margin": -0.0005,
-        "pnl_norm": -0.03, "drawdown": 0.004, "turnover": 0.03,
+        "drawdown": 0.004, "turnover": 0.03,
     })
     assert a["recommendation"] == "SKIP"
     assert a["composite_score"] < 0
@@ -58,37 +53,62 @@ def test_positive_sharpe_cannot_override_severe_risk_blowup():
     assert any("风险" in g or "成本" in g for g in a["guardrails"])
 
 
-def test_return_dilution_guardrail_forces_skip():
-    a = _rec({
-        "sharpe": 0.05, "returns": -0.02, "pnl_norm": -0.03,
-    })
+def test_routine_turnover_increase_does_not_trip_risk_guardrail():
+    """Calibration regression: a median-ish +0.02 turnover increase must NOT trip
+    the 'severe cost' guardrail (the old -0.7/scale-0.03 fired at the median)."""
+    a = _rec({"sharpe": 0.10, "returns": 0.003, "turnover": 0.022, "drawdown": -0.002})
+    assert not any("风险" in g or "成本" in g for g in a["guardrails"])
+    assert a["recommendation"] == "SUBMIT"
+
+
+def test_return_dilution_flags_and_caps():
+    """Strong return dilution raises the guardrail. When the composite is already
+    negative → SKIP (composite-driven). When other dims keep the composite
+    positive, the guardrail caps it to NEUTRAL (never auto-SUBMIT a money-diluter,
+    but don't hard-SKIP an alpha that lifts other dimensions)."""
+    a = _rec({"sharpe": 0.05, "returns": -0.02})  # composite negative → SKIP
     assert a["recommendation"] == "SKIP"
     assert any("收益" in g for g in a["guardrails"])
+    # strong +sharpe + lower drawdown keep composite positive, but return dilution
+    # caps the verdict to NEUTRAL rather than SUBMIT
+    b = _rec({"sharpe": 0.12, "drawdown": -0.006, "returns": -0.006})
+    assert b["composite_score"] > 0
+    assert b["recommendation"] == "NEUTRAL"
+    assert any("收益" in g for g in b["guardrails"])
 
 
 def test_recent_yearly_decay_caps_to_neutral():
-    """Overall positives but recent-year marginal sharpe decaying → cannot SUBMIT."""
-    a = _rec({
-        "sharpe": 0.04, "returns": 0.02, "pnl_norm": 0.03,
-        "recent_yearly_sharpe": -0.08,
-    })
+    """Overall positives but recent-year marginal sharpe decaying → cannot SUBMIT.
+    recent_yearly is weight 0 (abstains from composite) yet drives the guardrail."""
+    a = _rec({"sharpe": 0.04, "returns": 0.02, "recent_yearly_sharpe": -0.08})
     assert a["recommendation"] != "SUBMIT"
     assert any("衰减" in g for g in a["guardrails"])
 
 
+def test_guardrail_never_upgrades():
+    """Guardrails only DOWNGRADE: a base-SKIP alpha + a NEUTRAL-cap guardrail
+    (yearly decay) must stay SKIP, not rise to NEUTRAL."""
+    a = _rec({"sharpe": -0.05, "returns": -0.02, "recent_yearly_sharpe": -0.08})
+    assert a["recommendation"] == "SKIP"
+
+
+def test_neutral_dim_abstains_from_composite():
+    """A dim with |normalized| below the noise floor must not change the composite
+    (it neither drags nor lifts — it abstains)."""
+    base = _rec({"sharpe": 0.05, "returns": 0.02})
+    with_neutral = _rec({"sharpe": 0.05, "returns": 0.02, "fitness": 0.005})
+    assert with_neutral["composite_score"] == base["composite_score"]
+    assert "fitness" in {n["metric"] for n in with_neutral["neutrals"]}
+
+
 def test_scorecard_splits_positive_and_negative():
-    a = _rec({
-        "sharpe": -0.03, "returns": 0.02, "drawdown": -0.003, "turnover": 0.05,
-    })
-    assert isinstance(a["positives"], list) and isinstance(a["negatives"], list)
-    # returns/drawdown improve → positive; sharpe/turnover worsen → negative
+    a = _rec({"sharpe": -0.03, "returns": 0.02, "drawdown": -0.003, "turnover": 0.05})
     assert {p["metric"] for p in a["positives"]} >= {"returns", "drawdown"}
     assert {n["metric"] for n in a["negatives"]} >= {"sharpe", "turnover"}
 
 
 def test_magnitude_is_preserved_in_composite():
-    """sign-only is gone: a larger positive delta → larger composite."""
-    small = _rec({"sharpe": 0.012, "returns": 0.002})["composite_score"]
+    small = _rec({"sharpe": 0.05, "returns": 0.003})["composite_score"]
     big = _rec({"sharpe": 0.05, "returns": 0.02})["composite_score"]
     assert big > small
 
@@ -111,7 +131,7 @@ def test_unknown_without_core_metrics():
 
 def test_nan_inf_treated_as_absent():
     a = _rec({"sharpe": float("nan"), "returns": float("inf")})
-    assert a["recommendation"] == "UNKNOWN"  # no finite core metric
+    assert a["recommendation"] == "UNKNOWN"
 
 
 def test_bool_not_treated_as_number():
@@ -130,15 +150,13 @@ def test_yearly_parser_median_of_recent_years():
         "after": {"schema": {"properties": _YR_PROPS},
                   "records": [["2022", 1.4], ["2023", 1.3], ["2024", 1.4]]},
     }
-    # recent 2 years: 2023 Δ=-0.2, 2024 Δ=-0.2 → median -0.2 (decaying)
-    d = recent_yearly_sharpe_delta(block, recent_n=2)
-    assert d == pytest.approx(-0.2, abs=1e-9)
+    # recent 2 years: 2023 Δ=-0.2, 2024 Δ=-0.2 → median -0.2
+    assert recent_yearly_sharpe_delta(block, recent_n=2) == pytest.approx(-0.2, abs=1e-9)
 
 
 def test_yearly_parser_handles_missing_or_unaligned():
     assert recent_yearly_sharpe_delta(None) is None
     assert recent_yearly_sharpe_delta({}) is None
-    # no overlapping years
     block = {
         "before": {"schema": {"properties": _YR_PROPS}, "records": [["2020", 1.0]]},
         "after": {"schema": {"properties": _YR_PROPS}, "records": [["2024", 1.0]]},
@@ -147,8 +165,8 @@ def test_yearly_parser_handles_missing_or_unaligned():
 
 
 def test_yearly_parser_real_schema_column_order():
-    """Live schema has sharpe at index 6 of 12 cols — parser must use schema, not
-    a fixed index."""
+    """Live schema has sharpe at index 6 of 12 — parser must use schema, not a
+    fixed index."""
     props = [{"name": n} for n in
              ["year", "pnl", "bookSize", "longCount", "shortCount", "turnover",
               "sharpe", "returns", "drawdown", "margin", "fitness", "stage"]]

@@ -748,23 +748,15 @@ class AlphaService(BaseService):
             "margin": _delta("margin"),
         }
 
-        # Derived dimensions for the analysis: PnL normalised by book size (turns
-        # dollar PnL into a comparable return-contribution), and the recent-year
-        # marginal-sharpe trend (robustness / decay flag).
+        # Derived dimension for the analysis: the recent-year marginal-sharpe
+        # trend (robustness / decay flag — drives the guardrail). pnl_norm was
+        # dropped (3rd review): collinear with `returns`, double-counted return.
         from backend.marginal_analysis import (
             analyze_marginal_contribution,
             recent_yearly_sharpe_delta,
         )
-        _book = before.get("bookSize") or after.get("bookSize")
-        d_pnl = deltas.get("pnl")
-        pnl_norm = (
-            round(d_pnl / _book, 6)
-            if isinstance(d_pnl, (int, float)) and isinstance(_book, (int, float)) and _book
-            else None
-        )
         analysis_deltas = {
             **deltas,
-            "pnl_norm": pnl_norm,
             "recent_yearly_sharpe": recent_yearly_sharpe_delta(payload.get("yearlyStats")),
         }
         analysis = analyze_marginal_contribution(

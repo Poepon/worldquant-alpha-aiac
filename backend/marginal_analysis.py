@@ -8,16 +8,16 @@ this alpha is submitted vs AFTER it is merged in, so delta = after - before is
 the alpha's MARGINAL contribution to the portfolio.
 
 WHY MULTI-DIMENSIONAL (not Sharpe-led): adding a single alpha (standalone
-sharpe ~1.4-1.7) to a mature high-sharpe (~3) portfolio almost always DILUTES
-the portfolio sharpe (Δsharpe < 0) unless the alpha is negatively correlated —
-this is a structural/mathematical effect, not a quality signal. Empirically
-~20/20 real can_submit alphas show Δsharpe < 0 while Δreturns / Δpnl > 0. So a
-Sharpe-only gate rejects nearly everything and loses discriminative power. The
-right question is "does adding this alpha make the portfolio better across
-return AND risk dimensions, and is it temporally robust?" — a weighted scorecard
-of all dimensions (positive AND negative) plus hard guardrails for genuine red
-flags. Sharpe is the highest-weighted single dimension but does NOT veto on its
-own, and a positive Sharpe cannot override severe risk/cost deterioration.
+sharpe ~1.4-1.7) to a mature high-sharpe (~3) portfolio can dilute the portfolio
+sharpe (Δsharpe < 0) when the alpha is correlated — a structural effect, not a
+quality signal. Empirically the Δsharpe sign VARIES by alpha (a 20-alpha live
+sample on 2026-05-24 was ~17/20 positive, but earlier batches skewed negative),
+so Sharpe alone is an unreliable gate. The right question is "does adding this
+alpha make the portfolio better across return AND risk dimensions, and is it
+temporally robust?" — a weighted scorecard of all dimensions (positive AND
+negative) plus hard guardrails for genuine red flags. Sharpe is the
+highest-weighted single dimension but does NOT veto on its own, and a positive
+Sharpe cannot override severe risk/cost deterioration.
 
 Dimensions (direction +1 = higher-better, -1 = lower-better):
   return side : sharpe, returns, margin, fitness, pnl_norm (Δpnl / bookSize)
@@ -36,34 +36,47 @@ from typing import Any, Dict, List, Optional, Tuple
 #   direction: +1 higher-is-better, -1 lower-is-better
 #   scale:     a "clearly significant" |Δ| — Δ/scale maps to a normalized unit
 #   weight:    relative importance in the composite
-# Portfolio-level deltas are small, so scales are tuned to that regime.
-# NOTE: scales/weights/thresholds were sanity-checked against live audit samples;
-# re-calibrate with scripts/iqc_marginal_audit.py if the verdict mix looks off.
+# scale: |Δ| at which a dimension is a "clearly significant" move. CALIBRATED
+# from the observed live distribution (median |Δ| over 20 can_submit alphas:
+# sharpe 0.07 / returns 0.002 / margin 0.00022 / drawdown 0.0017 / turnover
+# 0.0217) — scale ≈ 2× median so the median move reads as a moderate (~0.5)
+# signal and only genuinely large moves saturate toward ±_NORM_CAP. Re-derive
+# with scripts/iqc_marginal_audit.py (scale ≈ 2 × median(|Δ|)) if BRAIN shifts.
+#
+# pnl_norm REMOVED 2026-05-24 (3rd review): it is collinear with `returns`
+# (both ≈ PnL/bookSize) and double-counted the return side. recent_yearly_sharpe
+# kept at WEIGHT 0 — it is shown in the scorecard + drives the decay guardrail,
+# but does NOT enter the composite (it is collinear with `sharpe`, just a
+# different window — scoring it would double-count the sharpe family).
 _DIMS: Dict[str, Tuple[int, float, float, str, str]] = {
-    "sharpe":               (+1, 0.05,   1.0, "Sharpe", ".3f"),
-    "returns":              (+1, 0.01,   0.8, "Returns", ".4f"),
-    "margin":               (+1, 0.0003, 0.6, "Margin", ".5f"),
-    "fitness":              (+1, 0.05,   0.5, "Fitness", ".3f"),
-    "pnl_norm":             (+1, 0.01,   0.4, "PnL贡献", ".4f"),
-    "drawdown":             (-1, 0.005,  0.5, "回撤", ".4f"),
-    "turnover":             (-1, 0.03,   0.3, "换手", ".4f"),
-    "recent_yearly_sharpe": (+1, 0.05,   0.5, "近年Sharpe趋势", ".3f"),
+    "sharpe":               (+1, 0.12,   1.0, "Sharpe", ".3f"),
+    "returns":              (+1, 0.004,  0.8, "Returns", ".4f"),
+    "margin":               (+1, 0.0004, 0.5, "Margin", ".5f"),
+    "fitness":              (+1, 0.08,   0.5, "Fitness", ".3f"),
+    "drawdown":             (-1, 0.003,  0.6, "回撤", ".4f"),
+    "turnover":             (-1, 0.045,  0.5, "换手", ".4f"),
+    "recent_yearly_sharpe": (+1, 0.05,   0.0, "近年Sharpe趋势", ".3f"),
 }
 
-_RETURN_SIDE = {"sharpe", "returns", "margin", "fitness", "pnl_norm"}
+_RETURN_SIDE = {"sharpe", "returns", "margin", "fitness"}
 _RISK_SIDE = {"drawdown", "turnover"}
 
 _NORM_CAP = 1.5          # clip normalized magnitude to ±1.5
-_NOISE_FLOOR = 0.15      # |normalized| <= this → neutral (filters BRAIN jitter)
+_NOISE_FLOOR = 0.15      # |normalized| <= this → neutral (abstains from composite)
 
 # Composite thresholds on the weighted-average normalized score (∈ [-1.5, 1.5]).
 _T_SUBMIT = 0.25
 _T_SKIP = -0.25
 
-# Guardrail trigger magnitudes (on normalized scale).
-_GR_RISK = -0.7          # drawdown or turnover this bad → cannot be SUBMIT
-_GR_RETURN = -0.5        # returns AND pnl both this bad → drags money → SKIP cap
-_GR_YEARLY = -0.5        # recent-year sharpe decaying this much → cannot be SUBMIT
+# Guardrail trigger magnitudes (on normalized scale). Set to "genuinely severe"
+# (≈ 2.5× median move) so routine portfolio shifts don't trip them — at the old
+# -0.7, a median +0.02 turnover increase wrongly read as a "severe cost blowup".
+# Guardrails only DOWNGRADE to NEUTRAL (a genuine red flag → don't auto-recommend
+# SUBMIT, force human judgment). A SKIP comes only from a genuinely negative
+# composite, never from a single guardrail.
+_GR_RISK = -1.2          # drawdown OR turnover this bad → cap NEUTRAL
+_GR_RETURN = -1.2        # returns this bad (strong dilution) → cap NEUTRAL
+_GR_YEARLY = -1.0        # recent-year sharpe decaying this much → cap NEUTRAL
 
 _LABELS = {
     "SUBMIT": "推荐提交",
@@ -79,7 +92,6 @@ _VERB = {
     "returns": ("增厚组合收益", "稀释组合收益"),
     "margin": ("提高单位交易收益率", "降低单位交易收益率"),
     "fitness": ("提升组合 Fitness", "降低组合 Fitness"),
-    "pnl_norm": ("增加组合 PnL", "减少组合 PnL"),
     "drawdown": ("降低组合回撤", "加大组合回撤"),
     "turnover": ("降低组合换手/成本", "推高组合换手/成本"),
     "recent_yearly_sharpe": ("近年边际 Sharpe 改善（稳健）", "近年边际 Sharpe 恶化（衰减风险）"),
@@ -200,10 +212,14 @@ def analyze_marginal_contribution(
         direction, scale, weight, name, fmt = _DIMS[m]
         n = _normalize(m, dval)
         norm[m] = n
-        wsum += weight
-        contrib += weight * n
         good = n > _NOISE_FLOOR
         bad = n < -_NOISE_FLOOR
+        # Only dimensions with a clear (above-noise) signal AND non-zero weight
+        # vote in the composite — neutral / display-only (weight 0) dims abstain
+        # so they neither dilute nor drag the weighted average.
+        if weight > 0 and (good or bad):
+            wsum += weight
+            contrib += weight * n
         signals[m] = 1 if good else (-1 if bad else 0)
         verb = _VERB[m][0] if good else (_VERB[m][1] if bad else "影响可忽略")
         row = {
@@ -238,10 +254,10 @@ def analyze_marginal_contribution(
     if norm.get("drawdown", 0) <= _GR_RISK or norm.get("turnover", 0) <= _GR_RISK:
         guardrails.append("风险/成本显著恶化（回撤或换手大幅上升）— 不允许直接推荐提交")
         _cap_to("NEUTRAL")
-    if norm.get("returns", 0) <= _GR_RETURN and norm.get("pnl_norm", 0) <= _GR_RETURN:
-        guardrails.append("边际收益与 PnL 双双明显为负 — 真实稀释组合收益")
-        _cap_to("SKIP")
-    if "recent_yearly_sharpe" in norm and norm["recent_yearly_sharpe"] <= _GR_YEARLY:
+    if norm.get("returns", 0) <= _GR_RETURN:
+        guardrails.append("边际收益明显为负 — 真实稀释组合收益，需人工权衡")
+        _cap_to("NEUTRAL")
+    if norm.get("recent_yearly_sharpe", 0) <= _GR_YEARLY:
         guardrails.append("近年边际 Sharpe 明显衰减 — 可能已被市场套利，提交价值存疑")
         _cap_to("NEUTRAL")
 

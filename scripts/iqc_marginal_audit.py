@@ -72,6 +72,7 @@ async def main(competition: str | None, limit: int | None) -> None:
                 stats = r["raw"].get("stats") or {}
                 before = stats.get("before") or {}
                 after = stats.get("after") or {}
+                an = r.get("analysis") or {}
                 entry = {
                     "alpha_pk": alpha.id,
                     "brain_id": alpha.alpha_id,
@@ -82,20 +83,23 @@ async def main(competition: str | None, limit: int | None) -> None:
                     "merged_sharpe": after.get("sharpe"),
                     "merged_fitness": after.get("fitness"),
                     "partition_name": r.get("partition_name"),
+                    "recommendation": an.get("recommendation"),
+                    "composite_score": an.get("composite_score"),
+                    "guardrails": an.get("guardrails") or [],
                     "deltas": r["deltas"],
                 }
                 results.append(entry)
-                dsh = r["deltas"].get("sharpe")
-                dsh_str = f"{dsh:+}" if isinstance(dsh, (int, float)) else "—"
-                _msh = after.get("sharpe")
+                cs = an.get("composite_score")
+                cs_str = f"{cs:+.3f}" if isinstance(cs, (int, float)) else "—"
                 print(
-                    f"  {tag} {alpha.alpha_id} IS_sh={alpha.is_sharpe:.2f} "
-                    f"merged_sh={_msh if isinstance(_msh, (int, float)) else '—'} Δsharpe={dsh_str}"
+                    f"  {tag} {alpha.alpha_id} {an.get('recommendation', '—'):8} "
+                    f"comp={cs_str} Δsharpe={r['deltas'].get('sharpe')}"
                 )
 
-    # Sort by Δsharpe desc (None to bottom)
+    # Sort by the multi-dim composite_score desc (None to bottom), aligning the
+    # batch ranking with the per-alpha recommendation shown in the UI.
     results.sort(
-        key=lambda r: (r["deltas"].get("sharpe") if isinstance(r["deltas"].get("sharpe"), (int, float)) else -99999),
+        key=lambda r: (r["composite_score"] if isinstance(r["composite_score"], (int, float)) else -99999),
         reverse=True,
     )
 
@@ -116,10 +120,11 @@ async def main(competition: str | None, limit: int | None) -> None:
         f"**Successfully fetched**: {len(results)}",
         f"**Failures**: {len(failures)}",
         "",
-        "Ranked by `Δsharpe` (descending — positive = improves the merged portfolio).",
+        "Ranked by multi-dim `composite_score` (descending). Recommendation is the "
+        "scorecard verdict (SUBMIT/NEUTRAL/SKIP) — same as the AlphaDetail UI.",
         "",
-        "| # | brain_id | IS sharpe | merged sharpe | Δsharpe | Δfitness | Δturnover | Δpnl |",
-        "|---|---|---|---|---|---|---|---|",
+        "| # | brain_id | rec | composite | merged sharpe | Δsharpe | Δreturns | Δmargin | Δdrawdown | Δturnover |",
+        "|---|---|---|---|---|---|---|---|---|---|",
     ]
     for i, r in enumerate(results, 1):
         d = r["deltas"]
@@ -129,13 +134,14 @@ async def main(competition: str | None, limit: int | None) -> None:
             if money:
                 return f"{v:+,.0f}"
             return f"{v:+.{prec}f}"
+        cs = r["composite_score"]
         lines.append(
-            f"| {i} | `{r['brain_id']}` | "
-            f"{r['is_sharpe']:.2f} | "
+            f"| {i} | `{r['brain_id']}` | {r.get('recommendation') or '—'} | "
+            f"{fmt(cs, prec=3)} | "
             f"{r['merged_sharpe'] if isinstance(r['merged_sharpe'], (int, float)) else '—'} | "
-            f"{fmt(d.get('sharpe'))} | {fmt(d.get('fitness'))} | "
-            f"{fmt(d.get('turnover'), prec=4)} | "
-            f"{fmt(d.get('pnl'), prec=0, money=True)} |"
+            f"{fmt(d.get('sharpe'), prec=3)} | {fmt(d.get('returns'), prec=4)} | "
+            f"{fmt(d.get('margin'), prec=5)} | {fmt(d.get('drawdown'), prec=4)} | "
+            f"{fmt(d.get('turnover'), prec=4)} |"
         )
     lines.append("")
     if failures:
@@ -145,14 +151,17 @@ async def main(competition: str | None, limit: int | None) -> None:
             lines.append(f"- `{f['brain_id']}` (alpha_pk={f['alpha_pk']}): {f['error']}")
         lines.append("")
 
-    # Summary stats
-    sharpe_deltas = [r["deltas"].get("sharpe") for r in results if isinstance(r["deltas"].get("sharpe"), (int, float))]
-    if sharpe_deltas:
+    # Summary stats — verdict distribution + composite spread.
+    from collections import Counter as _Counter
+    rec_dist = _Counter(r.get("recommendation") for r in results)
+    comps = [r["composite_score"] for r in results if isinstance(r["composite_score"], (int, float))]
+    if results:
         lines.insert(7, "")
-        lines.insert(7, f"**Net positive (Δsharpe > 0)**: {sum(1 for s in sharpe_deltas if s > 0)} / {len(sharpe_deltas)}")
-        lines.insert(8, f"**Average Δsharpe**: {sum(sharpe_deltas)/len(sharpe_deltas):+.3f}")
-        lines.insert(9, f"**Best Δsharpe**: {max(sharpe_deltas):+.3f}")
-        lines.insert(10, f"**Worst Δsharpe**: {min(sharpe_deltas):+.3f}")
+        lines.insert(7, f"**Verdict**: SUBMIT {rec_dist.get('SUBMIT', 0)} / "
+                        f"NEUTRAL {rec_dist.get('NEUTRAL', 0)} / SKIP {rec_dist.get('SKIP', 0)}")
+        if comps:
+            lines.insert(8, f"**Composite**: avg {sum(comps)/len(comps):+.3f}, "
+                            f"best {max(comps):+.3f}, worst {min(comps):+.3f}")
     md_path.write_text("\n".join(lines), encoding="utf-8")
 
     print()
@@ -160,10 +169,9 @@ async def main(competition: str | None, limit: int | None) -> None:
     print(f"  results: {len(results)}, failures: {len(failures)}")
     print(f"  json: {json_path}")
     print(f"  md:   {md_path}")
-    if sharpe_deltas:
-        pos = sum(1 for s in sharpe_deltas if s > 0)
-        print(f"  Net positive Δsharpe: {pos}/{len(sharpe_deltas)}")
-        print(f"  Best: {max(sharpe_deltas):+.3f}  Worst: {min(sharpe_deltas):+.3f}")
+    if results:
+        print(f"  Verdict: SUBMIT {rec_dist.get('SUBMIT', 0)} / "
+              f"NEUTRAL {rec_dist.get('NEUTRAL', 0)} / SKIP {rec_dist.get('SKIP', 0)}")
 
 
 if __name__ == "__main__":
