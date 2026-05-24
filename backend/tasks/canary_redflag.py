@@ -55,10 +55,15 @@ RED_FLAGS: List[Tuple[str, str, str, str]] = [
     ),
     (
         "Simulation cache wrong-hit rows",
+        # alphas.created_at is naive-UTC (timestamp WITHOUT time zone), unlike the
+        # tz-aware log tables above; :t0 is tz-aware UTC. asyncpg can't bind an
+        # aware param to a naive column (DataError: naive vs aware), so interpret
+        # the column as UTC → timestamptz before comparing. (See dual-timezone
+        # footgun: alphas.created_at = naive-UTC.)
         "SELECT COUNT(*) FROM alphas "
         "WHERE (metrics->>'_sim_cache_hit')::bool = true "
         "  AND (metrics->>'sharpe') IS NULL "
-        "  AND created_at > :t0",
+        "  AND created_at AT TIME ZONE 'UTC' > :t0",
         "value >= 1",
         "ENABLE_SIMULATION_CACHE",
     ),
