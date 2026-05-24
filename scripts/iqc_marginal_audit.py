@@ -76,6 +76,7 @@ async def main(competition: str | None, limit: int | None) -> None:
                 entry = {
                     "alpha_pk": alpha.id,
                     "brain_id": alpha.alpha_id,
+                    "region": alpha.region,
                     "expression": (alpha.expression or "")[:200],
                     "is_sharpe": float(alpha.is_sharpe or 0),
                     "is_fitness": float(alpha.is_fitness or 0),
@@ -163,6 +164,21 @@ async def main(competition: str | None, limit: int | None) -> None:
             lines.insert(8, f"**Composite**: avg {sum(comps)/len(comps):+.3f}, "
                             f"best {max(comps):+.3f}, worst {min(comps):+.3f}")
     md_path.write_text("\n".join(lines), encoding="utf-8")
+
+    # Per-region scale calibration: median |Δ| per scored dim → suggested scale
+    # (≈ 2 × median). Paste region-specific scales into config._MARGINAL_SCALE_OVERRIDES.
+    import statistics as _st
+    by_region: dict = {}
+    for r in results:
+        by_region.setdefault(r.get("region") or "?", []).append(r["deltas"])
+    print("\n=== Scale calibration (suggested scale ≈ 2 × median|Δ|) ===")
+    for region, dlist in sorted(by_region.items()):
+        print(f"  region={region} (n={len(dlist)}):")
+        for dim in ("sharpe", "returns", "drawdown", "turnover"):
+            vals = [abs(d[dim]) for d in dlist if isinstance(d.get(dim), (int, float))]
+            if vals:
+                med = _st.median(vals)
+                print(f"    {dim:9} median|Δ|={med:.5f}  suggested scale≈{2 * med:.5f}")
 
     print()
     print(f"=== Done ===")

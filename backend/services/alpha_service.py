@@ -764,7 +764,8 @@ class AlphaService(BaseService):
         if _alpha_margin is None and isinstance(alpha.is_metrics, dict):
             _alpha_margin = alpha.is_metrics.get("margin")
         analysis = analyze_marginal_contribution(
-            analysis_deltas, merged=after, baseline=before, alpha_margin=_alpha_margin,
+            analysis_deltas, merged=after, baseline=before,
+            alpha_margin=_alpha_margin, region=alpha.region,
         )
 
         return {

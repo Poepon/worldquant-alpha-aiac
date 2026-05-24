@@ -168,6 +168,20 @@ def test_lower_is_better_direction():
     assert b["signals"]["drawdown"] == -1
 
 
+def test_per_region_scale_override(monkeypatch):
+    """settings.marginal_scales(region) merges per-region overrides over the
+    default set, so a region can be recalibrated without touching code."""
+    import backend.config as cfg
+    monkeypatch.setattr(cfg, "_MARGINAL_SCALE_OVERRIDES", {"CHN": {"turnover": 10.0}})
+    d = {"sharpe": 0.0, "returns": 0.0, "turnover": 0.05}  # a turnover increase
+    usa = _rec(d, region="USA")
+    chn = _rec(d, region="CHN")
+    # USA default turnover scale 0.045 → 0.05 normalizes to a clear negative;
+    # CHN override scale 10.0 → the same move is negligible (abstains).
+    assert "turnover" in {n["metric"] for n in usa["negatives"]}
+    assert "turnover" not in {n["metric"] for n in chn["negatives"]}
+
+
 def test_unknown_without_core_metrics():
     a = _rec({"turnover": -0.05, "drawdown": -0.02})  # no sharpe nor returns
     assert a["recommendation"] == "UNKNOWN"

@@ -56,6 +56,34 @@ def _load_thinking_overrides() -> Dict[str, str]:
 _THINKING_EFFORT_OVERRIDES_CACHE: Dict[str, str] = _load_thinking_overrides()
 
 
+# Marginal-contribution scorecard calibration (consumed by
+# backend/marginal_analysis.py via Settings.MARGINAL_* / marginal_scales()).
+# Module-level so they're a single editable source and dodge Pydantic env-JSON
+# validation. Defaults = USA can_submit calibration (2026-05-24: scale ≈ 2×
+# median|Δ| over 20 live alphas). Δmargin / pnl_norm are intentionally absent
+# (collinear with turnover / returns — see marginal_analysis docstring).
+_MARGINAL_DIM_SCALES: Dict[str, float] = {
+    "sharpe": 0.12,
+    "returns": 0.004,
+    "fitness": 0.08,            # NOT yet calibrated (Δ unsampled) — provisional
+    "drawdown": 0.003,
+    "turnover": 0.045,
+    "recent_yearly_sharpe": 0.05,
+}
+_MARGINAL_DIM_WEIGHTS: Dict[str, float] = {
+    "sharpe": 1.0,
+    "returns": 0.8,
+    "fitness": 0.5,
+    "drawdown": 0.6,
+    "turnover": 0.5,
+    "recent_yearly_sharpe": 0.0,   # display + decay-guardrail only (collinear w/ sharpe)
+}
+# Per-region scale overrides, merged over the default (USA) set by
+# Settings.marginal_scales(region). Empty until other regions are calibrated
+# (the before/after portfolio is USA-dominated today). e.g. {"CHN": {"turnover": 0.06}}
+_MARGINAL_SCALE_OVERRIDES: Dict[str, Dict[str, float]] = {}
+
+
 # ---------------------------------------------------------------------------
 # Runtime feature-flag override cache (P3 — ops dashboard, 2026-05-16)
 # ---------------------------------------------------------------------------
@@ -800,6 +828,39 @@ class Settings(BaseSettings):
 
     EVAL_SCORE_PASS: float = 0.8
     EVAL_SCORE_OPTIMIZE: float = 0.3
+
+    # ── Marginal-contribution submit recommendation (backend/marginal_analysis.py)
+    # Calibration for the multi-dimensional before-and-after scorecard. Scalar
+    # tunables here; per-dim scales/weights are dict properties below (loaded as
+    # module-level constants to dodge Pydantic env-JSON validation, same pattern
+    # as THINKING_EFFORT_OVERRIDES). Defaults = USA can_submit calibration
+    # (2026-05-24, scale ≈ 2 × median|Δ|). Recalibrate via
+    # `python scripts/iqc_marginal_audit.py --calibrate` and put per-region scale
+    # overrides in _MARGINAL_SCALE_OVERRIDES.
+    MARGINAL_NORM_CAP: float = 1.5          # clip |normalized| to ±this
+    MARGINAL_NOISE_FLOOR: float = 0.15      # |normalized| <= this → abstains
+    MARGINAL_T_SUBMIT: float = 0.25         # composite >= this → SUBMIT
+    MARGINAL_T_SKIP: float = -0.25          # composite <= this → SKIP
+    MARGINAL_GR_RISK: float = -1.2          # drawdown/turnover norm this bad → cap NEUTRAL
+    MARGINAL_GR_RETURN: float = -1.2        # returns norm this bad → cap NEUTRAL
+    MARGINAL_GR_YEARLY: float = -1.0        # recent-year sharpe norm this bad → cap NEUTRAL
+    MARGINAL_MARGIN_FLOOR: float = 0.0005   # alpha margin (ratio) < this → cap NEUTRAL; <0 → SKIP
+
+    @property
+    def MARGINAL_DIM_SCALES(self) -> Dict[str, float]:
+        return _MARGINAL_DIM_SCALES
+
+    @property
+    def MARGINAL_DIM_WEIGHTS(self) -> Dict[str, float]:
+        return _MARGINAL_DIM_WEIGHTS
+
+    def marginal_scales(self, region: Optional[str] = None) -> Dict[str, float]:
+        """Per-dim scales for `region`, region overrides merged over the default
+        (USA-calibrated) set. Unknown region → defaults."""
+        scales = dict(_MARGINAL_DIM_SCALES)
+        if region:
+            scales.update(_MARGINAL_SCALE_OVERRIDES.get(region, {}))
+        return scales
 
     # V-19 Persistent Mining Service mode (2026-05-10) — session-loop pacing.
     # CASCADE_PAUSE_POLL_SEC is shared with FLAT_CONTINUOUS sessions (the

@@ -38,44 +38,20 @@ from __future__ import annotations
 import math
 from typing import Any, Dict, List, Optional, Tuple
 
-# metric -> (direction, scale, weight, display_name, value_fmt)
+# Per-dim STRUCTURAL metadata: (direction, display_name, value_fmt).
 #   direction: +1 higher-is-better, -1 lower-is-better
-#   scale:     |Δ| at which a dimension is a "clearly significant" move
-#   weight:    relative importance in the composite (0 = display/guardrail only)
-# scale CALIBRATED from live median |Δ| over 20 can_submit alphas (sharpe 0.07 /
-# returns 0.002 / drawdown 0.0017 / turnover 0.0217), scale ≈ 2× median so the
-# median move reads as a moderate ~0.5 signal. Re-derive with
-# scripts/iqc_marginal_audit.py (scale ≈ 2 × median(|Δ|)) if BRAIN shifts.
-# CAVEAT: fitness scale 0.08 is NOT yet calibrated (Δ not sampled) and fitness is
-# partly collinear with sharpe — treat its weight as provisional. The whole
-# calibration is from a single snapshot; per-region recalibration is future work.
-_DIMS: Dict[str, Tuple[int, float, float, str, str]] = {
-    "sharpe":               (+1, 0.12,   1.0, "Sharpe", ".3f"),
-    "returns":              (+1, 0.004,  0.8, "Returns", ".4f"),
-    "fitness":              (+1, 0.08,   0.5, "Fitness", ".3f"),
-    "drawdown":             (-1, 0.003,  0.6, "回撤", ".4f"),
-    "turnover":             (-1, 0.045,  0.5, "换手", ".4f"),
-    "recent_yearly_sharpe": (+1, 0.05,   0.0, "近年Sharpe趋势", ".3f"),
+# Tunable scale + weight live in config.Settings (MARGINAL_DIM_SCALES /
+# MARGINAL_DIM_WEIGHTS, with per-region overrides via settings.marginal_scales),
+# so they can be recalibrated per region without code change (CLAUDE.md: tunables
+# in config.py). weight 0 = display/guardrail only (abstains from composite).
+_DIM_META: Dict[str, Tuple[int, str, str]] = {
+    "sharpe":               (+1, "Sharpe", ".3f"),
+    "returns":              (+1, "Returns", ".4f"),
+    "fitness":              (+1, "Fitness", ".3f"),
+    "drawdown":             (-1, "回撤", ".4f"),
+    "turnover":             (-1, "换手", ".4f"),
+    "recent_yearly_sharpe": (+1, "近年Sharpe趋势", ".3f"),
 }
-
-_NORM_CAP = 1.5          # clip normalized magnitude to ±1.5
-_NOISE_FLOOR = 0.15      # |normalized| <= this → neutral (abstains from composite)
-
-# Composite thresholds on the weighted-average normalized score (∈ [-1.5, 1.5]).
-_T_SUBMIT = 0.25
-_T_SKIP = -0.25
-
-# Guardrail trigger magnitudes (on normalized scale). Set to "genuinely severe"
-# (≈ 2.5× median move) so routine portfolio shifts don't trip them. Guardrails
-# only DOWNGRADE to NEUTRAL (a red flag → don't auto-recommend SUBMIT). A SKIP
-# comes from a genuinely negative composite OR the hard margin gate below.
-_GR_RISK = -1.2          # drawdown OR turnover this bad → cap NEUTRAL
-_GR_RETURN = -1.2        # returns this bad (strong dilution) → cap NEUTRAL
-_GR_YEARLY = -1.0        # recent-year sharpe decaying this much → cap NEUTRAL
-
-# Margin economic gate (alpha's own standalone margin, in ratio: 0.0005 = 5 bps).
-_MARGIN_FLOOR = 0.0005   # < this → not profitable net of costs → cap NEUTRAL
-# margin < 0 → hard SKIP gate (no submission value)
 
 _LABELS = {
     "SUBMIT": "推荐提交",
@@ -142,9 +118,8 @@ def recent_yearly_sharpe_delta(yearly_block: Optional[Dict[str, Any]], recent_n:
     return deltas[mid] if n % 2 else (deltas[mid - 1] + deltas[mid]) / 2.0
 
 
-def _normalize(metric: str, delta: float) -> float:
-    direction, scale, *_ = _DIMS[metric]
-    return max(-_NORM_CAP, min(_NORM_CAP, direction * delta / scale))
+def _normalize(direction: int, scale: float, cap: float, delta: float) -> float:
+    return max(-cap, min(cap, direction * delta / (scale or 1.0)))
 
 
 def analyze_marginal_contribution(
@@ -152,32 +127,39 @@ def analyze_marginal_contribution(
     merged: Optional[Dict[str, Any]] = None,
     baseline: Optional[Dict[str, Any]] = None,
     alpha_margin: Optional[float] = None,
+    region: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Map marginal deltas + the alpha's own margin to a submit recommendation.
 
+    Calibration (per-dim scales/weights, thresholds, guardrail levels, margin
+    floor) is read from config.Settings (MARGINAL_*), with per-region scale
+    overrides resolved via settings.marginal_scales(region) — so it can be
+    recalibrated without code change.
+
     Args:
-        deltas: after-before deltas for any of the _DIMS metrics (+ derived
+        deltas: after-before deltas for any scored metric (+ derived
             recent_yearly_sharpe). Any may be None / missing / non-finite.
         merged: stats.after absolute values (rationale context).
         baseline: stats.before absolute values (reserved).
         alpha_margin: the alpha's OWN standalone IS margin (ratio, 0.0005 = 5 bps).
-            Drives the margin economic gate (see module docstring). None → gate
-            skipped (no margin data).
+            Drives the margin economic gate. None → gate skipped.
+        region: alpha region → selects per-region scale overrides.
 
-    Returns a JSON-friendly dict (back-compat fields kept: recommendation, label,
-    reasons, signals, marginal_score):
-        recommendation / label / composite_score
-        positives / negatives / neutrals: scored scorecard rows
-        reference: display-only rows (weight-0 dims, e.g. yearly trend)
-        margin_bps: the alpha's margin in bps (or None)
-        guardrails: triggered hard-flag descriptions (中文)
-        rationale / reasons / signals / marginal_score (back-compat)
+    Returns a JSON-friendly dict (back-compat: recommendation, label, reasons,
+    signals, marginal_score) + composite_score / positives / negatives / neutrals
+    / reference / margin_bps / guardrails / rationale.
     """
+    from backend.config import settings
+
     deltas = deltas or {}
     merged = merged or {}
+    scales = settings.marginal_scales(region)
+    weights = settings.MARGINAL_DIM_WEIGHTS
+    cap = settings.MARGINAL_NORM_CAP
+    floor = settings.MARGINAL_NOISE_FLOOR
 
     present: Dict[str, float] = {
-        m: float(deltas[m]) for m in _DIMS if m in deltas and _is_num(deltas.get(m))
+        m: float(deltas[m]) for m in _DIM_META if m in deltas and _is_num(deltas.get(m))
     }
     margin_bps = round(alpha_margin * 10000, 2) if _is_num(alpha_margin) else None
 
@@ -206,11 +188,12 @@ def analyze_marginal_contribution(
     contrib = 0.0
 
     for m, dval in present.items():
-        direction, scale, weight, name, fmt = _DIMS[m]
-        n = _normalize(m, dval)
+        direction, name, fmt = _DIM_META[m]
+        weight = weights.get(m, 0.0)
+        n = _normalize(direction, scales.get(m, 1.0), cap, dval)
         norm[m] = n
-        good = n > _NOISE_FLOOR
-        bad = n < -_NOISE_FLOOR
+        good = n > floor
+        bad = n < -floor
         signals[m] = 1 if good else (-1 if bad else 0)
         verb = _VERB[m][0] if good else (_VERB[m][1] if bad else "影响可忽略")
         row = {
@@ -235,9 +218,9 @@ def analyze_marginal_contribution(
     composite = round(contrib / wsum, 3) if wsum else 0.0
 
     # Base verdict from the weighted-average normalized contribution.
-    if composite >= _T_SUBMIT:
+    if composite >= settings.MARGINAL_T_SUBMIT:
         base = "SUBMIT"
-    elif composite <= _T_SKIP:
+    elif composite <= settings.MARGINAL_T_SKIP:
         base = "SKIP"
     else:
         base = "NEUTRAL"
@@ -252,23 +235,26 @@ def analyze_marginal_contribution(
 
     # Margin economic gate (alpha's own margin). margin < 0 is a HARD disqualifier
     # (no submission value); below the cost floor caps to NEUTRAL.
+    _margin_floor = settings.MARGINAL_MARGIN_FLOOR
     if _is_num(alpha_margin):
         if alpha_margin < 0:
             guardrails.append(f"Margin {margin_bps:.1f}bps 为负 — 无提交价值，无法进 Production Pool")
             _cap_to("SKIP")
-        elif alpha_margin < _MARGIN_FLOOR:
+        elif alpha_margin < _margin_floor:
             guardrails.append(
-                f"Margin {margin_bps:.1f}bps < 5bps — 扣除交易成本后恐难盈利，需人工权衡"
+                f"Margin {margin_bps:.1f}bps < {_margin_floor * 10000:.0f}bps — "
+                f"扣除交易成本后恐难盈利，需人工权衡"
             )
             _cap_to("NEUTRAL")
 
-    if norm.get("drawdown", 0) <= _GR_RISK or norm.get("turnover", 0) <= _GR_RISK:
+    _gr_risk = settings.MARGINAL_GR_RISK
+    if norm.get("drawdown", 0) <= _gr_risk or norm.get("turnover", 0) <= _gr_risk:
         guardrails.append("风险/成本显著恶化（回撤或换手大幅上升）— 不允许直接推荐提交")
         _cap_to("NEUTRAL")
-    if norm.get("returns", 0) <= _GR_RETURN:
+    if norm.get("returns", 0) <= settings.MARGINAL_GR_RETURN:
         guardrails.append("边际收益明显为负 — 真实稀释组合收益，需人工权衡")
         _cap_to("NEUTRAL")
-    if norm.get("recent_yearly_sharpe", 0) <= _GR_YEARLY:
+    if norm.get("recent_yearly_sharpe", 0) <= settings.MARGINAL_GR_YEARLY:
         guardrails.append("近年边际 Sharpe 明显衰减 — 可能已被市场套利，提交价值存疑")
         _cap_to("NEUTRAL")
 
