@@ -41,18 +41,18 @@ Every alpha must clear ALL of these to be submittable:
 **Derived constraint**: To satisfy `sharpe ≥ 1.5 AND fitness ≥ 1.0`:
 - If predicted turnover ≥ 0.125: `returns / turnover ≥ 0.44` (every unit of turnover must capture ≥44% annualized returns)
 - If predicted turnover < 0.125: `returns ≥ 0.055` (~5.5% annualized; turnover floored, no further benefit)
-- **Sweet spot: turnover 0.125 - 0.20** — low enough for high fitness, high enough for non-trivial activity.
+- **Turnover sweet spot is signal-dependent (see velocity table below) — NOT a single band.** Empirically in this system: fundamental signals peak below 0.20, but price/volume/technical signals peak at 0.40-0.70 (where the bulk of submittable alphas live). The one robust rule across ALL signal types: avoid turnover > 0.70 (PASS rate collapses, ≈0 submittable).
 
 ## Economic signal velocity classification (pick one before writing the expression)
 
-| Velocity | Source | Typical turnover | Reachable fitness |
+| Velocity | Source | Empirical turnover sweet spot | Evidence (this system, by PASS rate + submittable count) |
 |---|---|---|---|
-| **FUNDAMENTAL_SLOW** | quarterly accounting / cash-flow / quality | 0.05-0.25 | 1.0-2.0 |
-| **FACTOR_COMPOSITE** | derived multi-factor scores, smoothed signals | 0.05-0.20 | 1.5-3.0+ |
-| **MEDIUM** | monthly momentum (12-1), accruals | 0.20-0.40 | 0.8-1.5 |
-| **FAST** | short-term reversal, order flow, technical | 0.50-1.00 | 0.2-0.7 (mostly fails fitness gate) |
+| **FUNDAMENTAL_SLOW** | quarterly accounting / cash-flow / quality | **< 0.20** | 12.5% PASS below 0.20, collapses to ~0 above |
+| **FACTOR_COMPOSITE** | derived multi-factor scores, smoothed signals | **< 0.20** (stable) or 0.40-0.70 (high-fitness) | 22-32% PASS, bimodal |
+| **MEDIUM** | momentum / accruals on price-volume | **0.20-0.40** | 18.6% PASS + many submittable |
+| **FAST** | short-term reversal, order flow, technical | **0.40-0.70** (a submittable sweet spot, NOT a fail zone) | 24% PASS + the MOST submittable alphas of any cell |
 
-⚠ Default preference: FUNDAMENTAL_SLOW or FACTOR_COMPOSITE. Pick FAST only with explicit justification — it usually fails the fitness gate.
+⚠ The old "FAST mostly fails the fitness gate" rule was WRONG and is removed: price/volume/technical signals at 0.40-0.70 turnover are this system's single strongest submittable source. Match turnover to the signal SOURCE — do not force everything into a low band. The only hard turnover rule: avoid > 0.70 (PASS collapses + 0 submittable across every family).
 
 ## Mandatory 5-slot reasoning chain (output as part of each alpha)
 
@@ -61,7 +61,7 @@ For EVERY alpha, fill these slots IN ORDER:
 1. **economic_hypothesis** (≥ 30 chars, must contain a domain term like "应计/accrual", "现金流/cashflow", "momentum", "reversal", "quality", "factor_composite"): One-sentence economic intuition.
 2. **signal_velocity**: One of `FUNDAMENTAL_SLOW`, `FACTOR_COMPOSITE`, `MEDIUM`, `FAST`.
 3. **predicted_turnover**: A numeric estimate (e.g. 0.18) consistent with signal_velocity.
-4. **math_sanity_check**: A numeric self-check. Compute `predicted_returns / max(predicted_turnover, 0.125)` and assert ≥ 0.44; if FAST, explicitly note "expected to fail fitness gate".
+4. **math_sanity_check**: A numeric self-check. Compute `predicted_returns / max(predicted_turnover, 0.125)` and assert ≥ 0.44; flag ONLY if predicted_turnover > 0.70 (the real fail zone) — NOT merely because the signal is FAST.
 5. **expression**: The FASTEXPR string. Window ≥ 20 preferred; smoothing operators (ts_zscore / ts_rank / ts_regression / ts_decay_linear) preferred for SLOW/COMPOSITE.
 
 ## Three reference examples (learn the pattern, don't copy literally)
@@ -80,12 +80,15 @@ For EVERY alpha, fill these slots IN ORDER:
 - math_sanity_check: returns ≈ 8%, returns/max(0.18, 0.125) = 0.08/0.18 = 0.44 ✓ (临界)
 - expression: ts_rank(ts_scale(fn_accrued_liab_curr_q, 60), 5)
 
-### Example 3 — FAST (反面教材，演示拒绝)
-- economic_hypothesis: 短期价格反转
+### Example 3 — FAST / technical (price-volume reversal at moderate-high turnover — a SUBMITTABLE sweet spot)
+- economic_hypothesis: 日内价格在当日高低区间的相对位置反映短期反转（technical reversal）
 - signal_velocity: FAST
-- predicted_turnover: 0.85
-- math_sanity_check: returns ≈ 4%, 0.04/max(0.85, 0.125) = 0.047 ≪ 0.44 ❌ ABORT, switch to slower velocity
-- expression: (do not produce; instead pick a SLOW alternative)
+- predicted_turnover: 0.55  (inside the 0.40-0.70 band where price/volume signals supply the most submittable alphas)
+- math_sanity_check: if returns ≈ 0.28, 0.28/max(0.55, 0.125) = 0.51 ≥ 0.44 ✓ — turnover 0.55 is fine, NOT a fail zone
+- expression: multiply(-1, ts_zscore(divide(subtract(close, low), subtract(high, low)), 60))
+
+### Example 3b — the ACTUAL fail zone (turnover > 0.70, 反面教材)
+- predicted_turnover: 0.85 → across every signal family PASS collapses below ~4% and 0 alphas are submittable. ABORT: add smoothing (ts_decay_linear / a longer window) to pull turnover under 0.70, rather than abandoning the signal.
 
 ## Implementation guidelines
 
