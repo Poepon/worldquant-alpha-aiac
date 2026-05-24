@@ -50,6 +50,24 @@ Your role is to generate investment hypotheses for testing. The approach is empi
 3. Actionable: Clear enough to implement directly
 4. Focused: One direction per hypothesis, not "A or B might work"
 
+**Single-mechanism discipline (this system's #1 PASS-rate driver)**:
+A hypothesis MUST express exactly ONE economic mechanism, translatable into a
+single signal chain. Empirically here, single-mechanism alphas PASS ~7-10x more
+often than ones that blend mechanisms (add/multiply of different signals, or
+conditional trade_when overlays).
+
+- Keep `statement` to ONE sentence, <= 180 characters, naming ONE driver. Do NOT
+  chain clauses ("and / while / after / relative to / following") to smuggle in a
+  second mechanism — long multi-clause statements are the strongest failure
+  predictor (statements >= 240 chars PASS at ~2.5%).
+- Why single beats composite: (1) debuggable attribution — when it fails you know
+  which mechanism broke; (2) lower overfitting — composites luck-stack a backtest
+  Sharpe across sub-periods; (3) a clean, distinct signal clears BRAIN
+  self-correlation and adds incremental value to the production pool.
+- Diversify at the PORTFOLIO level — propose separate pure-momentum / pure-value /
+  pure-quality hypotheses and let portfolio weighting diversify — NOT by
+  add/multiply-ing mechanisms inside one expression.
+
 **Five Pillars Classification (P2-B, 2026-05-15)**:
 Each hypothesis MUST be tagged with a `pillar` field describing the factor
 family it tests. Pick ONE:
@@ -302,9 +320,10 @@ Generate 3-5 investment hypotheses for this dataset.
 
 **Requirements**:
 1. Each hypothesis should be specific and testable
-2. Include both conventional and unconventional ideas
-3. Explain the reasoning behind each hypothesis
-4. Consider what market behavior or inefficiency the data might capture
+2. ONE economic mechanism per hypothesis; keep statement <=180 chars (single-mechanism alphas PASS ~7x more often than blended ones)
+3. Include both conventional and unconventional ideas
+4. Explain the reasoning behind each hypothesis
+5. Consider what market behavior or inefficiency the data might capture
 
 **Output Schema** (JSON):
 ```json
@@ -317,12 +336,12 @@ Generate 3-5 investment hypotheses for this dataset.
   "hypotheses": [
     {{
       "id": "H1",
-      "statement": "Clear, testable hypothesis in one sentence",
+      "statement": "ONE sentence, <=180 chars, naming ONE economic mechanism — no clause-chaining to blend mechanisms",
       "rationale": "Economic or behavioral reasoning behind this hypothesis",
       "expected_signal": "momentum | mean_reversion | value | other",
       "pillar": "momentum | value | quality | volatility | sentiment | other",
       "key_fields": ["field1", "field2"],
-      "suggested_approach": "Brief description of how to test this",
+      "suggested_approach": "A SINGLE signal chain testing this one mechanism — avoid add/multiply blending of different signals",
       "confidence": "high | medium | low",
       "novelty": "established | emerging | experimental"
     }}
