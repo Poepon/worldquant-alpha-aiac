@@ -477,9 +477,14 @@ def audit_iqc_marginal_for_alpha(alpha_pk: int, competition: str = "IQC2026S1") 
     """Auto-triggered after can_submit refresh flips True.
 
     Calls BRAIN /competitions/{competition}/alphas/{alpha_id}/before-and-after
-    -performance and stores the resulting Δscore / Δsharpe / Δturnover into
+    -performance and stores the resulting Δsharpe / Δfitness / Δturnover into
     alpha.metrics._iqc_marginal. Doesn't change submission state — the user
     still decides; this just surfaces the team-impact signal.
+
+    2026-05-24: BRAIN removed the competition `score` from this endpoint, so
+    delta_score is no longer stored (it was always advisory and the dataset
+    bandit already moved off it to binary can_submit). The standalone-vs-merged
+    stats deltas + merged sharpe/fitness remain the team-impact signal.
 
     Idempotent: re-runs overwrite the metric. Failure is silent (logged at
     warning level) — IQC audit is a nice-to-have, not blocking.
@@ -518,7 +523,9 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
             new_metrics["_iqc_marginal"] = {
                 "competition": competition,
                 "audited_at": datetime.now(timezone.utc).isoformat(),
-                "delta_score": deltas.get("score"),
+                # delta_score dropped 2026-05-24 (BRAIN removed `score` from the
+                # before-and-after endpoint). partition_name is the new label.
+                "partition_name": result.get("partition_name"),
                 "delta_sharpe": deltas.get("sharpe"),
                 "delta_fitness": deltas.get("fitness"),
                 "delta_turnover": deltas.get("turnover"),
@@ -544,8 +551,8 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
             return {
                 "alpha_pk": alpha_pk,
                 "competition": competition,
-                "delta_score": deltas.get("score"),
                 "delta_sharpe": deltas.get("sharpe"),
+                "delta_fitness": deltas.get("fitness"),
             }
     except Exception as e:
         logger.warning(f"[audit_iqc_marginal] alpha_pk={alpha_pk} failed: {e}")

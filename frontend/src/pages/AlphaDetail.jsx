@@ -29,8 +29,6 @@ import {
   HistoryOutlined,
   ReloadOutlined,
   TrophyOutlined,
-  ArrowDownOutlined,
-  ArrowUpOutlined,
 } from '@ant-design/icons'
 import { 
   LineChart, 
@@ -619,11 +617,11 @@ function LineageSection({ alphaId }) {
                     <Space direction="vertical" size={4} style={{ fontSize: 12 }}>
                       <span>
                         Standalone(独立运行)vs Merged(并入组合)
-                        的 score/sharpe/fitness 对比 — 决定是否值得提交。
+                        的 sharpe/fitness/turnover 对比 — 决定是否值得提交。
                       </span>
                       <span style={{ color: '#888' }}>
-                        Competition leaderboard 用 merged score 而非 IS sharpe,
-                        因此一个 can_submit=true 的 alpha 可能 score delta 为负。
+                        BRAIN 已移除竞赛 score 字段(2026-05-24);现以 merged 后的
+                        stats 增量衡量边际贡献。turnover/drawdown 越低越好。
                       </span>
                     </Space>
                   }
@@ -674,24 +672,10 @@ function LineageSection({ alphaId }) {
                       column={1}
                       style={{ marginBottom: 16 }}
                     >
-                      <Descriptions.Item label="Competition score (before → after)">
-                        <Space>
-                          <Text>{marginal.raw?.score?.before ?? '—'}</Text>
-                          <span>→</span>
-                          <Text strong>{marginal.raw?.score?.after ?? '—'}</Text>
-                          {marginal.deltas?.score != null && (
-                            <Tag
-                              color={marginal.deltas.score >= 0 ? 'green' : 'red'}
-                              icon={
-                                marginal.deltas.score >= 0
-                                  ? <ArrowUpOutlined />
-                                  : <ArrowDownOutlined />
-                              }
-                            >
-                              Δ {marginal.deltas.score > 0 ? '+' : ''}{marginal.deltas.score}
-                            </Tag>
-                          )}
-                        </Space>
+                      <Descriptions.Item label="Partition">
+                        <Text code>
+                          {marginal.partition_name ?? marginal.raw?.partitionName ?? '—'}
+                        </Text>
                       </Descriptions.Item>
                     </Descriptions>
                     <Row gutter={16}>

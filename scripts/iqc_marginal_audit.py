@@ -1,9 +1,13 @@
 """Batch IQC marginal-contribution audit.
 
 Calls BRAIN before-and-after-performance for every can_submit=True alpha
-in the DB (default scope: IQC2026S1 competition), records score/sharpe
-deltas, sorts by score delta descending. Output: docs/iqc_marginal_audit_<date>.md
+in the DB (default scope: IQC2026S1 competition), records standalone-vs-merged
+stats deltas, sorts by Δsharpe descending. Output: docs/iqc_audit/audit_<date>.md
 + JSON dump.
+
+NOTE (2026-05-24): BRAIN removed the competition `score` from this endpoint, so
+the audit ranks by Δsharpe (marginal sharpe contribution to the merged portfolio)
+instead of the retired Δscore.
 
 Usage:
   venv/Scripts/python.exe scripts/iqc_marginal_audit.py
@@ -68,7 +72,6 @@ async def main(competition: str | None, limit: int | None) -> None:
                 stats = r["raw"].get("stats") or {}
                 before = stats.get("before") or {}
                 after = stats.get("after") or {}
-                score = r["raw"].get("score") or {}
                 entry = {
                     "alpha_pk": alpha.id,
                     "brain_id": alpha.alpha_id,
@@ -78,21 +81,21 @@ async def main(competition: str | None, limit: int | None) -> None:
                     "is_turnover": float(alpha.is_turnover or 0),
                     "merged_sharpe": after.get("sharpe"),
                     "merged_fitness": after.get("fitness"),
-                    "before_score": score.get("before"),
-                    "after_score": score.get("after"),
+                    "partition_name": r.get("partition_name"),
                     "deltas": r["deltas"],
                 }
                 results.append(entry)
-                ds = r["deltas"].get("score")
-                ds_str = f"{ds:+}" if isinstance(ds, (int, float)) else "—"
+                dsh = r["deltas"].get("sharpe")
+                dsh_str = f"{dsh:+}" if isinstance(dsh, (int, float)) else "—"
+                _msh = after.get("sharpe")
                 print(
                     f"  {tag} {alpha.alpha_id} IS_sh={alpha.is_sharpe:.2f} "
-                    f"merged_sh={after.get('sharpe'):.2f} Δscore={ds_str}"
+                    f"merged_sh={_msh if isinstance(_msh, (int, float)) else '—'} Δsharpe={dsh_str}"
                 )
 
-    # Sort by score delta desc (None to bottom)
+    # Sort by Δsharpe desc (None to bottom)
     results.sort(
-        key=lambda r: (r["deltas"].get("score") if isinstance(r["deltas"].get("score"), (int, float)) else -99999),
+        key=lambda r: (r["deltas"].get("sharpe") if isinstance(r["deltas"].get("sharpe"), (int, float)) else -99999),
         reverse=True,
     )
 
@@ -113,9 +116,9 @@ async def main(competition: str | None, limit: int | None) -> None:
         f"**Successfully fetched**: {len(results)}",
         f"**Failures**: {len(failures)}",
         "",
-        "Ranked by `Δscore` (descending — positive = adds value to team).",
+        "Ranked by `Δsharpe` (descending — positive = improves the merged portfolio).",
         "",
-        "| # | brain_id | IS sharpe | merged sharpe | Δsharpe | Δfitness | Δscore | Δpnl |",
+        "| # | brain_id | IS sharpe | merged sharpe | Δsharpe | Δfitness | Δturnover | Δpnl |",
         "|---|---|---|---|---|---|---|---|",
     ]
     for i, r in enumerate(results, 1):
@@ -131,7 +134,7 @@ async def main(competition: str | None, limit: int | None) -> None:
             f"{r['is_sharpe']:.2f} | "
             f"{r['merged_sharpe'] if isinstance(r['merged_sharpe'], (int, float)) else '—'} | "
             f"{fmt(d.get('sharpe'))} | {fmt(d.get('fitness'))} | "
-            f"{fmt(d.get('score'), prec=0)} | "
+            f"{fmt(d.get('turnover'), prec=4)} | "
             f"{fmt(d.get('pnl'), prec=0, money=True)} |"
         )
     lines.append("")
@@ -143,13 +146,13 @@ async def main(competition: str | None, limit: int | None) -> None:
         lines.append("")
 
     # Summary stats
-    score_deltas = [r["deltas"].get("score") for r in results if isinstance(r["deltas"].get("score"), (int, float))]
-    if score_deltas:
+    sharpe_deltas = [r["deltas"].get("sharpe") for r in results if isinstance(r["deltas"].get("sharpe"), (int, float))]
+    if sharpe_deltas:
         lines.insert(7, "")
-        lines.insert(7, f"**Net positive (Δscore > 0)**: {sum(1 for s in score_deltas if s > 0)} / {len(score_deltas)}")
-        lines.insert(8, f"**Average Δscore**: {sum(score_deltas)/len(score_deltas):+.1f}")
-        lines.insert(9, f"**Best Δscore**: {max(score_deltas):+.0f}")
-        lines.insert(10, f"**Worst Δscore**: {min(score_deltas):+.0f}")
+        lines.insert(7, f"**Net positive (Δsharpe > 0)**: {sum(1 for s in sharpe_deltas if s > 0)} / {len(sharpe_deltas)}")
+        lines.insert(8, f"**Average Δsharpe**: {sum(sharpe_deltas)/len(sharpe_deltas):+.3f}")
+        lines.insert(9, f"**Best Δsharpe**: {max(sharpe_deltas):+.3f}")
+        lines.insert(10, f"**Worst Δsharpe**: {min(sharpe_deltas):+.3f}")
     md_path.write_text("\n".join(lines), encoding="utf-8")
 
     print()
@@ -157,10 +160,10 @@ async def main(competition: str | None, limit: int | None) -> None:
     print(f"  results: {len(results)}, failures: {len(failures)}")
     print(f"  json: {json_path}")
     print(f"  md:   {md_path}")
-    if score_deltas:
-        pos = sum(1 for s in score_deltas if s > 0)
-        print(f"  Net positive Δscore: {pos}/{len(score_deltas)}")
-        print(f"  Best: {max(score_deltas):+.0f}  Worst: {min(score_deltas):+.0f}")
+    if sharpe_deltas:
+        pos = sum(1 for s in sharpe_deltas if s > 0)
+        print(f"  Net positive Δsharpe: {pos}/{len(sharpe_deltas)}")
+        print(f"  Best: {max(sharpe_deltas):+.3f}  Worst: {min(sharpe_deltas):+.3f}")
 
 
 if __name__ == "__main__":

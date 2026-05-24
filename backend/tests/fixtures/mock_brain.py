@@ -523,8 +523,10 @@ class MockBrainAdapter:
             "alpha_id": alpha_id,
             "scope": scope,
         })
+        # Mirrors the live shape verified 2026-05-24: no `score` field, a
+        # partitionName label, schema+records-wrapped pnl/yearlyStats.
         return {
-            "partitionName": "EQUITY:1",
+            "partitionName": "EQUITY:USA:1",
             "stats": {
                 "before": {
                     "sharpe": 3.19, "fitness": 2.67, "turnover": 0.156,
@@ -535,10 +537,17 @@ class MockBrainAdapter:
                     "returns": 0.123, "pnl": 6_066_501, "drawdown": 0.029,
                 },
             },
-            "score": {"before": 7227, "after": 6780},
-            "competition": {"id": competition, "name": competition or "self"},
-            "yearlyStats": {"before": {"records": []}, "after": {"records": []}},
-            "pnl": {"records": []},
+            "yearlyStats": {
+                "before": {"schema": {"properties": []}, "records": []},
+                "after": {"schema": {"properties": []}, "records": []},
+            },
+            "pnl": {
+                "schema": {"properties": [
+                    {"name": "date"}, {"name": "beforePnL"}, {"name": "afterPnL"},
+                ]},
+                "records": [],
+            },
+            "partition": ["settings.instrumentType", "settings.region"],
         }
     
     async def get_user_alphas(

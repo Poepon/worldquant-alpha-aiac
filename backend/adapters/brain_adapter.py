@@ -1843,13 +1843,22 @@ class BrainAdapter:
         leaderboard scores merged metrics not standalone IS metrics, so picking
         which can_submit alphas to actually submit depends on this delta.
 
-        Response shape (key fields):
-          stats.before / stats.after  — sharpe / fitness / turnover / pnl /
-                                        margin / returns / drawdown / longCount
-          yearlyStats.before / .after — per-year records
-          pnl.records                  — per-day [date, beforePnL, afterPnL]
-          score.before / .after        — competition score
-          competition / team / partition
+        Response shape (key fields, verified 2026-05-24):
+          partitionName                — e.g. "EQUITY:USA:1"
+          stats.before / stats.after   — bookSize / pnl / longCount / shortCount /
+                                        drawdown / turnover / returns / margin /
+                                        sharpe / fitness
+          yearlyStats.before / .after  — {schema, records}; records are positional
+                                        arrays keyed by schema.properties (year,
+                                        pnl, bookSize, sharpe, ..., stage)
+          pnl                          — {schema, records}; records are
+                                        [date, beforePnL, afterPnL]
+          partition                    — list
+
+        NOTE: the competition `score` field was REMOVED by BRAIN (2026-05-24) —
+        it is no longer present under any scope (users/self, competitions/{c},
+        teams/{t}). An already-submitted alpha returns HTTP 400 with a JSON list
+        body like ["Alpha is already submitted."] (handled as non-200 → {}).
 
         Polls on Retry-After (BRAIN computes merged stats asynchronously).
         Returns {} on persistent failure; caller checks for empty dict.

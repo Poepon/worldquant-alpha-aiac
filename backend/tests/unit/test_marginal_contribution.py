@@ -125,11 +125,13 @@ class TestMarginalContribution:
         assert deltas["fitness"] == pytest.approx(-0.10, abs=0.01)
         # before pnl=5_387_851, after=6_066_501 → +678_650
         assert deltas["pnl"] == pytest.approx(678_650, abs=10)
-        # before score=7227, after=6780 → -447
-        assert deltas["score"] == -447
+        # 2026-05-24: BRAIN removed `score` — no longer in deltas or raw payload
+        assert "score" not in deltas
+        assert "score" not in result["raw"]
 
         assert "stats" in result["raw"]
-        assert result["raw"]["score"]["after"] == 6780
+        # partitionName is surfaced in the envelope
+        assert result["partition_name"] == "EQUITY:USA:1"
 
     @pytest.mark.asyncio
     async def test_scope_defaults_to_users_self(self, pg_session, test_alpha):

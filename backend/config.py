@@ -843,8 +843,9 @@ class Settings(BaseSettings):
     # V-22.12 (2026-05-13): when a can_submit refresh flips True, automatically
     # call BRAIN /competitions/{comp}/before-and-after-performance and stash
     # the deltas in alpha.metrics._iqc_marginal. Empty string disables the
-    # auto-audit. Frontend filters by metrics._iqc_marginal.delta_score>0 to
-    # surface "actually adds value to team portfolio" candidates.
+    # auto-audit. The marginal signal is the standalone-vs-merged stats deltas
+    # (sharpe/fitness/turnover/...). NOTE (2026-05-24): BRAIN removed the
+    # competition `score` field, so delta_score is no longer available/stored.
     IQC_AUTO_AUDIT_COMPETITION: str = "IQC2026S1"
 
     HYPOTHESIS_CENTRIC_LEVEL: int = 0

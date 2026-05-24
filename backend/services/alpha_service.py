@@ -688,14 +688,16 @@ class AlphaService(BaseService):
         where scope ∈ {competitions/{competition}, teams/{team_id}, users/self}.
 
         Returns the raw BRAIN payload (stats.before/after, yearlyStats, pnl,
-        score) with an envelope adding our DB alpha_pk + the resolved scope
-        for the frontend. None when alpha lacks brain alpha_id or BRAIN call
-        fails — caller maps to 404 / 502.
+        partitionName) with an envelope adding our DB alpha_pk + the resolved
+        scope for the frontend. None when alpha lacks brain alpha_id or BRAIN
+        call fails — caller maps to 404 / 502.
 
-        IQC submission workflow: competition leaderboard score uses
-        merged (after) value not standalone IS metrics, so this is the
-        canonical signal for "which can_submit alpha actually helps the
-        team score".
+        2026-05-24: BRAIN dropped the competition `score` field from this
+        endpoint (verified empty under both users/self and competitions/{c}
+        scopes), so only the standalone-vs-merged stats deltas remain here
+        (sharpe/fitness/turnover/returns/pnl/drawdown). pnl/yearlyStats are now
+        {schema, records}-wrapped; pnl.records is still [date, beforePnL,
+        afterPnL]. partitionName (e.g. "EQUITY:USA:1") is the new partition label.
         """
         alpha = await self.alpha_repo.get_by_id(alpha_pk)
         if not alpha or not alpha.alpha_id:
@@ -719,7 +721,10 @@ class AlphaService(BaseService):
         if not payload:
             return None
 
-        # Compute deltas for quick UI display (and KB-feedback later)
+        # Compute deltas for quick UI display (and KB-feedback later).
+        # 2026-05-24: BRAIN removed the `score` field from this endpoint, so the
+        # marginal score delta is no longer available here — only the stats
+        # deltas remain.
         stats = payload.get("stats") or {}
         before = stats.get("before") or {}
         after = stats.get("after") or {}
@@ -728,14 +733,6 @@ class AlphaService(BaseService):
             if isinstance(b, (int, float)) and isinstance(a, (int, float)):
                 return round(a - b, 6)
             return None
-        score = payload.get("score") or {}
-        score_b, score_a = score.get("before"), score.get("after")
-        score_delta = (
-            (score_a - score_b)
-            if isinstance(score_a, (int, float))
-            and isinstance(score_b, (int, float))
-            else None
-        )
 
         return {
             "alpha_pk": alpha_pk,
@@ -744,6 +741,7 @@ class AlphaService(BaseService):
                 f"competitions/{competition}" if competition
                 else (f"teams/{team_id}" if team_id else "users/self")
             ),
+            "partition_name": payload.get("partitionName"),
             "raw": payload,
             "deltas": {
                 "sharpe": _delta("sharpe"),
@@ -752,7 +750,6 @@ class AlphaService(BaseService):
                 "returns": _delta("returns"),
                 "pnl": _delta("pnl"),
                 "drawdown": _delta("drawdown"),
-                "score": score_delta,
             },
         }
 
