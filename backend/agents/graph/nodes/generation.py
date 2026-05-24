@@ -1780,6 +1780,30 @@ async def node_code_gen(
                 "complexity": alpha_data.get("complexity", "unknown"),
                 "novelty_level": alpha_data.get("novelty_level", "unknown"),
             }
+            # P1 (2026-05-24): persist the 5-slot reasoning chain into
+            # candidate.metrics (the PERSISTED path — the metadata above never
+            # reaches alpha.metrics). These slots are generated under the
+            # code_gen=xhigh budget then were discarded (0/200 reached
+            # alpha.metrics), so we could neither measure predicted_turnover
+            # vs actual (is the CoT real or theater?) nor feed signal_velocity
+            # back into the P2 velocity-table calibration. Persisting them
+            # (under _reasoning_*) builds the measurement both need before any
+            # decision to drop the chain. predicted_turnover is coerced to
+            # float when numeric so the downstream predicted-vs-actual analysis
+            # is a plain numeric compare.
+            for _slot in (
+                "economic_hypothesis", "signal_velocity",
+                "predicted_turnover", "math_sanity_check",
+            ):
+                _sv = alpha_data.get(_slot)
+                if _sv is None:
+                    continue
+                if _slot == "predicted_turnover":
+                    try:
+                        _sv = float(_sv)
+                    except (TypeError, ValueError):
+                        pass  # keep raw string if LLM emitted a non-numeric
+                candidate.metrics[f"_reasoning_{_slot}"] = _sv
             # A1.3 trace assistant-mode synth — must land in candidate.metrics
             # (NOT metadata) so the keys survive the validate → simulate →
             # evaluate pipeline via evaluation.py:1278 setdefault merge into
