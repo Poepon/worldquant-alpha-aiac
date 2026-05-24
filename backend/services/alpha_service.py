@@ -749,8 +749,9 @@ class AlphaService(BaseService):
         }
 
         # Derived dimension for the analysis: the recent-year marginal-sharpe
-        # trend (robustness / decay flag — drives the guardrail). pnl_norm was
-        # dropped (3rd review): collinear with `returns`, double-counted return.
+        # trend (robustness / decay flag — drives the guardrail). pnl_norm and
+        # Δmargin were dropped (collinear with returns / turnover); the alpha's
+        # OWN absolute margin drives the economic gate instead (5bps / negative).
         from backend.marginal_analysis import (
             analyze_marginal_contribution,
             recent_yearly_sharpe_delta,
@@ -759,8 +760,11 @@ class AlphaService(BaseService):
             **deltas,
             "recent_yearly_sharpe": recent_yearly_sharpe_delta(payload.get("yearlyStats")),
         }
+        _alpha_margin = alpha.is_margin
+        if _alpha_margin is None and isinstance(alpha.is_metrics, dict):
+            _alpha_margin = alpha.is_metrics.get("margin")
         analysis = analyze_marginal_contribution(
-            analysis_deltas, merged=after, baseline=before
+            analysis_deltas, merged=after, baseline=before, alpha_margin=_alpha_margin,
         )
 
         return {

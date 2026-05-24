@@ -693,6 +693,19 @@ function LineageSection({ alphaId }) {
                                 {marginal.analysis.composite_score}
                               </Tag>
                             )}
+                            {marginal.analysis.margin_bps != null && (
+                              <Tag
+                                color={
+                                  marginal.analysis.margin_bps < 0
+                                    ? 'red'
+                                    : marginal.analysis.margin_bps < 5
+                                      ? 'orange'
+                                      : 'blue'
+                                }
+                              >
+                                Margin {marginal.analysis.margin_bps}bps（门槛 5bps）
+                              </Tag>
+                            )}
                           </Space>
                         }
                         description={
@@ -735,6 +748,14 @@ function LineageSection({ alphaId }) {
                                 )}
                               </Col>
                             </Row>
+                            {(marginal.analysis.reference || []).length > 0 && (
+                              <div style={{ color: '#888' }}>
+                                参考（不计入评分）：
+                                {marginal.analysis.reference
+                                  .map((r) => r.text)
+                                  .join('；')}
+                              </div>
+                            )}
                           </Space>
                         }
                       />

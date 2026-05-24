@@ -21,16 +21,50 @@ def _rec(deltas, **kw):
 
 
 def test_good_diversifier_submits_despite_negative_sharpe():
-    """Δsharpe slightly negative (dilution) but returns/margin up + drawdown down
-    → multi-dim SUBMIT (the core fix vs the old Sharpe-led SKIP)."""
+    """Δsharpe slightly negative (dilution) but returns up + drawdown down →
+    multi-dim SUBMIT (the core fix vs the old Sharpe-led SKIP)."""
     a = _rec({
-        "sharpe": -0.03, "fitness": 0.02, "returns": 0.013, "margin": 0.0003,
+        "sharpe": -0.03, "fitness": 0.02, "returns": 0.013,
         "drawdown": -0.003, "turnover": 0.004,
-    }, merged={"sharpe": 3.16})
+    }, merged={"sharpe": 3.16}, alpha_margin=0.001)  # 10bps, clears the gate
     assert a["recommendation"] == "SUBMIT"
     assert a["composite_score"] > 0
     assert "sharpe" in {n["metric"] for n in a["negatives"]}  # surfaced, not hidden
     assert "returns" in {p["metric"] for p in a["positives"]}
+
+
+# ── margin economic gate (alpha's own standalone margin) ─────────────────────
+
+def test_margin_negative_hard_skips():
+    """A negative-margin alpha has no submission value → hard SKIP, even if the
+    portfolio marginal looks great."""
+    a = _rec({"sharpe": 0.10, "returns": 0.02, "drawdown": -0.005},
+             alpha_margin=-0.0001)
+    assert a["recommendation"] == "SKIP"
+    assert a["margin_bps"] == pytest.approx(-1.0, abs=0.01)
+    assert any("无提交价值" in g for g in a["guardrails"])
+
+
+def test_margin_below_5bps_caps_neutral():
+    """0 ≤ margin < 5bps: likely unprofitable after costs → cap NEUTRAL."""
+    a = _rec({"sharpe": 0.10, "returns": 0.02, "drawdown": -0.005},
+             alpha_margin=0.0003)  # 3 bps
+    assert a["recommendation"] == "NEUTRAL"
+    assert any("5bps" in g for g in a["guardrails"])
+
+
+def test_margin_above_floor_no_gate():
+    a = _rec({"sharpe": 0.10, "returns": 0.02, "drawdown": -0.005},
+             alpha_margin=0.0008)  # 8 bps
+    assert a["recommendation"] == "SUBMIT"
+    assert not any("Margin" in g for g in a["guardrails"])
+    assert a["margin_bps"] == pytest.approx(8.0, abs=0.01)
+
+
+def test_margin_absent_skips_gate():
+    a = _rec({"sharpe": 0.10, "returns": 0.02, "drawdown": -0.005})  # no margin
+    assert a["margin_bps"] is None
+    assert not any("Margin" in g for g in a["guardrails"])
 
 
 def test_all_negative_skips():
@@ -83,6 +117,18 @@ def test_recent_yearly_decay_caps_to_neutral():
     a = _rec({"sharpe": 0.04, "returns": 0.02, "recent_yearly_sharpe": -0.08})
     assert a["recommendation"] != "SUBMIT"
     assert any("衰减" in g for g in a["guardrails"])
+
+
+def test_weight0_dim_goes_to_reference_not_contributions():
+    """recent_yearly_sharpe (weight 0) must NOT appear in positives/negatives
+    (it doesn't score) — it belongs in `reference`, shown for context only."""
+    a = _rec({"sharpe": 0.05, "returns": 0.02, "recent_yearly_sharpe": 0.30})
+    metrics_in_contrib = {r["metric"] for r in a["positives"] + a["negatives"]}
+    assert "recent_yearly_sharpe" not in metrics_in_contrib
+    assert "recent_yearly_sharpe" in {r["metric"] for r in a["reference"]}
+    # and it does not move the composite
+    base = _rec({"sharpe": 0.05, "returns": 0.02})
+    assert a["composite_score"] == base["composite_score"]
 
 
 def test_guardrail_never_upgrades():

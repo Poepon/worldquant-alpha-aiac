@@ -534,10 +534,12 @@ async def _audit_iqc_marginal_async(alpha_pk: int, competition: str) -> Dict:
                 "delta_pnl": deltas.get("pnl"),
                 "merged_sharpe": (stats.get("after") or {}).get("sharpe"),
                 "merged_fitness": (stats.get("after") or {}).get("fitness"),
-                # Multi-dimensional verdict (3rd review): persist so the "可提交"
-                # list + bandit can sort/flag by it without re-hitting BRAIN.
+                # Multi-dimensional verdict: persist so the "可提交" list / audits
+                # can sort + flag by it without re-hitting BRAIN. (The dataset
+                # bandit uses binary can_submit, not this — see 2026-05-23.)
                 "recommendation": analysis.get("recommendation"),
                 "composite_score": analysis.get("composite_score"),
+                "margin_bps": analysis.get("margin_bps"),
                 "guardrails": analysis.get("guardrails"),
                 # V-23.E: explicit fresh-after-audit flag (default false).
                 # sync_user_alphas flips this to true on submission flip;

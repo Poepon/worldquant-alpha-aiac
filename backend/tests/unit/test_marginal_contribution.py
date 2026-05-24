@@ -79,6 +79,7 @@ async def test_alpha(pg_session):
         is_sharpe=3.19,
         is_fitness=2.67,
         is_turnover=0.156,
+        is_margin=0.0010,  # 10 bps — clears the 5bps economic gate
     )
     pg_session.add(alpha)
     await pg_session.commit()
@@ -144,7 +145,10 @@ class TestMarginalContribution:
         assert analysis["composite_score"] > 0
         assert analysis["signals"]["sharpe"] == -1
         assert "sharpe" in {n["metric"] for n in analysis["negatives"]}
-        assert {p["metric"] for p in analysis["positives"]} >= {"returns", "margin"}
+        assert {p["metric"] for p in analysis["positives"]} >= {"returns", "drawdown"}
+        # alpha's own margin (10 bps) surfaced + clears the economic gate
+        assert analysis["margin_bps"] == pytest.approx(10.0, abs=0.01)
+        assert not any("Margin" in g for g in analysis["guardrails"])
 
     @pytest.mark.asyncio
     async def test_scope_defaults_to_users_self(self, pg_session, test_alpha):

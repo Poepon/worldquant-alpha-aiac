@@ -7,22 +7,28 @@ Semantics (verified 2026-05-24): the endpoint reports portfolio metrics BEFORE
 this alpha is submitted vs AFTER it is merged in, so delta = after - before is
 the alpha's MARGINAL contribution to the portfolio.
 
-WHY MULTI-DIMENSIONAL (not Sharpe-led): adding a single alpha (standalone
-sharpe ~1.4-1.7) to a mature high-sharpe (~3) portfolio can dilute the portfolio
-sharpe (Δsharpe < 0) when the alpha is correlated — a structural effect, not a
-quality signal. Empirically the Δsharpe sign VARIES by alpha (a 20-alpha live
-sample on 2026-05-24 was ~17/20 positive, but earlier batches skewed negative),
-so Sharpe alone is an unreliable gate. The right question is "does adding this
-alpha make the portfolio better across return AND risk dimensions, and is it
-temporally robust?" — a weighted scorecard of all dimensions (positive AND
-negative) plus hard guardrails for genuine red flags. Sharpe is the
-highest-weighted single dimension but does NOT veto on its own, and a positive
-Sharpe cannot override severe risk/cost deterioration.
+WHY MULTI-DIMENSIONAL (not Sharpe-led): adding a single alpha to a mature
+high-sharpe (~3) portfolio can dilute portfolio sharpe (Δsharpe < 0) when the
+alpha is correlated — a structural effect, not a quality signal. The Δsharpe sign
+varies by alpha, so Sharpe alone is unreliable. We score a weighted scorecard of
+return + risk dimensions (positive AND negative), plus guardrails for red flags.
 
-Dimensions (direction +1 = higher-better, -1 = lower-better):
-  return side : sharpe, returns, margin, fitness, pnl_norm (Δpnl / bookSize)
-  risk side   : drawdown, turnover
-  robustness  : recent_yearly_sharpe (median Δsharpe over the latest ~2 years)
+De-collinearised dimensions (each pair below measures the SAME effect; we keep one
+and drop the other from the composite to avoid double-counting):
+  - pnl_norm  (≈ Δpnl/bookSize)  ── collinear with `returns`           → dropped
+  - recent_yearly_sharpe         ── collinear with `sharpe` (window)   → weight 0
+  - Δmargin                      ── collinear with Δturnover (r≈-0.98) → dropped
+    (margin ≈ returns/turnover, so the MARGINAL Δmargin just mirrors the turnover
+     change). The ABSOLUTE margin LEVEL is a different, NON-collinear signal and
+     IS used — see the margin economic gate below.
+
+MARGIN ECONOMIC GATE (alpha's own standalone IS margin, NOT the portfolio Δ):
+margin = profit per dollar traded. WorldQuant treats ~5 bps as the floor to stay
+profitable after real-world costs (commissions / slippage / impact); a negative
+margin means the alpha has no submission value (cannot enter the Production Pool)
+and guards against "fake returns" churned out by high turnover + leverage. So:
+  alpha margin < 0      → hard SKIP gate (no submission value)
+  alpha margin < 5 bps  → cap NEUTRAL (likely unprofitable net of costs)
 
 This is the portfolio-contribution dimension; it complements (does not replace)
 can_submit and self-correlation gates shown elsewhere.
@@ -34,32 +40,23 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # metric -> (direction, scale, weight, display_name, value_fmt)
 #   direction: +1 higher-is-better, -1 lower-is-better
-#   scale:     a "clearly significant" |Δ| — Δ/scale maps to a normalized unit
-#   weight:    relative importance in the composite
-# scale: |Δ| at which a dimension is a "clearly significant" move. CALIBRATED
-# from the observed live distribution (median |Δ| over 20 can_submit alphas:
-# sharpe 0.07 / returns 0.002 / margin 0.00022 / drawdown 0.0017 / turnover
-# 0.0217) — scale ≈ 2× median so the median move reads as a moderate (~0.5)
-# signal and only genuinely large moves saturate toward ±_NORM_CAP. Re-derive
-# with scripts/iqc_marginal_audit.py (scale ≈ 2 × median(|Δ|)) if BRAIN shifts.
-#
-# pnl_norm REMOVED 2026-05-24 (3rd review): it is collinear with `returns`
-# (both ≈ PnL/bookSize) and double-counted the return side. recent_yearly_sharpe
-# kept at WEIGHT 0 — it is shown in the scorecard + drives the decay guardrail,
-# but does NOT enter the composite (it is collinear with `sharpe`, just a
-# different window — scoring it would double-count the sharpe family).
+#   scale:     |Δ| at which a dimension is a "clearly significant" move
+#   weight:    relative importance in the composite (0 = display/guardrail only)
+# scale CALIBRATED from live median |Δ| over 20 can_submit alphas (sharpe 0.07 /
+# returns 0.002 / drawdown 0.0017 / turnover 0.0217), scale ≈ 2× median so the
+# median move reads as a moderate ~0.5 signal. Re-derive with
+# scripts/iqc_marginal_audit.py (scale ≈ 2 × median(|Δ|)) if BRAIN shifts.
+# CAVEAT: fitness scale 0.08 is NOT yet calibrated (Δ not sampled) and fitness is
+# partly collinear with sharpe — treat its weight as provisional. The whole
+# calibration is from a single snapshot; per-region recalibration is future work.
 _DIMS: Dict[str, Tuple[int, float, float, str, str]] = {
     "sharpe":               (+1, 0.12,   1.0, "Sharpe", ".3f"),
     "returns":              (+1, 0.004,  0.8, "Returns", ".4f"),
-    "margin":               (+1, 0.0004, 0.5, "Margin", ".5f"),
     "fitness":              (+1, 0.08,   0.5, "Fitness", ".3f"),
     "drawdown":             (-1, 0.003,  0.6, "回撤", ".4f"),
     "turnover":             (-1, 0.045,  0.5, "换手", ".4f"),
     "recent_yearly_sharpe": (+1, 0.05,   0.0, "近年Sharpe趋势", ".3f"),
 }
-
-_RETURN_SIDE = {"sharpe", "returns", "margin", "fitness"}
-_RISK_SIDE = {"drawdown", "turnover"}
 
 _NORM_CAP = 1.5          # clip normalized magnitude to ±1.5
 _NOISE_FLOOR = 0.15      # |normalized| <= this → neutral (abstains from composite)
@@ -69,14 +66,16 @@ _T_SUBMIT = 0.25
 _T_SKIP = -0.25
 
 # Guardrail trigger magnitudes (on normalized scale). Set to "genuinely severe"
-# (≈ 2.5× median move) so routine portfolio shifts don't trip them — at the old
-# -0.7, a median +0.02 turnover increase wrongly read as a "severe cost blowup".
-# Guardrails only DOWNGRADE to NEUTRAL (a genuine red flag → don't auto-recommend
-# SUBMIT, force human judgment). A SKIP comes only from a genuinely negative
-# composite, never from a single guardrail.
+# (≈ 2.5× median move) so routine portfolio shifts don't trip them. Guardrails
+# only DOWNGRADE to NEUTRAL (a red flag → don't auto-recommend SUBMIT). A SKIP
+# comes from a genuinely negative composite OR the hard margin gate below.
 _GR_RISK = -1.2          # drawdown OR turnover this bad → cap NEUTRAL
 _GR_RETURN = -1.2        # returns this bad (strong dilution) → cap NEUTRAL
 _GR_YEARLY = -1.0        # recent-year sharpe decaying this much → cap NEUTRAL
+
+# Margin economic gate (alpha's own standalone margin, in ratio: 0.0005 = 5 bps).
+_MARGIN_FLOOR = 0.0005   # < this → not profitable net of costs → cap NEUTRAL
+# margin < 0 → hard SKIP gate (no submission value)
 
 _LABELS = {
     "SUBMIT": "推荐提交",
@@ -90,7 +89,6 @@ _RANK_INV = {v: k for k, v in _RANK.items()}
 _VERB = {
     "sharpe": ("抬升组合 Sharpe", "稀释组合 Sharpe"),
     "returns": ("增厚组合收益", "稀释组合收益"),
-    "margin": ("提高单位交易收益率", "降低单位交易收益率"),
     "fitness": ("提升组合 Fitness", "降低组合 Fitness"),
     "drawdown": ("降低组合回撤", "加大组合回撤"),
     "turnover": ("降低组合换手/成本", "推高组合换手/成本"),
@@ -107,9 +105,8 @@ def recent_yearly_sharpe_delta(yearly_block: Optional[Dict[str, Any]], recent_n:
 
     Parses BRAIN's {before:{schema,records}, after:{schema,records}} yearly block
     (records are positional arrays keyed by schema.properties). Returns None when
-    absent/unparsable (caller treats the robustness dimension as missing). A
-    strongly negative value flags an alpha whose marginal contribution is decaying
-    even if its all-time Δsharpe looks fine.
+    absent/unparsable. A strongly negative value flags an alpha whose marginal
+    contribution is decaying even if its all-time Δsharpe looks fine.
     """
     if not isinstance(yearly_block, dict):
         return None
@@ -154,30 +151,27 @@ def analyze_marginal_contribution(
     deltas: Optional[Dict[str, Any]],
     merged: Optional[Dict[str, Any]] = None,
     baseline: Optional[Dict[str, Any]] = None,
+    alpha_margin: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Map marginal deltas to a multi-dimensional submit recommendation.
+    """Map marginal deltas + the alpha's own margin to a submit recommendation.
 
     Args:
-        deltas: after-before deltas for any of the _DIMS metrics (incl. derived
-            pnl_norm and recent_yearly_sharpe). Any may be None / missing /
-            non-finite (treated as "dimension absent").
-        merged: stats.after absolute values (for context in the rationale).
-        baseline: stats.before absolute values (reserved for absolute-level
-            context; currently used only to note high-portfolio tolerance).
+        deltas: after-before deltas for any of the _DIMS metrics (+ derived
+            recent_yearly_sharpe). Any may be None / missing / non-finite.
+        merged: stats.after absolute values (rationale context).
+        baseline: stats.before absolute values (reserved).
+        alpha_margin: the alpha's OWN standalone IS margin (ratio, 0.0005 = 5 bps).
+            Drives the margin economic gate (see module docstring). None → gate
+            skipped (no margin data).
 
     Returns a JSON-friendly dict (back-compat fields kept: recommendation, label,
     reasons, signals, marginal_score):
-        recommendation:  SUBMIT | NEUTRAL | SKIP | UNKNOWN
-        label:           中文 label
-        composite_score: weighted-average normalized contribution ∈ [-1.5, 1.5]
-        positives/negatives/neutrals: scorecard rows {metric,name,delta,
-                         normalized,weight,text}
-        guardrails:      list of triggered hard-flag descriptions (中文)
-        rationale:       one-line 中文 verdict explanation
-        reasons:         flattened 中文 bullet list (back-compat; positives then
-                         negatives then guardrails)
-        signals:         {metric: -1|0|1} (back-compat)
-        marginal_score:  alias of composite_score (back-compat)
+        recommendation / label / composite_score
+        positives / negatives / neutrals: scored scorecard rows
+        reference: display-only rows (weight-0 dims, e.g. yearly trend)
+        margin_bps: the alpha's margin in bps (or None)
+        guardrails: triggered hard-flag descriptions (中文)
+        rationale / reasons / signals / marginal_score (back-compat)
     """
     deltas = deltas or {}
     merged = merged or {}
@@ -185,6 +179,7 @@ def analyze_marginal_contribution(
     present: Dict[str, float] = {
         m: float(deltas[m]) for m in _DIMS if m in deltas and _is_num(deltas.get(m))
     }
+    margin_bps = round(alpha_margin * 10000, 2) if _is_num(alpha_margin) else None
 
     # Core data gate: need at least one of sharpe / returns to say anything.
     if "sharpe" not in present and "returns" not in present:
@@ -193,7 +188,8 @@ def analyze_marginal_contribution(
             "label": _LABELS["UNKNOWN"],
             "composite_score": None,
             "marginal_score": None,
-            "positives": [], "negatives": [], "neutrals": [],
+            "positives": [], "negatives": [], "neutrals": [], "reference": [],
+            "margin_bps": margin_bps,
             "guardrails": [],
             "rationale": "缺少 Sharpe / Returns 边际数据，无法评估",
             "reasons": ["缺少 Sharpe / Returns 边际数据，无法评估"],
@@ -203,6 +199,7 @@ def analyze_marginal_contribution(
     positives: List[Dict[str, Any]] = []
     negatives: List[Dict[str, Any]] = []
     neutrals: List[Dict[str, Any]] = []
+    reference: List[Dict[str, Any]] = []
     signals: Dict[str, int] = {}
     norm: Dict[str, float] = {}
     wsum = 0.0
@@ -214,12 +211,6 @@ def analyze_marginal_contribution(
         norm[m] = n
         good = n > _NOISE_FLOOR
         bad = n < -_NOISE_FLOOR
-        # Only dimensions with a clear (above-noise) signal AND non-zero weight
-        # vote in the composite — neutral / display-only (weight 0) dims abstain
-        # so they neither dilute nor drag the weighted average.
-        if weight > 0 and (good or bad):
-            wsum += weight
-            contrib += weight * n
         signals[m] = 1 if good else (-1 if bad else 0)
         verb = _VERB[m][0] if good else (_VERB[m][1] if bad else "影响可忽略")
         row = {
@@ -227,6 +218,15 @@ def analyze_marginal_contribution(
             "normalized": round(n, 3), "weight": weight,
             "text": f"Δ{name} {dval:+{fmt}} — {verb}",
         }
+        if weight <= 0:
+            # Display/guardrail-only dim (e.g. yearly trend): shown for context,
+            # never scored — keep it OUT of positives/negatives so the scorecard's
+            # "contribution" columns only list dims that actually move the score.
+            reference.append(row)
+            continue
+        if good or bad:
+            wsum += weight
+            contrib += weight * n
         (positives if good else (negatives if bad else neutrals)).append(row)
 
     positives.sort(key=lambda r: -r["normalized"] * r["weight"])
@@ -242,7 +242,6 @@ def analyze_marginal_contribution(
     else:
         base = "NEUTRAL"
 
-    # Hard guardrails — they only DOWNGRADE (cap) the recommendation.
     guardrails: List[str] = []
     cap = "SUBMIT"  # most permissive cap
 
@@ -250,6 +249,18 @@ def analyze_marginal_contribution(
         nonlocal cap
         if _RANK[level] < _RANK[cap]:
             cap = level
+
+    # Margin economic gate (alpha's own margin). margin < 0 is a HARD disqualifier
+    # (no submission value); below the cost floor caps to NEUTRAL.
+    if _is_num(alpha_margin):
+        if alpha_margin < 0:
+            guardrails.append(f"Margin {margin_bps:.1f}bps 为负 — 无提交价值，无法进 Production Pool")
+            _cap_to("SKIP")
+        elif alpha_margin < _MARGIN_FLOOR:
+            guardrails.append(
+                f"Margin {margin_bps:.1f}bps < 5bps — 扣除交易成本后恐难盈利，需人工权衡"
+            )
+            _cap_to("NEUTRAL")
 
     if norm.get("drawdown", 0) <= _GR_RISK or norm.get("turnover", 0) <= _GR_RISK:
         guardrails.append("风险/成本显著恶化（回撤或换手大幅上升）— 不允许直接推荐提交")
@@ -264,17 +275,15 @@ def analyze_marginal_contribution(
     rec = _RANK_INV[min(_RANK[base], _RANK[cap])]
 
     # Rationale
-    pos_w = sum(r["weight"] * r["normalized"] for r in positives)
-    neg_w = -sum(r["weight"] * r["normalized"] for r in negatives)
     merged_sh = merged.get("sharpe")
-    sh_ctx = (
-        f"（并入后组合 Sharpe≈{merged_sh:.2f}）"
-        if _is_num(merged_sh) else ""
-    )
+    sh_ctx = f"（并入后组合 Sharpe≈{merged_sh:.2f}）" if _is_num(merged_sh) else ""
+    pure_dead_zone = not positives and not negatives
     if rec == "SUBMIT":
         head = f"综合边际为正(评分{composite:+.2f}){sh_ctx}：正向贡献压过负向，建议提交"
     elif rec == "SKIP":
         head = f"综合边际为负(评分{composite:+.2f}){sh_ctx}：负向拖累压过正向，不建议提交"
+    elif pure_dead_zone and not guardrails:
+        head = f"各维边际均低于显著阈值(评分{composite:+.2f}){sh_ctx}：影响可忽略，自行判断"
     else:
         head = f"综合边际中性(评分{composite:+.2f}){sh_ctx}：正负相抵或存在否决项，建议人工权衡"
     if guardrails and _RANK[cap] < _RANK[base]:
@@ -290,6 +299,8 @@ def analyze_marginal_contribution(
         "positives": positives,
         "negatives": negatives,
         "neutrals": neutrals,
+        "reference": reference,
+        "margin_bps": margin_bps,
         "guardrails": guardrails,
         "rationale": head,
         "reasons": reasons,
