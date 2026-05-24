@@ -1118,6 +1118,33 @@ def _verify_cascade_ownership(lock_key: str, token: str, *, where: str) -> bool:
     return False
 
 
+async def _rebuild_flat_db_session(old_db, task_id, run_id, brain):
+    """Discard a possibly-poisoned AsyncSession and return a fresh
+    ``(db, task, run, mining_agent)`` bound to a clean connection (2026-05-25).
+
+    Root cause (task 3504): a per-round ``asyncio.wait_for`` timeout cancels
+    ``run_evolution_loop`` mid-flight; when the cancel lands inside an asyncpg
+    DB op, SQLAlchemy's cleanup raises ``greenlet_spawn has not been called``
+    and the shared session is permanently poisoned — every later
+    ``db.refresh`` / commit on it re-raises, so one slow round killed the WHOLE
+    FLAT session and stranded the cursor. Closing the old session returns its
+    (pool-invalidated) connection; the new session checks out a clean one.
+    ``task`` / ``run`` are re-fetched into the new session; the caller rebinds
+    them and the ``MiningAgent``. ``brain`` may be None (finalization path,
+    outside the BrainAdapter context) → no MiningAgent is built.
+    """
+    for _op in (old_db.rollback, old_db.close):
+        try:
+            await _op()
+        except Exception:  # noqa: BLE001 — a poisoned session may fail both
+            pass
+    new_db = AsyncSessionLocal()
+    task = await new_db.get(MiningTask, task_id)
+    run = await new_db.get(ExperimentRun, run_id) if run_id is not None else None
+    mining_agent = MiningAgent(new_db, brain) if brain is not None else None
+    return new_db, task, run, mining_agent
+
+
 async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_token):
     """Flat session main loop (post tier-system removal, 2026-05-18).
 
@@ -1132,6 +1159,11 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
     Exits cleanly on task.status in (PAUSED, STOPPED, EARLY_STOPPED) at any
     iteration boundary, preserving cursor in runtime_state.
     """
+    # 2026-05-25: track the originally-injected session. On round failure we
+    # may rebuild a clean replacement (see _rebuild_flat_db_session); the
+    # original is owned by run_mining_task._run's `async with`, so only a
+    # self-built replacement gets closed by us at the end.
+    _orig_db = db
     logger.info(
         f"[flat] task={task.id} region={task.region} starting "
         f"flat session (target_datasets={len(task.target_datasets or [])})"
@@ -1199,8 +1231,28 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 logger.warning(f"[flat] dataset-bandit weight fetch failed: {_wm_err}")
                 _ds_weight_map = {}
 
+        # 2026-05-25: a single poisoned/timed-out round must not kill the whole
+        # FLAT session — count consecutive failures and bail out gracefully
+        # (cursor preserved, resumable) only after a small threshold.
+        consecutive_round_failures = 0
+        _max_round_failures = int(
+            getattr(settings, "FLAT_MAX_CONSECUTIVE_ROUND_FAILURES", 3) or 3
+        )
+
         while iterations < max_iters and total_alphas < daily_goal:
-            await db.refresh(task)
+            try:
+                await db.refresh(task)
+            except Exception as _refresh_ex:  # noqa: BLE001
+                # Shared session poisoned by a prior round's wait_for-cancel
+                # greenlet_spawn — rebuild a clean one before reading status.
+                logger.error(
+                    f"[flat] task={task.id} session refresh failed "
+                    f"(rebuilding clean session): {_refresh_ex}"
+                )
+                db, task, run, mining_agent = await _rebuild_flat_db_session(
+                    db, task.id, run.id, brain
+                )
+                await db.refresh(task)
             if task.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
                 logger.info(
                     f"[flat] task={task.id} status={task.status} at cursor={flat_cursor}, "
@@ -1238,14 +1290,66 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 if _picked is not None:
                     dataset_id = _picked
 
-            result = await _run_one_round_inline(
-                db, task, run, brain, mining_agent, operators,
-                dataset_id=dataset_id,
-                # Pass cumulative round count as offset so the inner
-                # workflow advances trace_steps.iteration past flat-mode
-                # dataset cycles (and pause-resume boundaries).
-                iteration_offset=iterations,
-            )
+            try:
+                result = await _run_one_round_inline(
+                    db, task, run, brain, mining_agent, operators,
+                    dataset_id=dataset_id,
+                    # Pass cumulative round count as offset so the inner
+                    # workflow advances trace_steps.iteration past flat-mode
+                    # dataset cycles (and pause-resume boundaries).
+                    iteration_offset=iterations,
+                )
+            except Exception as _round_ex:  # noqa: BLE001
+                # 2026-05-25: _run_one_round_inline normally soft-fails to an
+                # error dict, but a wait_for-cancel greenlet_spawn can defeat
+                # even its own rollback and propagate. Treat as a failed round.
+                logger.error(
+                    f"[flat] task={task.id} round raised out of inline "
+                    f"(dataset={dataset_id}): {_round_ex}"
+                )
+                result = {"all_alphas": [], "error": str(_round_ex)}
+
+            # 2026-05-25: a failed round may have poisoned the shared session
+            # (timeout cancel mid asyncpg IO → greenlet_spawn). Rebuild a clean
+            # session, advance past this dataset, and continue so one slow /
+            # timed-out round can't kill the entire FLAT session and strand the
+            # cursor. Bail out only after _max_round_failures in a row.
+            if result.get("error"):
+                consecutive_round_failures += 1
+                logger.error(
+                    f"[flat] task={task.id} round failed (dataset={dataset_id}, "
+                    f"consecutive={consecutive_round_failures}/"
+                    f"{_max_round_failures}): {str(result.get('error'))[:200]}"
+                )
+                db, task, run, mining_agent = await _rebuild_flat_db_session(
+                    db, task.id, run.id, brain
+                )
+                flat_cursor += 1
+                iterations += 1
+                # Persist the advanced cursor on the fresh session so a resume
+                # skips the bad slot (best-effort; never fatal).
+                try:
+                    if isinstance(run.runtime_state, dict):
+                        run.runtime_state["flat_cursor"] = flat_cursor
+                        run.runtime_state["flat_iterations"] = iterations
+                        flag_modified(run, "runtime_state")
+                        await db.commit()
+                except Exception as _cur_ex:  # noqa: BLE001
+                    logger.warning(
+                        f"[flat] task={task.id} cursor persist after rebuild "
+                        f"failed (non-fatal): {_cur_ex}"
+                    )
+                if consecutive_round_failures >= _max_round_failures:
+                    logger.error(
+                        f"[flat] task={task.id} {consecutive_round_failures} "
+                        f"consecutive round failures — exiting flat loop "
+                        f"(cursor={flat_cursor} preserved; resumable)"
+                    )
+                    break
+                continue
+
+            consecutive_round_failures = 0
+
             # A+ circuit breaker: if BRAIN auth circuit is OPEN the round
             # was skipped — don't busy-loop hitting the same circuit-open
             # check on every dataset. Sleep enough for the circuit's TTL to
@@ -1346,13 +1450,33 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
     # STOPPED or ownership takeover, reflect that on the run so history
     # isn't misrepresented as finished work.
     if run is not None:
-        await db.refresh(task)
+        # 2026-05-25: this runs OUTSIDE the BrainAdapter context, so a rebuild
+        # here passes brain=None (no MiningAgent needed for finalization).
+        try:
+            await db.refresh(task)
+        except Exception as _fin_ex:  # noqa: BLE001
+            logger.error(
+                f"[flat] task={task.id} finalization refresh failed "
+                f"(rebuilding clean session): {_fin_ex}"
+            )
+            db, task, run, _ = await _rebuild_flat_db_session(
+                db, task.id, run.id, None
+            )
+            await db.refresh(task)
         if task.status in ("PAUSED", "STOPPED"):
             run.status = task.status
         else:
             run.status = "COMPLETED"
         run.finished_at = datetime.utcnow()
         await db.commit()
+
+    # 2026-05-25: if we rebuilt the session mid-loop, run_mining_task._run's
+    # `async with` only closes the ORIGINAL db — close the replacement we own.
+    if db is not _orig_db:
+        try:
+            await db.close()
+        except Exception:  # noqa: BLE001
+            pass
 
     return {
         "mode": "FLAT_CONTINUOUS",

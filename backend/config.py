@@ -249,6 +249,12 @@ class Settings(BaseSettings):
     LLM_CALL_TIMEOUT_SEC: float = 180.0     # 单次 LLM HTTP 调用硬上限(非流式)
     LLM_STREAM_TIMEOUT_SEC: float = 600.0   # anthropic thinking 流式调用硬上限
     MINING_ROUND_TIMEOUT_SEC: int = 1200    # per-round 兜底(20min;健康 round 5-13min)
+    # 2026-05-25: 单轮 round 失败(尤其 wait_for 超时 cancel 在 asyncpg DB IO 中途
+    # 触发 greenlet_spawn,毒化共享 AsyncSession)后,_run_flat_iteration 重建一个
+    # 干净 session 隔离毒化、继续后续轮,而不是让整个 FLAT session 暴毙(task 3504
+    # 实证:it5 跑满 1200s 超时 → 共享 session 毒化 → 整个 task FAILED、cursor 之后
+    # 全丢)。连续失败达到此上限则优雅退出(cursor 已保存,可 resume),避免无限重建。
+    FLAT_MAX_CONSECUTIVE_ROUND_FAILURES: int = 3
 
     # ----- Sprint 0 spike calibration (2026-05-19) -----
     # Production baseline (last 30d, scripts/sprint0_baseline_spike.py):
