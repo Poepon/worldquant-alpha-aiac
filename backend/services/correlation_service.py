@@ -69,6 +69,11 @@ MIN_OVERLAP_DAYS = 60
 # Concurrency limit for PnL fetches (BRAIN tolerates ~10 in parallel without
 # triggering sub-minute burst red-line).
 PNL_FETCH_CONCURRENCY = 10
+# opt B (2026-05-25): PnL-fetch retry backoff base. Was an inline 1.5
+# (→ 1.5+3.0 = 4.5s of sleep over 3 attempts). Shorter base cuts the wasted
+# wait when an alpha's PnL is simply not-yet-ready (just simulated → BRAIN
+# returns empty) while KEEPING the retry count for genuine rate-limit recovery.
+_PNL_RETRY_BACKOFF_BASE = 1.0
 # Cache freshness: refresh if older than 24h.
 CACHE_TTL_HOURS = 24
 
@@ -167,6 +172,16 @@ class CorrelationService:
 
     def __init__(self, brain: BrainAdapter):
         self.brain = brain
+        # opt A (2026-05-25): per-instance PnL fetch cache. CorrelationService
+        # is created per node_evaluate call (evaluation.py:1894), so this is a
+        # per-round cache. calc_self_corr AND calc_self_corr_by_window each
+        # fetch the SAME target alpha's PnL — previously two BRAIN round-trips,
+        # each with up to 3 retries (the duplicate retry storm pushed news12
+        # EVALUATE to ~10min and tipped rounds over the 1200s timeout). Caching
+        # the first fetch (incl. an empty / not-yet-ready result) removes the
+        # duplicate round-trip + duplicate retries. Per-round scope means no
+        # cross-round staleness.
+        self._pnl_cache: Dict[str, pd.Series] = {}
 
     # ------------------------------------------------------------------
     # Cache I/O
@@ -266,12 +281,20 @@ class CorrelationService:
         backoff recovers the transient case; a still-empty result after
         `max_attempts` is treated as genuinely empty by the caller.
         """
+        # opt A: serve a repeat fetch of the same alpha (calc_self_corr →
+        # calc_self_corr_by_window) from the per-round cache. A cached EMPTY
+        # result is intentionally returned too — it short-circuits a second
+        # retry storm for a not-yet-ready alpha (opt B's complement).
+        cached = self._pnl_cache.get(alpha_id)
+        if cached is not None:
+            return cached
         last_exc: Optional[Exception] = None
         for attempt in range(max_attempts):
             try:
                 payload = await self.brain.get_alpha_pnl(alpha_id)
                 series = _pnl_records_to_series(payload, alpha_id)
                 if not series.empty:
+                    self._pnl_cache[alpha_id] = series
                     return series
             except Exception as e:
                 last_exc = e
@@ -280,7 +303,8 @@ class CorrelationService:
                     f"{attempt + 1}/{max_attempts} failed for {alpha_id}: {e}"
                 )
             if attempt < max_attempts - 1:
-                await asyncio.sleep(1.5 * (attempt + 1))
+                # opt B: shorter backoff (was 1.5*(n+1)) — see _PNL_RETRY_BACKOFF_BASE.
+                await asyncio.sleep(_PNL_RETRY_BACKOFF_BASE * (attempt + 1))
         # V-27.129: unify both failure paths — "3× exception" and "3× empty"
         # now both return an empty Series. PnL being unreachable is an
         # expected boundary (BRAIN rate-limit soft-fail / genuinely no PnL);
@@ -291,7 +315,11 @@ class CorrelationService:
                 f"[CorrelationService] PnL fetch for {alpha_id} failed all "
                 f"{max_attempts} attempts: {last_exc} — returning empty series"
             )
-        return pd.Series(dtype="float64", name=alpha_id)
+        empty = pd.Series(dtype="float64", name=alpha_id)
+        # opt A: cache the empty result too so a repeat fetch this round does
+        # not re-run the whole retry loop.
+        self._pnl_cache[alpha_id] = empty
+        return empty
 
     async def refresh_os_alpha_cache(
         self,
