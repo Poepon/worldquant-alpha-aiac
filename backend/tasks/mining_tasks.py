@@ -1064,13 +1064,25 @@ async def _run_one_round_inline(
             timeout=settings.MINING_ROUND_TIMEOUT_SEC,
         )
     except Exception as e:
-        logger.error(f"[flat round {dataset_id}] inline round failed: {e}")
+        # 2026-05-25: include the exception TYPE. asyncio.TimeoutError (the
+        # per-round wait_for backstop firing on a slow round, e.g. news12) has
+        # an EMPTY str(), so `str(e)` logged a blank message AND produced
+        # error="" below — which the caller's truthy `if result.get("error")`
+        # treated as "no error", skipping the rebuild path and falling through
+        # to the success-path cursor commit on a cancel-poisoned session →
+        # greenlet_spawn killed the whole task (3504 + 3516, both news12).
+        logger.error(
+            f"[flat round {dataset_id}] inline round failed: {type(e).__name__}: {e}"
+        )
         try:
             await db.rollback()
             await db.refresh(task)
         except Exception:
             pass
-        return {"all_alphas": [], "iterations_completed": 0, "error": str(e)}
+        return {
+            "all_alphas": [], "iterations_completed": 0,
+            "error": (str(e) or type(e).__name__),
+        }
 
 
 def _verify_cascade_ownership(lock_key: str, token: str, *, where: str) -> bool:
@@ -1314,16 +1326,30 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
             # session, advance past this dataset, and continue so one slow /
             # timed-out round can't kill the entire FLAT session and strand the
             # cursor. Bail out only after _max_round_failures in a row.
-            if result.get("error"):
+            # 2026-05-25: `is not None` NOT truthy — a timeout round returns
+            # error="" (empty str, falsy), which truthy skipped → fell through
+            # to the poisoned success-path cursor commit (3504/3516 root cause).
+            if result.get("error") is not None:
                 consecutive_round_failures += 1
                 logger.error(
                     f"[flat] task={task.id} round failed (dataset={dataset_id}, "
                     f"consecutive={consecutive_round_failures}/"
                     f"{_max_round_failures}): {str(result.get('error'))[:200]}"
                 )
-                db, task, run, mining_agent = await _rebuild_flat_db_session(
-                    db, task.id, run.id, brain
-                )
+                try:
+                    db, task, run, mining_agent = await _rebuild_flat_db_session(
+                        db, task.id, run.id, brain
+                    )
+                except Exception as _rebuild_ex:  # noqa: BLE001
+                    # 2026-05-25: if even the rebuild can't get a clean session in
+                    # this coroutine, don't let it propagate (that is what killed
+                    # the task) — bail out; a fresh dispatch (new coroutine +
+                    # session) resumes from the preserved cursor.
+                    logger.error(
+                        f"[flat] task={task.id} session rebuild FAILED post-round "
+                        f"— exiting loop for fresh re-dispatch: {_rebuild_ex}"
+                    )
+                    break
                 flat_cursor += 1
                 iterations += 1
                 # Persist the advanced cursor on the fresh session so a resume
@@ -1380,7 +1406,31 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 run.runtime_state["flat_total_alphas"] = total_alphas
                 run.runtime_state["flat_iterations"] = iterations
                 flag_modified(run, "runtime_state")
-                await db.commit()
+                try:
+                    await db.commit()
+                except Exception as _succ_commit_ex:  # noqa: BLE001
+                    # 2026-05-25 defence: even a round that returned success can
+                    # leave the shared session poisoned (e.g. a persistence-layer
+                    # savepoint swallowed an error mid-round) — the success-path
+                    # cursor commit then hits greenlet_spawn. Guard it so it
+                    # rebuilds + continues instead of killing the whole task.
+                    # (Fix A/B already routes timeout rounds to the rebuild path;
+                    # this covers the round-returned-success-but-poisoned case.)
+                    logger.error(
+                        f"[flat] task={task.id} success-path cursor commit failed "
+                        f"(session poisoned; rebuilding): {_succ_commit_ex}"
+                    )
+                    try:
+                        db, task, run, mining_agent = await _rebuild_flat_db_session(
+                            db, task.id, run.id, brain
+                        )
+                    except Exception as _rb_ex:  # noqa: BLE001
+                        logger.error(
+                            f"[flat] task={task.id} rebuild after success-commit "
+                            f"failed — exiting loop for fresh re-dispatch: {_rb_ex}"
+                        )
+                        break
+                    continue
 
             logger.info(
                 f"[flat] task={task.id} iter={iterations} dataset={dataset_id} "
