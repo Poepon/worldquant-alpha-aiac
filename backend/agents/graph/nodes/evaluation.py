@@ -2175,29 +2175,42 @@ async def node_evaluate(
         # exception) still releases every claimed in-flight slot instead of
         # leaking them to the 900s TTL.
         try:
-            for orig in flip_candidates:
-                flipped_expr = f"multiply(-1, {orig.expression})"
+            # opt A (2026-05-25): simulate all flip candidates CONCURRENTLY.
+            # Was a serial `for ... await simulate_alpha` (it6: ~4 sims ×
+            # ~2.7min ≈ 11min EVALUATE, tipping the round over the 1200s
+            # timeout). Each simulate_alpha already holds a cross-process BRAIN
+            # sim slot (_acquire_sim_slot, role-aware USER=3 / CONSULTANT=80),
+            # so gathering is safe — the slot counter caps real concurrency and
+            # never lets us hit 429 CONCURRENT_SIMULATION_LIMIT. Results keep
+            # input order; post-processing (build + re-evaluate) stays serial
+            # since it is local/fast (corr probe = 2.5s).
+            from backend.sim_settings import smart_simulation_settings
+
+            async def _sim_one_flip(_orig):
+                _fexpr = f"multiply(-1, {_orig.expression})"
                 try:
-                    from backend.sim_settings import smart_simulation_settings
-                    smart = smart_simulation_settings(
-                        flipped_expr,
+                    _smart = smart_simulation_settings(
+                        _fexpr,
                         region=state.region,
                         universe=state.universe,
-                        # P3-Brain: flip-retry 同 round 内必须保持 test_period
-                        # 一致(否则 sharpe 不可比)。从 task snapshot 传。
+                        # P3-Brain: flip-retry 同 round 内保持 test_period 一致
+                        # (否则 sharpe 不可比)。从 task snapshot 传。
                         test_period=getattr(state, "effective_default_test_period", None),
                     )
-                    _flip_sim_settings = dict(smart)
-                    sim_result = await brain.simulate_alpha(
-                        expression=flipped_expr,
-                        **smart,
-                    )
-                except Exception as e:
-                    logger.warning(f"[{node_name}] flip-retry sim failed: {e}")
-                    continue
+                    _res = await brain.simulate_alpha(expression=_fexpr, **_smart)
+                    return (_orig, _fexpr, dict(_smart), _res)
+                except Exception as _e:  # noqa: BLE001
+                    logger.warning(f"[{node_name}] flip-retry sim failed: {_e}")
+                    return (_orig, _fexpr, None, None)
 
-                if not sim_result.get("success"):
-                    logger.debug(f"[{node_name}] flip sim returned failure for {flipped_expr[:80]}")
+            _flip_sim_results = await asyncio.gather(
+                *[_sim_one_flip(_o) for _o in flip_candidates]
+            )
+
+            for orig, flipped_expr, _flip_sim_settings, sim_result in _flip_sim_results:
+                if sim_result is None or not sim_result.get("success"):
+                    if sim_result is not None:
+                        logger.debug(f"[{node_name}] flip sim returned failure for {flipped_expr[:80]}")
                     continue
 
                 flip_metrics = sim_result.get("metrics") or {}
