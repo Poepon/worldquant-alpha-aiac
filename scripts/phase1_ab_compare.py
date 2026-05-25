@@ -90,15 +90,15 @@ def agg_for(conn, ids: List[int]) -> dict:
             SELECT
                 a.id,
                 a.anchor_ds_id,
-                COUNT(DISTINCT df.dataset_id) FILTER (WHERE df.dataset_id IS NOT NULL) AS nd_total,
-                COUNT(DISTINCT df.dataset_id) FILTER (
-                    WHERE df.dataset_id IS NOT NULL AND df.dataset_id <> a.anchor_ds_id
+                COUNT(DISTINCT d_f.id) FILTER (WHERE d_f.id IS NOT NULL) AS nd_total,
+                COUNT(DISTINCT d_f.id) FILTER (
+                    WHERE d_f.id IS NOT NULL AND d_f.id <> a.anchor_ds_id
                 ) AS nd_non_anchor
             FROM alpha_anchor a
             LEFT JOIN alphas a2 ON a2.id = a.id
             LEFT JOIN LATERAL jsonb_array_elements_text(a2.fields_used) AS f(field_id) ON TRUE
-            LEFT JOIN datafields df
-              ON df.field_id = f.field_id AND df.region = a.region
+            LEFT JOIN datafields df ON df.field_id = f.field_id
+            LEFT JOIN datasets d_f ON d_f.id = df.dataset_id AND d_f.region = a.region
             GROUP BY a.id, a.anchor_ds_id
         )
         SELECT

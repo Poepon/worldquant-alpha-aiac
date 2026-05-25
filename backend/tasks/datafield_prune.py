@@ -59,7 +59,7 @@ async def _prune_async(*, window_days: int, cap: int, session_factory=None) -> D
 
     from sqlalchemy import select, update
 
-    from backend.models import AlphaFailure, DataField
+    from backend.models import AlphaFailure, DataField, DataFieldCellStats
 
     if session_factory is None:
         from backend.database import AsyncSessionLocal as session_factory  # noqa: N813
@@ -78,18 +78,26 @@ async def _prune_async(*, window_days: int, cap: int, session_factory=None) -> D
             logger.info("[datafield-prune] no Invalid-data-field failures in window")
             return {"deactivated": 0, "fields": []}
 
-        # Only flip currently-active rows (idempotent) — cap for safety.
-        targets = (await db.execute(
-            select(DataField.field_id).where(
+        # is_active moved to datafield_cell_stats per (universe, delay) — a BRAIN
+        # "Invalid data field" error is field-level (the field is gone/renamed),
+        # so deactivate ALL cells of the matching field defs. Only flip cells
+        # currently active (idempotent); cap on the field defs for safety.
+        target_field_ids = (await db.execute(
+            select(DataField.field_id)
+            .join(DataFieldCellStats, DataFieldCellStats.datafield_ref == DataField.id)
+            .where(
                 DataField.field_id.in_(sorted(invalid)),
-                DataField.is_active.is_(True),
-            ).limit(cap)
+                DataFieldCellStats.is_active.is_(True),
+            )
+            .distinct()
+            .limit(cap)
         )).scalars().all()
-        targets = list(dict.fromkeys(targets))
+        targets = list(dict.fromkeys(target_field_ids))
         if targets:
+            ref_subq = select(DataField.id).where(DataField.field_id.in_(targets))
             await db.execute(
-                update(DataField)
-                .where(DataField.field_id.in_(targets))
+                update(DataFieldCellStats)
+                .where(DataFieldCellStats.datafield_ref.in_(ref_subq))
                 .values(is_active=False)
             )
             await db.commit()

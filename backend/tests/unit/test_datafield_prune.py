@@ -51,16 +51,23 @@ def session_factory(db_session):
 @pytest.mark.asyncio
 class TestPrune:
     async def test_deactivates_only_rejected_fields(self, db_session, session_factory):
-        from backend.models import AlphaFailure, DataField, DatasetMetadata
+        from backend.models import (
+            AlphaFailure, DataField, DataFieldCellStats, DatasetMetadata,
+        )
 
-        ds = DatasetMetadata(dataset_id="pv96", region="USA", universe="TOP3000", name="pv96")
+        # Cell-stats normalization: is_active lives on datafield_cell_stats per
+        # (universe, delay); a field def + its TOP3000/delay=1 cell.
+        ds = DatasetMetadata(dataset_id="pv96", region="USA", name="pv96")
         db_session.add(ds)
         await db_session.flush()
-        bad = DataField(dataset_id=ds.id, region="USA", universe="TOP3000",
-                        field_id="pv96_eq_dvd_cash_cg_amt", field_name="x", is_active=True)
-        good = DataField(dataset_id=ds.id, region="USA", universe="TOP3000",
-                         field_id="pv96_close", field_name="c", is_active=True)
+        bad = DataField(dataset_id=ds.id, field_id="pv96_eq_dvd_cash_cg_amt", field_name="x")
+        good = DataField(dataset_id=ds.id, field_id="pv96_close", field_name="c")
         db_session.add_all([bad, good])
+        await db_session.flush()
+        db_session.add_all([
+            DataFieldCellStats(datafield_ref=bad.id, universe="TOP3000", delay=1, is_active=True),
+            DataFieldCellStats(datafield_ref=good.id, universe="TOP3000", delay=1, is_active=True),
+        ])
         db_session.add(AlphaFailure(
             task_id=1, expression="ts_mean(pv96_eq_dvd_cash_cg_amt, 5)",
             error_type="SIMULATION_ERROR",
@@ -72,8 +79,13 @@ class TestPrune:
         assert out["deactivated"] == 1
         assert "pv96_eq_dvd_cash_cg_amt" in out["fields"]
 
-        rows = {r.field_id: r.is_active for r in (await db_session.execute(select(DataField))).scalars().all()}
-        assert rows["pv96_eq_dvd_cash_cg_amt"] is False  # rejected → deactivated
+        rows = {
+            fid: active for fid, active in (await db_session.execute(
+                select(DataField.field_id, DataFieldCellStats.is_active)
+                .join(DataFieldCellStats, DataFieldCellStats.datafield_ref == DataField.id)
+            )).all()
+        }
+        assert rows["pv96_eq_dvd_cash_cg_amt"] is False  # rejected → deactivated (cell)
         assert rows["pv96_close"] is True                # untouched
 
     async def test_idempotent_no_failures(self, db_session, session_factory):

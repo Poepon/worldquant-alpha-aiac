@@ -43,6 +43,13 @@ async def build_field_dataset_map(db, region: str, universe: str) -> Dict[str, s
 
     Soft-fails to ``{}`` so callers degrade to leaving dataset_id NULL — this
     must never break persistence. TTL-cached per (region, universe).
+
+    2026-05-26 (cell-stats normalization): ``datasets``/``datafields`` are now
+    universe-INVARIANT definitions (UK ``(dataset_id, region)``), so this maps by
+    region ALONE — fixing the latent bug where a non-TOP3000 universe found no
+    rows (empty map → NULL ``alpha.dataset_id`` → dataset bandit blind). The
+    ``universe`` arg is retained for the cache key / caller compat but no longer
+    filters (the field→dataset definition is the same across universes).
     """
     key = (region, universe)
     cached = _MAP_CACHE.get(key)
@@ -56,10 +63,7 @@ async def build_field_dataset_map(db, region: str, universe: str) -> Dict[str, s
         stmt = (
             select(DataField.field_id, DatasetMetadata.dataset_id)
             .join(DatasetMetadata, DataField.dataset_id == DatasetMetadata.id)
-            .where(
-                DatasetMetadata.region == region,
-                DatasetMetadata.universe == universe,
-            )
+            .where(DatasetMetadata.region == region)
         )
         rows = (await db.execute(stmt)).all()
         m: Dict[str, str] = {}

@@ -19,8 +19,14 @@ from sqlalchemy import select, update, func, and_
 from loguru import logger
 
 from backend.selection_strategy import DatasetBandit, DatasetArm
-from backend.models import DatasetMetadata, Alpha, DataField, KnowledgeEntry
+from backend.models import (
+    DatasetMetadata, DatasetCellStats, Alpha, DataField, KnowledgeEntry,
+)
 from backend.config import settings
+
+# Dataset selection runs at delay=1 (the cell-stats schema supports delay-0 but
+# selector wiring pins delay=1; see backend/tasks/mining_tasks.py:_FLAT_DELAY).
+_SELECTOR_DELAY = 1
 
 
 # =============================================================================
@@ -130,30 +136,42 @@ class DatasetEvaluator:
         """
         logger.info(f"[DatasetEvaluator] Evaluating datasets | region={region} universe={universe}")
         
-        # 1. Get dataset metadata
-        query = select(DatasetMetadata).where(
-            DatasetMetadata.region == region,
-            DatasetMetadata.is_active == True
+        # 1. Get dataset defs + their (universe, delay=1) cell (is_active + the
+        #    quality metrics now live on dataset_cell_stats). INNER JOIN on
+        #    is_active preserves the old "active datasets only" filter for this cell.
+        cell_on = and_(
+            DatasetCellStats.dataset_ref == DatasetMetadata.id,
+            DatasetCellStats.universe == universe,
+            DatasetCellStats.delay == _SELECTOR_DELAY,
         )
-        
+        query = (
+            select(DatasetMetadata, DatasetCellStats)
+            .join(DatasetCellStats, cell_on)
+            .where(
+                DatasetMetadata.region == region,
+                DatasetCellStats.is_active == True,
+            )
+        )
+
         if dataset_ids:
             query = query.where(DatasetMetadata.dataset_id.in_(dataset_ids))
-            
+
         result = await self.db.execute(query)
-        datasets = result.scalars().all()
-        
-        if not datasets:
+        rows = result.all()
+
+        if not rows:
             logger.warning(f"[DatasetEvaluator] No datasets found for region={region}")
             return []
-        
+
         # 2. Get historical alpha statistics
         alpha_stats = await self._get_alpha_statistics(region, universe)
-        
+
         # 3. Evaluate each dataset
         scores = []
-        for ds in datasets:
+        for ds, cell in rows:
             score = await self._evaluate_single_dataset(
                 dataset=ds,
+                cell=cell,
                 region=region,
                 universe=universe,
                 alpha_stats=alpha_stats
@@ -205,33 +223,34 @@ class DatasetEvaluator:
     async def _evaluate_single_dataset(
         self,
         dataset: DatasetMetadata,
+        cell: DatasetCellStats,
         region: str,
         universe: str,
         alpha_stats: Dict[str, Dict]
     ) -> DatasetQualityScore:
-        """Evaluate a single dataset."""
+        """Evaluate a single dataset (def + its per-(universe, delay) cell)."""
         ds_id = dataset.dataset_id
-        
+
         # Get historical stats
         hist = alpha_stats.get(ds_id, {'total': 0, 'passed': 0, 'avg_sharpe': 0, 'last_alpha': None})
-        
+
         # Calculate success rate
         success_rate = hist['passed'] / hist['total'] if hist['total'] > 0 else 0.5  # Default 50%
-        
+
         # Infer category
         category = self._infer_category(ds_id, dataset.category)
-        
-        # Create score object
+
+        # Create score object — quality metrics come from the joined cell.
         score = DatasetQualityScore(
             dataset_id=ds_id,
             region=region,
             universe=universe,
-            coverage=dataset.coverage or dataset.date_coverage or 0.5,
-            field_count=dataset.field_count or 0,
+            coverage=cell.coverage or cell.date_coverage or 0.5,
+            field_count=cell.field_count or 0,
             alpha_count=hist['total'],
             success_rate=success_rate,
             avg_sharpe=hist['avg_sharpe'],
-            pyramid_multiplier=dataset.pyramid_multiplier or dataset.mining_weight or 1.0,
+            pyramid_multiplier=cell.pyramid_multiplier or cell.mining_weight or 1.0,
             category=category,
             last_success_date=hist['last_alpha']
         )
@@ -472,29 +491,37 @@ class DatasetSelector:
         logger.info(f"[DatasetSelector] Initialized | region={region} arms={len(self.bandit.arms)}")
         
     async def _load_datasets(self, dataset_ids: Optional[List[str]] = None):
-        """Load datasets from DB and create Bandit arms"""
-        query = select(DatasetMetadata).where(
-            DatasetMetadata.region == self.region
+        """Load datasets from DB and create Bandit arms (def + (universe, delay=1) cell)."""
+        cell_on = and_(
+            DatasetCellStats.dataset_ref == DatasetMetadata.id,
+            DatasetCellStats.universe == self.universe,
+            DatasetCellStats.delay == _SELECTOR_DELAY,
         )
-        
+        query = (
+            select(DatasetMetadata, DatasetCellStats)
+            .select_from(DatasetMetadata)
+            .outerjoin(DatasetCellStats, cell_on)
+            .where(DatasetMetadata.region == self.region)
+        )
+
         if dataset_ids:
             query = query.where(DatasetMetadata.dataset_id.in_(dataset_ids))
-            
+
         result = await self.db.execute(query)
-        datasets = result.scalars().all()
-        
-        for ds in datasets:
+        rows = result.all()
+
+        for ds, cell in rows:
             arm = DatasetArm(
                 dataset_id=ds.dataset_id,
                 region=ds.region,
                 universe=self.universe,
-                pyramid_multiplier=ds.mining_weight or 1.0,
-                alpha_count=ds.alpha_count or 0,
-                field_count=ds.field_count or 0
+                pyramid_multiplier=(cell.mining_weight if cell else None) or 1.0,
+                alpha_count=(cell.alpha_count if cell else None) or 0,
+                field_count=(cell.field_count if cell else None) or 0
             )
             self.bandit.add_arm(arm)
-            
-        logger.debug(f"[DatasetSelector] Loaded {len(datasets)} datasets as Bandit arms")
+
+        logger.debug(f"[DatasetSelector] Loaded {len(rows)} datasets as Bandit arms")
         
     async def _load_bandit_state(self):
         """W3: Load persisted Bandit state from bandit_state table.

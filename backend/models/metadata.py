@@ -12,102 +12,136 @@ from backend.database import SQLAlchemyBase
 
 
 class DatasetMetadata(SQLAlchemyBase):
-    """
-    Dataset Metadata - Information about BRAIN datasets.
+    """Dataset DEFINITION — region-scoped, universe/delay-INVARIANT.
+
+    Refactor 2026-05-26 (multi-cell breadth): split from a single per-(region,
+    universe) row into a definition row + per-(delay, universe) ``DatasetCellStats``,
+    mirroring BRAIN's data-sets model (a definition + a ``data[]`` array of
+    per-cell stats). UK is now ``(dataset_id, region)`` — universe/delay and all
+    per-cell metrics (coverage/counts/mining_weight/...) moved to
+    ``DatasetCellStats``. ``DataField.dataset_id`` still FKs ``datasets.id`` (PK
+    unchanged), so a field belongs to exactly one (dataset_id, region) def.
     """
     __tablename__ = "datasets"
     __table_args__ = (
-        UniqueConstraint('dataset_id', 'region', 'universe', name='uq_dataset_region_universe'),
+        UniqueConstraint('dataset_id', 'region', name='uq_dataset_region'),
         {'extend_existing': True}
     )
-    
+
     id = Column(Integer, primary_key=True, autoincrement=True)
     dataset_id = Column(String(100), nullable=False)
     region = Column(String(10), nullable=False)
-    universe = Column(String(50), nullable=False, default="TOP3000")
     name = Column(String(200), nullable=False, default="")
     description = Column(Text)
     category = Column(String(100))
     subcategory = Column(String(100))
-    
-    # Metrics
+
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class DatasetCellStats(SQLAlchemyBase):
+    """Per-(delay, universe) statistics for a dataset (one row per BRAIN
+    ``data[]`` cell). ``region`` is reachable via ``dataset_ref → datasets.region``.
+
+    ``mining_weight`` lives here so the dataset-steering bandit can become
+    per-cell; today the refresh writes the same weight to every cell of a
+    (region, dataset) — the schema is ready for per-cell reward later.
+    """
+    __tablename__ = "dataset_cell_stats"
+    __table_args__ = (
+        UniqueConstraint('dataset_ref', 'delay', 'universe', name='uq_dataset_cell'),
+        {'extend_existing': True}
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    dataset_ref = Column(Integer, ForeignKey("datasets.id"), nullable=False)
+    universe = Column(String(50), nullable=False, default="TOP3000")
+    delay = Column(Integer, nullable=False, default=1)
+
+    # Metrics (per cell)
     coverage = Column(Float)
+    date_coverage = Column(Float)
     value_score = Column(Integer)
     user_count = Column(Integer)
     alpha_count = Column(Integer)
     field_count = Column(Integer)
     pyramid_multiplier = Column(Float)
-    
-    # Settings
-    delay = Column(Integer, default=1)
-    is_active = Column(Boolean, default=True)
     mining_weight = Column(Float, default=1.0)
-    
-    # Brain Fields
-    date_coverage = Column(Float)
+
+    # Brain extras (per cell)
     themes = Column(JSONB)
     resources = Column(JSONB)
-    
+
+    # Mining stats (per cell)
+    alpha_success_count = Column(Integer, default=0)
+    alpha_fail_count = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+
     last_synced_at = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
-    
-    # Mining stats
-    alpha_success_count = Column(Integer, default=0)
-    alpha_fail_count = Column(Integer, default=0)
 
 
 class DataField(SQLAlchemyBase):
-    """
-    Data Field - Information about fields within datasets.
-    
-    Real API structure from get_datafields:
-    - id: field ID (e.g., "assets", "close")
-    - description: field description
-    - dataset: nested object {id, name}
-    - category: nested object {id, name}
-    - subcategory: nested object {id, name}
-    - region, delay, universe
-    - type: MATRIX, VECTOR, GROUP
-    - dateCoverage, coverage
-    - userCount, alphaCount
-    - pyramidMultiplier
-    - themes: list of theme objects
+    """Data field DEFINITION — universe/delay-INVARIANT, belongs to one dataset def.
+
+    Real API structure from get_datafields: id / description / dataset{id,name} /
+    category{id,name} / subcategory{id,name} / type (MATRIX|VECTOR|GROUP).
+
+    Refactor 2026-05-26: per-cell stats (coverage/counts/themes/is_active) moved to
+    ``DataFieldCellStats`` keyed by (delay, universe); ``region`` dropped (reachable
+    via ``dataset_id → datasets.region``). UK ``(dataset_id, field_id)`` unchanged →
+    the inbound FK ``datafields.dataset_id`` is preserved.
     """
     __tablename__ = "datafields"
     __table_args__ = (
         UniqueConstraint('dataset_id', 'field_id', name='uq_datafield_dataset_field'),
         {'extend_existing': True}
     )
-    
+
     id = Column(Integer, primary_key=True)
     dataset_id = Column(Integer, ForeignKey("datasets.id"))
-    region = Column(String(10), nullable=False)
-    universe = Column(String(50), nullable=False)
-    delay = Column(Integer, default=1)
     field_id = Column(String(200), nullable=False)
     field_name = Column(String(200), nullable=False)
     field_type = Column(String(50))  # VECTOR, MATRIX, GROUP
     description = Column(Text)
-    
+
     # Category info (API returns nested objects, we store IDs)
     category = Column(String(100))       # category.id
     category_name = Column(String(200))  # category.name
     subcategory = Column(String(100))    # subcategory.id
     subcategory_name = Column(String(200))  # subcategory.name
-    
-    # Metrics from API
+
+    created_at = Column(DateTime, server_default=func.now())
+
+
+class DataFieldCellStats(SQLAlchemyBase):
+    """Per-(delay, universe) statistics for a data field (one row per BRAIN
+    ``data[]`` cell). ``region`` reachable via ``datafield_ref → datafields →
+    datasets.region``. ``is_active`` is per cell (mining-driven prune flips it)."""
+    __tablename__ = "datafield_cell_stats"
+    __table_args__ = (
+        UniqueConstraint('datafield_ref', 'delay', 'universe', name='uq_datafield_cell'),
+        {'extend_existing': True}
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    datafield_ref = Column(Integer, ForeignKey("datafields.id"), nullable=False)
+    universe = Column(String(50), nullable=False, default="TOP3000")
+    delay = Column(Integer, nullable=False, default=1)
+
+    # Metrics from API (per cell)
     date_coverage = Column(Float)        # dateCoverage
     coverage = Column(Float)             # coverage
     pyramid_multiplier = Column(Float)   # pyramidMultiplier
     user_count = Column(Integer)         # userCount
     alpha_count = Column(Integer)        # alphaCount
-    
-    # Themes (stored as JSON)
-    themes = Column(JSONB, default=[])
-    
+    themes = Column(JSONB, default=list)  # callable default — never share one list instance
+
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
 class Operator(SQLAlchemyBase):

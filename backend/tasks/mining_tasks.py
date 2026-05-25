@@ -9,7 +9,7 @@ import os
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import select, update, func, case
+from sqlalchemy import select, update, func, case, and_
 from sqlalchemy.orm.attributes import flag_modified  # Phase 1.5-B JSONB dirty trigger
 from loguru import logger
 
@@ -18,7 +18,16 @@ from backend.config import settings
 from backend.database import AsyncSessionLocal
 from backend.agents import MiningAgent
 from backend.adapters.brain_adapter import BrainAdapter
-from backend.models import MiningTask, DatasetMetadata, Operator, DataField, ExperimentRun
+from backend.models import (
+    MiningTask, DatasetMetadata, DatasetCellStats, Operator, DataField,
+    DataFieldCellStats, ExperimentRun,
+)
+
+# FLAT/ONESHOT mining runs at delay=1 (MiningTask has no delay column); the
+# (universe x delay) cell schema supports delay-0 natively but wiring delay-0
+# into mining is deferred (needs a delay-0 datafield sync + native discovery —
+# see plan golden-forging-taco §Phase 0). All cell joins below pin delay=1.
+_FLAT_DELAY = 1
 from backend.tasks import run_async
 
 
@@ -613,18 +622,28 @@ async def _get_datasets_to_mine(db, task):
         return task.target_datasets
 
     # Auto-explore: get top datasets by weight, randomize ties.
+    # Cell-stats normalization: mining_weight lives on dataset_cell_stats per
+    # (universe, delay). LEFT JOIN the task's cell so a dataset whose cell is not
+    # yet synced for this universe still appears (COALESCE→1.0 default) rather
+    # than vanishing from the mining list.
+    weight = func.coalesce(DatasetCellStats.mining_weight, 1.0)
     ds_query = (
-        select(DatasetMetadata)
-        .where(
-            DatasetMetadata.region == task.region,
-            DatasetMetadata.universe == task.universe
+        select(DatasetMetadata.dataset_id)
+        .select_from(DatasetMetadata)
+        .outerjoin(
+            DatasetCellStats,
+            and_(
+                DatasetCellStats.dataset_ref == DatasetMetadata.id,
+                DatasetCellStats.universe == task.universe,
+                DatasetCellStats.delay == _FLAT_DELAY,
+            ),
         )
-        .order_by(DatasetMetadata.mining_weight.desc(), func.random())
+        .where(DatasetMetadata.region == task.region)
+        .order_by(weight.desc(), func.random())
         .limit(10)
     )
     ds_result = await db.execute(ds_query)
-    datasets_objs = ds_result.scalars().all()
-    return [d.dataset_id for d in datasets_objs]
+    return [row[0] for row in ds_result.all()]
 
 
 async def _get_complementary_datasets(
@@ -645,18 +664,27 @@ async def _get_complementary_datasets(
     """
     if k <= 0:
         return []
+    weight = func.coalesce(DatasetCellStats.mining_weight, 1.0)
     ds_query = (
-        select(DatasetMetadata)
+        select(DatasetMetadata.dataset_id)
+        .select_from(DatasetMetadata)
+        .outerjoin(
+            DatasetCellStats,
+            and_(
+                DatasetCellStats.dataset_ref == DatasetMetadata.id,
+                DatasetCellStats.universe == task.universe,
+                DatasetCellStats.delay == _FLAT_DELAY,
+            ),
+        )
         .where(
             DatasetMetadata.region == task.region,
-            DatasetMetadata.universe == task.universe,
             DatasetMetadata.dataset_id != anchor_dataset_id,
         )
-        .order_by(DatasetMetadata.mining_weight.desc(), func.random())
+        .order_by(weight.desc(), func.random())
         .limit(k)
     )
-    rows = (await db.execute(ds_query)).scalars().all()
-    return [d.dataset_id for d in rows]
+    rows = (await db.execute(ds_query)).all()
+    return [row[0] for row in rows]
 
 
 async def _get_operators(db):
@@ -696,16 +724,15 @@ async def _get_operators(db):
 
 
 async def _get_dataset_fields(db, dataset_id, region, universe):
-    """Get fields for a dataset."""
-    ds_meta_stmt = select(DatasetMetadata).where(
+    """Get fields for a dataset (cell-stats normalization: datasets/datafields are
+    universe-invariant defs; the per-(universe, delay=1) cell supplies is_active)."""
+    ds_meta_stmt = select(DatasetMetadata.id).where(
         DatasetMetadata.dataset_id == dataset_id,
         DatasetMetadata.region == region,
-        DatasetMetadata.universe == universe
     )
-    ds_meta_res = await db.execute(ds_meta_stmt)
-    ds_meta = ds_meta_res.scalar_one_or_none()
+    ds_meta_id = (await db.execute(ds_meta_stmt)).scalar_one_or_none()
 
-    if not ds_meta:
+    if ds_meta_id is None:
         return []
 
     # is_active == True (2026-05-22): exclude fields BRAIN rejects as
@@ -713,32 +740,36 @@ async def _get_dataset_fields(db, dataset_id, region, universe):
     # Without this filter is_active was a dead flag and a stale catalog field
     # (e.g. pv96_eq_dvd_cash_cg_amt, 107 sim failures/wk once the dataset
     # bandit steered onto long-dormant pv96) kept being offered to the LLM.
+    # is_active is now per (universe, delay) on datafield_cell_stats — join the
+    # mining cell so a field deactivated in this universe is hidden here.
     # Value fields first (2026-05-23): GROUP-heavy datasets (pv13: 135 GROUP /
     # 30 MATRIX) would otherwise crowd MATRIX/VECTOR value fields out of the
     # downstream [:60]/[:30] caps, leaving the LLM only group fields to (mis)use
     # as value inputs. Order non-GROUP (value) fields ahead of GROUP.
     fields_stmt = (
-        select(DataField)
+        select(DataField.field_id, DataField.field_name, DataField.description, DataField.field_type)
+        .join(
+            DataFieldCellStats,
+            and_(
+                DataFieldCellStats.datafield_ref == DataField.id,
+                DataFieldCellStats.universe == universe,
+                DataFieldCellStats.delay == _FLAT_DELAY,
+            ),
+        )
         .where(
-            DataField.dataset_id == ds_meta.id,
-            DataField.is_active.is_(True),
+            DataField.dataset_id == ds_meta_id,
+            DataFieldCellStats.is_active.is_(True),
         )
         .order_by(
             case((DataField.field_type == "GROUP", 1), else_=0),
             DataField.field_id,
         )
     )
-    fields_res = await db.execute(fields_stmt)
-    fields_objs = fields_res.scalars().all()
+    rows = (await db.execute(fields_stmt)).all()
 
     return [
-        {
-            "id": f.field_id,
-            "name": f.field_name,
-            "description": f.description,
-            "type": f.field_type
-        }
-        for f in fields_objs
+        {"id": fid, "name": fname, "description": desc, "type": ftype}
+        for (fid, fname, desc, ftype) in rows
     ]
 
 
@@ -763,29 +794,32 @@ async def _get_universal_pv_fields(db, region, universe):
     dataset is being mined. Returns at most |_UNIVERSAL_PV_FIELDS| entries
     that exist in the datafields table for this region/universe.
     """
-    pv_meta_stmt = select(DatasetMetadata).where(
-        DatasetMetadata.dataset_id == "pv1",
-        DatasetMetadata.region == region,
-        DatasetMetadata.universe == universe,
-    )
-    pv_meta = (await db.execute(pv_meta_stmt)).scalar_one_or_none()
-    if not pv_meta:
+    pv_meta_id = (await db.execute(
+        select(DatasetMetadata.id).where(
+            DatasetMetadata.dataset_id == "pv1",
+            DatasetMetadata.region == region,
+        )
+    )).scalar_one_or_none()
+    if pv_meta_id is None:
         return []
     fields_stmt = (
-        select(DataField)
-        .where(DataField.dataset_id == pv_meta.id)
+        select(DataField.field_id, DataField.field_name, DataField.description, DataField.field_type)
+        .join(
+            DataFieldCellStats,
+            and_(
+                DataFieldCellStats.datafield_ref == DataField.id,
+                DataFieldCellStats.universe == universe,
+                DataFieldCellStats.delay == _FLAT_DELAY,
+            ),
+        )
+        .where(DataField.dataset_id == pv_meta_id)
         .where(DataField.field_id.in_(_UNIVERSAL_PV_FIELDS))
-        .where(DataField.is_active.is_(True))
+        .where(DataFieldCellStats.is_active.is_(True))
     )
-    rows = (await db.execute(fields_stmt)).scalars().all()
+    rows = (await db.execute(fields_stmt)).all()
     return [
-        {
-            "id": f.field_id,
-            "name": f.field_name,
-            "description": f.description,
-            "type": f.field_type,
-        }
-        for f in rows
+        {"id": fid, "name": fname, "description": desc, "type": ftype}
+        for (fid, fname, desc, ftype) in rows
     ]
 
 
@@ -1230,9 +1264,18 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
         if _bandit_on:
             try:
                 wrows = await db.execute(
-                    select(DatasetMetadata.dataset_id, DatasetMetadata.mining_weight).where(
+                    select(DatasetMetadata.dataset_id, DatasetCellStats.mining_weight)
+                    .select_from(DatasetMetadata)
+                    .outerjoin(
+                        DatasetCellStats,
+                        and_(
+                            DatasetCellStats.dataset_ref == DatasetMetadata.id,
+                            DatasetCellStats.universe == task.universe,
+                            DatasetCellStats.delay == _FLAT_DELAY,
+                        ),
+                    )
+                    .where(
                         DatasetMetadata.region == task.region,
-                        DatasetMetadata.universe == task.universe,
                         DatasetMetadata.dataset_id.in_(datasets),
                     )
                 )

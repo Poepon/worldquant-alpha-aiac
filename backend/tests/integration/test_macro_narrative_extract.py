@@ -47,6 +47,7 @@ import backend.tasks  # noqa: E402, F401
 
 from backend.models import (  # noqa: E402
     DataField,
+    DataFieldCellStats,
     DatasetMetadata,
     KnowledgeEntry,
 )
@@ -73,6 +74,13 @@ async def pg_session():
                         "     OR meta_data->>'field_id' ILIKE :p)"
                     ),
                     {"p": f"%{_TAG}%"},
+                )
+                await s.execute(
+                    delete(DataFieldCellStats).where(
+                        DataFieldCellStats.datafield_ref.in_(
+                            select(DataField.id).where(DataField.field_id.like(f"{_TAG}%"))
+                        )
+                    )
                 )
                 await s.execute(
                     delete(DataField).where(
@@ -103,7 +111,6 @@ async def _seed_missing_field(pg_session, *, field_id: str,
     ds = DatasetMetadata(
         dataset_id=ds_brain,
         region=region,
-        universe="TOP3000",
         name=f"{_TAG}ds",
         description="x",
         category="Price/Volume",
@@ -113,15 +120,17 @@ async def _seed_missing_field(pg_session, *, field_id: str,
     await pg_session.refresh(ds)
     df = DataField(
         dataset_id=ds.id,
-        region=region,
-        universe="TOP3000",
         field_id=field_id,
         field_name=field_id,
         field_type="MATRIX",
         description="seeded for extract test",
-        is_active=True,
     )
     pg_session.add(df)
+    await pg_session.flush()
+    # is_active lives on the (universe, delay) cell — seed an active TOP3000 cell.
+    pg_session.add(DataFieldCellStats(
+        datafield_ref=df.id, universe="TOP3000", delay=1, is_active=True,
+    ))
     await pg_session.commit()
     return ds, df
 

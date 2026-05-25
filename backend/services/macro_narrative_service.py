@@ -187,13 +187,16 @@ class MacroNarrativeService(BaseService):
         # LEFT JOIN against KnowledgeEntry on JSONB meta_data->>'field_id'
         # = DataField.field_id, only the field-scope MACRO_NARRATIVE rows
         # (so missing here means we have NO field-level narrative).
+        # Cell-stats normalization: df.region dropped (via dm.region) and
+        # df.is_active moved to datafield_cell_stats — a field is "active" if it
+        # has at least one active cell (a narrative is universe-agnostic).
         sql = """
             SELECT
               df.field_id,
               df.field_name,
               df.description,
               df.category_name,
-              df.region,
+              dm.region,
               dm.dataset_id AS dataset_id_brain
             FROM datafields df
             JOIN datasets dm ON df.dataset_id = dm.id
@@ -202,18 +205,21 @@ class MacroNarrativeService(BaseService):
               AND ke.is_active = TRUE
               AND COALESCE(ke.meta_data->>'scope', 'unknown') = 'field'
               AND COALESCE(ke.meta_data->>'field_id', '') = df.field_id
-            WHERE df.is_active = TRUE
+            WHERE EXISTS (
+                SELECT 1 FROM datafield_cell_stats dfc
+                WHERE dfc.datafield_ref = df.id AND dfc.is_active = TRUE
+              )
               AND ke.id IS NULL
         """
         params: Dict[str, Any] = {}
         if region:
-            sql += " AND df.region = :region"
+            sql += " AND dm.region = :region"
             params["region"] = region
         # P2 review fix: ORDER BY region FIRST so the task can groupby
         # and produce region-homogeneous batches. Without this the LLM
         # gets one region's market context but writes narratives for
         # cross-region fields, all stamped with batch[0]'s region.
-        sql += " ORDER BY df.region, df.field_id LIMIT :lim"
+        sql += " ORDER BY dm.region, df.field_id LIMIT :lim"
         params["lim"] = int(limit)
 
         try:
@@ -429,7 +435,10 @@ class MacroNarrativeService(BaseService):
               AND ke.is_active = TRUE
               AND COALESCE(ke.meta_data->>'scope', 'unknown') = 'field'
               AND COALESCE(ke.meta_data->>'field_id', '') = df.field_id
-            WHERE df.is_active = TRUE
+            WHERE EXISTS (
+                SELECT 1 FROM datafield_cell_stats dfc
+                WHERE dfc.datafield_ref = df.id AND dfc.is_active = TRUE
+              )
         """
         try:
             cov_row = (await self.db.execute(text(coverage_sql))).first()

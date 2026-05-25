@@ -166,7 +166,7 @@ async def _refresh_async(
     flag is flipped."""
     from sqlalchemy import select, text
 
-    from backend.models import BanditState, DatasetMetadata, SystemConfig
+    from backend.models import BanditState, DatasetMetadata, DatasetCellStats, SystemConfig
     from backend.selection_strategy import (
         discounted_thompson_update,
         thompson_sample_weight,
@@ -214,9 +214,12 @@ async def _refresh_async(
         # multi-universe rows to the (region, dataset_id) arm key.
         catalog_arms: set = set()
         if first_run:
+            # is_active moved to dataset_cell_stats — a (region, dataset) arm is
+            # "active" if it has at least one active cell. DISTINCT collapses cells.
             cat_rows = (await db.execute(
                 select(DatasetMetadata.region, DatasetMetadata.dataset_id)
-                .where(DatasetMetadata.is_active.is_(True))
+                .join(DatasetCellStats, DatasetCellStats.dataset_ref == DatasetMetadata.id)
+                .where(DatasetCellStats.is_active.is_(True))
                 .distinct()
             )).all()
             catalog_arms = {(r[0], r[1]) for r in cat_rows if r[0] and r[1]}
@@ -269,12 +272,16 @@ async def _refresh_async(
                     row.beta_param = beta
                     row.pulls_at_last_refresh = pulls
 
-                # Write back mining_weight for every universe of this (region,
-                # dataset). DatasetMetadata.__tablename__ == "datasets".
+                # Write back mining_weight to every (universe, delay) cell of this
+                # (region, dataset) — the bandit arm is universe-agnostic, so all
+                # cells share its weight. mining_weight moved to dataset_cell_stats
+                # (cell-stats normalization); the cell's region is via dataset_ref.
                 await db.execute(
                     text(
-                        "UPDATE datasets SET mining_weight = :w "
-                        "WHERE region = :r AND dataset_id = :d"
+                        "UPDATE dataset_cell_stats SET mining_weight = :w "
+                        "WHERE dataset_ref IN ("
+                        "  SELECT id FROM datasets WHERE region = :r AND dataset_id = :d"
+                        ")"
                     ),
                     {"w": float(weight), "r": region, "d": dataset_id},
                 )

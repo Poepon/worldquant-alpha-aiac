@@ -12,10 +12,12 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from dataclasses import dataclass, field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, and_
 
 from backend.services.base import BaseService
-from backend.models import DatasetMetadata, DataField
+from backend.models import (
+    DatasetMetadata, DatasetCellStats, DataField, DataFieldCellStats,
+)
 
 logger = logging.getLogger("services.dataset")
 
@@ -90,6 +92,10 @@ class DatasetListFilters:
     search: Optional[str] = None
     limit: int = 50
     offset: int = 0
+    # Which (universe, delay) cell's stats to surface for each dataset def.
+    # Defaults to the canonical TOP3000/delay=1 cell (cell-stats normalization).
+    universe: str = "TOP3000"
+    delay: int = 1
 
 
 class DatasetService(BaseService):
@@ -117,60 +123,76 @@ class DatasetService(BaseService):
         Returns:
             PaginatedResult with DatasetInfo items
         """
-        # Build base query
-        query = select(DatasetMetadata)
-        
+        # Build base query — cell-stats normalization: a dataset def joins its
+        # per-(universe, delay) cell for the display stats. LEFT JOIN so a def
+        # without a cell for the requested universe still lists (with None stats).
+        cell_on = and_(
+            DatasetCellStats.dataset_ref == DatasetMetadata.id,
+            DatasetCellStats.universe == filters.universe,
+            DatasetCellStats.delay == filters.delay,
+        )
+        query = (
+            select(DatasetMetadata, DatasetCellStats)
+            .select_from(DatasetMetadata)
+            .outerjoin(DatasetCellStats, cell_on)
+        )
+
         if filters.region:
             query = query.where(DatasetMetadata.region == filters.region)
-        
+
         if filters.category:
             query = query.where(DatasetMetadata.category == filters.category)
-        
+
         if filters.search:
             search_term = f"%{filters.search}%"
             query = query.where(or_(
                 DatasetMetadata.dataset_id.ilike(search_term),
                 DatasetMetadata.description.ilike(search_term)
             ))
-        
+
         # Get total count
         count_stmt = select(func.count()).select_from(query.subquery())
         count_result = await self.db.execute(count_stmt)
         total = count_result.scalar_one()
-        
+
         # Apply pagination
-        query = query.order_by(DatasetMetadata.mining_weight.desc())
+        query = query.order_by(func.coalesce(DatasetCellStats.mining_weight, 1.0).desc())
         query = query.limit(filters.limit).offset(filters.offset)
-        
+
         result = await self.db.execute(query)
-        datasets = result.scalars().all()
-        
-        items = [self._to_dataset_info(d) for d in datasets]
-        
+        rows = result.all()
+
+        items = [self._to_dataset_info(d, cell, filters.universe) for (d, cell) in rows]
+
         return PaginatedResult(total=total, items=items)
-    
-    def _to_dataset_info(self, d: DatasetMetadata) -> DatasetInfo:
-        """Convert DatasetMetadata to DatasetInfo."""
+
+    def _to_dataset_info(
+        self,
+        d: DatasetMetadata,
+        cell: Optional[DatasetCellStats],
+        universe: str,
+    ) -> DatasetInfo:
+        """Convert a (dataset def, cell) pair to DatasetInfo."""
         return DatasetInfo(
             dataset_id=d.dataset_id,
             name=d.name,
             region=d.region,
-            universe=d.universe,
+            universe=(cell.universe if cell else universe),
             category=d.category,
             subcategory=d.subcategory,
             description=d.description,
-            field_count=d.field_count or 0,
-            alpha_success_count=d.alpha_success_count or 0,
-            alpha_fail_count=d.alpha_fail_count or 0,
-            mining_weight=d.mining_weight or 1.0,
-            last_synced_at=d.last_synced_at,
-            date_coverage=d.date_coverage,
-            themes=d.themes,
-            resources=d.resources,
-            value_score=d.value_score,
-            alpha_count=d.alpha_count,
-            pyramid_multiplier=d.pyramid_multiplier,
-            coverage=d.coverage,
+            field_count=(cell.field_count if cell else None) or 0,
+            alpha_success_count=(cell.alpha_success_count if cell else None) or 0,
+            alpha_fail_count=(cell.alpha_fail_count if cell else None) or 0,
+            mining_weight=(cell.mining_weight if cell else None) or 1.0,
+            last_synced_at=(cell.last_synced_at if cell else None),
+            date_coverage=(cell.date_coverage if cell else None),
+            themes=(cell.themes if cell else None),
+            resources=(cell.resources if cell else None),
+            value_score=(cell.value_score if cell else None),
+            alpha_count=(cell.alpha_count if cell else None),
+            pyramid_multiplier=(cell.pyramid_multiplier if cell else None),
+            coverage=(cell.coverage if cell else None),
         )
     
     async def list_categories(self) -> List[str]:
@@ -217,58 +239,67 @@ class DatasetService(BaseService):
         Raises:
             ValueError if dataset not found
         """
-        # Resolve dataset
+        # Resolve dataset def (universe/delay-invariant → keyed by dataset_id+region).
         ds_stmt = select(DatasetMetadata).where(
             DatasetMetadata.dataset_id == dataset_id,
             DatasetMetadata.region == region,
-            DatasetMetadata.universe == universe,
-            DatasetMetadata.delay == delay,
         )
         ds_result = await self.db.execute(ds_stmt)
         dataset = ds_result.scalar_one_or_none()
-        
+
         if not dataset:
             raise ValueError(f"Dataset {dataset_id} not found")
-        
-        # Query fields
-        query = select(DataField).where(DataField.dataset_id == dataset.id)
-        
+
+        # Query field defs + their (universe, delay) cell stats. LEFT JOIN so a
+        # field def with no cell for this universe still lists (None stats).
+        cell_on = and_(
+            DataFieldCellStats.datafield_ref == DataField.id,
+            DataFieldCellStats.universe == universe,
+            DataFieldCellStats.delay == delay,
+        )
+        query = (
+            select(DataField, DataFieldCellStats)
+            .select_from(DataField)
+            .outerjoin(DataFieldCellStats, cell_on)
+            .where(DataField.dataset_id == dataset.id)
+        )
+
         # Get total
         count_stmt = select(func.count()).select_from(query.subquery())
         count_result = await self.db.execute(count_stmt)
         total = count_result.scalar_one()
-        
+
         # Apply pagination
         query = query.limit(limit).offset(offset)
-        
+
         result = await self.db.execute(query)
-        fields = result.scalars().all()
-        
+        rows = result.all()
+
         items = [
             DataFieldInfo(
                 field_id=f.field_id,
                 field_name=f.field_name,
                 description=f.description,
                 dataset_id=dataset_id,
-                region=f.region,
-                universe=f.universe,
-                delay=f.delay,
-                is_active=f.is_active,
+                region=dataset.region,
+                universe=(cell.universe if cell else universe),
+                delay=(cell.delay if cell else delay),
+                is_active=(cell.is_active if cell else True),
                 field_type=f.field_type,
-                date_coverage=f.date_coverage,
-                coverage=f.coverage,
-                pyramid_multiplier=f.pyramid_multiplier,
-                user_count=getattr(f, 'user_count', None),
-                alpha_count=f.alpha_count,
-                category=getattr(f, 'category', None),
-                category_name=getattr(f, 'category_name', None),
-                subcategory=getattr(f, 'subcategory', None),
-                subcategory_name=getattr(f, 'subcategory_name', None),
-                themes=getattr(f, 'themes', None),
+                date_coverage=(cell.date_coverage if cell else None),
+                coverage=(cell.coverage if cell else None),
+                pyramid_multiplier=(cell.pyramid_multiplier if cell else None),
+                user_count=(cell.user_count if cell else None),
+                alpha_count=(cell.alpha_count if cell else None),
+                category=f.category,
+                category_name=f.category_name,
+                subcategory=f.subcategory,
+                subcategory_name=f.subcategory_name,
+                themes=(cell.themes if cell else None),
             )
-            for f in fields
+            for (f, cell) in rows
         ]
-        
+
         return PaginatedResult(total=total, items=items)
     
     # =========================================================================

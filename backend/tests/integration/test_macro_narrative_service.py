@@ -57,6 +57,7 @@ from backend.macro_narratives import (  # noqa: E402
 )
 from backend.models import (  # noqa: E402
     DataField,
+    DataFieldCellStats,
     DatasetMetadata,
     KnowledgeEntry,
 )
@@ -90,7 +91,15 @@ async def pg_session():
                     ),
                     {"p": f"%{_TAG}%"},
                 )
-                # Cleanup tagged DataFields/Datasets seeded for S6
+                # Cleanup tagged DataFields/Datasets seeded for S6 — delete the
+                # cell_stats children first (FK to datafields/datasets).
+                await s.execute(
+                    delete(DataFieldCellStats).where(
+                        DataFieldCellStats.datafield_ref.in_(
+                            select(DataField.id).where(DataField.field_id.like(f"{_TAG}%"))
+                        )
+                    )
+                )
                 await s.execute(
                     delete(DataField).where(
                         DataField.field_id.like(f"{_TAG}%"),
@@ -295,7 +304,6 @@ class TestListFieldsMissingNarrative:
         ds_row = DatasetMetadata(
             dataset_id=ds_brain_id,
             region="USA",
-            universe="TOP3000",
             name=f"{_TAG} test dataset",
             description="x",
             category="Price/Volume",
@@ -304,19 +312,21 @@ class TestListFieldsMissingNarrative:
         await pg_session.commit()
         await pg_session.refresh(ds_row)
 
-        # Seed a DataField whose FK points at the just-created Dataset
+        # Seed a DataField def whose FK points at the just-created Dataset, plus
+        # its TOP3000/delay=1 cell (is_active lives on datafield_cell_stats now).
         fid = f"{_TAG}new_field"
         df_row = DataField(
             dataset_id=ds_row.id,  # Integer FK
-            region="USA",
-            universe="TOP3000",
             field_id=fid,
             field_name=f"{_TAG} new",
             field_type="MATRIX",
             description="a field with no narrative yet",
-            is_active=True,
         )
         pg_session.add(df_row)
+        await pg_session.flush()
+        pg_session.add(DataFieldCellStats(
+            datafield_ref=df_row.id, universe="TOP3000", delay=1, is_active=True,
+        ))
         await pg_session.commit()
 
         svc = MacroNarrativeService(pg_session)

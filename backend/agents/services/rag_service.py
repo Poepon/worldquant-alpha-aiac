@@ -17,7 +17,7 @@ from sqlalchemy import select, and_, or_, func, desc
 from sqlalchemy.dialects.postgresql import JSONB
 from loguru import logger
 
-from backend.models import KnowledgeEntry, DatasetMetadata
+from backend.models import KnowledgeEntry, DatasetMetadata, DatasetCellStats
 from backend.config import settings as _settings
 # V-26.34 (2026-05-13): module-level binding for the regex-driven operator
 # extractor. extract_operator_chain itself relies on Python's internal
@@ -190,10 +190,13 @@ async def resolve_field_categories(expression_or_fields, region: str, db) -> Lis
     if not tokens:
         return []
     try:
-        from backend.models.metadata import DataField
+        from backend.models.metadata import DataField, DatasetMetadata
+        # DataField.region dropped (cell-stats normalization) — region is via the
+        # parent dataset def now.
         rows = (await db.execute(
             select(DataField.category)
-            .where(DataField.region == region.upper())
+            .join(DatasetMetadata, DataField.dataset_id == DatasetMetadata.id)
+            .where(DatasetMetadata.region == region.upper())
             .where(func.lower(DataField.field_id).in_(list(tokens)))
             .where(DataField.category.isnot(None))
             .distinct()
@@ -1243,24 +1246,45 @@ class RAGService:
         return out
 
     async def _get_dataset_info(self, dataset_id: str) -> Optional[Dict]:
-        """Get dataset metadata."""
-        query = select(DatasetMetadata).where(
-            DatasetMetadata.dataset_id == dataset_id
-        ).limit(1)
-        result = await self.db.execute(query)
-        dataset = result.scalars().first()
-        
-        if not dataset:
+        """Get dataset metadata.
+
+        Cell-stats normalization (2026-05-26): field_count/mining_weight moved to
+        dataset_cell_stats per (universe, delay). This lookup has no universe
+        context (any matching dataset def), so it LEFT JOINs the canonical
+        TOP3000/delay=1 cell for those two stats (None when that cell is unsynced).
+        """
+        query = (
+            select(
+                DatasetMetadata.dataset_id, DatasetMetadata.region,
+                DatasetMetadata.category, DatasetMetadata.subcategory,
+                DatasetMetadata.description,
+                DatasetCellStats.field_count, DatasetCellStats.mining_weight,
+            )
+            .select_from(DatasetMetadata)
+            .outerjoin(
+                DatasetCellStats,
+                and_(
+                    DatasetCellStats.dataset_ref == DatasetMetadata.id,
+                    DatasetCellStats.universe == "TOP3000",
+                    DatasetCellStats.delay == 1,
+                ),
+            )
+            .where(DatasetMetadata.dataset_id == dataset_id)
+            .limit(1)
+        )
+        row = (await self.db.execute(query)).first()
+
+        if not row:
             return None
-        
+
         return {
-            'dataset_id': dataset.dataset_id,
-            'region': dataset.region,
-            'category': dataset.category,
-            'subcategory': dataset.subcategory,
-            'description': dataset.description,
-            'field_count': dataset.field_count,
-            'mining_weight': dataset.mining_weight
+            'dataset_id': row[0],
+            'region': row[1],
+            'category': row[2],
+            'subcategory': row[3],
+            'description': row[4],
+            'field_count': row[5],
+            'mining_weight': row[6],
         }
     
     async def update_pattern_brain_status(

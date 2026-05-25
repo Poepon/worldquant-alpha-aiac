@@ -360,8 +360,9 @@ class AlphaRepository(BaseRepository[Alpha]):
         if dataset_id is not None:
             query = query.where(Alpha.dataset_id == dataset_id)
         elif category is not None:
-            # Subquery (not a join) so multiple universe rows per dataset in the
-            # datasets table can't multiply the alpha sample rows.
+            # Subquery (not a join) keeps alpha sample rows from being multiplied.
+            # Since the 2026-05-26 cell-stats normalization, datasets is one row
+            # per (dataset_id, region), so the .distinct() is belt-and-suspenders.
             ds_subq = (
                 select(DatasetMetadata.dataset_id)
                 .where(

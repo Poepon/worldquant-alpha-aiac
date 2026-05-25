@@ -16,7 +16,9 @@ from loguru import logger
 from backend.celery_app import celery_app
 from backend.database import AsyncSessionLocal
 from backend.adapters.brain_adapter import BrainAdapter
-from backend.models import DatasetMetadata, DataField, Operator, Alpha
+from backend.models import (
+    DatasetMetadata, DatasetCellStats, DataField, DataFieldCellStats, Operator, Alpha,
+)
 from backend.services.correlation_service import CorrelationService
 from backend.tasks import run_async
 from backend.tasks._role_helpers import read_role_snapshot
@@ -279,6 +281,83 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
     }
 
 
+async def _upsert_dataset_def_and_cell(db, ds, *, region, universe, delay, category, subcategory):
+    """Cell-stats normalization upsert: a dataset DEFINITION (by dataset_id,
+    region) + its per-(universe, delay) ``DatasetCellStats`` cell.
+
+    Returns ``(def_created, cell_created)``. mining_weight / alpha_{success,fail}_count
+    are left at their column defaults (the dataset bandit owns mining_weight; sync
+    never wrote those) — mirrors the pre-refactor sync which never touched them.
+    Caller commits.
+    """
+    dsid = ds.get("id")
+    ddef = (await db.execute(
+        select(DatasetMetadata).where(
+            DatasetMetadata.dataset_id == dsid,
+            DatasetMetadata.region == region,
+        )
+    )).scalar_one_or_none()
+    def_created = False
+    if ddef is None:
+        ddef = DatasetMetadata(
+            dataset_id=dsid, region=region,
+            description=ds.get("description"), category=category, subcategory=subcategory,
+        )
+        db.add(ddef)
+        await db.flush()  # assign datasets.id for the cell FK
+        def_created = True
+    else:
+        ddef.description = ds.get("description")
+        ddef.category = category
+        ddef.subcategory = subcategory
+
+    cell = (await db.execute(
+        select(DatasetCellStats).where(
+            DatasetCellStats.dataset_ref == ddef.id,
+            DatasetCellStats.universe == universe,
+            DatasetCellStats.delay == delay,
+        )
+    )).scalar_one_or_none()
+    cell_created = False
+    if cell is None:
+        cell = DatasetCellStats(dataset_ref=ddef.id, universe=universe, delay=delay)
+        db.add(cell)
+        cell_created = True
+    cell.field_count = ds.get("fieldCount", 0)
+    cell.last_synced_at = func.now()
+    cell.date_coverage = ds.get("dateCoverage")
+    cell.themes = ds.get("themes")
+    cell.resources = ds.get("researchPapers")
+    cell.value_score = ds.get("valueScore")
+    cell.alpha_count = ds.get("alphaCount")
+    cell.pyramid_multiplier = ds.get("pyramidMultiplier")
+    cell.coverage = ds.get("coverage")
+    return def_created, cell_created
+
+
+async def _upsert_datafield_cell(db, datafield_ref, *, universe, delay, f_data):
+    """Upsert the per-(universe, delay) cell stats for a datafield def. BRAIN
+    returned the field → is_active=True (undoes any prior prune). region is via
+    the parent dataset (not stored on the cell). Caller commits."""
+    cell = (await db.execute(
+        select(DataFieldCellStats).where(
+            DataFieldCellStats.datafield_ref == datafield_ref,
+            DataFieldCellStats.universe == universe,
+            DataFieldCellStats.delay == delay,
+        )
+    )).scalar_one_or_none()
+    if cell is None:
+        cell = DataFieldCellStats(datafield_ref=datafield_ref, universe=universe, delay=delay)
+        db.add(cell)
+    cell.date_coverage = f_data.get("dateCoverage")
+    cell.coverage = f_data.get("coverage")
+    cell.pyramid_multiplier = f_data.get("pyramidMultiplier")
+    cell.user_count = f_data.get("userCount")
+    cell.alpha_count = f_data.get("alphaCount", 0)
+    cell.themes = f_data.get("themes", [])
+    cell.is_active = True
+
+
 @celery_app.task(name="backend.tasks.sync_datasets")
 def sync_datasets(regions: Optional[list] = None, **_extra_kwargs):
     """
@@ -343,15 +422,6 @@ def sync_datasets(regions: Optional[list] = None, **_extra_kwargs):
                         continue
 
                     for ds in datasets:
-                        result = await db.execute(
-                            select(DatasetMetadata).where(
-                                DatasetMetadata.dataset_id == ds.get("id"),
-                                DatasetMetadata.region == region,
-                                DatasetMetadata.universe == universe,
-                            )
-                        )
-                        existing = result.scalar_one_or_none()
-
                         category = ds.get("category")
                         if isinstance(category, dict):
                             category = category.get("id")
@@ -359,42 +429,21 @@ def sync_datasets(regions: Optional[list] = None, **_extra_kwargs):
                         if isinstance(subcategory, dict):
                             subcategory = subcategory.get("id")
 
-                        if existing:
-                            existing.description = ds.get("description")
-                            existing.category = category
-                            existing.subcategory = subcategory
-                            existing.field_count = ds.get("fieldCount", 0)
-                            existing.last_synced_at = func.now()
-                            existing.date_coverage = ds.get("dateCoverage")
-                            existing.themes = ds.get("themes")
-                            existing.resources = ds.get("researchPapers")
-                            existing.value_score = ds.get("valueScore")
-                            existing.alpha_count = ds.get("alphaCount")
-                            existing.pyramid_multiplier = ds.get("pyramidMultiplier")
-                            existing.coverage = ds.get("coverage")
-                            updated_count += 1
-                        else:
-                            db.add(DatasetMetadata(
-                                dataset_id=ds.get("id"),
-                                region=region,
-                                universe=universe,
-                                category=category,
-                                subcategory=subcategory,
-                                description=ds.get("description"),
-                                field_count=ds.get("fieldCount", 0),
-                                date_coverage=ds.get("dateCoverage"),
-                                themes=ds.get("themes"),
-                                resources=ds.get("researchPapers"),
-                                value_score=ds.get("valueScore"),
-                                alpha_count=ds.get("alphaCount"),
-                                pyramid_multiplier=ds.get("pyramidMultiplier"),
-                                coverage=ds.get("coverage"),
-                            ))
+                        def_created, cell_created = await _upsert_dataset_def_and_cell(
+                            db, ds, region=region, universe=universe, delay=1,
+                            category=category, subcategory=subcategory,
+                        )
+                        if def_created:
                             new_count += 1
-                            # P3-Brain: capture per-(dataset, region, universe) tuple
-                            # — multi-region sync uses different universes (HKG=TOP500
-                            # etc.), can't rely on closure `universe` (would be the
-                            # last region's universe by enqueue time).
+                        else:
+                            updated_count += 1
+                        # Trigger field sync whenever the (universe) cell is new —
+                        # covers both a brand-new dataset and a new universe of an
+                        # existing one (its datafield cells don't exist yet).
+                        # P3-Brain: capture the (dataset, region, universe) tuple —
+                        # multi-region sync uses different universes (HKG=TOP500 etc.),
+                        # can't rely on closure `universe` (= last region's by enqueue).
+                        if cell_created:
                             field_sync_targets.append((ds.get("id"), region, universe))
 
                 await db.commit()
@@ -444,56 +493,23 @@ def sync_datasets_from_brain(region: str = "USA", universe: str = "TOP3000"):
                 updated = 0
                 
                 for ds in datasets:
-                    stmt = select(DatasetMetadata).where(
-                        DatasetMetadata.dataset_id == ds.get("id"),
-                        DatasetMetadata.region == region,
-                        DatasetMetadata.universe == universe
-                    )
-                    result = await db.execute(stmt)
-                    existing = result.scalar_one_or_none()
-                    
                     category = ds.get("category")
                     if isinstance(category, dict):
                         category = category.get("id")
-                        
+
                     subcategory = ds.get("subcategory")
                     if isinstance(subcategory, dict):
                         subcategory = subcategory.get("id")
-                        
-                    if existing:
-                        existing.description = ds.get("description")
-                        existing.category = category
-                        existing.subcategory = subcategory
-                        existing.field_count = ds.get("fieldCount", 0)
-                        existing.last_synced_at = func.now()
-                        existing.date_coverage = ds.get("dateCoverage")
-                        existing.themes = ds.get("themes")
-                        existing.resources = ds.get("researchPapers")
-                        existing.value_score = ds.get("valueScore")
-                        existing.alpha_count = ds.get("alphaCount")
-                        existing.pyramid_multiplier = ds.get("pyramidMultiplier")
-                        existing.coverage = ds.get("coverage")
-                        updated += 1
-                    else:
-                        metadata = DatasetMetadata(
-                            dataset_id=ds.get("id"),
-                            region=region,
-                            universe=universe,
-                            category=category,
-                            subcategory=subcategory,
-                            description=ds.get("description"),
-                            field_count=ds.get("fieldCount", 0),
-                            date_coverage=ds.get("dateCoverage"),
-                            themes=ds.get("themes"),
-                            resources=ds.get("researchPapers"),
-                            value_score=ds.get("valueScore"),
-                            alpha_count=ds.get("alphaCount"),
-                            pyramid_multiplier=ds.get("pyramidMultiplier"),
-                            coverage=ds.get("coverage")
-                        )
-                        db.add(metadata)
+
+                    def_created, _cell_created = await _upsert_dataset_def_and_cell(
+                        db, ds, region=region, universe=universe, delay=1,
+                        category=category, subcategory=subcategory,
+                    )
+                    if def_created:
                         count += 1
-                
+                    else:
+                        updated += 1
+
                 await db.commit()
                 
                 # Auto-trigger field sync
@@ -577,6 +593,11 @@ async def _reconcile_dataset_fields(db, dataset, fields, *, region, universe, de
     response; the loop self-identifies dead fields as they fail. Caller commits.
     Pure DB-side → unit-testable on the sqlite fixture.
 
+    Cell-stats normalization (2026-05-26): a field DEFINITION (datafields, keyed
+    by dataset_id+field_id) is upserted once + its per-(universe, delay) cell in
+    datafield_cell_stats (coverage/counts/themes/is_active). field_count lands on
+    the parent dataset's (universe, delay) cell, counting ACTIVE field cells.
+
     Returns {"new", "updated", "returned"}.
     """
     from sqlalchemy import func as sqla_func
@@ -605,44 +626,57 @@ async def _reconcile_dataset_fields(db, dataset, fields, *, region, universe, de
             existing.description = f_data.get("description")
             existing.field_name = f_data.get("name", fid)
             existing.field_type = f_data.get("type")
-            existing.date_coverage = f_data.get("dateCoverage")
-            existing.coverage = f_data.get("coverage")
-            existing.pyramid_multiplier = f_data.get("pyramidMultiplier")
-            existing.user_count = f_data.get("userCount")
-            existing.alpha_count = f_data.get("alphaCount", 0)
             existing.category = category_id
             existing.category_name = category_name
             existing.subcategory = subcategory_id
             existing.subcategory_name = subcategory_name
-            existing.themes = f_data.get("themes", [])
-            existing.is_active = True  # BRAIN returns it → valid → (re-)activate
+            df_ref = existing.id
             updated += 1
         else:
-            db.add(DataField(
-                dataset_id=dataset.id, region=region, universe=universe, delay=delay,
+            df = DataField(
+                dataset_id=dataset.id,
                 field_id=fid, field_name=f_data.get("name", fid),
                 description=f_data.get("description"), field_type=f_data.get("type"),
-                date_coverage=f_data.get("dateCoverage"), coverage=f_data.get("coverage"),
-                pyramid_multiplier=f_data.get("pyramidMultiplier"),
-                user_count=f_data.get("userCount"), alpha_count=f_data.get("alphaCount", 0),
                 category=category_id, category_name=category_name,
                 subcategory=subcategory_id, subcategory_name=subcategory_name,
-                themes=f_data.get("themes", []),
-            ))
+            )
+            db.add(df)
+            await db.flush()  # assign datafields.id for the cell FK
+            df_ref = df.id
             count += 1
+
+        await _upsert_datafield_cell(db, df_ref, universe=universe, delay=delay, f_data=f_data)
 
     returned_ids = {f.get("id") for f in fields if f.get("id")}
     # Fields BRAIN no longer returns are intentionally left as-is — the mining
     # prune deactivates the truly-invalid ones when BRAIN rejects them at sim.
+    await db.flush()  # ensure new cells are visible to the count below
 
-    # field_count reflects ACTIVE fields (what mining actually sees).
-    dataset.field_count = (await db.execute(
-        select(sqla_func.count(DataField.id)).where(
+    # field_count reflects ACTIVE field cells for this (universe, delay) — what
+    # mining actually sees — and lands on the parent dataset's cell.
+    active_count = (await db.execute(
+        select(sqla_func.count(DataFieldCellStats.id))
+        .join(DataField, DataField.id == DataFieldCellStats.datafield_ref)
+        .where(
             DataField.dataset_id == dataset.id,
-            DataField.is_active.is_(True),
+            DataFieldCellStats.universe == universe,
+            DataFieldCellStats.delay == delay,
+            DataFieldCellStats.is_active.is_(True),
         )
     )).scalar() or 0
-    dataset.last_synced_at = func.now()
+
+    ds_cell = (await db.execute(
+        select(DatasetCellStats).where(
+            DatasetCellStats.dataset_ref == dataset.id,
+            DatasetCellStats.universe == universe,
+            DatasetCellStats.delay == delay,
+        )
+    )).scalar_one_or_none()
+    if ds_cell is None:
+        ds_cell = DatasetCellStats(dataset_ref=dataset.id, universe=universe, delay=delay)
+        db.add(ds_cell)
+    ds_cell.field_count = active_count
+    ds_cell.last_synced_at = func.now()
     return {"new": count, "updated": updated, "returned": len(returned_ids)}
 
 
@@ -661,11 +695,10 @@ def sync_fields_from_brain(dataset_id: str, region: str = "USA", universe: str =
     
     async def _run():
         async with AsyncSessionLocal() as db:
-            # Resolve dataset PK
+            # Resolve dataset def (universe/delay-invariant → keyed by dataset_id+region)
             stmt_ds = select(DatasetMetadata).where(
                 DatasetMetadata.dataset_id == dataset_id,
                 DatasetMetadata.region == region,
-                DatasetMetadata.universe == universe
             )
             res_ds = await db.execute(stmt_ds)
             dataset = res_ds.scalar_one_or_none()

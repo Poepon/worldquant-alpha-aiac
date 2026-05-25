@@ -62,19 +62,18 @@ class TestBuildFieldDatasetMap:
         from backend.models import DataField, DatasetMetadata
 
         _clear_cache()
+        # Cell-stats normalization: datasets/datafields are universe-invariant
+        # defs (no universe column); region lives on the dataset def.
         ds = DatasetMetadata(
-            dataset_id="fundamental2", region="USA", universe="TOP3000",
-            name="Fundamental 2",
+            dataset_id="fundamental2", region="USA", name="Fundamental 2",
         )
         db_session.add(ds)
         await db_session.flush()  # populate ds.id (FK target)
         db_session.add(DataField(
-            dataset_id=ds.id, region="USA", universe="TOP3000",
-            field_id="fn_assets", field_name="Assets",
+            dataset_id=ds.id, field_id="fn_assets", field_name="Assets",
         ))
         db_session.add(DataField(
-            dataset_id=ds.id, region="USA", universe="TOP3000",
-            field_id="fn_debt", field_name="Debt",
+            dataset_id=ds.id, field_id="fn_debt", field_name="Debt",
         ))
         await db_session.commit()
 

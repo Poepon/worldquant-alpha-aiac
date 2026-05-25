@@ -59,10 +59,11 @@ cur.execute("""
         SELECT
             a.id,
             a.quality_status,
-            COUNT(DISTINCT df.dataset_id) AS n_datasets
+            COUNT(DISTINCT d.id) AS n_datasets
         FROM alphas a
         LEFT JOIN LATERAL jsonb_array_elements_text(a.fields_used) AS f(field_id) ON TRUE
-        LEFT JOIN datafields df ON df.field_id = f.field_id AND df.region = a.region
+        LEFT JOIN datafields df ON df.field_id = f.field_id
+        LEFT JOIN datasets d ON d.id = df.dataset_id AND d.region = a.region
         WHERE a.fields_used IS NOT NULL
           AND jsonb_typeof(a.fields_used) = 'array'
           AND jsonb_array_length(a.fields_used) > 0

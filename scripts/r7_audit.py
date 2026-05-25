@@ -124,29 +124,35 @@ def _operators_snapshot() -> str:
 def _datafields_snapshot() -> str:
     conn = _conn()
     cur = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+    # Cell-stats normalization (2026-05-26): datasets/datafields are
+    # universe/delay-invariant defs; universe + is_active live on the cell_stats
+    # tables. Join the (universe, delay) cell for per-cell field counts.
     cur.execute("""
         SELECT
-            d.region, d.universe, d.dataset_id, d.category, d.subcategory,
-            COUNT(f.id) AS field_count,
-            COUNT(*) FILTER (WHERE f.field_type = 'MATRIX') AS matrix_count,
-            COUNT(*) FILTER (WHERE f.field_type = 'VECTOR') AS vector_count
+            d.region, dc.universe, d.dataset_id, d.category, d.subcategory,
+            COUNT(fc.id) AS field_count,
+            COUNT(*) FILTER (WHERE f.field_type = 'MATRIX' AND fc.id IS NOT NULL) AS matrix_count,
+            COUNT(*) FILTER (WHERE f.field_type = 'VECTOR' AND fc.id IS NOT NULL) AS vector_count
         FROM datasets d
+        JOIN dataset_cell_stats dc ON dc.dataset_ref = d.id AND dc.is_active = true
         LEFT JOIN datafields f ON f.dataset_id = d.id
-                              AND f.region = d.region
-                              AND f.universe = d.universe
-        WHERE d.is_active = true
-        GROUP BY d.region, d.universe, d.dataset_id, d.category, d.subcategory
-        ORDER BY d.region, d.universe, d.dataset_id
+        LEFT JOIN datafield_cell_stats fc ON fc.datafield_ref = f.id
+                              AND fc.universe = dc.universe
+                              AND fc.delay = dc.delay
+                              AND fc.is_active = true
+        GROUP BY d.region, dc.universe, d.dataset_id, d.category, d.subcategory
+        ORDER BY d.region, dc.universe, d.dataset_id
     """)
     ds_rows = cur.fetchall()
 
     cur.execute("""
-        SELECT region, COUNT(DISTINCT dataset_id) AS n_datasets,
-               COUNT(*) AS n_fields,
-               COUNT(*) FILTER (WHERE field_type='MATRIX') AS n_matrix,
-               COUNT(*) FILTER (WHERE field_type='VECTOR') AS n_vector
-        FROM datafields
-        GROUP BY region ORDER BY region
+        SELECT d.region, COUNT(DISTINCT d.dataset_id) AS n_datasets,
+               COUNT(f.id) AS n_fields,
+               COUNT(*) FILTER (WHERE f.field_type='MATRIX') AS n_matrix,
+               COUNT(*) FILTER (WHERE f.field_type='VECTOR') AS n_vector
+        FROM datasets d
+        JOIN datafields f ON f.dataset_id = d.id
+        GROUP BY d.region ORDER BY d.region
     """)
     region_rows = cur.fetchall()
 
@@ -193,9 +199,12 @@ def _datafields_snapshot() -> str:
     conn = _conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT field_id FROM datafields
-        WHERE region = 'USA' AND universe = 'TOP3000'
-          AND field_id = ANY(%s)
+        SELECT DISTINCT f.field_id
+        FROM datafields f
+        JOIN datasets d ON f.dataset_id = d.id
+        JOIN datafield_cell_stats fc ON fc.datafield_ref = f.id AND fc.universe = 'TOP3000'
+        WHERE d.region = 'USA'
+          AND f.field_id = ANY(%s)
     """, (sorted(plan_field_aliases),))
     found_in_usa = {row[0] for row in cur.fetchall()}
     cur.close()

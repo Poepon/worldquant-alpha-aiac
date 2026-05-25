@@ -13,19 +13,28 @@ from backend.tasks.sync_tasks import _reconcile_dataset_fields
 
 
 async def _setup(db):
-    from backend.models import DataField, DatasetMetadata
-    ds = DatasetMetadata(dataset_id="pv1", region="USA", universe="TOP3000", name="pv1")
+    # Cell-stats normalization: is_active lives on datafield_cell_stats per
+    # (universe, delay); each field is a def + its TOP3000/delay=1 cell.
+    from backend.models import DataField, DataFieldCellStats, DatasetMetadata
+    ds = DatasetMetadata(dataset_id="pv1", region="USA", name="pv1")
     db.add(ds)
     await db.flush()
 
-    def mk(fid, active):
-        return DataField(dataset_id=ds.id, region="USA", universe="TOP3000", delay=1,
-                         field_id=fid, field_name=fid, field_type="MATRIX", is_active=active)
+    states = [
+        ("f_keep", True),      # active, BRAIN returns  → stays active
+        ("f_stale", True),     # active, BRAIN DROPS    → STAYS active (prune's job)
+        ("f_revive", False),   # inactive, BRAIN returns→ re-activate
+        ("f_dormant", False),  # inactive, BRAIN DROPS  → stays inactive
+    ]
+    defs = {
+        fid: DataField(dataset_id=ds.id, field_id=fid, field_name=fid, field_type="MATRIX")
+        for fid, _ in states
+    }
+    db.add_all(list(defs.values()))
+    await db.flush()
     db.add_all([
-        mk("f_keep", True),      # active, BRAIN returns  → stays active
-        mk("f_stale", True),     # active, BRAIN DROPS    → STAYS active (prune's job)
-        mk("f_revive", False),   # inactive, BRAIN returns→ re-activate
-        mk("f_dormant", False),  # inactive, BRAIN DROPS  → stays inactive
+        DataFieldCellStats(datafield_ref=defs[fid].id, universe="TOP3000", delay=1, is_active=active)
+        for fid, active in states
     ])
     await db.flush()
     return ds
@@ -36,9 +45,13 @@ def _bf(fid):
 
 
 async def _states(db):
-    from backend.models import DataField
-    return {r.field_id: r.is_active
-            for r in (await db.execute(select(DataField))).scalars().all()}
+    from backend.models import DataField, DataFieldCellStats
+    return {
+        fid: active for fid, active in (await db.execute(
+            select(DataField.field_id, DataFieldCellStats.is_active)
+            .join(DataFieldCellStats, DataFieldCellStats.datafield_ref == DataField.id)
+        )).all()
+    }
 
 
 @pytest.mark.asyncio

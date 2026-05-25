@@ -363,20 +363,22 @@ class TestConfigService:
 
 @pytest_asyncio.fixture
 async def sample_dataset(db_session):
-    """Create a sample dataset for testing."""
-    from backend.models import DatasetMetadata
-    
+    """Create a sample dataset for testing (def + TOP3000/delay=1 cell)."""
+    from backend.models import DatasetMetadata, DatasetCellStats
+
     dataset = DatasetMetadata(
         dataset_id="test_dataset",
         name="Test Dataset",
         region="USA",
-        universe="TOP3000",
         category="Fundamental",
         description="Test dataset for unit tests",
-        field_count=10,
-        mining_weight=1.0,
     )
     db_session.add(dataset)
+    await db_session.flush()
+    db_session.add(DatasetCellStats(
+        dataset_ref=dataset.id, universe="TOP3000", delay=1,
+        field_count=10, mining_weight=1.0, is_active=True,
+    ))
     await db_session.commit()
     await db_session.refresh(dataset)
     return dataset

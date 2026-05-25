@@ -203,11 +203,15 @@ async def _mk_alpha(db, dataset_id, region="USA", *, edge=False,
 
 
 async def _mk_dataset(db, dataset_id, region="USA"):
-    from backend.models import DatasetMetadata
+    # Cell-stats normalization: mining_weight / is_active live on the
+    # (universe, delay) cell; create the def + its TOP3000/delay=1 cell.
+    from backend.models import DatasetMetadata, DatasetCellStats
 
-    db.add(DatasetMetadata(
-        dataset_id=dataset_id, region=region, universe="TOP3000",
-        name=dataset_id, mining_weight=1.0,
+    ds = DatasetMetadata(dataset_id=dataset_id, region=region, name=dataset_id)
+    db.add(ds)
+    await db.flush()
+    db.add(DatasetCellStats(
+        dataset_ref=ds.id, universe="TOP3000", delay=1, mining_weight=1.0, is_active=True,
     ))
     await db.flush()
 
@@ -254,10 +258,11 @@ class TestBeatJobFlow:
         # and the two posteriors overlap (review SF-3: the ON path is not
         # position-assertable). The deterministic value-ordering is the
         # posterior MEAN, asserted above.
-        from backend.models import DatasetMetadata
+        from backend.models import DatasetMetadata, DatasetCellStats
         weights = {
             d: w for d, w in (await db_session.execute(
-                select(DatasetMetadata.dataset_id, DatasetMetadata.mining_weight)
+                select(DatasetMetadata.dataset_id, DatasetCellStats.mining_weight)
+                .join(DatasetCellStats, DatasetCellStats.dataset_ref == DatasetMetadata.id)
             )).all()
         }
         assert 0.0 < weights["pv1"] != 1.0
@@ -354,9 +359,11 @@ class TestBeatJobFlow:
         # cold-start spec (r5): s=t=0 → α=1, β=coldstart_beta (NOT 1.0+max(0,0)=1.0).
         assert (pv96.alpha_param, pv96.beta_param, pv96.pulls) == (1.0, 2.0, 0)
         # mining_weight written off the raw 1.0 default (floor-driven, positive).
-        from backend.models import DatasetMetadata
+        from backend.models import DatasetMetadata, DatasetCellStats
         w = (await db_session.execute(
-            select(DatasetMetadata.mining_weight).where(DatasetMetadata.dataset_id == "pv96")
+            select(DatasetCellStats.mining_weight)
+            .join(DatasetMetadata, DatasetCellStats.dataset_ref == DatasetMetadata.id)
+            .where(DatasetMetadata.dataset_id == "pv96")
         )).scalar_one()
         assert w > 0.0
 
@@ -392,11 +399,13 @@ class TestBeatJobFlow:
 @pytest.mark.asyncio
 async def test_load_bandit_state_populates_arms(db_session):
     from backend.dataset_selector import DatasetSelector
-    from backend.models import BanditState, DatasetMetadata
+    from backend.models import BanditState, DatasetMetadata, DatasetCellStats
 
-    db_session.add(DatasetMetadata(
-        dataset_id="pv1", region="USA", universe="TOP3000", name="pv1",
-        mining_weight=1.0,
+    ds = DatasetMetadata(dataset_id="pv1", region="USA", name="pv1")
+    db_session.add(ds)
+    await db_session.flush()
+    db_session.add(DatasetCellStats(
+        dataset_ref=ds.id, universe="TOP3000", delay=1, mining_weight=1.0, is_active=True,
     ))
     db_session.add(BanditState(
         region="USA", dataset_id="pv1", pulls=2280, total_reward=1.0,

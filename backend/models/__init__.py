@@ -59,7 +59,9 @@ from backend.models.knowledge import (
 # Metadata models
 from backend.models.metadata import (
     DatasetMetadata,
+    DatasetCellStats,
     DataField,
+    DataFieldCellStats,
     Operator,
     OperatorBlacklist,
     Region,
@@ -165,7 +167,9 @@ __all__ = [
     "compute_pattern_hash",
     # Metadata
     "DatasetMetadata",
+    "DatasetCellStats",
     "DataField",
+    "DataFieldCellStats",
     "Operator",
     "OperatorBlacklist",
     "Region",

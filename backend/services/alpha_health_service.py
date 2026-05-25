@@ -408,8 +408,9 @@ class AlphaHealthService:
         ``Alpha.dataset_id`` is also a business-key String(50). Looking up
         by int PK would always miss.
 
-        ``(dataset_id, region, universe)`` is a UniqueConstraint on
-        ``datasets``, so the same business key recurs across regions but
+        ``(dataset_id, region)`` is the UniqueConstraint on ``datasets`` (since
+        the 2026-05-26 cell-stats normalization; universe moved to
+        dataset_cell_stats), so the same business key recurs across regions but
         ``category`` is invariant; a simple last-write-wins dict is fine.
 
         Async classmethod so the task wrapper can do

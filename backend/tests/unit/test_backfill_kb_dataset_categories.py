@@ -81,12 +81,14 @@ async def pg_session() -> AsyncGenerator[AsyncSession, None]:
 async def test_resolve_real_field_to_its_category(pg_session):
     """A field_id that exists in the USA datafields catalog must resolve to its
     canonical category (self-validating against whatever the catalog holds)."""
-    from backend.models.metadata import DataField
+    from backend.models.metadata import DataField, DatasetMetadata
     from backend.agents.services.rag_service import resolve_field_categories, _canonical_category
 
+    # DataField.region dropped (cell-stats normalization) — region via the dataset def.
     row = (await pg_session.execute(
         select(DataField.field_id, DataField.category)
-        .where(DataField.region == "USA", DataField.category.isnot(None))
+        .join(DatasetMetadata, DataField.dataset_id == DatasetMetadata.id)
+        .where(DatasetMetadata.region == "USA", DataField.category.isnot(None))
         .limit(1)
     )).first()
     if not row:
