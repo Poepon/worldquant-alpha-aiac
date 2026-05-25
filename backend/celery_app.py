@@ -3,6 +3,20 @@ Celery Application for Background Tasks
 Handles mining tasks, feedback loops, and scheduled jobs
 """
 
+# 2026-05-25: ensure the repo root is on sys.path for Celery worker processes.
+# backend/ and scripts/ are both namespace packages (no __init__.py). celery
+# -A backend.celery_app loads `backend` at startup, but a task doing
+# `from scripts.X import ...` at RUN time (q10_tasks' telemetry beat) failed
+# with "No module named 'scripts'" because the worker's runtime sys.path did
+# not include the repo root. Inserting it here — executed once when the worker
+# imports celery_app — makes every root-level module importable from tasks.
+import sys as _sys
+from pathlib import Path as _Path
+
+_PROJECT_ROOT = str(_Path(__file__).resolve().parent.parent)
+if _PROJECT_ROOT not in _sys.path:
+    _sys.path.insert(0, _PROJECT_ROOT)
+
 from celery import Celery
 from celery.schedules import crontab
 from celery.signals import worker_process_init, worker_process_shutdown
