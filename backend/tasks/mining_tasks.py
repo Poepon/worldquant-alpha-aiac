@@ -1467,6 +1467,12 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
             run.status = task.status
         else:
             run.status = "COMPLETED"
+            # 2026-05-25: also sync task.status — finalization previously only
+            # updated run.status, so a FLAT session that finished naturally
+            # (daily_goal / max_iters) left mining_tasks.status stuck at RUNNING
+            # → watch false-RUNNING/STALE + quota miscount (observed task 3515).
+            # The PAUSED/STOPPED branch leaves task untouched (already terminal).
+            task.status = "COMPLETED"
         run.finished_at = datetime.utcnow()
         await db.commit()
 

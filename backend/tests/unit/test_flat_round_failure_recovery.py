@@ -235,3 +235,75 @@ async def test_flat_loop_recovers_and_continues_after_transient_failure(async_en
     assert result["total_alphas"] == 4
     assert result["final_cursor"] == 2  # failed slot + successful slot
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_finalization_syncs_task_status_to_completed(async_engine, monkeypatch):
+    """A FLAT session that finishes normally (daily_goal hit) must leave
+    mining_tasks.status = COMPLETED — not stuck at RUNNING (2026-05-25 fix:
+    finalization previously only updated run.status, observed on task 3515)."""
+    maker = _maker(async_engine)
+    monkeypatch.setattr(mining_tasks, "AsyncSessionLocal", maker)
+    monkeypatch.setattr(
+        mining_tasks.settings, "ENABLE_DATASET_VALUE_BANDIT", False, raising=False
+    )
+    monkeypatch.setattr(
+        mining_tasks.settings, "FLAT_CONTINUOUS_MAX_ITERATIONS", 50, raising=False
+    )
+    monkeypatch.setattr(
+        mining_tasks.settings, "FLAT_CONTINUOUS_DAILY_GOAL", 4, raising=False
+    )
+
+    seed = maker()
+    task = MiningTask(
+        task_name="fin", region="USA", universe="TOP3000", schedule="FLAT",
+        target_datasets=["ds1"], config={}, status="RUNNING", daily_goal=4,
+    )
+    seed.add(task)
+    await seed.flush()
+    run = ExperimentRun(task_id=task.id, status="RUNNING", runtime_state={})
+    seed.add(run)
+    await seed.commit()
+    tid, rid = task.id, run.id
+
+    db = maker()
+    task = await db.get(MiningTask, tid)
+    run = await db.get(ExperimentRun, rid)
+
+    class _FakeBrain:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+    class _FakeAgent:
+        def __init__(self, *a, **k):
+            pass
+
+    async def _fake_ops(_db):
+        return []
+
+    async def _good_round(*a, **k):
+        # 4 alphas in one round → daily_goal(4) hit → loop exits normally
+        return {"all_alphas": [object(), object(), object(), object()]}
+
+    monkeypatch.setattr(mining_tasks, "BrainAdapter", _FakeBrain)
+    monkeypatch.setattr(mining_tasks, "MiningAgent", _FakeAgent)
+    monkeypatch.setattr(mining_tasks, "_get_operators", _fake_ops)
+    monkeypatch.setattr(mining_tasks, "_verify_cascade_ownership", lambda *a, **k: True)
+    monkeypatch.setattr(mining_tasks, "_run_one_round_inline", _good_round)
+
+    result = await mining_tasks._run_flat_iteration(
+        db, task, run, "celery-1", lock_key="lk", lock_token="tok"
+    )
+    assert result["total_alphas"] == 4
+    await db.close()
+
+    # verify in a fresh session that BOTH run and task are COMPLETED
+    verify = maker()
+    t = await verify.get(MiningTask, tid)
+    r = await verify.get(ExperimentRun, rid)
+    assert r.status == "COMPLETED"
+    assert t.status == "COMPLETED", f"task.status should sync to COMPLETED, got {t.status!r}"
+    await verify.close()
