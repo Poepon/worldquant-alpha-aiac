@@ -229,6 +229,22 @@ class Settings(BaseSettings):
     BRAIN_REAUTH_WAIT_TIMEOUT_SEC: float = 60.0
     BRAIN_REAUTH_POLL_INTERVAL_SEC: float = 1.5
 
+    # ===== Sim-poll liveness / Zombie-simulation reclaim (2026-05-24) =====
+    # brain_adapter._wait_for_simulation / _wait_for_multisim poll BRAIN with
+    # the Retry-After protocol. A "zombie" sim keeps returning HTTP 200 + a
+    # valid Retry-After header indefinitely (observed: task 3329 RUNNING ~11h
+    # with 0 alphas, rooted in a stale/thrashing BRAIN session). The poll
+    # loop's max_wait was a DEAD parameter — never compared against elapsed —
+    # so a zombie polled forever. These caps enforce it: on exceeding the cap
+    # the adapter re-auths once + rechecks (Zombie Protocol), then abandons the
+    # handle with retryable=True so node_simulate holds the alpha at PENDING
+    # and the next round re-tries (vs. polling a dead handle forever).
+    # Thresholds are deliberately GENEROUS — well above any healthy sim
+    # duration (a P0Y full-history single sim, or an N-child multi-sim) — so a
+    # trigger almost certainly means a genuine zombie, not a slow-but-live sim.
+    BRAIN_SIM_MAX_WAIT_SEC: int = 1800        # single REGULAR sim poll ceiling (30 min)
+    BRAIN_MULTISIM_MAX_WAIT_SEC: int = 3600   # multi-sim (N children) poll ceiling (60 min)
+
     # ===== Phase 4 Sprint 0 (2026-05-19) =====
     # Plan: docs/phase4_a_b_plan_v5_2026-05-19.md
     # ----- PR0 LLM_API_CIRCUIT (Sprint 0) -----

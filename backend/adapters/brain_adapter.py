@@ -119,6 +119,11 @@ class BrainAdapter:
     _SLOT_TTL_SEC: int = 600   # safety: orphaned counter resets after 10 min
     _SLOT_POLL_INTERVAL: float = 1.5
     _SLOT_ACQUIRE_TIMEOUT: float = 1800.0   # 30 min upper bound on wait
+    # Zombie-simulation reclaim (2026-05-24): when a poll loop exceeds its
+    # max_wait ceiling, re-auth once (Zombie Protocol STEP 1) then recheck
+    # after this short grace (STEP 2) before classifying the sim as a zombie
+    # and abandoning it. Short so a genuinely-finished sim is still caught.
+    _ZOMBIE_RECHECK_SLEEP: float = 5.0
     _redis_client: Optional["redis.Redis"] = None
     # Bug fix (2026-05-01): redis.from_url binds to whatever event loop is
     # current when called. tasks/__init__.run_async creates a new loop per
@@ -930,7 +935,15 @@ class BrainAdapter:
             parent_result = await self._wait_for_multisim(location)
 
             if not parent_result["success"]:
-                return [{"success": False, "error": parent_result.get("error")} for _ in expressions]
+                # Propagate a parent-level retryable signal (e.g. zombie
+                # timeout) to EVERY child so node_simulate holds each alpha at
+                # PENDING instead of writing them all to alpha_failures.
+                _failed = {"success": False, "error": parent_result.get("error")}
+                if parent_result.get("retryable"):
+                    _failed["retryable"] = True
+                    _failed["retry_after_sec"] = parent_result.get("retry_after_sec", 30)
+                    _failed["error_kind"] = parent_result.get("error_kind")
+                return [dict(_failed) for _ in expressions]
 
             # Map results back to order is tricky if Brain doesn't guarantee order,
             # but usually 'children' list order might allow correlation if we trust it?
@@ -979,22 +992,31 @@ class BrainAdapter:
 
         return await asyncio.gather(*(run_one(e) for e in expressions))
 
-    async def _wait_for_multisim(self, location: str, max_wait: int = 900) -> Dict:
+    async def _wait_for_multisim(self, location: str, max_wait: Optional[int] = None) -> Dict:
         """
         Poll for multi-simulation completion.
         Reference: ace_lib.py `multisimulation_progress` function.
         Key insight: Use Retry-After header presence to determine if still running.
+
+        Zombie-simulation reclaim (2026-05-24): ``max_wait`` is the poll-loop
+        ceiling (was a dead parameter — see _wait_for_simulation). A multi-sim
+        bundles N children so its ceiling is more generous.
+        ``None`` ⇒ settings.BRAIN_MULTISIM_MAX_WAIT_SEC.
         """
+        if max_wait is None:
+            max_wait = settings.BRAIN_MULTISIM_MAX_WAIT_SEC
         # Determine full URL
         if location.startswith("http"):
             poll_url = location
         else:
             poll_url = f"{self.BASE_URL}{location}"
-        
+
         error_flag = False
         retry_count = 0
         max_retries = 3
-        
+        _start = asyncio.get_event_loop().time()
+        _reauth_grace_used = False
+
         while True:
             try:
                 response = await self._request("GET", poll_url)
@@ -1012,7 +1034,21 @@ class BrainAdapter:
                 
                 # Key check: If Retry-After header is missing or 0, simulation is complete
                 retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
-                
+
+                # worldquant-miner pattern (2026-05-26): body STATUS field is
+                # terminal, not just the Retry-After header — a rotted session
+                # can keep sending Retry-After after the multi-sim is done.
+                try:
+                    _body = response.json()
+                    _status = str(_body.get("status") or "").upper()
+                except Exception:  # noqa: BLE001 — parse blip → fall through to header
+                    _body, _status = {}, ""
+                if _status in ("COMPLETE", "FAIL", "FAILED", "ERROR"):
+                    if _status != "COMPLETE":
+                        error_flag = True
+                        logger.error(f"Multi-simulation {_status} (status field): {_body}")
+                    break
+
                 if not retry_after or retry_after == "0":
                     # Simulation completed - check for error status
                     data = response.json()
@@ -1020,7 +1056,40 @@ class BrainAdapter:
                         error_flag = True
                         logger.error(f"Multi-simulation error: {data}")
                     break
-                
+
+                # Still running. Zombie-simulation liveness check (2026-05-24):
+                # same dead-max_wait bug as single-sim. On exceeding the ceiling
+                # run the Zombie Protocol (re-auth once + recheck) then abandon
+                # with a retryable signal. simulate_batch propagates retryable
+                # to every child below so node_simulate holds them at PENDING.
+                elapsed = asyncio.get_event_loop().time() - _start
+                if elapsed >= max_wait:
+                    if not _reauth_grace_used:
+                        _reauth_grace_used = True
+                        logger.warning(
+                            f"[BrainAdapter] multi-sim poll exceeded {max_wait}s "
+                            f"(elapsed={elapsed:.0f}s) on {poll_url} — Zombie "
+                            f"Protocol: re-auth + recheck once."
+                        )
+                        try:
+                            await self._coalesced_reauth()
+                        except Exception as _re:
+                            logger.warning(f"[BrainAdapter] zombie re-auth failed: {_re}")
+                        await asyncio.sleep(self._ZOMBIE_RECHECK_SLEEP)
+                        continue
+                    logger.error(
+                        f"[BrainAdapter] ZOMBIE multi-sim confirmed: still "
+                        f"in_progress {elapsed:.0f}s after re-auth+recheck on "
+                        f"{poll_url}. Abandoning; signalling retryable."
+                    )
+                    return {
+                        "success": False,
+                        "error": f"BRAIN multi-simulation zombie timeout after {elapsed:.0f}s",
+                        "retryable": True,
+                        "retry_after_sec": 30,
+                        "error_kind": "sim_zombie_timeout",
+                    }
+
                 # Still running, wait as instructed
                 await asyncio.sleep(float(retry_after))
                 
@@ -1084,22 +1153,32 @@ class BrainAdapter:
         results = await asyncio.gather(*(fetch_child_result(cid) for cid in children))
         return {"success": True, "results": list(results)}
 
-    async def _wait_for_simulation(self, location: str, max_wait: int = 900) -> Dict:
+    async def _wait_for_simulation(self, location: str, max_wait: Optional[int] = None) -> Dict:
         """
         Monitor simulation progress and return result when complete.
         Reference: ace_lib.py `simulation_progress` function.
         Key insight: Use Retry-After header presence to determine if still running.
+
+        Zombie-simulation reclaim (2026-05-24): ``max_wait`` is the poll-loop
+        ceiling. It USED to be a dead parameter (declared but never compared
+        against elapsed) so a sim that kept returning 200 + Retry-After polled
+        forever (task 3329: RUNNING ~11h). Now enforced — see the liveness
+        check below. ``None`` ⇒ settings.BRAIN_SIM_MAX_WAIT_SEC.
         """
+        if max_wait is None:
+            max_wait = settings.BRAIN_SIM_MAX_WAIT_SEC
         # Determine full URL
         if location.startswith("http"):
             poll_url = location
         else:
             poll_url = f"{self.BASE_URL}{location}"
-            
+
         error_flag = False
         retry_count = 0
         max_retries = 3
-        
+        _start = asyncio.get_event_loop().time()
+        _reauth_grace_used = False
+
         while True:
             try:
                 response = await self._request("GET", poll_url)
@@ -1130,6 +1209,23 @@ class BrainAdapter:
                 # Key check: If Retry-After header is missing or 0, simulation is complete
                 retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
 
+                # worldquant-miner pattern (2026-05-26): trust the body STATUS
+                # field as terminal, not just the Retry-After header. A stale /
+                # rotted session can keep returning 200 + Retry-After AFTER the
+                # sim is actually COMPLETE/ERROR — the header-only check then
+                # polls a finished handle until the zombie/round timeout. The
+                # status field is ground truth, so end the poll on it directly.
+                try:
+                    _body = response.json()
+                    _status = str(_body.get("status") or "").upper()
+                except Exception:  # noqa: BLE001 — body parse blip → fall through to header
+                    _body, _status = {}, ""
+                if _status in ("COMPLETE", "FAIL", "FAILED", "ERROR"):
+                    if _status != "COMPLETE":
+                        error_flag = True
+                        logger.error(f"Simulation {_status} (status field): {_body}")
+                    break
+
                 if not retry_after or retry_after == "0":
                     # Simulation completed - check for error status
                     data = response.json()
@@ -1137,6 +1233,44 @@ class BrainAdapter:
                         error_flag = True
                         logger.error(f"Simulation error: {data}")
                     break
+
+                # Still running. Zombie-simulation liveness check (2026-05-24):
+                # a stuck/thrashing BRAIN session can keep returning 200 +
+                # Retry-After forever (task 3329: RUNNING ~11h, 0 alphas).
+                # max_wait was a dead param — now enforced. On exceeding it run
+                # the Zombie Protocol: re-auth once (STEP 1) + recheck after a
+                # short grace (STEP 2); if STILL in_progress, classify as a
+                # zombie (STEP 3) and abandon with a retryable signal (STEP 4)
+                # so node_simulate holds the alpha at PENDING and the next
+                # round re-tries — vs. polling a dead handle indefinitely.
+                elapsed = asyncio.get_event_loop().time() - _start
+                if elapsed >= max_wait:
+                    if not _reauth_grace_used:
+                        _reauth_grace_used = True
+                        logger.warning(
+                            f"[BrainAdapter] sim poll exceeded {max_wait}s "
+                            f"(elapsed={elapsed:.0f}s) on {poll_url} — Zombie "
+                            f"Protocol: re-auth + recheck once."
+                        )
+                        try:
+                            await self._coalesced_reauth()
+                        except Exception as _re:
+                            logger.warning(f"[BrainAdapter] zombie re-auth failed: {_re}")
+                        await asyncio.sleep(self._ZOMBIE_RECHECK_SLEEP)
+                        continue
+                    logger.error(
+                        f"[BrainAdapter] ZOMBIE sim confirmed: still in_progress "
+                        f"{elapsed:.0f}s after re-auth+recheck on {poll_url}. "
+                        f"Abandoning handle; signalling retryable so the alpha "
+                        f"is held at PENDING and re-tried next round."
+                    )
+                    return {
+                        "success": False,
+                        "error": f"BRAIN simulation zombie timeout after {elapsed:.0f}s",
+                        "retryable": True,
+                        "retry_after_sec": 30,
+                        "error_kind": "sim_zombie_timeout",
+                    }
 
                 # Still running, wait as instructed
                 await asyncio.sleep(float(retry_after))
@@ -1204,17 +1338,31 @@ class BrainAdapter:
         try:
             url = f"{self.BASE_URL}/alphas/{alpha_id}"
 
-            # Poll until no retry-after header (matching ace_lib.py pattern)
+            # Poll until no retry-after header (matching ace_lib.py pattern).
+            # BOUNDED (2026-05-26): this used to be an unbounded `while True` —
+            # a stale/rotted session that keeps returning Retry-After after the
+            # sim already COMPLETED would poll the detail endpoint FOREVER (a
+            # second hang point the sim-poll zombie protocol can't reach, since
+            # _wait_for_simulation already returned COMPLETE). worldquant-miner
+            # does a single GET here; we keep a short poll for the post-COMPLETE
+            # materialization window but cap it so a degraded session can't hang.
+            _detail_start = asyncio.get_event_loop().time()
+            _DETAIL_MAX_WAIT = 120  # details are ready seconds after COMPLETE
             while True:
                 response = await self._request("GET", url)
-                
+
                 # Check for retry-after header (case-insensitive)
                 retry_after = response.headers.get("Retry-After") or response.headers.get("retry-after")
-                
-                if retry_after:
-                    await asyncio.sleep(float(retry_after))
-                else:
+
+                if not retry_after:
                     break
+                if asyncio.get_event_loop().time() - _detail_start >= _DETAIL_MAX_WAIT:
+                    logger.warning(
+                        f"[BrainAdapter] alpha-detail poll exceeded {_DETAIL_MAX_WAIT}s "
+                        f"for {alpha_id} (stale session?) — proceeding with last response"
+                    )
+                    break
+                await asyncio.sleep(float(retry_after))
             
             if response.status_code != 200:
                 logger.error(f"Failed to get alpha details [{response.status_code}]: {response.text}")
