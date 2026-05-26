@@ -150,6 +150,61 @@ class TestDatasetFieldsPerDelay:
 
 
 # ---------------------------------------------------------------------------
+# _get_datasets_to_mine — delay-0 must exclude delay-1-only datasets
+# ---------------------------------------------------------------------------
+async def _mk_dataset_cell(db, *, dataset_id, region, universe, delay, weight=1.0):
+    """Create (or reuse) a dataset def + a DatasetCellStats cell at (universe, delay)."""
+    from sqlalchemy import select
+    from backend.models import DatasetMetadata, DatasetCellStats
+    ds = (await db.execute(select(DatasetMetadata).where(
+        DatasetMetadata.dataset_id == dataset_id, DatasetMetadata.region == region,
+    ))).scalar_one_or_none()
+    if ds is None:
+        ds = DatasetMetadata(dataset_id=dataset_id, region=region, name=dataset_id)
+        db.add(ds)
+        await db.flush()
+    db.add(DatasetCellStats(dataset_ref=ds.id, universe=universe, delay=delay,
+                            field_count=1, mining_weight=weight, is_active=True))
+    await db.commit()
+
+
+class _FakeMiningTask:
+    def __init__(self, *, region, universe, config):
+        self.region = region
+        self.universe = universe
+        self.config = config
+        self.dataset_strategy = "AUTO"
+        self.target_datasets = []
+
+
+@pytest.mark.asyncio
+class TestGetDatasetsToMinePerDelay:
+    async def test_delay_0_excludes_delay_1_only_datasets(self, db_session):
+        # ds_d0 has a delay-0 cell; ds_d1only has ONLY a delay-1 cell (like
+        # model16/pv96). A delay-0 task must not pick ds_d1only (it would
+        # field-skip the round → "starts at round 2").
+        from backend.tasks.mining_tasks import _get_datasets_to_mine
+        await _mk_dataset_cell(db_session, dataset_id="news12_d0", region="USA",
+                               universe="TOP3000", delay=0)
+        await _mk_dataset_cell(db_session, dataset_id="model16_d1", region="USA",
+                               universe="TOP3000", delay=1)
+        task0 = _FakeMiningTask(region="USA", universe="TOP3000", config={"delay": 0})
+        out = await _get_datasets_to_mine(db_session, task0)
+        assert "news12_d0" in out
+        assert "model16_d1" not in out  # delay-1-only excluded at delay-0
+
+    async def test_delay_1_keeps_permissive_outer_join(self, db_session):
+        # The same delay-1-only dataset IS returned for a delay-1 task (the
+        # permissive LEFT JOIN behavior is preserved byte-for-byte).
+        from backend.tasks.mining_tasks import _get_datasets_to_mine
+        await _mk_dataset_cell(db_session, dataset_id="model16_d1", region="USA",
+                               universe="TOP3000", delay=1)
+        task1 = _FakeMiningTask(region="USA", universe="TOP3000", config={"flat_cursor": 0})
+        out = await _get_datasets_to_mine(db_session, task1)
+        assert "model16_d1" in out
+
+
+# ---------------------------------------------------------------------------
 # start_flat_session — config stamping + validation
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio

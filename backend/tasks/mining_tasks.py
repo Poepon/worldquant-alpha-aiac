@@ -637,6 +637,7 @@ async def _get_datasets_to_mine(db, task):
     # (universe, delay). LEFT JOIN the task's cell so a dataset whose cell is not
     # yet synced for this universe still appears (COALESCE→1.0 default) rather
     # than vanishing from the mining list.
+    _delay = _task_delay(task)
     weight = func.coalesce(DatasetCellStats.mining_weight, 1.0)
     ds_query = (
         select(DatasetMetadata.dataset_id)
@@ -646,13 +647,22 @@ async def _get_datasets_to_mine(db, task):
             and_(
                 DatasetCellStats.dataset_ref == DatasetMetadata.id,
                 DatasetCellStats.universe == task.universe,
-                DatasetCellStats.delay == _task_delay(task),
+                DatasetCellStats.delay == _delay,
             ),
         )
         .where(DatasetMetadata.region == task.region)
         .order_by(weight.desc(), func.random())
         .limit(10)
     )
+    # delay-0 native mining: require the dataset to actually have a cell at THIS
+    # delay. The permissive OUTER join + COALESCE(weight,1.0) otherwise surfaces
+    # delay-1-only datasets (model16/model77/pv96/… → zero delay-0 fields), which
+    # then instant-skip in _run_one_round_inline — burning round slots, diluting
+    # the bandit, and inflating trace_steps.iteration (session appears to "start
+    # at round 2"). delay-1 keeps the permissive join (every synced dataset has a
+    # delay-1 cell; see the LEFT-JOIN rationale above) → unchanged.
+    if _delay != _FLAT_DELAY:
+        ds_query = ds_query.where(DatasetCellStats.id.isnot(None))
     ds_result = await db.execute(ds_query)
     return [row[0] for row in ds_result.all()]
 
@@ -675,6 +685,7 @@ async def _get_complementary_datasets(
     """
     if k <= 0:
         return []
+    _delay = _task_delay(task)
     weight = func.coalesce(DatasetCellStats.mining_weight, 1.0)
     ds_query = (
         select(DatasetMetadata.dataset_id)
@@ -684,7 +695,7 @@ async def _get_complementary_datasets(
             and_(
                 DatasetCellStats.dataset_ref == DatasetMetadata.id,
                 DatasetCellStats.universe == task.universe,
-                DatasetCellStats.delay == _task_delay(task),
+                DatasetCellStats.delay == _delay,
             ),
         )
         .where(
@@ -694,6 +705,10 @@ async def _get_complementary_datasets(
         .order_by(weight.desc(), func.random())
         .limit(k)
     )
+    # delay-0: exclude delay-1-only datasets that have no cell at this delay
+    # (same rationale as _get_datasets_to_mine — they'd field-skip the round).
+    if _delay != _FLAT_DELAY:
+        ds_query = ds_query.where(DatasetCellStats.id.isnot(None))
     rows = (await db.execute(ds_query)).all()
     return [row[0] for row in rows]
 
