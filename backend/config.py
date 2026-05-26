@@ -1295,7 +1295,23 @@ class Settings(BaseSettings):
     # when a task has no explicit daily_goal. See
     # docs/delay0_sim_pipeline_design_2026-05-27.md.
     ALPHAS_PER_ROUND: int = 10
-    
+
+    # --- Mining pipeline (producer-consumer) — Sub-phase 0, default OFF ---
+    # Decouples LLM generation from BRAIN simulation so sim slots stay
+    # saturated. When OFF the existing round loop runs byte-for-byte. See
+    # docs/sim_pipeline_impl_plan_2026-05-27.md.
+    ENABLE_SIM_PIPELINE: bool = False
+    # work_queue capacity (producer backpressure). 0 = auto = 2× sim-slot limit.
+    SIM_PIPELINE_QUEUE_MAXSIZE: int = 0
+    # number of producer coroutines. 1 at USER 3 slots (gen >> sim consumption);
+    # scaled up only at CONSULTANT 80 slots where generation becomes the
+    # bottleneck (Sub-phase 2).
+    SIM_PIPELINE_PRODUCER_COUNT: int = 1
+    # persister drains every N completed sim results (1 = persist each
+    # immediately; higher = micro-batch). Keep small to bound crash-loss of
+    # already-simulated-but-unpersisted results (wasted BRAIN quota).
+    SIM_PIPELINE_PERSIST_EVERY: int = 1
+
     # Optimization Chain Settings
     MAX_OPTIMIZATION_VARIANTS: int = 10
     MAX_SETTINGS_VARIANTS: int = 5
