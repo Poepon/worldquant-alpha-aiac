@@ -566,8 +566,10 @@ function LineageSection({ alphaId }) {
 
   // IQC marginal contribution — lazy fetch (BRAIN poll can be slow)
   const [marginalEnabled, setMarginalEnabled] = useState(false)
-  // Empty → backend falls back to its configured default scope (team deLkl06
-  // after IQC2026S1 was deleted 2026-05-24). Type a competition id here to override.
+  // Empty → backend falls back to its configured default scope
+  // (settings.iqc_audit_scope() → competitions/IQC2026S2, the live season as of
+  // 2026-05-26, which populates the competition `score`). Type a competition id
+  // here to override.
   const [marginalCompetition, setMarginalCompetition] = useState('')
   const {
     data: marginal,
@@ -769,6 +771,24 @@ function LineageSection({ alphaId }) {
                       column={1}
                       style={{ marginBottom: 16 }}
                     >
+                      {marginal.raw?.score != null && (
+                        <Descriptions.Item label="竞赛 Δscore（排名分，越高越好）">
+                          <Space size={8} wrap>
+                            <Text type="secondary">
+                              before: {Number(marginal.raw.score.before).toLocaleString()}
+                            </Text>
+                            <Text strong>
+                              after: {Number(marginal.raw.score.after).toLocaleString()}
+                            </Text>
+                            {marginal.deltas?.score != null && (
+                              <Tag color={marginal.deltas.score >= 0 ? 'green' : 'red'}>
+                                Δ {marginal.deltas.score > 0 ? '+' : ''}
+                                {Number(marginal.deltas.score).toLocaleString()}
+                              </Tag>
+                            )}
+                          </Space>
+                        </Descriptions.Item>
+                      )}
                       <Descriptions.Item label="Partition">
                         <Text code>
                           {marginal.partition_name ?? marginal.raw?.partitionName ?? '—'}

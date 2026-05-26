@@ -336,8 +336,8 @@ async def get_alpha_marginal_contribution(
         None,
         description="Competition ID. Mutually exclusive with team_id. When both "
                     "are omitted the configured default scope is used "
-                    "(settings.iqc_audit_scope() → team deLkl06 after IQC2026S1 "
-                    "was deleted 2026-05-24).",
+                    "(settings.iqc_audit_scope() → competitions/IQC2026S2, the "
+                    "live season as of 2026-05-26, which populates `score`).",
     ),
     team_id: Optional[str] = Query(
         None, description="Team ID for team-scoped comparison."
@@ -354,9 +354,9 @@ async def get_alpha_marginal_contribution(
 
     Scope resolution: an explicit `competition` / `team_id` query param wins.
     When neither is supplied we fall back to the configured default scope
-    (`settings.iqc_audit_scope()`) so the frontend defaults to the team scope
-    without hard-coding it. If that is also unset, the service defaults to the
-    user's personal portfolio (users/self).
+    (`settings.iqc_audit_scope()`) so the frontend defaults to the live
+    competition scope (IQC2026S2) without hard-coding it. If that is also unset,
+    the service defaults to the user's personal portfolio (users/self).
 
     Performance: BRAIN computes the comparison asynchronously and may serve
     Retry-After while computing; the adapter polls up to 30× internally.

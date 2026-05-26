@@ -1843,11 +1843,18 @@ class BrainAdapter:
         leaderboard scores merged metrics not standalone IS metrics, so picking
         which can_submit alphas to actually submit depends on this delta.
 
-        Response shape (key fields, verified 2026-05-24):
-          partitionName                — e.g. "EQUITY:USA:1"
+        Response shape (key fields, verified 2026-05-26 under competitions/IQC2026S2):
+          partitionName                — e.g. "EQUITY:1"
           stats.before / stats.after   — bookSize / pnl / longCount / shortCount /
                                         drawdown / turnover / returns / margin /
                                         sharpe / fitness
+          score.before / score.after   — competition leaderboard rank score. Only
+                                        present under a competition scope (team /
+                                        users omit it). REMOVED 2026-05-24 while
+                                        IQC2026S1 was down, RETURNED with the
+                                        IQC2026S2 season.
+          competition                  — {id, name, scoring} (competition scope)
+          team                         — {id, type, name, university}
           yearlyStats.before / .after  — {schema, records}; records are positional
                                         arrays keyed by schema.properties (year,
                                         pnl, bookSize, sharpe, ..., stage)
@@ -1855,10 +1862,9 @@ class BrainAdapter:
                                         [date, beforePnL, afterPnL]
           partition                    — list
 
-        NOTE: the competition `score` field was REMOVED by BRAIN (2026-05-24) —
-        it is no longer present under any scope (users/self, competitions/{c},
-        teams/{t}). An already-submitted alpha returns HTTP 400 with a JSON list
-        body like ["Alpha is already submitted."] (handled as non-200 → {}).
+        NOTE: under users/self / teams scope `score` is absent. An already-
+        submitted alpha returns HTTP 400 with a JSON list body like
+        ["Alpha is already submitted."] (handled as non-200 → {}).
 
         Polls on Retry-After (BRAIN computes merged stats asynchronously).
         Returns {} on persistent failure; caller checks for empty dict.

@@ -692,12 +692,14 @@ class AlphaService(BaseService):
         scope for the frontend. None when alpha lacks brain alpha_id or BRAIN
         call fails — caller maps to 404 / 502.
 
-        2026-05-24: BRAIN dropped the competition `score` field from this
-        endpoint (verified empty under both users/self and competitions/{c}
-        scopes), so only the standalone-vs-merged stats deltas remain here
-        (sharpe/fitness/turnover/returns/pnl/drawdown). pnl/yearlyStats are now
-        {schema, records}-wrapped; pnl.records is still [date, beforePnL,
-        afterPnL]. partitionName (e.g. "EQUITY:USA:1") is the new partition label.
+        2026-05-26: the competition `score` RETURNED with the IQC2026S2 season
+        (verified live under competitions/IQC2026S2). score.before/after is the
+        team leaderboard rank score; deltas["score"] = after - before is surfaced
+        for display + audit, but is DISPLAY-ONLY — it is not fed to the composite
+        scorecard. Present only under a competition scope (team/users omit it).
+        pnl/yearlyStats are {schema, records}-wrapped; pnl.records is still
+        [date, beforePnL, afterPnL]. partitionName (e.g. "EQUITY:1") labels the
+        partition.
         """
         alpha = await self.alpha_repo.get_by_id(alpha_pk)
         if not alpha or not alpha.alpha_id:
@@ -722,9 +724,10 @@ class AlphaService(BaseService):
             return None
 
         # Compute deltas for quick UI display + the multi-dimensional analysis.
-        # 2026-05-24: BRAIN removed the `score` field from this endpoint; the
-        # marginal signal is now the standalone-vs-merged stats deltas across
-        # return AND risk dimensions (see backend.marginal_analysis).
+        # 2026-05-26: the competition `score` is back (IQC2026S2); its delta is
+        # added below as a DISPLAY-ONLY signal. The composite scorecard still
+        # scores only the standalone-vs-merged stats deltas across return AND risk
+        # dimensions (see backend.marginal_analysis).
         import math as _math
         stats = payload.get("stats") or {}
         before = stats.get("before") or {}
@@ -767,6 +770,18 @@ class AlphaService(BaseService):
             analysis_deltas, merged=after, baseline=before,
             alpha_margin=_alpha_margin, region=alpha.region,
         )
+
+        # Competition `score` delta — lives at the payload TOP level (not stats).
+        # score.before/after is the team leaderboard rank score, restored with the
+        # IQC2026S2 season (2026-05-26); present only under a competition scope.
+        # Surfaced in `deltas` for display + audit persistence, but DELIBERATELY
+        # added AFTER analyze_marginal_contribution so it can never enter the
+        # composite scorecard (display-only signal per 2026-05-26 decision).
+        _score = payload.get("score") or {}
+        _sb, _sa = _score.get("before"), _score.get("after")
+        if (isinstance(_sb, (int, float)) and not isinstance(_sb, bool) and _math.isfinite(_sb)
+                and isinstance(_sa, (int, float)) and not isinstance(_sa, bool) and _math.isfinite(_sa)):
+            deltas["score"] = round(_sa - _sb, 6)
 
         return {
             "alpha_pk": alpha_pk,

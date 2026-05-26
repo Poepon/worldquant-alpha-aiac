@@ -910,18 +910,20 @@ class Settings(BaseSettings):
     # V-22.12 (2026-05-13): when a can_submit refresh flips True, automatically
     # call BRAIN /{scope}/alphas/{id}/before-and-after-performance and stash the
     # deltas in alpha.metrics._iqc_marginal. The marginal signal is the
-    # standalone-vs-merged stats deltas (sharpe/fitness/turnover/...). NOTE
-    # (2026-05-24): BRAIN removed the competition `score` field, so delta_score
-    # is no longer available/stored.
+    # standalone-vs-merged stats deltas (sharpe/fitness/turnover/...) PLUS the
+    # competition `score` delta. NOTE (2026-05-24): BRAIN had dropped `score`
+    # while IQC2026S1 was down; it RETURNED with the IQC2026S2 season (verified
+    # live 2026-05-26 under competitions/IQC2026S2). score.before/after is the
+    # team leaderboard rank score, so delta_score is an active, NON-collinear
+    # signal again — an alpha can lift Δsharpe yet drop Δscore (observed live).
     #
-    # Scope migration (2026-05-24): BRAIN deleted the IQC2026S1 competition, so
-    # its per-competition endpoint is gone. The auto-audit now runs against the
-    # team scope (deLkl06) by default. Use `iqc_audit_scope()` — the single
-    # source of truth — to resolve the active (competition, team_id): competition
-    # wins when non-empty (set it to revive a future live competition), else the
-    # team scope; both empty disables the audit entirely.
-    IQC_AUTO_AUDIT_COMPETITION: str = ""        # non-empty → overrides the team scope
-    IQC_AUTO_AUDIT_TEAM: str = "deLkl06"        # standing scope after IQC2026S1 was deleted
+    # Scope (2026-05-26): IQC2026S2 is the live competition. The auto-audit runs
+    # against competitions/IQC2026S2 so `score` is populated (the team / users
+    # scope omits it). Use `iqc_audit_scope()` — the single source of truth — to
+    # resolve the active (competition, team_id): competition wins when non-empty,
+    # else the team scope; both empty disables the audit entirely.
+    IQC_AUTO_AUDIT_COMPETITION: str = "IQC2026S2"  # live competition → populates `score`
+    IQC_AUTO_AUDIT_TEAM: str = "deLkl06"           # fallback scope (no `score`)
 
     def iqc_audit_scope(self) -> Tuple[Optional[str], Optional[str]]:
         """Resolve the active IQC marginal-audit scope as (competition, team_id).

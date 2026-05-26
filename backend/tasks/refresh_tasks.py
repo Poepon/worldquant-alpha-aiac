@@ -485,13 +485,14 @@ def audit_iqc_marginal_for_alpha(
     still decides; this just surfaces the team-impact signal.
 
     Scope: pass `competition` (a live competition) or `team_id`; the service
-    resolves the BRAIN scope. 2026-05-24 — IQC2026S1 was deleted, so callers
-    pass team_id="deLkl06" via `settings.iqc_audit_scope()`. Both None → the
-    audit runs against the user's personal portfolio (users/self).
+    resolves the BRAIN scope. 2026-05-26 — IQC2026S2 is the live competition, so
+    callers pass competition="IQC2026S2" via `settings.iqc_audit_scope()` (a
+    competition scope populates `score`). Both None → the audit runs against the
+    user's personal portfolio (users/self), which omits `score`.
 
-    2026-05-24: BRAIN removed the competition `score` from this endpoint, so
-    delta_score is no longer stored (it was always advisory and the dataset
-    bandit already moved off it to binary can_submit). The standalone-vs-merged
+    2026-05-26: the competition `score` RETURNED with the IQC2026S2 season, so
+    delta_score is stored again under a competition scope (advisory — the dataset
+    bandit still uses binary can_submit, not this). The standalone-vs-merged
     stats deltas + merged sharpe/fitness remain the team-impact signal.
 
     Callers MUST enqueue with kwargs (apply_async(args=[pk], kwargs={...})) so
@@ -543,9 +544,11 @@ async def _audit_iqc_marginal_async(
                 # (2026-05-24 scope migration — IQC2026S1 was deleted).
                 "scope": result.get("scope"),
                 "audited_at": datetime.now(timezone.utc).isoformat(),
-                # delta_score dropped 2026-05-24 (BRAIN removed `score` from the
-                # before-and-after endpoint). partition_name is the new label.
+                # delta_score is back 2026-05-26 (BRAIN restored `score` with the
+                # IQC2026S2 season). Populated only under a competition scope;
+                # None under team/users. partition_name is the partition label.
                 "partition_name": result.get("partition_name"),
+                "delta_score": deltas.get("score"),
                 "delta_sharpe": deltas.get("sharpe"),
                 "delta_fitness": deltas.get("fitness"),
                 "delta_turnover": deltas.get("turnover"),

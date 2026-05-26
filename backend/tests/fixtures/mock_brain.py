@@ -523,13 +523,13 @@ class MockBrainAdapter:
             "alpha_id": alpha_id,
             "scope": scope,
         })
-        # Mirrors the live shape verified 2026-05-24: no `score` field, a
-        # partitionName label, margin/bookSize in stats, schema+records-wrapped
-        # pnl/yearlyStats. This sample is a "good diversifier": Δsharpe slightly
-        # negative (portfolio dilution) but returns/margin/pnl up + drawdown down
-        # → the multi-dimensional analysis should NOT blanket-SKIP it.
+        # Mirrors the live shape: a partitionName label, margin/bookSize in stats,
+        # schema+records-wrapped pnl/yearlyStats. This sample is a "good
+        # diversifier": Δsharpe slightly negative (portfolio dilution) but
+        # returns/margin/pnl up + drawdown down → the multi-dimensional analysis
+        # should NOT blanket-SKIP it.
         _yr_props = [{"name": "year"}, {"name": "sharpe"}]
-        return {
+        payload = {
             "partitionName": "EQUITY:USA:1",
             "stats": {
                 "before": {
@@ -559,6 +559,25 @@ class MockBrainAdapter:
             },
             "partition": ["settings.instrumentType", "settings.region"],
         }
+        # 2026-05-26: the competition `score` RETURNED with the IQC2026S2 season.
+        # It is present ONLY under a competition scope (team/users omit it), so
+        # mirror that — a competition scope picks up score + competition/team
+        # objects + the global "EQUITY:1" partition label. Δscore here is -138
+        # (rank score drops on merge) even though stats look like a good
+        # diversifier, exercising the "Δscore is NON-collinear" display path.
+        if competition:
+            payload["partitionName"] = "EQUITY:1"
+            payload["score"] = {"before": 7741.0, "after": 7603.0}
+            payload["competition"] = {
+                "id": competition,
+                "name": "International Quant Championship 2026 Stage 2",
+                "scoring": "PERFORMANCE",
+            }
+            payload["team"] = {
+                "id": "deLkl06", "type": "IQC2026S1",
+                "name": "BP40504", "university": "not applicable",
+            }
+        return payload
     
     async def get_user_alphas(
         self,

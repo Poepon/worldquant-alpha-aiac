@@ -131,7 +131,8 @@ class TestMarginalContribution:
         assert deltas["pnl"] == pytest.approx(612_149, abs=10)
         # margin now extracted: 0.0016 → 0.0019 → +0.0003
         assert deltas["margin"] == pytest.approx(0.0003, abs=1e-5)
-        # 2026-05-24: BRAIN removed `score` — no longer in deltas or raw payload
+        # 2026-05-26: `score` is competition-scope-ONLY (team/users omit it), so
+        # under this team scope it must be absent from both deltas and raw.
         assert "score" not in deltas
         assert "score" not in result["raw"]
 
@@ -152,6 +153,38 @@ class TestMarginalContribution:
         # alpha's own margin (10 bps) surfaced + clears the economic gate
         assert analysis["margin_bps"] == pytest.approx(10.0, abs=0.01)
         assert not any("Margin" in g for g in analysis["guardrails"])
+
+    @pytest.mark.asyncio
+    async def test_competition_scope_surfaces_score_display_only(
+        self, pg_session, test_alpha,
+    ):
+        """IQC2026S2 (2026-05-26): a competition scope brings back the leaderboard
+        `score`. deltas["score"] must be computed + raw.score surfaced, but it is
+        DISPLAY-ONLY — it must NOT enter the composite scorecard (not a scored
+        dimension), even when Δscore is negative while the stats look good.
+        """
+        svc = AlphaService(pg_session)
+        mock = MockBrainAdapter()
+        result = await svc.get_marginal_contribution(
+            alpha_pk=test_alpha.id, competition="IQC2026S2", brain_adapter=mock,
+        )
+        assert result is not None
+        assert result["scope"] == "competitions/IQC2026S2"
+        # partition label is the global competition shape
+        assert result["partition_name"] == "EQUITY:1"
+
+        # score delta computed at the payload top level: 7603 - 7741 = -138
+        assert result["raw"]["score"] == {"before": 7741.0, "after": 7603.0}
+        assert result["deltas"]["score"] == pytest.approx(-138.0, abs=1e-6)
+
+        # DISPLAY-ONLY: a negative Δscore must NOT drag the composite. The mock's
+        # stats match the team-scope sample (a good diversifier), so `score` never
+        # appears as a scored signal / row and the recommendation stays SUBMIT.
+        analysis = result["analysis"]
+        assert "score" not in analysis["signals"]
+        assert "score" not in {r["metric"] for r in analysis["positives"]}
+        assert "score" not in {r["metric"] for r in analysis["negatives"]}
+        assert analysis["recommendation"] == "SUBMIT"
 
     @pytest.mark.asyncio
     async def test_scope_defaults_to_users_self(self, pg_session, test_alpha):
