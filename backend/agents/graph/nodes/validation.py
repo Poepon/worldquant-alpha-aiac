@@ -142,10 +142,19 @@ async def node_validate(state: MiningState, config: RunnableConfig = None) -> Di
         o.get("name") for o in (state.operators or [])
         if isinstance(o, dict) and o.get("name")
     ]
+    # delay-0 native mining (2026-05-26): HARD-reject fields not in the offered
+    # set. At delay-0 the LLM tends to reach for delay-1 field names it saw in
+    # RAG/KB patterns (e.g. anl4_af_eps_value — exists only at delay-1); BRAIN
+    # then rejects the sim with "unknown variable", burning a slot for 0 alphas.
+    # The offered list IS the delay-0 roster, so any non-member field is either
+    # a delay-1 name or a hallucination — reject it pre-sim. delay-1 keeps the
+    # lenient default (our delay-1 catalog may legitimately lag BRAIN's, so a
+    # non-member there is more likely a catalog gap than a real error).
+    _strict_fields = getattr(state, "delay", 1) != 1
     semantic_validator = AlphaSemanticValidator(
         fields=_effective_fields,
         operators=_allowed_op_names or None,
-        strict_field_check=False,
+        strict_field_check=_strict_fields,
         strict_type_check=True,
         reject_unknown_operators=True,
     )

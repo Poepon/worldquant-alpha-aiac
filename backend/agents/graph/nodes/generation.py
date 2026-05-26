@@ -1623,7 +1623,24 @@ async def node_code_gen(
         target_hypothesis=target_hypothesis,
         experiment_feedback=experiment_feedback
     )
-    
+
+    # delay-0 native mining (2026-05-26): the offered field list IS the delay-0
+    # roster, but RAG/KB patterns are delay-1 so the LLM reaches for delay-1
+    # field names (e.g. anl4_af_eps_value) that don't exist at delay-0 → BRAIN
+    # "unknown variable" → wasted sim. Hard-constrain generation to the listed
+    # fields. (Pairs with the validation-node delay-0 strict_field_check that
+    # rejects any that still slip through, pre-sim.)
+    if getattr(state, "delay", 1) != 1:
+        prompt += (
+            "\n\n## CRITICAL — delay-0 simulation\n"
+            "This is a DELAY-0 run. You MUST use ONLY field IDs that appear "
+            "verbatim in the Available Fields list above. Field names from "
+            "examples, patterns, or prior knowledge that are NOT in that list "
+            "(many delay-1-only fields look plausible but DO NOT EXIST at "
+            "delay-0) will fail simulation with 'unknown variable' and waste "
+            "the run. When in doubt, choose a field that is explicitly listed."
+        )
+
     try:
         response = await llm_service.call(
             system_prompt=ALPHA_GENERATION_SYSTEM,

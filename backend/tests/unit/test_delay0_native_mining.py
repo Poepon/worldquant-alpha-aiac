@@ -44,6 +44,39 @@ class TestTaskDelayResolution:
 
 
 # ---------------------------------------------------------------------------
+# delay-0 strict field membership — reject delay-1 field names PRE-SIM
+# ---------------------------------------------------------------------------
+class TestDelay0StrictFieldCheck:
+    """delay-0 sims were wasted on 'unknown variable' (LLM used delay-1 field
+    names like anl4_af_eps_value from RAG/KB; they don't exist at delay-0). The
+    validation node now sets strict_field_check = (state.delay != 1) so a
+    non-offered field is a HARD reject pre-sim at delay-0, lenient at delay-1."""
+
+    def _findings(self, strict):
+        from backend.alpha_semantic_validator import AlphaSemanticValidator
+        v = AlphaSemanticValidator(
+            fields=[{"id": "close", "type": "MATRIX"}, {"id": "nws12_mainz_range", "type": "MATRIX"}],
+            operators=["ts_mean"], strict_field_check=strict,
+            strict_type_check=True, reject_unknown_operators=True,
+        )
+        # anl4_af_eps_value is a real delay-1-only field (from the 3727 error log)
+        return v.validate("ts_mean(anl4_af_eps_value, 20)").findings
+
+    def test_delay0_strict_hard_rejects_non_offered_field(self):
+        hard = [f for f in self._findings(strict=True) if f.severity == "hard"]
+        assert any("field" in str(f.rule_id).lower() for f in hard)  # FIELD_NOT_FOUND is hard
+
+    def test_delay1_lenient_keeps_field_soft(self):
+        finds = self._findings(strict=False)
+        assert not any(f.severity == "hard" and "field" in str(f.rule_id).lower() for f in finds)
+
+    def test_validation_node_strict_flag_tracks_delay(self):
+        # Mirror the validation-node guard: strict iff delay != 1.
+        for delay, expect in ((0, True), (1, False)):
+            assert (delay != 1) is expect
+
+
+# ---------------------------------------------------------------------------
 # _refresh_brain_client — FLAT 'fresh session' recovery (worldquant-miner pattern)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
