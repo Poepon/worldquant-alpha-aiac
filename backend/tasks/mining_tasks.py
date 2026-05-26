@@ -23,12 +23,22 @@ from backend.models import (
     DataFieldCellStats, ExperimentRun,
 )
 
-# FLAT/ONESHOT mining runs at delay=1 (MiningTask has no delay column); the
-# (universe x delay) cell schema supports delay-0 natively but wiring delay-0
-# into mining is deferred (needs a delay-0 datafield sync + native discovery —
-# see plan golden-forging-taco §Phase 0). All cell joins below pin delay=1.
+# Default BRAIN delay. MiningTask has no delay column, so a delay-0 native
+# session carries delay in task.config["delay"] (set by start_flat_session).
+# _task_delay(task) resolves it; absent/1 = the established delay-1 path so
+# every cell join + sim below stays byte-for-byte unchanged.
 _FLAT_DELAY = 1
 from backend.tasks import run_async
+
+
+def _task_delay(task) -> int:
+    """BRAIN delay for this task's cell joins + sim. delay-0 native mining
+    (②/B) stamps task.config['delay']=0; default _FLAT_DELAY (1) = the
+    established path. Never raises — bad config falls back to delay-1."""
+    try:
+        return int((getattr(task, "config", None) or {}).get("delay", _FLAT_DELAY))
+    except (TypeError, ValueError):
+        return _FLAT_DELAY
 
 
 # ---------------------------------------------------------------------------
@@ -405,14 +415,15 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                         
                         # Get fields — main dataset + universal PV supplement
                         # (D1: cross-dataset alpha support).
-                        fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe)
+                        _td = _task_delay(task)
+                        fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe, _td)
 
                         if not fields:
                             logger.warning(f"No fields found for dataset {dataset_id}, skipping")
                             continue
 
                         if dataset_id != "pv1":
-                            pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe)
+                            pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe, _td)
                             n_before = len(fields)
                             fields = _merge_field_pools(fields, pv_supplement)
                             n_added = len(fields) - n_before
@@ -635,7 +646,7 @@ async def _get_datasets_to_mine(db, task):
             and_(
                 DatasetCellStats.dataset_ref == DatasetMetadata.id,
                 DatasetCellStats.universe == task.universe,
-                DatasetCellStats.delay == _FLAT_DELAY,
+                DatasetCellStats.delay == _task_delay(task),
             ),
         )
         .where(DatasetMetadata.region == task.region)
@@ -673,7 +684,7 @@ async def _get_complementary_datasets(
             and_(
                 DatasetCellStats.dataset_ref == DatasetMetadata.id,
                 DatasetCellStats.universe == task.universe,
-                DatasetCellStats.delay == _FLAT_DELAY,
+                DatasetCellStats.delay == _task_delay(task),
             ),
         )
         .where(
@@ -723,9 +734,11 @@ async def _get_operators(db):
     return operators
 
 
-async def _get_dataset_fields(db, dataset_id, region, universe):
+async def _get_dataset_fields(db, dataset_id, region, universe, delay=_FLAT_DELAY):
     """Get fields for a dataset (cell-stats normalization: datasets/datafields are
-    universe-invariant defs; the per-(universe, delay=1) cell supplies is_active)."""
+    universe-invariant defs; the per-(universe, delay) cell supplies is_active).
+    delay defaults to 1; a delay-0 session passes delay=0 so the LLM sees the
+    delay-0-available field roster (sparser, partly distinct from delay-1)."""
     ds_meta_stmt = select(DatasetMetadata.id).where(
         DatasetMetadata.dataset_id == dataset_id,
         DatasetMetadata.region == region,
@@ -753,7 +766,7 @@ async def _get_dataset_fields(db, dataset_id, region, universe):
             and_(
                 DataFieldCellStats.datafield_ref == DataField.id,
                 DataFieldCellStats.universe == universe,
-                DataFieldCellStats.delay == _FLAT_DELAY,
+                DataFieldCellStats.delay == delay,
             ),
         )
         .where(
@@ -789,10 +802,11 @@ _UNIVERSAL_PV_FIELDS = (
 )
 
 
-async def _get_universal_pv_fields(db, region, universe):
+async def _get_universal_pv_fields(db, region, universe, delay=_FLAT_DELAY):
     """Pull the canonical PV fields (price-volume) regardless of which
     dataset is being mined. Returns at most |_UNIVERSAL_PV_FIELDS| entries
-    that exist in the datafields table for this region/universe.
+    that exist in the datafields table for this region/universe/delay.
+    delay defaults to 1; a delay-0 session passes delay=0.
     """
     pv_meta_id = (await db.execute(
         select(DatasetMetadata.id).where(
@@ -809,7 +823,7 @@ async def _get_universal_pv_fields(db, region, universe):
             and_(
                 DataFieldCellStats.datafield_ref == DataField.id,
                 DataFieldCellStats.universe == universe,
-                DataFieldCellStats.delay == _FLAT_DELAY,
+                DataFieldCellStats.delay == delay,
             ),
         )
         .where(DataField.dataset_id == pv_meta_id)
@@ -878,11 +892,12 @@ async def _build_dataset_pool(db, task, dataset_id: str) -> list:
 async def _prepare_round_fields(db, task, dataset_id: str):
     """Load + merge fields for a single round. Returns None if dataset has
     no fields (caller should skip)."""
-    fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe)
+    _td = _task_delay(task)
+    fields = await _get_dataset_fields(db, dataset_id, task.region, task.universe, _td)
     if not fields:
         return None
     if dataset_id != "pv1":
-        pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe)
+        pv_supplement = await _get_universal_pv_fields(db, task.region, task.universe, _td)
         fields = _merge_field_pools(fields, pv_supplement)
     return fields
 
@@ -1271,7 +1286,7 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                         and_(
                             DatasetCellStats.dataset_ref == DatasetMetadata.id,
                             DatasetCellStats.universe == task.universe,
-                            DatasetCellStats.delay == _FLAT_DELAY,
+                            DatasetCellStats.delay == _task_delay(task),
                         ),
                     )
                     .where(

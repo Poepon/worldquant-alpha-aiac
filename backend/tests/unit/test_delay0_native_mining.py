@@ -1,0 +1,182 @@
+"""Tests for native delay-0 mining wiring (②/B, 2026-05-26).
+
+A FLAT session can be created at delay=0 so the LLM mines the delay-0 field
+roster and the sim runs at delay-0 (a genuinely orthogonal axis vs our delay-1
+submitted pool — transfer-re-sim of delay-1 winners FAILED, see
+scripts/_probe_delay0.py, so native discovery is the only route).
+
+delay flows: ops payload → start_flat_session(delay) → task.config['delay']
+→ MiningState.delay → evaluation smart-settings override + the cell-join
+delay (_task_delay / _get_dataset_fields delay param).
+
+INVARIANT under test: delay=1 (the default) keeps every path byte-for-byte
+identical — config omits the key, smart-settings gets no override, cell joins
+pin delay=1. Per [[feedback_orm_constructor_real_test]] the join-bearing reads
++ the config-stamping path run against a real (aiosqlite) session.
+"""
+import pytest
+
+
+# ---------------------------------------------------------------------------
+# _task_delay — config resolution (default 1; never raises)
+# ---------------------------------------------------------------------------
+class _FakeTask:
+    def __init__(self, config):
+        self.config = config
+
+
+class TestTaskDelayResolution:
+    def test_absent_key_is_delay_1(self):
+        from backend.tasks.mining_tasks import _task_delay
+        assert _task_delay(_FakeTask({"flat_cursor": 0})) == 1
+        assert _task_delay(_FakeTask({})) == 1
+        assert _task_delay(_FakeTask(None)) == 1
+
+    def test_delay_0_is_honored(self):
+        from backend.tasks.mining_tasks import _task_delay
+        assert _task_delay(_FakeTask({"delay": 0})) == 0
+        assert _task_delay(_FakeTask({"delay": "0"})) == 0  # int() coerces
+
+    def test_bad_config_falls_back_to_1(self):
+        from backend.tasks.mining_tasks import _task_delay
+        assert _task_delay(_FakeTask({"delay": "oops"})) == 1
+        assert _task_delay(object()) == 1  # no .config attr → fallback
+
+
+# ---------------------------------------------------------------------------
+# MiningState.delay — default 1, accepts 0
+# ---------------------------------------------------------------------------
+class TestMiningStateDelayField:
+    def test_default_delay_is_1(self):
+        from backend.agents.graph.state import MiningState
+        st = MiningState(task_id=1)
+        assert st.delay == 1
+
+    def test_delay_0_accepted(self):
+        from backend.agents.graph.state import MiningState
+        st = MiningState(task_id=1, delay=0)
+        assert st.delay == 0
+
+
+# ---------------------------------------------------------------------------
+# smart-settings override — the evaluation node's injection mechanism
+# ---------------------------------------------------------------------------
+class TestSmartSettingsDelayOverride:
+    def test_no_override_keeps_default_delay_1(self):
+        from backend.sim_settings import smart_simulation_settings
+        s = smart_simulation_settings("rank(close)", region="USA", universe="TOP3000",
+                                      test_period="P2Y0M", overrides=None)
+        assert s["delay"] == 1  # _BASE_DEFAULTS unchanged → delay-1 path intact
+
+    def test_override_sets_delay_0(self):
+        from backend.sim_settings import smart_simulation_settings
+        s = smart_simulation_settings("rank(close)", region="USA", universe="TOP3000",
+                                      test_period="P2Y0M", overrides={"delay": 0})
+        assert s["delay"] == 0
+
+    def test_evaluation_node_override_logic_mirrors_state_delay(self):
+        # Mirrors the inline guard in node_evaluate: override only when delay != 1.
+        from backend.sim_settings import smart_simulation_settings
+        for _delay in (0, 1):
+            ov = {"delay": _delay} if _delay != 1 else None
+            s = smart_simulation_settings("rank(close)", region="USA", universe="TOP3000",
+                                          test_period="P2Y0M", overrides=ov)
+            assert s["delay"] == _delay
+
+
+# ---------------------------------------------------------------------------
+# _get_dataset_fields / _get_universal_pv_fields — per-delay cell join
+# ---------------------------------------------------------------------------
+async def _mk_field_cell(db, *, dataset_id, region, universe, field_id, delay, is_active=True):
+    """Create (or reuse) a dataset+field def and add ONE datafield cell at the
+    given (universe, delay)."""
+    from sqlalchemy import select
+    from backend.models import DatasetMetadata, DataField, DataFieldCellStats
+    ds = (await db.execute(select(DatasetMetadata).where(
+        DatasetMetadata.dataset_id == dataset_id, DatasetMetadata.region == region,
+    ))).scalar_one_or_none()
+    if ds is None:
+        ds = DatasetMetadata(dataset_id=dataset_id, region=region, name=dataset_id)
+        db.add(ds)
+        await db.flush()
+    df = (await db.execute(select(DataField).where(
+        DataField.dataset_id == ds.id, DataField.field_id == field_id,
+    ))).scalar_one_or_none()
+    if df is None:
+        df = DataField(dataset_id=ds.id, field_id=field_id, field_name=field_id.upper(),
+                       field_type="MATRIX", description=f"{field_id} desc")
+        db.add(df)
+        await db.flush()
+    db.add(DataFieldCellStats(datafield_ref=df.id, universe=universe, delay=delay,
+                              is_active=is_active, coverage=0.9))
+    await db.commit()
+
+
+@pytest.mark.asyncio
+class TestDatasetFieldsPerDelay:
+    async def test_delay_param_selects_delay_0_cell(self, db_session):
+        from backend.tasks.mining_tasks import _get_dataset_fields
+        # close exists at BOTH delays; only_d0 exists at delay-0 only.
+        await _mk_field_cell(db_session, dataset_id="pv1", region="USA",
+                             universe="TOP3000", field_id="close", delay=1)
+        await _mk_field_cell(db_session, dataset_id="pv1", region="USA",
+                             universe="TOP3000", field_id="close", delay=0)
+        await _mk_field_cell(db_session, dataset_id="pv1", region="USA",
+                             universe="TOP3000", field_id="only_d0", delay=0)
+        d1 = await _get_dataset_fields(db_session, "pv1", "USA", "TOP3000", 1)
+        d0 = await _get_dataset_fields(db_session, "pv1", "USA", "TOP3000", 0)
+        assert [f["id"] for f in d1] == ["close"]
+        assert sorted(f["id"] for f in d0) == ["close", "only_d0"]
+
+    async def test_default_delay_param_is_1(self, db_session):
+        # Omitting the delay arg must behave exactly like delay=1 (byte-for-byte
+        # legacy callers are unaffected).
+        from backend.tasks.mining_tasks import _get_dataset_fields
+        await _mk_field_cell(db_session, dataset_id="pv1", region="USA",
+                             universe="TOP3000", field_id="close", delay=1)
+        await _mk_field_cell(db_session, dataset_id="pv1", region="USA",
+                             universe="TOP3000", field_id="only_d0", delay=0)
+        out = await _get_dataset_fields(db_session, "pv1", "USA", "TOP3000")  # no delay arg
+        assert [f["id"] for f in out] == ["close"]  # delay-0-only field NOT returned
+
+    async def test_universal_pv_fields_delay_param(self, db_session):
+        from backend.tasks.mining_tasks import _get_universal_pv_fields
+        await _mk_field_cell(db_session, dataset_id="pv1", region="USA",
+                             universe="TOP3000", field_id="close", delay=0)
+        out = await _get_universal_pv_fields(db_session, "USA", "TOP3000", 0)
+        assert [f["id"] for f in out] == ["close"]
+        # delay-1 has no cell → empty (proves the join is delay-scoped)
+        assert await _get_universal_pv_fields(db_session, "USA", "TOP3000", 1) == []
+
+
+# ---------------------------------------------------------------------------
+# start_flat_session — config stamping + validation
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+class TestStartFlatSessionDelay:
+    async def _svc(self, db_session, monkeypatch):
+        from backend.services.task_service import TaskService
+
+        async def _noop_dispatch(self, *a, **k):
+            return None
+        monkeypatch.setattr(TaskService, "_dispatch_session_worker", _noop_dispatch)
+        return TaskService(db_session)
+
+    async def test_delay_1_omits_config_key(self, db_session, monkeypatch):
+        svc = await self._svc(db_session, monkeypatch)
+        info = await svc.start_flat_session(region="USA", universe="TOP3000",
+                                            datasets=["pv1"], delay=1)
+        task = await svc.task_repo.get_by_id(info.task_id)
+        assert "delay" not in (task.config or {})  # byte-identical legacy config
+
+    async def test_delay_0_stamps_config(self, db_session, monkeypatch):
+        svc = await self._svc(db_session, monkeypatch)
+        info = await svc.start_flat_session(region="USA", universe="TOP3000",
+                                            datasets=["pv1"], delay=0)
+        task = await svc.task_repo.get_by_id(info.task_id)
+        assert (task.config or {}).get("delay") == 0
+
+    async def test_invalid_delay_raises(self, db_session, monkeypatch):
+        svc = await self._svc(db_session, monkeypatch)
+        with pytest.raises(ValueError):
+            await svc.start_flat_session(region="USA", universe="TOP3000", delay=2)

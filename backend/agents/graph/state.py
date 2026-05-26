@@ -122,6 +122,10 @@ class MiningState(BaseModel):
     task_id: int
     region: str = "USA"
     universe: str = "TOP3000"
+    # BRAIN simulation delay (0 or 1). Default 1 = the established path. A
+    # delay-0 FLAT session sets this from task.config["delay"] so the LLM
+    # mines delay-0-available fields and sims at delay-0 (orthogonal axis).
+    delay: int = 1
     dataset_id: str = ""
     
     # Context data

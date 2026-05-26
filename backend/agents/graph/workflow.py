@@ -327,6 +327,9 @@ class MiningWorkflow:
             task_id=task.id,
             region=task.region,
             universe=task.universe,
+            # delay-0 native mining (②/B): FLAT session stamps task.config["delay"].
+            # Default 1 = established path. Threaded into evaluation sim + cell joins.
+            delay=int((task.config or {}).get("delay", 1)),
             dataset_id=dataset_id,
             fields=fields,
             operators=operators,

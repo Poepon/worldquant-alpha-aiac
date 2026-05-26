@@ -591,6 +591,7 @@ class TaskService(BaseService):
         region: str = "USA",
         universe: str = "TOP3000",
         datasets: Optional[List[str]] = None,
+        delay: int = 1,
     ) -> "MiningSessionInfo":
         """Create a new FLAT_CONTINUOUS task and dispatch its worker.
 
@@ -598,11 +599,19 @@ class TaskService(BaseService):
         singleton-per-region: multiple FLAT tasks may co-exist (different
         dataset / hypothesis sets). Caller (ops endpoint) is expected to
         gate on ``settings.ENABLE_FLAT_CONTINUOUS``.
+
+        delay: BRAIN simulation delay (0 or 1). 1 = the established path.
+        delay=0 stamps task.config['delay']=0 so the worker mines the
+        delay-0 field roster and sims at delay-0 (orthogonal axis ②/B);
+        the delay-0 datafield cells must already be synced for the chosen
+        datasets/universe (sync_fields_from_brain delay=0).
         """
         if region not in self.SUPPORTED_REGIONS:
             raise ValueError(
                 f"region={region!r} not supported; choose one of {self.SUPPORTED_REGIONS}"
             )
+        if delay not in (0, 1):
+            raise ValueError(f"delay={delay!r} not supported; choose 0 or 1")
 
         # Pin hypothesis_centric level into the task config at CREATION time
         # (2026-05-22 root-cause fix). _get_active_level falls back to
@@ -618,6 +627,12 @@ class TaskService(BaseService):
         from backend.config import settings as _hge
         _level = int(getattr(_hge, "HYPOTHESIS_CENTRIC_LEVEL", 0) or 0)
 
+        # delay-1 omits the key so existing-session config stays byte-identical
+        # (_task_delay falls back to 1 when absent); only delay-0 stamps it.
+        _config = {"flat_cursor": 0, "hypothesis_centric_variant": _level}
+        if delay != 1:
+            _config["delay"] = int(delay)
+
         task = MiningTask(
             task_name=f"flat-session-{region}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
             region=region,
@@ -626,7 +641,7 @@ class TaskService(BaseService):
             target_datasets=list(datasets or []),
             daily_goal=0,                # 0 = unlimited within FLAT_CONTINUOUS_MAX_ITERATIONS
             max_iterations=999999,
-            config={"flat_cursor": 0, "hypothesis_centric_variant": _level},
+            config=_config,
             status="RUNNING",
             schedule="FLAT",
         )

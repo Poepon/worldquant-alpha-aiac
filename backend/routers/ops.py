@@ -1340,6 +1340,13 @@ class StartFlatSessionIn(BaseModel):
         default_factory=list,
         description="Explicit dataset list; empty = AUTO-pick",
     )
+    delay: int = Field(
+        default=1,
+        ge=0,
+        le=1,
+        description="BRAIN sim delay (0 or 1). 1 = established path. 0 = native "
+        "delay-0 mining (orthogonal axis); requires delay-0 datafield cells synced.",
+    )
 
 
 class FlatSessionOut(BaseModel):
@@ -1419,6 +1426,7 @@ async def start_flat_session(
             region=payload.region,
             universe=payload.universe,
             datasets=payload.datasets or None,
+            delay=payload.delay,
         )
     except ValueError as ex:
         raise HTTPException(status_code=400, detail=str(ex)) from ex

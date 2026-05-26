@@ -1630,6 +1630,10 @@ async def node_simulate(
     buckets: Dict[Tuple, List[int]] = {}
     for local_i, idx in enumerate(indices_to_simulate):
         expr = state.pending_alphas[idx].expression
+        # delay-0 native mining (②/B): a FLAT session with task.config["delay"]==0
+        # threads state.delay here so the sim runs at delay-0. delay-1 is the
+        # smart-settings default → no override when delay==1 (path unchanged).
+        _delay = getattr(state, "delay", 1)
         smart = smart_simulation_settings(
             expr,
             region=state.region,
@@ -1637,6 +1641,7 @@ async def node_simulate(
             # P3-Brain: 从 task-startup snapshot 传 test_period(plan §8.4)
             # 避免 Consultant 切换中途 simulate 不同 alpha 用不同 test_period。
             test_period=getattr(state, "effective_default_test_period", None),
+            overrides=({"delay": _delay} if _delay != 1 else None),
         )
         smart_settings_per_idx[local_i] = smart
         smart_reasons_per_idx[local_i] = settings_reason(expr)
