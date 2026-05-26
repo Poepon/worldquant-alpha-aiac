@@ -75,6 +75,13 @@ export default function Dashboard() {
     refetchInterval: 5000,
   })
 
+  // Live BRAIN sim-slot concurrency (cross-process Redis counter brain:concurrent_sims)
+  const { data: simSlots } = useQuery({
+    queryKey: ['simSlots'],
+    queryFn: () => api.getSimSlots(),
+    refetchInterval: 3000, // near-real-time
+  })
+
   // Live feed SSE connection
   useEffect(() => {
     const eventSource = new EventSource('/api/v1/stats/live-feed')
@@ -94,6 +101,8 @@ export default function Dashboard() {
   const stats = dailyStats || { goal: 4, current: 0, success_rate: 0, avg_sharpe: 0 }
   const metrics = kpi || { today_simulations: 0, today_success_rate: 0, today_avg_sharpe: 0, week_total_alphas: 0 }
   const tasks = activeTasks || []
+  const slots = simSlots || { current: 0, limit: 3, available: 3, role: 'USER' }
+  const slotPct = slots.limit > 0 ? Math.round((slots.current / slots.limit) * 100) : 0
 
   const goalPercent = Math.round((stats.current / stats.goal) * 100)
 
@@ -190,6 +199,23 @@ export default function Dashboard() {
                   <Text>数据库</Text>
                   <Tag color="success" icon={<CheckCircleOutlined />}>已连接</Tag>
                 </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Text>
+                    BRAIN 模拟并发{' '}
+                    <Text type="secondary" style={{ fontSize: 12 }}>({slots.role})</Text>
+                  </Text>
+                  <Tag color={slots.current >= slots.limit ? 'error' : slots.current > 0 ? 'processing' : 'default'}>
+                    {slots.current} / {slots.limit}
+                  </Tag>
+                </div>
+                <Progress
+                  percent={slotPct}
+                  size="small"
+                  status={slots.current >= slots.limit ? 'exception' : 'active'}
+                  strokeColor={slots.current >= slots.limit ? '#ff4d4f' : '#00d4ff'}
+                  trailColor="rgba(255,255,255,0.1)"
+                  format={() => `${slots.current}/${slots.limit}`}
+                />
               </Space>
             </div>
           </Card>

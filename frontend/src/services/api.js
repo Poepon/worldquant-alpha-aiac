@@ -90,6 +90,11 @@ const api = {
     return data
   },
 
+  getSimSlots: async () => {
+    const { data } = await client.get('/stats/sim-slots')
+    return data
+  },
+
   // Tasks
   getTasks: async (params = {}) => {
     const { data } = await client.get('/tasks', { params })

@@ -134,6 +134,39 @@ async def get_kpi_metrics(
     )
 
 
+class BrainSimSlotsOut(BaseModel):
+    current: int
+    limit: int
+    available: int
+    role: str
+    ttl_sec: int = -1
+
+
+@router.get("/sim-slots", response_model=BrainSimSlotsOut)  # live BRAIN sim concurrency widget
+async def get_sim_slots():
+    """Live BRAIN concurrent-simulation slot usage (cross-process Redis counter
+    ``brain:concurrent_sims``). The FLAT mining loop and any probe/transfer sweep
+    share these role-aware slots (USER=3 / CONSULTANT=80); this surfaces the
+    real-time in-flight concurrency to the dashboard. Soft-fails to current=0 on
+    any Redis error so the widget never breaks the page."""
+    from backend.adapters.brain_adapter import BrainAdapter
+    from backend.config import settings as _s
+    current, ttl = 0, -1
+    try:
+        r = await BrainAdapter._get_slot_redis()
+        raw = await r.get(BrainAdapter._SLOT_COUNTER_KEY)
+        current = max(0, int(raw)) if raw is not None else 0
+        ttl = int(await r.ttl(BrainAdapter._SLOT_COUNTER_KEY))
+    except Exception:  # noqa: BLE001 — widget must never break the dashboard
+        pass
+    limit = BrainAdapter._current_sim_slot_limit()
+    role = "CONSULTANT" if getattr(_s, "ENABLE_BRAIN_CONSULTANT_MODE", False) else "USER"
+    return BrainSimSlotsOut(
+        current=current, limit=limit, available=max(0, limit - current),
+        role=role, ttl_sec=ttl,
+    )
+
+
 @router.get("/live-feed")
 async def live_feed(db: AsyncSession = Depends(get_db)):
     """
