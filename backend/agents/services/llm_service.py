@@ -312,6 +312,19 @@ class LLMService:
             # max_retries=0 so the @retry/circuit layer owns retry policy.
             anthropic_kwargs["timeout"] = settings.LLM_STREAM_TIMEOUT_SEC
             anthropic_kwargs["max_retries"] = 0
+            # Present requests as the Claude CLI. `default_headers` is merged
+            # last in the SDK's `default_headers` property (anthropic
+            # _base_client.py), so these win over the built-in "User-Agent".
+            # Empty settings → header omitted (keeps SDK default UA).
+            extra_headers: Dict[str, str] = {}
+            ua = (getattr(settings, 'ANTHROPIC_USER_AGENT', '') or '').strip()
+            if ua:
+                extra_headers["User-Agent"] = ua
+            x_app = (getattr(settings, 'ANTHROPIC_X_APP', '') or '').strip()
+            if x_app:
+                extra_headers["x-app"] = x_app
+            if extra_headers:
+                anthropic_kwargs["default_headers"] = extra_headers
             self.anthropic_client = anthropic.AsyncAnthropic(**anthropic_kwargs)
 
         # Pre-resolve thinking-tier display name for logging only.

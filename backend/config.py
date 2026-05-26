@@ -149,6 +149,16 @@ class Settings(BaseSettings):
     # official api.anthropic.com. Set to a proxy/mirror (e.g. self-hosted
     # gateway, OpenRouter, vendor-compatible endpoint) when needed.
     ANTHROPIC_BASE_URL: str = os.getenv("ANTHROPIC_BASE_URL", "")
+    # User-Agent sent on every Anthropic request. Defaults to the Claude CLI
+    # signature so traffic is presented as `claude-cli`. Override via env when
+    # a different identity is needed; set empty to keep the SDK's default UA.
+    ANTHROPIC_USER_AGENT: str = os.getenv(
+        "ANTHROPIC_USER_AGENT", "claude-cli/2.1.150 (external, sdk-cli)"
+    )
+    # `x-app` header sent on every Anthropic request — the Claude CLI sends
+    # "cli". Pure identity marker; the standard Anthropic API ignores it.
+    # Empty → header omitted.
+    ANTHROPIC_X_APP: str = os.getenv("ANTHROPIC_X_APP", "cli")
     # Anthropic extended-thinking reasoning effort (opus-4-7 family).
     # Tier names match Anthropic's model capability metadata (low/medium/high/max)
     # plus an intermediate "xhigh" and the alias "auto" → adaptive.
