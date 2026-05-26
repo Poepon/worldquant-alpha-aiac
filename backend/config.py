@@ -1295,6 +1295,16 @@ class Settings(BaseSettings):
     # when a task has no explicit daily_goal. See
     # docs/delay0_sim_pipeline_design_2026-05-27.md.
     ALPHAS_PER_ROUND: int = 10
+    # code_gen asks the LLM for ALPHAS_PER_ROUND alpha objects in ONE JSON
+    # response; each carries a 5-slot reasoning chain + explanation (~400-500
+    # output tokens). The LLM call's default max_tokens is 4096 — fine at the
+    # old batch of 4 (~2k tokens) but a batch of 10 (~5k) overruns it, the JSON
+    # is truncated, json.loads fails, and the round yields ZERO candidates. So
+    # code_gen now sizes max_tokens to the batch: max(4096, BASE + PER_ALPHA*n),
+    # capped at CEILING. CEILING must stay ≤ the deployed model's max output
+    # (deepseek-chat = 8192). See node_code_gen.
+    CODE_GEN_MAX_TOKENS_PER_ALPHA: int = 512
+    CODE_GEN_MAX_TOKENS_CEILING: int = 8000
 
     # --- Mining pipeline (producer-consumer) — Sub-phase 0, default OFF ---
     # Decouples LLM generation from BRAIN simulation so sim slots stay

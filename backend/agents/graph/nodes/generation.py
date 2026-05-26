@@ -1641,12 +1641,23 @@ async def node_code_gen(
             "the run. When in doubt, choose a field that is explicitly listed."
         )
 
+    # Size the output budget to the batch. One JSON response holds
+    # num_alphas_target alpha objects (~400-500 tokens each); the call default
+    # of 4096 truncates a batch of 10 → JSONDecodeError → 0 candidates. Keep
+    # max(4096, …) so the old batch-of-4 budget never shrinks; cap at the
+    # configured ceiling (must be ≤ model max output). See config.py.
+    _n_alphas = int(getattr(state, "num_alphas_target", 0) or 4)
+    _code_gen_max_tokens = min(
+        _gen_settings.CODE_GEN_MAX_TOKENS_CEILING,
+        max(4096, 1024 + _gen_settings.CODE_GEN_MAX_TOKENS_PER_ALPHA * _n_alphas),
+    )
     try:
         response = await llm_service.call(
             system_prompt=ALPHA_GENERATION_SYSTEM,
             user_prompt=prompt,
             temperature=temperature,
             json_mode=True,
+            max_tokens=_code_gen_max_tokens,
             node_key="code_gen",
         )
     except Exception as llm_err:

@@ -133,17 +133,84 @@ async def test_slot_released_when_simulate_raises():
 
 
 @pytest.mark.asyncio
-async def test_backpressure_queue_never_exceeds_maxsize():
+async def test_backpressure_bounds_in_flight_work():
+    """Producer is fast, consumers slow → the bounded work_q must throttle the
+    producer. We OBSERVE the in-flight gap (produced − completed) and assert it
+    stays bounded by ~queue capacity + consumer pool. An unbounded queue would
+    let the gap reach the full 40 before anything drains."""
     cands = _candidates(40)
     slots = FakeSlots(limit=2)
-    # Consumers are slow; producer is fast → the bounded queue must throttle it.
+    num_consumers = 2
+    completed = 0
+    max_gap = 0
+
+    async def produce(push, should_stop):
+        nonlocal max_gap
+        for c in cands:
+            await push(c)
+            max_gap = max(max_gap, c.context["i"] + 1 - completed)
+
+    async def simulate(c):
+        await asyncio.sleep(0.005)  # slow consumer
+        return {"ok": True}
+
+    async def evaluate(c, out):
+        nonlocal completed
+        completed += 1
+        return SimResult(candidate=c, ok=True, metrics=out)
+
+    async def persist(session, results):
+        return len(results)
+
+    stats = await run_pipeline_session(
+        produce=produce, simulate=simulate, evaluate=evaluate, persist=persist,
+        session_factory=_null_session_factory, num_consumers=num_consumers,
+        acquire_slot=slots.acquire, release_slot=slots.release,
+    )
+    assert stats["produced"] == 40
+    assert stats["simulated"] == 40
+    assert stats["persisted"] == 40
+    assert slots.live == 0
+    # queue_maxsize auto = 2*num_consumers = 4, plus up to num_consumers in
+    # flight → gap must stay well under 40. (Unbounded queue → gap ≈ 40.)
+    assert max_gap <= 4 + num_consumers + 2, f"backpressure failed: max_gap={max_gap}"
+
+
+class BlockingSlots:
+    """Slot fake that actually BLOCKS at a hard ceiling (like the real Redis
+    counter), so the runner's reliance on acquire_slot to cap concurrency is
+    exercised even when num_consumers > limit."""
+
+    def __init__(self, limit):
+        self.limit = limit
+        self.live = 0
+        self.max_live = 0
+
+    async def acquire(self):
+        while self.live >= self.limit:
+            await asyncio.sleep(0.001)
+        self.live += 1
+        self.max_live = max(self.max_live, self.live)
+        return True
+
+    async def release(self):
+        self.live -= 1
+
+
+@pytest.mark.asyncio
+async def test_slot_ceiling_caps_concurrency_below_consumer_count():
+    """5 consumers but a slot ceiling of 2 → at most 2 sims run at once. This
+    is the invariant slots EXIST for; the non-blocking FakeSlots never tested
+    it (concurrency was trivially capped by the consumer-pool size)."""
+    cands = _candidates(15)
+    slots = BlockingSlots(limit=2)
 
     async def produce(push, should_stop):
         for c in cands:
             await push(c)
 
     async def simulate(c):
-        await asyncio.sleep(0.005)
+        await asyncio.sleep(0.01)  # hold the slot long enough to contend
         return {"ok": True}
 
     async def evaluate(c, out):
@@ -152,17 +219,14 @@ async def test_backpressure_queue_never_exceeds_maxsize():
     async def persist(session, results):
         return len(results)
 
-    # queue_maxsize auto = 2 * num_consumers = 4. Producing 40 fast items must
-    # never let more than (maxsize + in-flight) pile up — assert produced count
-    # rises only as consumers drain. We sample produced vs persisted gap.
     stats = await run_pipeline_session(
         produce=produce, simulate=simulate, evaluate=evaluate, persist=persist,
-        session_factory=_null_session_factory, num_consumers=2,
+        session_factory=_null_session_factory, num_consumers=5,
         acquire_slot=slots.acquire, release_slot=slots.release,
     )
-    assert stats["produced"] == 40
-    assert stats["simulated"] == 40
-    assert stats["persisted"] == 40
+    assert stats["simulated"] == 15
+    # Even with 5 consumers, the slot ceiling held concurrency to 2.
+    assert slots.max_live == 2
     assert slots.live == 0
 
 
@@ -293,9 +357,16 @@ async def test_stop_event_drains_gracefully():
         stop_event=stop,
     )
 
-    # Producer bailed early on stop → far fewer than 100 produced, no hang.
-    assert stats["produced"] < 100
+    # Producer bailed right after pushing i==5 → at most ~7 produced (tight, not
+    # the loose <100). No hang.
+    assert stats["produced"] <= 8
     assert slots.live == 0  # clean shutdown, all slots released
+    # Every produced candidate is reconcilable: simulated + dropped-on-stop +
+    # slot_timeouts + errors == produced (nothing silently vanishes).
+    assert (
+        stats["simulated"] + stats["dropped_on_stop"]
+        + stats["slot_timeouts"] + stats["errors"]
+    ) == stats["produced"]
 
 
 @pytest.mark.asyncio
@@ -342,3 +413,103 @@ async def test_invalid_num_consumers_rejected():
             produce=noop, simulate=noop, evaluate=noop, persist=noop,
             session_factory=_null_session_factory, num_consumers=0,
         )
+
+
+@pytest.mark.asyncio
+async def test_mismatched_slot_pair_rejected():
+    """Passing only one of acquire/release would mix a fake with the real
+    BrainAdapter primitive and corrupt the global Redis slot counter."""
+    slots = FakeSlots(limit=2)
+
+    async def noop(*a, **k):
+        return None
+
+    with pytest.raises(ValueError):
+        await run_pipeline_session(
+            produce=noop, simulate=noop, evaluate=noop, persist=noop,
+            session_factory=_null_session_factory, num_consumers=2,
+            acquire_slot=slots.acquire,  # release_slot omitted → reject
+        )
+
+
+@pytest.mark.asyncio
+async def test_persist_failure_is_counted_not_silent():
+    cands = _candidates(3)
+    slots = FakeSlots(limit=2)
+
+    async def produce(push, should_stop):
+        for c in cands:
+            await push(c)
+
+    async def simulate(c):
+        return {"ok": True}
+
+    async def evaluate(c, out):
+        return SimResult(candidate=c, ok=True, metrics=out)
+
+    async def persist(session, results):
+        raise RuntimeError("DB down")
+
+    stats = await run_pipeline_session(
+        produce=produce, simulate=simulate, evaluate=evaluate, persist=persist,
+        session_factory=_null_session_factory, num_consumers=2,
+        acquire_slot=slots.acquire, release_slot=slots.release,
+    )
+    # Sims ran (quota burned) but persistence failed — the loss is surfaced in
+    # stats rather than silently swallowed, and the session still terminates.
+    assert stats["simulated"] == 3
+    assert stats["persisted"] == 0
+    assert stats["persist_failures"] == 3
+    assert slots.live == 0
+
+
+@pytest.mark.asyncio
+async def test_cancellation_releases_slots_and_no_orphans():
+    """Cancelling the session mid-flight (e.g. a per-round wait_for deadline)
+    must cancel+drain the child tasks — no orphaned consumers left holding
+    BRAIN slots, no detached persister still writing."""
+    slots = BlockingSlots(limit=2)
+    sims_started = 0
+    sims_after_cancel = 0
+    cancelled = False
+
+    async def produce(push, should_stop):
+        i = 0
+        while not should_stop():
+            await push(Candidate(expression=f"e{i}", context={"i": i}))
+            i += 1
+            await asyncio.sleep(0.001)
+
+    async def simulate(c):
+        nonlocal sims_started, sims_after_cancel
+        sims_started += 1
+        if cancelled:
+            sims_after_cancel += 1
+        await asyncio.sleep(0.02)
+        return {"ok": True}
+
+    async def evaluate(c, out):
+        return SimResult(candidate=c, ok=True, metrics=out)
+
+    async def persist(session, results):
+        return len(results)
+
+    task = asyncio.create_task(run_pipeline_session(
+        produce=produce, simulate=simulate, evaluate=evaluate, persist=persist,
+        session_factory=_null_session_factory, num_consumers=2,
+        acquire_slot=slots.acquire, release_slot=slots.release,
+    ))
+    # Let the pipeline get going, then cancel.
+    await asyncio.sleep(0.05)
+    assert sims_started > 0
+    cancelled = True
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Give the loop a few ticks; if consumers were orphaned they'd keep simming.
+    started_at_cancel = sims_started
+    await asyncio.sleep(0.05)
+    assert sims_started == started_at_cancel, "orphaned consumer kept simulating"
+    # All slots released by the cancelled consumers' finally.
+    assert slots.live == 0

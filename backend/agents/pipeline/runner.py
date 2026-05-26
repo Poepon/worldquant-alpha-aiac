@@ -84,21 +84,31 @@ async def run_pipeline_session(
     if queue_maxsize <= 0:
         queue_maxsize = max(1, 2 * num_consumers)
 
-    if acquire_slot is None or release_slot is None:
+    # Both-or-neither: a mismatched pair (e.g. a test fake acquire + the real
+    # BrainAdapter release) would decrement the shared global Redis slot counter
+    # that the fake never incremented, corrupting the ceiling for every worker.
+    if (acquire_slot is None) != (release_slot is None):
+        raise ValueError("acquire_slot and release_slot must be provided together")
+    if acquire_slot is None:
         # Imported lazily so unit tests that inject fakes don't pull BRAIN/Redis.
         from backend.adapters.brain_adapter import BrainAdapter
 
-        acquire_slot = acquire_slot or BrainAdapter._acquire_sim_slot
-        release_slot = release_slot or BrainAdapter._release_sim_slot
+        acquire_slot = BrainAdapter._acquire_sim_slot
+        release_slot = BrainAdapter._release_sim_slot
 
     work_q: asyncio.Queue = asyncio.Queue(maxsize=queue_maxsize)
-    persist_q: asyncio.Queue = asyncio.Queue()
+    # Bounded too: if the single persister falls behind N consumers, putting a
+    # result blocks the consumer (back-pressure) instead of growing RAM without
+    # limit over a multi-hour / 80-consumer session.
+    persist_q: asyncio.Queue = asyncio.Queue(maxsize=max(4, 2 * queue_maxsize))
     stats = {
         "produced": 0,
         "simulated": 0,
         "persisted": 0,
         "errors": 0,
         "slot_timeouts": 0,
+        "dropped_on_stop": 0,
+        "persist_failures": 0,
     }
 
     def _should_stop() -> bool:
@@ -126,7 +136,10 @@ async def run_pipeline_session(
                 if item is _SENTINEL:
                     return
                 if _should_stop():
-                    # Drop remaining work fast on stop; sentinels still flush.
+                    # Drop remaining queued work fast on stop. Counted (not
+                    # silent) so produced == simulated + slot_timeouts + errors
+                    # + dropped_on_stop stays reconcilable.
+                    stats["dropped_on_stop"] += 1
                     continue
                 acquired = False
                 try:
@@ -138,13 +151,15 @@ async def run_pipeline_session(
                         )
                         continue
                     sim_outcome = await simulate(item)
+                    # Count the sim the moment it returns — BRAIN quota is spent
+                    # here, regardless of whether evaluate/persist later fail.
+                    stats["simulated"] += 1
                 finally:
                     if acquired:
                         await release_slot()
                 # Evaluate happens OUTSIDE the slot — the sim is done, no need to
                 # hold the slot during pure compute.
                 result = await evaluate(item, sim_outcome)
-                stats["simulated"] += 1
                 await persist_q.put(result)
             except Exception as exc:  # noqa: BLE001 — one bad candidate ≠ dead consumer
                 stats["errors"] += 1
@@ -170,7 +185,11 @@ async def run_pipeline_session(
                     n = await persist(session, list(batch))
                 stats["persisted"] += int(n or 0)
             except Exception:  # noqa: BLE001 — never let a persist error kill the loop
-                logger.exception("[pipeline] persist flush failed for %d results", len(batch))
+                # The batch is dropped (results already simulated → wasted BRAIN
+                # quota), so make the loss observable rather than silent. A
+                # retry / dead-letter path is a Sub-phase 1 follow-up.
+                stats["persist_failures"] += len(batch)
+                logger.exception("[pipeline] persist flush DROPPED %d results", len(batch))
             finally:
                 batch.clear()
 
@@ -194,15 +213,28 @@ async def run_pipeline_session(
         for i in range(num_consumers)
     ]
     persister_task = asyncio.create_task(_persister(), name="pipeline-persister")
+    all_tasks = [producer_task, *consumer_tasks, persister_task]
 
-    # Producer finishes (or crashes) → it has queued one sentinel per consumer.
-    await producer_task
-    # All consumers drain the queue + their sentinel, then exit.
-    await asyncio.gather(*consumer_tasks)
-    # Now no more results will be produced → tell the persister to drain & exit.
-    # All consumers have finished (gather returned), so every result is already
-    # on persist_q ahead of this sentinel; the persister flushes on the sentinel.
-    await persist_q.put(_SENTINEL)
-    await persister_task
+    try:
+        # Producer finishes (or crashes) → it has queued one sentinel per consumer.
+        await producer_task
+        # All consumers drain the queue + their sentinel, then exit.
+        await asyncio.gather(*consumer_tasks)
+        # No more results will be produced → tell the persister to drain & exit.
+        # Every result is already on persist_q ahead of this sentinel (consumers
+        # finished), so the persister flushes on the sentinel.
+        await persist_q.put(_SENTINEL)
+        await persister_task
+    finally:
+        # Never leak child coroutines. On the happy path every task is already
+        # done (this is a no-op). On cancellation (e.g. the caller's per-round
+        # wait_for deadline) or a child BaseException escaping the gather, cancel
+        # whatever is still pending and drain it — otherwise orphaned consumers
+        # keep burning BRAIN slots and the persister keeps writing after the
+        # session is over (the exact zombie class this project fights).
+        for t in all_tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*all_tasks, return_exceptions=True)
 
     return stats
