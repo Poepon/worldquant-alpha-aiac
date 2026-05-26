@@ -162,6 +162,7 @@ export default function TaskManagement() {
       region: values.region,
       universe: values.universe,
       datasets: datasetsList,
+      delay: values.delay ?? 1,
     })
   }
 
@@ -383,7 +384,7 @@ export default function TaskManagement() {
           form={flatForm}
           layout="vertical"
           onFinish={handleStartFlatSession}
-          initialValues={{ region: 'USA', universe: 'TOP3000', datasets: '' }}
+          initialValues={{ region: 'USA', universe: 'TOP3000', datasets: '', delay: 1 }}
         >
           <Row gutter={16}>
             <Col span={12}>
@@ -427,6 +428,16 @@ export default function TaskManagement() {
               rows={3}
               placeholder="留空 = AUTO；或填 dataset_id，例如：analyst10, news4"
             />
+          </Form.Item>
+          <Form.Item
+            name="delay"
+            label="Delay"
+            tooltip="delay-1 = 标准（用昨日数据，字段最全）；delay-0 = 当日数据（字段更稀疏、与 delay-1 正交的新挖掘面）。delay-0 需已同步该 universe 的 delay-0 字段。"
+          >
+            <Select>
+              <Option value={1}>delay 1（标准）</Option>
+              <Option value={0}>delay 0（当日 / 正交轴）</Option>
+            </Select>
           </Form.Item>
           <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
             <Space>
