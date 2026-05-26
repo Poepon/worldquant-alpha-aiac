@@ -1782,7 +1782,9 @@ async def node_simulate(
                 "_sim_settings": {
                     "region": state.region,
                     "universe": state.universe,
-                    "delay": _v16_settings.SIM_DEFAULT_DELAY,
+                    # delay-0: use the task delay (getattr default handles delay=0,
+                    # which is falsy — never use `or SIM_DEFAULT_DELAY` here).
+                    "delay": getattr(state, "delay", _v16_settings.SIM_DEFAULT_DELAY),
                     "decay": _v16_settings.SIM_DEFAULT_DECAY,
                     "neutralization": _v16_settings.SIM_DEFAULT_NEUTRALIZATION,
                 },
@@ -2193,6 +2195,12 @@ async def node_evaluate(
 
             async def _sim_one_flip(_orig):
                 _fexpr = f"multiply(-1, {_orig.expression})"
+                # delay-0 native mining: the flip-retry sub-path is a SECOND sim
+                # call — it must inherit the task's delay too, else a delay-0
+                # round's flip sims run at delay-1 (smart-settings default) and
+                # persist a delay-1 alpha into a delay-0 session. delay-1 → no
+                # override (unchanged).
+                _fd = getattr(state, "delay", 1)
                 try:
                     _smart = smart_simulation_settings(
                         _fexpr,
@@ -2201,6 +2209,7 @@ async def node_evaluate(
                         # P3-Brain: flip-retry 同 round 内保持 test_period 一致
                         # (否则 sharpe 不可比)。从 task snapshot 传。
                         test_period=getattr(state, "effective_default_test_period", None),
+                        overrides=({"delay": _fd} if _fd != 1 else None),
                     )
                     _res = await brain.simulate_alpha(expression=_fexpr, **_smart)
                     return (_orig, _fexpr, dict(_smart), _res)
@@ -2356,6 +2365,9 @@ async def node_evaluate(
             _ctl_sim_kwargs = dict(_dr_alpha.metrics.get("_sim_settings") or {
                 "region": state.region,
                 "universe": state.universe,
+                # delay-0: stamp is normally present (has delay); this fallback
+                # only fires if it's absent — still honor the task delay then.
+                "delay": getattr(state, "delay", 1),
             })
             _ctl_sim_kwargs["expression"] = _ctrl_expr
             try:
