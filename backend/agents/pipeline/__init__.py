@@ -15,6 +15,7 @@ from backend.agents.pipeline.types import Candidate, SimResult
 from backend.agents.pipeline.runner import run_pipeline_session
 from backend.agents.pipeline.consumer import build_consumer_stages
 from backend.agents.pipeline.persister import build_persister
+from backend.agents.pipeline.producer import build_producer, run_flat_pipeline_session
 
 __all__ = [
     "Candidate",
@@ -22,4 +23,6 @@ __all__ = [
     "run_pipeline_session",
     "build_consumer_stages",
     "build_persister",
+    "build_producer",
+    "run_flat_pipeline_session",
 ]
