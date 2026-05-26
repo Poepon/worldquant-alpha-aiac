@@ -605,6 +605,18 @@ class MiningWorkflow:
                     if _ar_hid in _terminal_hids:
                         _ar_hid = None
 
+                    # delay-0 native mining: persist the delay the sim ACTUALLY
+                    # ran at. metrics._sim_settings.delay is ground truth (stamped
+                    # by node_simulate / flip-retry); fall back to the task's
+                    # configured delay, then the column default (1). Without this
+                    # the Alpha.delay column (default=1) mislabels delay-0 alphas
+                    # as delay-1 even though the BRAIN sim used delay-0.
+                    _alpha_delay = None
+                    if isinstance(metrics_dict, dict):
+                        _alpha_delay = (metrics_dict.get("_sim_settings") or {}).get("delay")
+                    if _alpha_delay is None:
+                        _alpha_delay = int((task.config or {}).get("delay", 1))
+
                     alpha = Alpha(
                         task_id=task.id,
                         run_id=run_id,
@@ -616,6 +628,7 @@ class MiningWorkflow:
                         region=task.region,
                         universe=task.universe,
                         dataset_id=dataset_id,
+                        delay=_alpha_delay,
                         quality_status=alpha_result.quality_status,
                         metrics=alpha_result.metrics,
                         is_sharpe=metrics_dict.get("sharpe"),

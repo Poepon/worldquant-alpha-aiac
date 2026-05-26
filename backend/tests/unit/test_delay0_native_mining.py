@@ -205,6 +205,40 @@ class TestGetDatasetsToMinePerDelay:
 
 
 # ---------------------------------------------------------------------------
+# Alpha.delay column — persisted from the sim's actual delay (not default 1)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+class TestAlphaDelayColumnRoundTrip:
+    async def test_alpha_persists_delay_0(self, db_session):
+        # Per [[feedback_orm_constructor_real_test]]: the Alpha(delay=…) field
+        # the workflow now sets must round-trip through a real session — a
+        # delay-0 mined alpha must read back delay=0, not the column default 1.
+        from sqlalchemy import select
+        from backend.models import Alpha
+        a = Alpha(task_id=999001, alpha_id="DELAY0TEST", expression="rank(close)",
+                  region="USA", universe="TOP3000", dataset_id="news12", delay=0,
+                  quality_status="FAIL")
+        db_session.add(a)
+        await db_session.commit()
+        got = (await db_session.execute(
+            select(Alpha.delay).where(Alpha.alpha_id == "DELAY0TEST"))).scalar_one()
+        assert got == 0  # not the model default (1)
+
+    async def test_alpha_default_delay_is_1(self, db_session):
+        # Omitting delay still defaults to 1 (delay-1 path unchanged).
+        from sqlalchemy import select
+        from backend.models import Alpha
+        a = Alpha(task_id=999002, alpha_id="DELAY1DEFAULT", expression="rank(close)",
+                  region="USA", universe="TOP3000", dataset_id="pv1",
+                  quality_status="FAIL")
+        db_session.add(a)
+        await db_session.commit()
+        got = (await db_session.execute(
+            select(Alpha.delay).where(Alpha.alpha_id == "DELAY1DEFAULT"))).scalar_one()
+        assert got == 1
+
+
+# ---------------------------------------------------------------------------
 # start_flat_session — config stamping + validation
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio

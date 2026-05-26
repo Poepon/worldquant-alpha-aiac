@@ -1505,7 +1505,12 @@ class MiningAgent:
         logger.info(
             f"[MiningAgent] Simulating {len(expr_variants)} variants for optimization"
         )
-        
+
+        # delay-0 native mining: variants must sim at (and persist) the task's
+        # delay, not a hardcoded 1 — else a delay-0 task's optimization variants
+        # silently run at delay-1. Defaults to 1 for delay-1 tasks (unchanged).
+        _opt_delay = int((task.config or {}).get("delay", 1))
+
         # Process Expression Variants
         for variant in expr_variants:
             try:
@@ -1518,9 +1523,9 @@ class MiningAgent:
                     expression=expression,
                     region=task.region,
                     universe=task.universe,
-                    delay=1,
+                    delay=_opt_delay,
                     decay=4,
-                    neutralization="INDUSTRY" 
+                    neutralization="INDUSTRY"
                 )
                 
                 if result.get("success"):
@@ -1547,6 +1552,7 @@ class MiningAgent:
                             region=task.region,
                             universe=task.universe,
                             dataset_id=task.dataset_id if hasattr(task, 'dataset_id') else "unknown",
+                            delay=_opt_delay,
                             simulation_status="SUCCESS",
                             quality_status="PASS" if hard_gate_pass else "OPTIMIZE",
                             metrics=metrics
