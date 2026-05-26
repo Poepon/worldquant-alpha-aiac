@@ -44,6 +44,48 @@ class TestTaskDelayResolution:
 
 
 # ---------------------------------------------------------------------------
+# _refresh_brain_client — FLAT 'fresh session' recovery (worldquant-miner pattern)
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+class TestRefreshBrainClient:
+    async def test_refresh_recreates_client_and_reauths(self, monkeypatch):
+        # Closes the global client, acquires a FRESH one, re-auths — the exact
+        # sequence that breaks the long-lived-client sim-hang. Order matters:
+        # close must precede get_client so a genuinely new client is built.
+        from backend.tasks import mining_tasks
+        from backend.adapters.brain_adapter import BrainAdapter
+        calls = []
+
+        async def _close(): calls.append("close")
+        async def _get_client(): calls.append("get_client"); return "FRESH_CLIENT"
+        monkeypatch.setattr(BrainAdapter, "close", classmethod(lambda cls: _close()))
+        monkeypatch.setattr(BrainAdapter, "get_client", classmethod(lambda cls: _get_client()))
+
+        class _Brain:
+            client = "OLD_CLIENT"
+            async def ensure_session(self): calls.append("ensure_session")
+        b = _Brain()
+        ok = await mining_tasks._refresh_brain_client(b)
+        assert ok is True
+        assert calls == ["close", "get_client", "ensure_session"]
+        assert b.client == "FRESH_CLIENT"  # old (rotted) client replaced
+
+    async def test_refresh_is_non_fatal_on_error(self, monkeypatch):
+        # A refresh failure must NEVER raise into the FLAT loop (best-effort).
+        from backend.tasks import mining_tasks
+        from backend.adapters.brain_adapter import BrainAdapter
+
+        async def _boom(): raise RuntimeError("brain down")
+        monkeypatch.setattr(BrainAdapter, "close", classmethod(lambda cls: _boom()))
+
+        class _Brain:
+            client = "OLD"
+            async def ensure_session(self): pass
+        ok = await mining_tasks._refresh_brain_client(_Brain())
+        assert ok is False  # swallowed, returns False
+
+
+# ---------------------------------------------------------------------------
 # MiningState.delay — default 1, accepts 0
 # ---------------------------------------------------------------------------
 class TestMiningStateDelayField:

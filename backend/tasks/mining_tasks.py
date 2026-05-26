@@ -41,6 +41,35 @@ def _task_delay(task) -> int:
         return _FLAT_DELAY
 
 
+# A FLAT session reuses ONE process-global httpx client (BrainAdapter's
+# _GLOBAL_CLIENT singleton) for its entire multi-hour run. Empirically
+# (2026-05-26) that client degrades after ~10 rounds — its keepalive sockets go
+# stale and BRAIN sim polls then hang on perpetual Retry-After until the 20-min
+# round backstop cancels them (3 in a row → session bails). A FRESH adapter in a
+# separate process sims the same expression in ~2min, proving BRAIN/creds/code
+# are fine — only the long-lived client rots. Per the worldquant-miner "fresh
+# session per batch" pattern we proactively recreate the client every N rounds
+# (and after any failed round) to force fresh connections + a clean re-auth.
+_BRAIN_CLIENT_REFRESH_EVERY = 8
+
+
+async def _refresh_brain_client(brain) -> bool:
+    """Force a fresh BRAIN httpx client + session on the long-lived FLAT adapter.
+    Uses only existing BrainAdapter methods (close/get_client/ensure_session) so
+    it never touches the adapter's own sim/poll code. Never raises — a refresh
+    failure is non-fatal (the next round retries on whatever client exists)."""
+    try:
+        from backend.adapters.brain_adapter import BrainAdapter
+        await BrainAdapter.close()                       # aclose() + null the global client
+        brain.client = await BrainAdapter.get_client()   # fresh client → fresh connections
+        await brain.ensure_session()                     # re-auth on the fresh client
+        logger.info("[flat] BRAIN client refreshed (fresh connections + re-auth)")
+        return True
+    except Exception as _e:  # noqa: BLE001 — refresh is best-effort
+        logger.warning(f"[flat] BRAIN client refresh failed (non-fatal): {_e}")
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Phase 1.5-C: TaskSchema v2 dual-source readers
 # ---------------------------------------------------------------------------
@@ -1345,6 +1374,13 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 )
                 break
 
+            # Proactively recreate the BRAIN client every N rounds before the
+            # long-lived global client rots into the sim-hang failure mode
+            # (worldquant-miner 'fresh session' pattern). Between rounds → no
+            # sim in flight → safe. Non-fatal on failure.
+            if iterations > 0 and iterations % _BRAIN_CLIENT_REFRESH_EVERY == 0:
+                await _refresh_brain_client(brain)
+
             # HIGH-#4 fix (2026-05-18): V-27.1 ownership self-check at the
             # iteration boundary, mirroring the cascade pattern (cf. line
             # 1267-1273). Without this, a watchdog re-assignment mid-FLAT
@@ -1423,6 +1459,10 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                         f"— exiting loop for fresh re-dispatch: {_rebuild_ex}"
                     )
                     break
+                # A failed round is often a hung BRAIN sim on a rotted client —
+                # recreate the client so the NEXT round gets fresh connections
+                # (this turns a 3-round-bail spiral into a 1-round recovery).
+                await _refresh_brain_client(brain)
                 flat_cursor += 1
                 iterations += 1
                 # Persist the advanced cursor on the fresh session so a resume
