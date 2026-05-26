@@ -58,7 +58,12 @@ class MiningWorkflow:
         self.checkpointer = checkpointer
         
         self._graph = self._build_graph()
-        
+        # Generation-only graph for the pipeline producer (Sub-phase 0 / Unit 2):
+        # identical nodes up to validate, but the post-validate "simulate" route
+        # ends instead — sim/evaluate/persist move to the pipeline consumer +
+        # persister. Built once; compiled on demand in run(generate_only=True).
+        self._gen_graph = self._build_generation_graph()
+
         logger.info("[MiningWorkflow] Initialized")
     
     def _build_graph(self) -> StateGraph:
@@ -235,6 +240,38 @@ class MiningWorkflow:
         workflow.add_edge("save_results", END)
 
         return workflow
+
+    def _build_generation_graph(self) -> StateGraph:
+        """Generation-only graph for the pipeline producer.
+
+        Same nodes + bindings as ``_build_graph`` up to validation, but the
+        post-validate router's ``simulate`` branch (all-valid / retries-
+        exhausted) ends the graph instead of simulating. The final state's
+        ``pending_alphas`` are the validated candidates the pipeline hands to
+        its sim consumers. Simulate/evaluate/save are NOT wired here — they run
+        in the consumer/persister stages. Reusing the identical node bindings
+        keeps all generation hooks (R1b/G5 consume, bandit reads, self-correct)
+        byte-identical to the live generation path, so it cannot drift.
+        """
+        g = StateGraph(MiningState)
+        g.add_node("rag_query", partial(node_rag_query, rag_service=self.rag_service))
+        g.add_node("distill_context", partial(node_distill_context, llm_service=self.llm_service))
+        g.add_node("hypothesis", partial(node_hypothesis, llm_service=self.llm_service))
+        g.add_node("code_gen", partial(node_code_gen, llm_service=self.llm_service))
+        g.add_node("validate", node_validate)
+        g.add_node("self_correct", partial(node_self_correct, llm_service=self.llm_service))
+        g.set_entry_point("rag_query")
+        g.add_edge("rag_query", "distill_context")
+        g.add_edge("distill_context", "hypothesis")
+        g.add_edge("hypothesis", "code_gen")
+        g.add_edge("code_gen", "validate")
+        g.add_conditional_edges(
+            "validate",
+            route_after_validate,
+            {"simulate": END, "self_correct": "self_correct"},
+        )
+        g.add_edge("self_correct", "validate")
+        return g
     
     def compile(self):
         """Compile the graph with optional checkpointer."""
@@ -248,14 +285,21 @@ class MiningWorkflow:
         operators: List[str],
         num_alphas: int = 3,
         config: Dict[str, Any] = None,
+        generate_only: bool = False,
     ) -> Dict[str, Any]:
         """Execute the mining workflow (flat hypothesis-driven, post tier-removal).
 
         Returns dict with generated_alphas, failures, trace_steps.
+
+        When ``generate_only`` is True (pipeline producer), runs only the
+        generation graph (rag…validate/self-correct) and returns
+        ``{"pending_alphas": [validated AlphaCandidate…], "trace_steps": […],
+        "state": final_state}`` — no simulate/evaluate/persist.
         """
         logger.info(
             f"[MiningWorkflow] 开始执行 | "
             f"task={task.id} dataset={dataset_id} target={num_alphas}"
+            f"{' [generate_only]' if generate_only else ''}"
         )
 
         # Initialize state
@@ -344,15 +388,36 @@ class MiningWorkflow:
             llm_mode_used=_llm_mode,
         )
         
-        # Compile and run
-        app = self.compile()
-        
+        # Compile and run. generate_only uses the generation-only graph
+        # (ends after validate); the full graph otherwise.
+        app = self._gen_graph.compile() if generate_only else self.compile()
+
         # Execute graph (Synchronous-style for full state)
         # We use invoke to ensure we get the accumulated final state, NOT just partial updates
         final_state = await app.ainvoke(initial_state, config=config)
-        
+
         # Log completion
         logger.info("[MiningWorkflow] Worklfow execution finished")
+
+        if generate_only:
+            # Producer path: return the validated candidates + buffered trace.
+            def _attr(obj, name, default):
+                if hasattr(obj, name):
+                    return getattr(obj, name)
+                if isinstance(obj, dict):
+                    return obj.get(name, default)
+                return default
+            pending = _attr(final_state, "pending_alphas", []) or []
+            valid_pending = [a for a in pending if getattr(a, "is_valid", None)]
+            logger.info(
+                f"[MiningWorkflow] generate_only done | "
+                f"valid={len(valid_pending)}/{len(pending)}"
+            )
+            return {
+                "pending_alphas": valid_pending,
+                "trace_steps": _attr(final_state, "trace_steps", []),
+                "state": final_state,
+            }
         
         # Get results
         generated_alphas = []
