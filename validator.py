@@ -919,17 +919,12 @@ class ExpressionValidator:
             if bracket_count > 0:
                 all_errors.append("括号不匹配: 左括号过多")
             
-            # Complexity Checks
-            if ast:
-                op_count, unique_fields = self._count_complexity(ast)
-                
-                # Check 1: Max Fields (Limit: 3)
-                if len(unique_fields) > 3:
-                    all_errors.append(f"Field Count Violation: Used {len(unique_fields)} fields ({', '.join(unique_fields)}), limit is 3.")
-                
-                # Check 2: Max Operators (Limit: 8)
-                if op_count > 8:
-                    all_errors.append(f"Complexity Violation: Used {op_count} operators, limit is 8.")
+            # Complexity limits REMOVED (2026-05-26, user request): the hardcoded
+            # field-count ≤3 / operator-count ≤8 caps were far stricter than
+            # BRAIN's own limits and drove heavy self-correct churn — pre-sim
+            # rejecting valid, richer expressions and slowing mining throughput.
+            # BRAIN's actual complexity limits still apply at simulation time, so
+            # genuinely over-complex alphas are caught there (real, not guessed).
 
             return {
                 'valid': len(all_errors) == 0,
