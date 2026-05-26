@@ -1286,7 +1286,15 @@ class Settings(BaseSettings):
     DEFAULT_TEMPERATURE: float = 0.7
     DEFAULT_EXPLORATION_WEIGHT: float = 0.5
     MAX_EVOLUTION_ITERATIONS: int = 10
-    ALPHAS_PER_ROUND: int = 4
+    # Per-round generation batch — how many candidates one CODE_GEN call
+    # produces (and the round then simulates). Option A (2026-05-27): bumped
+    # 4→10. Timing analysis showed SIMULATE is 63% of round wall-time while the
+    # ~175s LLM gen chain runs with 0 sim slots busy; a single gen call
+    # amortizes that fixed cost over more sims, lifting USER-3-slot utilization
+    # ~63%→~84% (~1.5-1.8x throughput) at near-zero risk. Used as the fallback
+    # when a task has no explicit daily_goal. See
+    # docs/delay0_sim_pipeline_design_2026-05-27.md.
+    ALPHAS_PER_ROUND: int = 10
     
     # Optimization Chain Settings
     MAX_OPTIMIZATION_VARIANTS: int = 10

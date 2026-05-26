@@ -496,8 +496,10 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                         try:
                             # PR4 fix — honor the task's configured daily_goal as
                             # num_alphas_per_round (was hardcoded 4 ignoring user
-                            # input).
-                            num_per_round = task.daily_goal if task.daily_goal else 4
+                            # input). Option A (2026-05-27): fallback now reads
+                            # settings.ALPHAS_PER_ROUND (default 10, was dead
+                            # config) instead of a hardcoded 4.
+                            num_per_round = task.daily_goal or settings.ALPHAS_PER_ROUND
                             # 2026-05-21: per-round hard deadline (see _run_one_round_inline).
                             # TimeoutError is caught by the except below → loop continues.
                             result = await asyncio.wait_for(
@@ -1145,7 +1147,9 @@ async def _run_one_round_inline(
             mining_agent.run_evolution_loop(
                 task=task, dataset_id=dataset_id, fields=fields, operators=operators,
                 max_iterations=1, target_alphas=999999,
-                num_alphas_per_round=task.daily_goal if task.daily_goal else 4,
+                # Option A (2026-05-27): fallback batch settings.ALPHAS_PER_ROUND
+                # (default 10) instead of hardcoded 4 — see config.py.
+                num_alphas_per_round=task.daily_goal or settings.ALPHAS_PER_ROUND,
                 run_id=run.id,
                 available_dataset_pool=available_dataset_pool,
                 hypothesis_centric_level=active_level,
