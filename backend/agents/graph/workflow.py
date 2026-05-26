@@ -58,11 +58,13 @@ class MiningWorkflow:
         self.checkpointer = checkpointer
         
         self._graph = self._build_graph()
-        # Generation-only graph for the pipeline producer (Sub-phase 0 / Unit 2):
-        # identical nodes up to validate, but the post-validate "simulate" route
-        # ends instead — sim/evaluate/persist move to the pipeline consumer +
-        # persister. Built once; compiled on demand in run(generate_only=True).
+        # Pipeline sub-graphs (Sub-phase 0 / Unit 2): producer runs generation
+        # only; consumer runs simulate then evaluate per candidate. Same node
+        # bindings as the full graph, so they can't drift. Built once; compiled
+        # on demand in run(generate_only=True) / run_simulate / run_evaluate.
         self._gen_graph = self._build_generation_graph()
+        self._sim_graph = self._build_simulate_graph()
+        self._eval_graph = self._build_evaluate_graph()
 
         logger.info("[MiningWorkflow] Initialized")
     
@@ -272,6 +274,43 @@ class MiningWorkflow:
         )
         g.add_edge("self_correct", "validate")
         return g
+
+    def _build_simulate_graph(self) -> StateGraph:
+        """Single-node graph (simulate→END) for the pipeline consumer.
+
+        Reuses the identical node_simulate binding so per-candidate sims behave
+        exactly like the in-round batch sim (DB dedup, slot claim, delay
+        overrides). node_simulate manages its OWN ephemeral DB sessions, so
+        concurrent consumers never share a connection.
+        """
+        g = StateGraph(MiningState)
+        g.add_node("simulate", partial(node_simulate, brain=self.brain))
+        g.set_entry_point("simulate")
+        g.add_edge("simulate", END)
+        return g
+
+    def _build_evaluate_graph(self) -> StateGraph:
+        """Single-node graph (evaluate→END) for the pipeline consumer.
+
+        node_evaluate writes verdicts onto pending_alphas and (when trace_service
+        is None, as the consumer passes) records trace in-memory only; its Q10/
+        R1a/PR06 side-channels each open their own ephemeral session, so it is
+        concurrent-safe. Persistence (save_results) is intentionally NOT here —
+        the pipeline persister owns it.
+        """
+        g = StateGraph(MiningState)
+        g.add_node("evaluate", partial(node_evaluate, brain=self.brain))
+        g.set_entry_point("evaluate")
+        g.add_edge("evaluate", END)
+        return g
+
+    async def run_simulate(self, state, config: Dict[str, Any] = None):
+        """Run node_simulate on a (single-candidate) state; return final state."""
+        return await self._sim_graph.compile().ainvoke(state, config=config)
+
+    async def run_evaluate(self, state, config: Dict[str, Any] = None):
+        """Run node_evaluate on a (post-sim) state; return final state."""
+        return await self._eval_graph.compile().ainvoke(state, config=config)
     
     def compile(self):
         """Compile the graph with optional checkpointer."""

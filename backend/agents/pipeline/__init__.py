@@ -13,5 +13,11 @@ See docs/sim_pipeline_impl_plan_2026-05-27.md.
 
 from backend.agents.pipeline.types import Candidate, SimResult
 from backend.agents.pipeline.runner import run_pipeline_session
+from backend.agents.pipeline.consumer import build_consumer_stages
 
-__all__ = ["Candidate", "SimResult", "run_pipeline_session"]
+__all__ = [
+    "Candidate",
+    "SimResult",
+    "run_pipeline_session",
+    "build_consumer_stages",
+]

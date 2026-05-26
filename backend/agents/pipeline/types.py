@@ -48,3 +48,6 @@ class SimResult:
     verdict: Optional[str] = None
     trace_records: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
+    # Post-evaluate MiningState (carries the evaluated pending_alphas + context
+    # the persister needs for _incremental_save_alphas). None on a failure path.
+    state: Any = None
