@@ -433,6 +433,19 @@ async def _incremental_save_alphas(
                 if isinstance(alpha.metrics, dict) else None
             ),
         )
+        # delay-0 native mining: persist the delay the sim ACTUALLY ran at.
+        # metrics._sim_settings.delay is ground truth (stamped by node_simulate
+        # / flip-retry). This is the ONLY live mined-alpha persist path (post
+        # tier-system removal), so without it every alpha takes the column
+        # default (1) and delay-0 alphas are mislabeled delay-1 even though the
+        # BRAIN sim used delay-0. Omit when absent → column default (1) applies,
+        # so delay-1 alphas (sim delay=1) store 1 unchanged.
+        _sim_delay = (
+            (metrics_dict.get("_sim_settings") or {}).get("delay")
+            if isinstance(metrics_dict, dict) else None
+        )
+        if _sim_delay is not None:
+            values_dict["delay"] = int(_sim_delay)
         try:
             async with db_session.begin_nested():
                 stmt = (

@@ -205,6 +205,68 @@ class TestGetDatasetsToMinePerDelay:
 
 
 # ---------------------------------------------------------------------------
+# _incremental_save_alphas — the LIVE persist path stamps delay from sim
+# (the ONLY mined-alpha persist path post tier-system removal; workflow.py's
+# ORM Alpha() batch path is skipped, so the fix must live HERE).
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+class TestIncrementalSaveStampsDelay:
+    async def _capture_insert_delay(self, sim_delay, monkeypatch):
+        from types import SimpleNamespace
+        from sqlalchemy.dialects import postgresql
+        from backend.config import settings
+        from backend.agents.graph.nodes.persistence import _incremental_save_alphas
+
+        monkeypatch.setattr(settings, "ENABLE_FAIL_ALPHA_PERSIST", True, raising=False)
+        monkeypatch.setattr(settings, "HYPOTHESIS_REUSE_TERMINAL_GUARD_ENABLED", False, raising=False)
+
+        captured = {}
+
+        class _Ins:
+            def scalar_one_or_none(self): return 999
+
+        class _Sel:
+            def scalar_one_or_none(self): return SimpleNamespace(id=999)
+
+        class _Nested:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *_): return False
+
+        class _Stub:
+            def begin_nested(self): return _Nested()
+            async def execute(self, stmt):
+                if "Insert" in type(stmt).__name__:
+                    captured["params"] = stmt.compile(dialect=postgresql.dialect()).params
+                    return _Ins()
+                return _Sel()
+            async def commit(self): pass
+
+        metrics = {"sharpe": 0.4, "fitness": 0.05, "turnover": 0.35,
+                   "_sim_settings": {"delay": sim_delay, "region": "USA"}}
+        alpha = SimpleNamespace(
+            expression="ts_rank(close, 10)", hypothesis="t", explanation="t",
+            alpha_id="d0persist", is_valid=True, is_simulated=True,
+            simulation_success=True, simulation_error=None, validation_error=None,
+            quality_status="FAIL", metrics=metrics, parent_alpha_id=None,
+            wrapper_kind=None,
+        )
+        await _incremental_save_alphas(
+            db_session=_Stub(), task_id=42, run_id=None,
+            region="USA", universe="TOP3000", dataset_id="pv13",
+            pending_alphas=[alpha], hypothesis_id=None, g8_forest_referenced_ids=None,
+        )
+        return captured.get("params", {})
+
+    async def test_persists_delay_0_from_sim_settings(self, monkeypatch):
+        params = await self._capture_insert_delay(0, monkeypatch)
+        assert params.get("delay") == 0  # ground truth from metrics._sim_settings
+
+    async def test_persists_delay_1_from_sim_settings(self, monkeypatch):
+        params = await self._capture_insert_delay(1, monkeypatch)
+        assert params.get("delay") == 1
+
+
+# ---------------------------------------------------------------------------
 # Alpha.delay column — persisted from the sim's actual delay (not default 1)
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
