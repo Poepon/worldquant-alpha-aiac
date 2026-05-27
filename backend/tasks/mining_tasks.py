@@ -1370,6 +1370,19 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
         for _ in range(len(datasets) + 1):
             if state["iterations"] >= max_iters:
                 return None
+            # BRAIN auth circuit OPEN → the consumers' sims would fast-fail, so
+            # don't burn LLM generation on candidates that can't simulate. Stop
+            # the producer cleanly (cursor preserved → a re-dispatch resumes
+            # once ops re-auths). Sub-phase 1: stop-on-open (legacy parked +
+            # retried the same dataset; stop-and-resume is the simpler safe
+            # equivalent for the decoupled pipeline).
+            from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
+            if BRAIN_AUTH_CIRCUIT.is_open():
+                logger.warning(
+                    f"[flat-pipeline] task={task_id} BRAIN auth circuit OPEN — "
+                    f"stopping producer (cursor preserved, resumable)"
+                )
+                return None
             if not _verify_cascade_ownership(
                 lock_key, lock_token, where="flat-pipeline producer"
             ):
