@@ -1269,10 +1269,18 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     The injected ``db`` is used only for read-only setup + finalization, never
     during the concurrent run.
 
-    Deferred to Sub-phase 1 (so kept simple here): per-round BRAIN client
-    refresh (F4) and consecutive-failure session rebuild — generation rounds
-    rarely poison a session (sim, the slow/hang-prone step, is now in the
-    DB-free consumers).
+    Deferred to Sub-phase 1 (NOT yet replicated from the legacy loop — known
+    gaps when the flag is enabled, acceptable for a bounded shadow but must
+    land before wider rollout):
+      - per-round BRAIN client refresh (F4) + consecutive-failure session
+        rebuild (generation rounds rarely poison a session — sim, the
+        hang-prone step, is now in the DB-free consumers);
+      - R14 task stop-loss (ENABLE_TASK_STOP_LOSS): the auto-pause brake is not
+        evaluated on this path;
+      - BRAIN auth-circuit park-and-retry: when the circuit is open the
+        producer keeps advancing the cursor (legacy parks on the dataset);
+      - trace iteration_offset threading (trace_steps.iteration restarts per
+        round) — pairs with the F3 iteration-grouping redefinition.
     """
     from backend.database import AsyncSessionLocal
     from backend.agents.graph.workflow import MiningWorkflow
@@ -1337,6 +1345,10 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
         state["cursor"] = int(run.runtime_state.get("flat_cursor", 0) or 0)
         state["iterations"] = int(run.runtime_state.get("flat_iterations", 0) or 0)
 
+    # Why the producer stopped — finalization must NOT mark COMPLETED on an
+    # ownership takeover (a replacement worker is meant to continue).
+    _stop_reason = {"ownership_lost": False}
+
     async def _persist_cursor(pdb):
         # Best-effort cursor persistence on the producer's session so a
         # pause-resume skips already-attempted slots. Never fatal.
@@ -1351,14 +1363,17 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             logger.warning(f"[flat-pipeline] cursor persist failed (non-fatal): {_cur_ex}")
 
     async def next_round_inputs(pdb):
-        # Bounded scan for the next usable dataset; advances cursor each probe so
-        # an empty-fields dataset is skipped, not retried forever.
+        # Bounded scan for the next usable dataset; the cursor advances on every
+        # probe so an empty-fields dataset is skipped (not retried forever), but
+        # only a round that ACTUALLY runs counts toward max_iters (mirrors the
+        # legacy loop, which never spends the iteration budget on skips).
         for _ in range(len(datasets) + 1):
             if state["iterations"] >= max_iters:
                 return None
             if not _verify_cascade_ownership(
                 lock_key, lock_token, where="flat-pipeline producer"
             ):
+                _stop_reason["ownership_lost"] = True
                 logger.info(f"[flat-pipeline] task={task_id} ownership lost; stopping producer")
                 return None
             task_p = await pdb.get(MiningTask, task_id)
@@ -1380,10 +1395,13 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
 
             fields = await _prepare_round_fields(pdb, task_p, dataset_id)
             state["cursor"] += 1
+            if not fields:
+                # Skip empty dataset: persist the cursor advance (so resume
+                # skips it too) but DON'T spend an iteration on it.
+                await _persist_cursor(pdb)
+                continue
             state["iterations"] += 1
             await _persist_cursor(pdb)
-            if not fields:
-                continue  # nothing to mine on this dataset → try the next
             pool = await _build_dataset_pool(pdb, task_p, dataset_id)
             config = {
                 "configurable": {
@@ -1401,6 +1419,22 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
         return None
 
     num_consumers = BrainAdapter._current_sim_slot_limit()
+
+    # CRITICAL: node_simulate → simulate_alpha ALREADY acquires the role-aware
+    # `brain:concurrent_sims` Redis slot internally (brain_adapter.py). If the
+    # runner ALSO acquired it per consumer, each candidate would take the slot
+    # TWICE — N consumers hold N slots then each block on a 2nd → self-deadlock
+    # (30-min acquire timeouts, ~0 throughput). So the runner uses NO-OP slots
+    # here and lets simulate_alpha own the single real acquire; concurrency is
+    # still bounded to the slot ceiling by that inner acquire (extra consumers
+    # block inside simulate_alpha). simulate_alpha is shared with legacy callers
+    # so its inner acquire must stay.
+    async def _noop_acquire():
+        return True
+
+    async def _noop_release():
+        return None
+
     stats = {}
     async with BrainAdapter() as brain:
         # consumer_wf.db is never used by node_simulate/node_evaluate (they open
@@ -1415,6 +1449,8 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             num_alphas=num_alphas,
             num_consumers=num_consumers,
             daily_goal=daily_goal,
+            acquire_slot=_noop_acquire,
+            release_slot=_noop_release,
         )
 
     logger.info(
@@ -1429,22 +1465,32 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     # on the run + sync task.status. The producer persisted runtime_state on its
     # own session, so refresh run here before touching it on the injected db.
     if run is not None:
-        try:
-            await db.refresh(task)
-            await db.refresh(run)
-        except Exception:  # noqa: BLE001
-            pass
-        if task.status in ("PAUSED", "STOPPED"):
-            run.status = task.status
+        if _stop_reason["ownership_lost"]:
+            # Ownership was taken over mid-session — a replacement worker is
+            # meant to continue from the preserved cursor. Do NOT mark COMPLETED
+            # (that would race the new owner / falsely finish the session); leave
+            # run + task untouched (legacy's ownership-takeover case).
+            logger.info(
+                f"[flat-pipeline] task={task_id} exited on ownership loss — "
+                f"leaving run/task for the new owner (cursor preserved)"
+            )
         else:
-            run.status = "COMPLETED"
-            if task.status == "RUNNING":
-                task.status = "COMPLETED"
-        run.finished_at = datetime.utcnow()
-        try:
-            await db.commit()
-        except Exception as _fin_ex:  # noqa: BLE001
-            logger.error(f"[flat-pipeline] finalization commit failed: {_fin_ex}")
+            try:
+                await db.refresh(task)
+                await db.refresh(run)
+            except Exception:  # noqa: BLE001
+                pass
+            if task.status in ("PAUSED", "STOPPED"):
+                run.status = task.status
+            else:
+                run.status = "COMPLETED"
+                if task.status == "RUNNING":
+                    task.status = "COMPLETED"
+            run.finished_at = datetime.utcnow()
+            try:
+                await db.commit()
+            except Exception as _fin_ex:  # noqa: BLE001
+                logger.error(f"[flat-pipeline] finalization commit failed: {_fin_ex}")
 
     return {"total_alphas": stats.get("persisted", 0), "pipeline_stats": stats}
 

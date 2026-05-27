@@ -56,6 +56,7 @@ def build_producer(
     next_round_inputs: Callable[[Any], Awaitable[Optional[Dict[str, Any]]]],
     num_alphas: int,
     should_continue: Optional[Callable[[], bool]] = None,
+    target_candidates: Optional[int] = None,
 ) -> Callable[..., Awaitable[None]]:
     """Build the ``produce(push, should_stop)`` callable for run_pipeline_session.
 
@@ -67,15 +68,21 @@ def build_producer(
             bandit pick), or None to stop (cursor exhausted / ownership lost /
             task paused). Owns all FLAT-specific round-selection logic.
         num_alphas: candidates to request per generation round.
-        should_continue: optional () -> bool gate checked before each round
-            (e.g. persisted < daily_goal). None → no extra gate.
+        should_continue: optional () -> bool gate checked before each round.
+        target_candidates: optional cap on TOTAL candidates produced this
+            session (mirrors the legacy loop's daily_goal, which counts alphas
+            ATTEMPTED per round — not persisted-PASS, which at a ~0 PASS rate
+            would never terminate). Stop once produced >= target_candidates.
     """
 
     async def produce(push, should_stop) -> None:
         rounds = 0
+        produced = 0
         async with session_factory() as db:
             wf = workflow_factory(db)
             while not should_stop():
+                if target_candidates is not None and produced >= target_candidates:
+                    break
                 if should_continue is not None and not should_continue():
                     break
                 inputs = await next_round_inputs(db)
@@ -100,7 +107,11 @@ def build_producer(
                         payload=_sim_ready_payload(gen_state, ac),
                     )
                     await push(cand)
-        logger.info("[pipeline] producer finished after %d generation round(s)", rounds)
+                    produced += 1
+        logger.info(
+            "[pipeline] producer finished after %d round(s), %d candidate(s)",
+            rounds, produced,
+        )
 
     return produce
 
@@ -130,23 +141,19 @@ async def run_flat_pipeline_session(
     ``persist_fn`` is an injection seam for tests; defaults to the real
     build_persister(run_id).
     """
-    progress = {"persisted": 0}
-    base_persist = persist_fn or build_persister(run_id=run_id)
+    persist = persist_fn or build_persister(run_id=run_id)
 
-    async def persist(session, results):
-        n = await base_persist(session, results)
-        progress["persisted"] += int(n or 0)
-        return n
-
-    def should_continue() -> bool:
-        return daily_goal is None or progress["persisted"] < daily_goal
-
+    # daily_goal is a PRODUCED-candidate cap (≈ legacy's alphas-attempted-per-
+    # round counting), NOT a persisted-PASS gate — gating on persisted-PASS at a
+    # ~0 PASS rate would never terminate and burn the full max_iters every
+    # session. Termination otherwise comes from next_round_inputs returning None
+    # (cursor exhausted / ownership lost / paused / max_iters).
     produce = build_producer(
         session_factory=session_factory,
         workflow_factory=producer_workflow_factory,
         next_round_inputs=next_round_inputs,
         num_alphas=num_alphas,
-        should_continue=should_continue,
+        target_candidates=daily_goal,
     )
     simulate, evaluate = build_consumer_stages(
         consumer_workflow,

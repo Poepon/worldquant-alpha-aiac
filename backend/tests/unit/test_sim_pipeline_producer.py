@@ -121,6 +121,39 @@ async def test_producer_stops_when_should_continue_false():
 
 
 @pytest.mark.asyncio
+async def test_producer_stops_at_target_candidates():
+    # Unlimited rounds of 2 candidates each; cap at 3 → stop after the round
+    # that crosses the cap (checked before each round → 2 rounds = 4 candidates).
+    class _InfiniteGen:
+        def __init__(self):
+            self.i = 0
+
+        async def run(self, *, task, dataset_id, fields, operators, num_alphas, config, generate_only):
+            self.i += 1
+            state = MiningState(
+                task_id=1, region="USA", universe="TOP3000", dataset_id=dataset_id,
+                pending_alphas=[AlphaCandidate(expression=f"e{self.i}_{k}", is_valid=True) for k in range(2)],
+            )
+            return {"pending_alphas": list(state.pending_alphas), "state": state}
+
+    async def infinite_inputs(db):
+        return {"task": SimpleNamespace(id=1), "dataset_id": "pv1", "fields": [], "operators": [], "config": None}
+
+    pushed = []
+
+    async def push(c):
+        pushed.append(c)
+
+    produce = build_producer(
+        session_factory=_session_factory, workflow_factory=lambda db: _InfiniteGen(),
+        next_round_inputs=infinite_inputs, num_alphas=2, target_candidates=3,
+    )
+    await produce(push, lambda: False)
+    # Stops once produced >= 3; overshoots by at most one round (2 candidates).
+    assert 3 <= len(pushed) <= 4
+
+
+@pytest.mark.asyncio
 async def test_producer_stops_when_inputs_exhausted():
     wf = _FakeGenWorkflow(per_round=[["a"], ["b"]])
     pushed = []
