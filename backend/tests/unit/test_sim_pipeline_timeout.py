@@ -93,16 +93,24 @@ async def test_consumer_eval_timeout_fails_cleanly():
 
 
 @pytest.mark.asyncio
-async def test_producer_gen_timeout_skips_round():
+async def test_producer_gen_timeout_ends_generation():
+    """A hung generation round must END generation (not `continue` reusing the
+    producer's possibly-poisoned shared asyncpg session): the next round is NOT
+    attempted, and the producer returns without hanging."""
     class _HungWF:
+        def __init__(self):
+            self.run_calls = 0
+
         async def run(self, **kwargs):
+            self.run_calls += 1
             await asyncio.sleep(30)        # hung distill/hypothesis/code_gen LLM
             return {"pending_alphas": [], "state": None, "trace_steps": []}
 
+    wf = _HungWF()
     rounds = {"n": 0}
 
-    async def nri(db):
-        if rounds["n"] >= 1:
+    async def nri(db):                     # offers 3 rounds; break must stop at 1
+        if rounds["n"] >= 3:
             return None
         rounds["n"] += 1
         return {"task": object(), "dataset_id": "pv1", "fields": [], "operators": []}
@@ -113,11 +121,12 @@ async def test_producer_gen_timeout_skips_round():
         pushed.append(c)
 
     produce = build_producer(
-        session_factory=_sf, workflow_factory=lambda db: _HungWF(),
+        session_factory=_sf, workflow_factory=lambda db: wf,
         next_round_inputs=nri, num_alphas=4, op_timeout=0.1,
     )
     await asyncio.wait_for(produce(push, lambda: False), timeout=10)
-    assert pushed == []                    # the round timed out → skipped, no hang
+    assert pushed == []                    # no candidates, no hang
+    assert wf.run_calls == 1               # ended after the 1st timeout (break, not continue)
 
 
 @pytest.mark.asyncio

@@ -139,8 +139,7 @@ def build_producer(
                     break
                 rounds += 1
                 # Per-op deadline on the generation LLM chain — a hung distill/
-                # hypothesis/code_gen call fails this round (skipped) instead of
-                # freezing the producer (and thus the whole pipeline) forever.
+                # hypothesis/code_gen call must not freeze the pipeline forever.
                 try:
                     result = await _with_timeout(wf.run(
                         task=inputs["task"],
@@ -151,9 +150,18 @@ def build_producer(
                         config=inputs.get("config"),
                         generate_only=True,
                     ), op_timeout)
-                except Exception:  # noqa: BLE001 — a slow/failed round ≠ dead producer
-                    logger.exception("[pipeline] generation round failed/timed out (skipped)")
-                    continue
+                except Exception:  # noqa: BLE001
+                    # END generation (don't `continue`): a timed-out/failed round
+                    # may have left the producer's SHARED asyncpg session
+                    # poisoned/aborted — esp. a wait_for cancel landing mid
+                    # RAG query (the dc7c8e5 greenlet-poison precedent). Reusing
+                    # it would cascade-fail every later round. Break cleanly:
+                    # queued candidates still drain + the feedback phase runs +
+                    # the `async with` closes the session.
+                    logger.exception(
+                        "[pipeline] generation round failed/timed out; ending "
+                        "generation (shared session integrity uncertain)")
+                    break
                 gen_state = result.get("state") if isinstance(result, dict) else None
                 pending = (result.get("pending_alphas") if isinstance(result, dict) else None) or []
                 # The batch's shared generation trace (RAG/DISTILL/HYPOTHESIS/
@@ -252,9 +260,16 @@ def build_split_producer(
                                 generate_only=True,
                                 stop_after_hypothesis=True,
                             ), op_timeout)
-                        except Exception:  # noqa: BLE001 — slow/failed round ≠ dead stage 1
-                            logger.exception("[pipeline] hyp round failed/timed out (skipped)")
-                            continue
+                        except Exception:  # noqa: BLE001
+                            # END stage 1 (don't `continue`): a timed-out/failed
+                            # round may have poisoned the producer's SHARED
+                            # asyncpg session (wait_for cancel mid RAG query —
+                            # dc7c8e5 precedent). Break so the finally sends the
+                            # sentinels and the code-producers drain cleanly.
+                            logger.exception(
+                                "[pipeline] hyp round failed/timed out; ending "
+                                "stage 1 (shared session integrity uncertain)")
+                            break
                         hyp_state = result.get("state") if isinstance(result, dict) else None
                         if hyp_state is not None:
                             await hyp_q.put((hyp_state, inputs["dataset_id"]))
@@ -305,12 +320,12 @@ def build_split_producer(
                         t.cancel()
                 await asyncio.gather(hyp_task, *code_tasks, return_exceptions=True)
 
-            await _drain_feedback(
+            handled = await _drain_feedback(
                 feedback_ctx, handle_feedback, push, db, wf, should_stop, op_timeout)
 
         logger.info(
-            "[pipeline] split-producer finished after %d round(s), %d candidate(s)",
-            st["rounds"], st["produced"],
+            "[pipeline] split-producer finished after %d round(s), %d candidate(s), %d feedback handled",
+            st["rounds"], st["produced"], handled,
         )
 
     return produce
