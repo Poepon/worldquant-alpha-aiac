@@ -170,6 +170,13 @@ const api = {
     return data
   },
 
+  // Daily PnL series (cumulative + daily) from the alpha_pnl table. Empty
+  // points list when none stored yet.
+  getAlphaPnl: async (id) => {
+    const { data } = await client.get(`/alphas/${id}/pnl`)
+    return data
+  },
+
   // Status transition history (used by AlphaDetail).
   // getAlphaLineage retired post tier-system removal (2026-05-18) — backend
   // /alphas/{id}/lineage endpoint deleted (Ship #3).

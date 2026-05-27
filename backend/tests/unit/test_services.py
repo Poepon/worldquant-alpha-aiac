@@ -136,6 +136,32 @@ class TestAlphaService:
         assert stats["total"] == 2
 
     @pytest.mark.asyncio
+    async def test_get_alpha_pnl_series(self, alpha_service, db_session):
+        """PnL series returns chronological rows; empty list when none."""
+        from backend.models import AlphaPnl
+
+        assert await alpha_service.get_alpha_pnl_series(424242) == []
+
+        # Insert out of order to confirm the query sorts by trade_date asc.
+        db_session.add_all([
+            AlphaPnl(alpha_id=777, trade_date=datetime(2025, 1, 3),
+                     pnl=5.0, cumulative_pnl=15.0),
+            AlphaPnl(alpha_id=777, trade_date=datetime(2025, 1, 1),
+                     pnl=None, cumulative_pnl=10.0),
+            AlphaPnl(alpha_id=777, trade_date=datetime(2025, 1, 2),
+                     pnl=-2.0, cumulative_pnl=8.0),
+            AlphaPnl(alpha_id=888, trade_date=datetime(2025, 1, 1),
+                     pnl=1.0, cumulative_pnl=1.0),
+        ])
+        await db_session.commit()
+
+        series = await alpha_service.get_alpha_pnl_series(777)
+        assert [p["cumulative_pnl"] for p in series] == [10.0, 8.0, 15.0]
+        assert series[0]["pnl"] is None
+        # Scoped to the requested alpha only.
+        assert len(await alpha_service.get_alpha_pnl_series(888)) == 1
+
+    @pytest.mark.asyncio
     async def test_get_alpha(self, alpha_service, sample_alpha):
         """Test getting alpha by ID."""
         alpha = await alpha_service.get_alpha(sample_alpha.id)

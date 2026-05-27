@@ -1169,3 +1169,22 @@ class AlphaService(BaseService):
             rows += 1
         await self.db.flush()
         return rows
+
+    async def get_alpha_pnl_series(self, alpha_db_id: int) -> List[Dict[str, Any]]:
+        """Ordered daily PnL series for an alpha from the alpha_pnl table.
+
+        Returns a chronological list of {trade_date, pnl, cumulative_pnl};
+        empty list when nothing has been persisted yet (mining/sync populate it).
+        """
+        from backend.models import AlphaPnl
+
+        q = (
+            select(AlphaPnl.trade_date, AlphaPnl.pnl, AlphaPnl.cumulative_pnl)
+            .where(AlphaPnl.alpha_id == alpha_db_id)
+            .order_by(AlphaPnl.trade_date.asc())
+        )
+        rows = (await self.db.execute(q)).all()
+        return [
+            {"trade_date": r[0], "pnl": r[1], "cumulative_pnl": r[2]}
+            for r in rows
+        ]

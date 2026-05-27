@@ -457,6 +457,30 @@ async def get_alpha_trace(
     return trace
 
 
+class AlphaPnlPoint(BaseModel):
+    trade_date: datetime
+    pnl: Optional[float] = None
+    cumulative_pnl: Optional[float] = None
+
+
+class AlphaPnlResponse(BaseModel):
+    alpha_id: int
+    points: List[AlphaPnlPoint] = []
+
+
+@router.get("/{alpha_id}/pnl", response_model=AlphaPnlResponse)
+async def get_alpha_pnl(
+    alpha_id: int,
+    service: AlphaService = Depends(get_alpha_service),
+):
+    """Daily PnL series (cumulative + daily diff) for an alpha, read from the
+    alpha_pnl table populated by mining + sync. Returns an empty points list
+    when no PnL has been stored yet (not a 404 — the alpha may simply predate
+    PnL capture or have never simulated)."""
+    points = await service.get_alpha_pnl_series(alpha_id)
+    return AlphaPnlResponse(alpha_id=alpha_id, points=points)
+
+
 # =============================================================================
 # Status transition history
 # =============================================================================
