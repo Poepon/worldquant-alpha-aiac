@@ -662,12 +662,13 @@ const api = {
 
   // flat-F1 advanced kickoff (2026-05-18). Gated server-side by
   // ENABLE_FLAT_CONTINUOUS — flag OFF returns HTTP 400 with detail string.
-  startFlatSession: async ({ region, universe, datasets = [], delay = 1 }) => {
+  startFlatSession: async ({ region, universe, datasets = [], delay = 1, enablePipeline = false }) => {
     const { data } = await client.post('/ops/start-flat-session', {
       region,
       universe,
       datasets,
       delay,
+      enable_pipeline: enablePipeline,
     })
     return data
   },
