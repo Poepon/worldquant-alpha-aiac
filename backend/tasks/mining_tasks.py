@@ -1267,6 +1267,24 @@ def _pick_least_covered_dataset(datasets, coverage):
     return min(datasets, key=lambda d: coverage.get(d, 0))
 
 
+def _pick_diverse_dataset(datasets, dataset_cov, category_cov, category_of):
+    """Option C step-3 explore: pick the dataset minimizing (category coverage,
+    dataset coverage) — i.e. spread across data-source CATEGORIES first (the v3
+    orthogonality currency: same-category datasets produce correlated alphas;
+    cross-category is more orthogonal), then least-covered dataset within. When
+    no category map is given each dataset is its own category → degrades to
+    plain coverage-greedy (C-step1). Structural + low-overfit.
+    """
+    if not datasets:
+        return None
+
+    def _key(d):
+        cat = category_of.get(d, d)
+        return (category_cov.get(cat, 0), dataset_cov.get(d, 0))
+
+    return min(datasets, key=_key)
+
+
 def _dataset_mean_margin(reward, dataset):
     """Mean alpha margin for a dataset this session (reward[d]=(sum, n)); -inf
     when no margins recorded yet (so exploit never picks an unmeasured one)."""
@@ -1274,18 +1292,18 @@ def _dataset_mean_margin(reward, dataset):
     return (s / n) if n else float("-inf")
 
 
-def _pick_dataset(datasets, coverage, reward, explore_prob, rand):
-    """Option C step-2 ε-greedy dataset pick: EXPLORE (least-covered, breadth)
-    with probability ``explore_prob`` or while no margins are known yet;
-    otherwise EXPLOIT (highest mean alpha margin — economic value). Keeps C-step1
-    breadth while tilting budget toward cost-positive datasets. Low-overfit:
-    ε + dense margin signal, no historical threshold fitting.
+def _pick_dataset(datasets, dataset_cov, category_cov, category_of, reward, explore_prob, rand):
+    """Option C ε-greedy dataset pick: EXPLORE (category-stratified least-covered,
+    C-step1 breadth + C-step3 orthogonality-via-category) with probability
+    ``explore_prob`` or while no margins are known yet; otherwise EXPLOIT
+    (highest mean alpha margin — C-step2 economic value). Low-overfit: ε + dense
+    margin + structural category coverage, no historical threshold fitting.
     """
     if not datasets:
         return None
     has_reward = any(reward.get(d, (0.0, 0))[1] for d in datasets)
     if not has_reward or rand() < explore_prob:
-        return _pick_least_covered_dataset(datasets, coverage)
+        return _pick_diverse_dataset(datasets, dataset_cov, category_cov, category_of)
     return max(datasets, key=lambda d: _dataset_mean_margin(reward, d))
 
 
@@ -1349,6 +1367,22 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
 
     operators = await _get_operators(db)
 
+    # Option C step-3: dataset → data-source category, for category-stratified
+    # explore (orthogonality via cross-category spread). Soft-fail → empty map
+    # (each dataset becomes its own category → degrades to plain coverage).
+    _category_of: dict = {}
+    try:
+        crows = await db.execute(
+            select(DatasetMetadata.dataset_id, DatasetMetadata.category).where(
+                DatasetMetadata.region == task.region,
+                DatasetMetadata.dataset_id.in_(datasets),
+            )
+        )
+        _category_of = {did: (cat or did) for did, cat in crows.all()}
+    except Exception as _cat_ex:  # noqa: BLE001
+        logger.warning(f"[flat-pipeline] dataset category fetch failed (non-fatal): {_cat_ex}")
+        _category_of = {}
+
     # Bandit weights (read once on the injected session, same query as the loop).
     bandit_on = bool(getattr(settings, "ENABLE_DATASET_VALUE_BANDIT", False))
     ds_weight_map: dict = {}
@@ -1394,6 +1428,9 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     # resume re-spreads from scratch — acceptable; trace/breadth is observability
     # + steering, not correctness).
     _coverage: dict = {}
+    # Option C step-3: per-category coverage (orthogonality via cross-category
+    # spread). Incremented alongside _coverage.
+    _category_coverage: dict = {}
     # Option C step-2: per-dataset (margin_sum, n) reward — the persister feeds
     # each simulated candidate's margin via _reward_hook; the producer ε-greedy
     # exploits high-mean-margin datasets while still exploring (breadth).
@@ -1455,7 +1492,10 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             # Option C: ε-greedy pick — explore (least-covered, breadth) or
             # exploit (highest mean alpha margin, economic value). bandit
             # (currently OFF) still overrides when enabled.
-            dataset_id = _pick_dataset(datasets, _coverage, _reward, _explore_prob, random.random)
+            dataset_id = _pick_dataset(
+                datasets, _coverage, _category_coverage, _category_of,
+                _reward, _explore_prob, random.random,
+            )
             if bandit_on and ds_weight_map:
                 from backend.selection_strategy import weighted_choice
                 _picked = weighted_choice(
@@ -1470,6 +1510,8 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             # coverage-greedy moves to the next distinct dataset rather than
             # re-picking it.
             _coverage[dataset_id] = _coverage.get(dataset_id, 0) + num_alphas
+            _cat = _category_of.get(dataset_id, dataset_id)
+            _category_coverage[_cat] = _category_coverage.get(_cat, 0) + num_alphas
             if not fields:
                 # Skip empty dataset: persist the cursor advance (so resume
                 # skips it too) but DON'T spend an iteration on it.

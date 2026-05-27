@@ -112,14 +112,35 @@ def test_pick_dataset_epsilon_greedy_explore_vs_exploit():
     ds = ["a", "b", "c"]
     cov = {"a": 0, "b": 4, "c": 4}                 # a least-covered
     reward = {"b": (0.004, 2), "c": (0.001, 1)}    # b mean margin 0.002 > c 0.001
+    # (no category map → each dataset is its own category → plain coverage)
     # cold start (no reward) → always explore (least-covered), even on an exploit roll
-    assert _pick_dataset(ds, cov, {}, 0.5, lambda: 0.99) == "a"
+    assert _pick_dataset(ds, cov, {}, {}, {}, 0.5, lambda: 0.99) == "a"
     # explore roll (rand < explore_prob) → least-covered
-    assert _pick_dataset(ds, cov, reward, 0.5, lambda: 0.1) == "a"
+    assert _pick_dataset(ds, cov, {}, {}, reward, 0.5, lambda: 0.1) == "a"
     # exploit roll (rand >= explore_prob) + reward present → highest mean margin
-    assert _pick_dataset(ds, cov, reward, 0.5, lambda: 0.9) == "b"
+    assert _pick_dataset(ds, cov, {}, {}, reward, 0.5, lambda: 0.9) == "b"
     # a has no reward (mean = -inf) → never picked on exploit
-    assert _pick_dataset(ds, cov, reward, 0.0, lambda: 0.9) != "a"
+    assert _pick_dataset(ds, cov, {}, {}, reward, 0.0, lambda: 0.9) != "a"
+
+
+def test_pick_diverse_dataset_spreads_categories_first():
+    from backend.tasks.mining_tasks import _pick_diverse_dataset
+    ds = ["analyst4", "fundamental2", "fundamental6", "news12"]
+    catof = {"analyst4": "analyst", "fundamental2": "fundamental",
+             "fundamental6": "fundamental", "news12": "news"}
+    dcov, ccov = {}, {}
+    picked = []
+    for _ in range(4):
+        d = _pick_diverse_dataset(ds, dcov, ccov, catof)
+        picked.append(d)
+        dcov[d] = dcov.get(d, 0) + 4
+        c = catof[d]
+        ccov[c] = ccov.get(c, 0) + 4
+    # First 3 picks cover 3 DISTINCT categories before the 2nd fundamental.
+    assert {catof[picked[0]], catof[picked[1]], catof[picked[2]]} == {"analyst", "fundamental", "news"}
+    assert picked[3] == "fundamental6"  # 2nd same-category dataset comes last
+    # Empty category map → each dataset its own category → plain coverage-greedy.
+    assert _pick_diverse_dataset(ds, {}, {}, {}) == "analyst4"
 
 
 class _FakePdb:
