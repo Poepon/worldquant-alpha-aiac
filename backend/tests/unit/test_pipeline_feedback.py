@@ -306,6 +306,28 @@ async def test_feedback_stop_during_drain_no_hang():
 
 
 @pytest.mark.asyncio
+async def test_async_classify_feedback_rejected():
+    """An async classify_feedback would return a never-None coroutine (queued as
+    a bogus event) and break the await-free atomicity → fail loud at activation."""
+
+    async def _async_classify(result):  # wrong: must be sync
+        return None
+
+    with pytest.raises(TypeError, match="SYNC callable"):
+        await run_pipeline_session(
+            produce=_make_produce([]),
+            simulate=_simulate,
+            evaluate=_evaluate,
+            persist=_make_persist({"n": 0, "exprs": []}),
+            session_factory=_sf,
+            num_consumers=1,
+            acquire_slot=_acq,
+            release_slot=_rel,
+            classify_feedback=_async_classify,
+        )
+
+
+@pytest.mark.asyncio
 async def test_run_flat_pipeline_session_both_or_neither_feedback():
     """run_flat_pipeline_session rejects a one-sided feedback wiring (classify
     without handle, or vice versa) — the persister would queue events the

@@ -32,7 +32,9 @@ _SENTINEL = object()
 
 # Type aliases for the injected stages.
 PushFn = Callable[[Candidate], Awaitable[None]]
-ProduceFn = Callable[[PushFn, "Callable[[], bool]"], Awaitable[None]]
+# produce(push, should_stop) — or produce(push, should_stop, feedback_ctx) when
+# the F2 feedback loop is active. Arity varies, so the alias is left open.
+ProduceFn = Callable[..., Awaitable[None]]
 SimulateFn = Callable[[Candidate], Awaitable[Any]]
 EvaluateFn = Callable[[Candidate, Any], Awaitable[SimResult]]
 PersistFn = Callable[[Any, List[SimResult]], Awaitable[int]]
@@ -143,6 +145,16 @@ async def run_pipeline_session(
 
     # --- F2 feedback loop (inactive unless classify_feedback is provided) ------
     _feedback_active = classify_feedback is not None
+    # The persister calls classify_feedback await-free, BETWEEN its +1-event and
+    # -1-result, so that block stays atomic (single-threaded asyncio → no
+    # interleave → no premature quiescence). An async classify would (a) break
+    # that atomicity and (b) return a never-None coroutine that gets queued as a
+    # bogus "event". Fail loud rather than silently mis-fire the loop.
+    if _feedback_active and asyncio.iscoroutinefunction(classify_feedback):
+        raise TypeError(
+            "classify_feedback must be a SYNC callable (it is invoked await-free "
+            "inside the persister's atomic +1-event/-1-result accounting)"
+        )
     # Unbounded ON PURPOSE: it must never block the persister's put, otherwise
     # producer(push→work_q)→consumer(→persist_q)→persister(→feedback_q)→producer
     # would form a cycle of bounded-blocking queues that can deadlock. Fan-out
