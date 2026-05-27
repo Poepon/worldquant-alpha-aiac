@@ -51,3 +51,30 @@ class SimResult:
     # Post-evaluate MiningState (carries the evaluated pending_alphas + context
     # the persister needs for _incremental_save_alphas). None on a failure path.
     state: Any = None
+
+
+# Feedback-event kinds (F2 — close the CoSTEER loop in the pipeline).
+FEEDBACK_RETRY = "RETRY"          # R1b: FAIL+implementation → rewrite expression, re-sim
+FEEDBACK_MUTATE = "MUTATE"        # R1b: FAIL+hypothesis → mutate hypothesis, regenerate
+FEEDBACK_PASS_LANDED = "PASS_LANDED"  # G5: a PASS persisted → maybe crossover offspring
+
+
+@dataclass
+class FeedbackEvent:
+    """A signal routed back from the persister to the producer to close a
+    CoSTEER feedback loop in the pipeline (R1b retry / mutate, G5 crossover).
+
+    The persister CLASSIFIES a SimResult into an event (DB-free: reads
+    verdict/metrics off the result + a budget); the producer HANDLES it (it owns
+    a DB session + the generation workflow, so it can rewrite/mutate/crossover
+    and ``push`` derived candidates back onto the work queue).
+
+    Lifecycle (see runner quiescence accounting): each queued event is one live
+    "work unit" — the session is not quiescent until every event has been
+    handled AND every derived candidate has been simulated+persisted. ``kind``
+    selects the handler; ``result`` carries the triggering SimResult.
+    """
+
+    kind: str
+    result: Optional[SimResult] = None
+    payload: Dict[str, Any] = field(default_factory=dict)

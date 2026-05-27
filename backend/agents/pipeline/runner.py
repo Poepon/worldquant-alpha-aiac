@@ -22,7 +22,7 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, List, Optional
 
-from backend.agents.pipeline.types import Candidate, SimResult
+from backend.agents.pipeline.types import Candidate, FeedbackEvent, SimResult
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +36,25 @@ ProduceFn = Callable[[PushFn, "Callable[[], bool]"], Awaitable[None]]
 SimulateFn = Callable[[Candidate], Awaitable[Any]]
 EvaluateFn = Callable[[Candidate, Any], Awaitable[SimResult]]
 PersistFn = Callable[[Any, List[SimResult]], Awaitable[int]]
+# F2: persister classifies a SimResult into 0/1 feedback event (DB-free).
+ClassifyFeedbackFn = Callable[[SimResult], Optional[FeedbackEvent]]
+
+
+class _FeedbackCtx:
+    """Handle the runner hands to the producer's drain phase (F2).
+
+    ``next_event`` blocks until the next feedback event (or None = quiescence,
+    stop). ``mark_primary_done`` tells the runner primary generation finished
+    (so the quiescence sentinel can fire once outstanding work drains).
+    ``event_done`` releases one event's work unit after the producer handled it.
+    """
+
+    __slots__ = ("next_event", "mark_primary_done", "event_done")
+
+    def __init__(self, next_event, mark_primary_done, event_done):
+        self.next_event = next_event
+        self.mark_primary_done = mark_primary_done
+        self.event_done = event_done
 
 
 async def run_pipeline_session(
@@ -51,6 +70,7 @@ async def run_pipeline_session(
     acquire_slot: Optional[Callable[[], Awaitable[bool]]] = None,
     release_slot: Optional[Callable[[], Awaitable[None]]] = None,
     stop_event: Optional[asyncio.Event] = None,
+    classify_feedback: Optional[ClassifyFeedbackFn] = None,
 ) -> dict:
     """Run one pipeline session to completion and return run stats.
 
@@ -73,9 +93,19 @@ async def run_pipeline_session(
         persist_every: flush the persist batch every N results (1 = each).
         acquire_slot / release_slot: slot primitives; default to BrainAdapter's.
         stop_event: optional cooperative stop; checked by ``should_stop``.
+        classify_feedback: optional (F2) ``(SimResult) -> FeedbackEvent | None``.
+            When set, the feedback loop is ACTIVE: per persisted result the
+            persister classifies a feedback event onto an internal feedback
+            queue, and the producer's drain phase handles it (closing the
+            CoSTEER loop). The producer callable MUST accept the optional 3rd
+            ``feedback_ctx`` arg and drain it (build_producer does this when its
+            own ``handle_feedback`` is set — the two MUST be wired together).
+            When None (default) the loop is INACTIVE and the path is
+            byte-identical to the pre-F2 runner.
 
     Returns:
-        stats dict: produced, simulated, persisted, errors, slot_timeouts.
+        stats dict: produced, simulated, persisted, errors, slot_timeouts,
+        and (feedback active) feedback_events / feedback_handled.
     """
     if num_consumers < 1:
         raise ValueError("num_consumers must be >= 1")
@@ -111,16 +141,89 @@ async def run_pipeline_session(
         "persist_failures": 0,
     }
 
+    # --- F2 feedback loop (inactive unless classify_feedback is provided) ------
+    _feedback_active = classify_feedback is not None
+    # Unbounded ON PURPOSE: it must never block the persister's put, otherwise
+    # producer(push→work_q)→consumer(→persist_q)→persister(→feedback_q)→producer
+    # would form a cycle of bounded-blocking queues that can deadlock. Fan-out
+    # is capped by the handlers (retry≤3/alpha, mutate≤2, offspring≤2), so an
+    # unbounded feedback queue cannot grow without bound.
+    feedback_q: Optional[asyncio.Queue] = asyncio.Queue() if _feedback_active else None
+    if _feedback_active:
+        stats["feedback_events"] = 0
+        stats["feedback_handled"] = 0
+        # Persist each result immediately so a PASS is COMMITTED before its
+        # PASS_LANDED event reaches the producer's crossover DB query.
+        persist_every = 1
+    # Live "work units": +1 per pushed candidate and per queued feedback event;
+    # -1 when a result is persister-processed / an event is producer-handled.
+    # Single-threaded asyncio → a plain int needs no lock. Quiescence (and thus
+    # the terminating sentinel) is outstanding == 0 after primary gen finished.
+    wstate = {"outstanding": 0, "primary_done": False, "done_signalled": False}
+
+    def _maybe_signal_done() -> None:
+        if (
+            _feedback_active
+            and wstate["primary_done"]
+            and wstate["outstanding"] == 0
+            and not wstate["done_signalled"]
+        ):
+            wstate["done_signalled"] = True
+            feedback_q.put_nowait(_SENTINEL)  # unbounded → never blocks
+
     def _should_stop() -> bool:
         return stop_event is not None and stop_event.is_set()
 
     async def _push(candidate: Candidate) -> None:
+        if _feedback_active:
+            wstate["outstanding"] += 1  # before the (maybe-blocking) put
         await work_q.put(candidate)
         stats["produced"] += 1
 
+    async def _next_feedback() -> Optional[FeedbackEvent]:
+        # Block for the next event, but wake every few seconds to re-check the
+        # cooperative stop: on an ABRUPT stop the quiescence sentinel may never
+        # fire (consumers drop work without producing a result → outstanding
+        # never returns to 0), and the producer must not strand here. A
+        # cancelled empty get() loses nothing (asyncio.Queue re-wakes the next
+        # waiter), so polling is safe.
+        while True:
+            if _should_stop():
+                return None
+            try:
+                item = await asyncio.wait_for(feedback_q.get(), timeout=2.0)
+            except asyncio.TimeoutError:
+                continue
+            try:
+                return None if item is _SENTINEL else item
+            finally:
+                feedback_q.task_done()
+
+    def _mark_primary_done() -> None:
+        # Generation is done. If no work is outstanding (0 candidates, or all
+        # already drained) this fires the terminating sentinel immediately so
+        # the producer's drain loop doesn't block forever.
+        wstate["primary_done"] = True
+        _maybe_signal_done()
+
+    def _event_done() -> None:
+        wstate["outstanding"] -= 1
+        _maybe_signal_done()
+
+    _feedback_ctx = (
+        _FeedbackCtx(_next_feedback, _mark_primary_done, _event_done)
+        if _feedback_active
+        else None
+    )
+
     async def _producer() -> None:
         try:
-            await produce(_push, _should_stop)
+            # Inactive path: call produce with the original 2-arg signature so
+            # existing produce callables / fakes are untouched (byte-identical).
+            if _feedback_active:
+                await produce(_push, _should_stop, _feedback_ctx)
+            else:
+                await produce(_push, _should_stop)
         except Exception:  # noqa: BLE001 — a producer crash must still drain
             logger.exception("[pipeline] producer crashed; draining consumers")
         finally:
@@ -204,6 +307,23 @@ async def run_pipeline_session(
                 batch.append(item)
                 if len(batch) >= persist_every:
                     await _flush()
+                # F2: this result is now COMMITTED (persist_every == 1 when the
+                # feedback loop is active). Classify it into 0/1 feedback event
+                # and release its work unit. Emit (+1) BEFORE release (-1) so
+                # ``outstanding`` never transiently hits 0 while an event is
+                # still pending (which would fire a premature done-sentinel).
+                if _feedback_active and isinstance(item, SimResult):
+                    ev = None
+                    try:
+                        ev = classify_feedback(item)
+                    except Exception:  # noqa: BLE001 — classification never fatal
+                        logger.exception("[pipeline] classify_feedback failed (skipped)")
+                    if ev is not None:
+                        wstate["outstanding"] += 1
+                        stats["feedback_events"] += 1
+                        feedback_q.put_nowait(ev)
+                    wstate["outstanding"] -= 1
+                    _maybe_signal_done()
             finally:
                 persist_q.task_done()
 
