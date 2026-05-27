@@ -1556,37 +1556,45 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     # combats the long-session client-rot sim-hang; runs only with 0 in flight.
     _refresh_every = int(getattr(settings, "SIM_PIPELINE_CLIENT_REFRESH_EVERY", 0) or 0)
 
-    # F2-2: R1b retry through the feedback channel — wired only when the legacy
-    # retry flag is on. classify (persister-side) turns a FAIL+IMPLEMENTATION
-    # result with budget into a RETRY event; handle (producer-side) rewrites +
-    # re-validates and re-pushes the valid rewrite. When OFF, both stay None and
-    # the pipeline is byte-identical (the feedback loop never activates). Depth
-    # caps at R1B_MAX_RETRIES_PER_ALPHA, carried on the candidate's state.
-    _retry_classify = None
-    _retry_handle = None
-    if getattr(settings, "ENABLE_R1B_RETRY_LOOP", False):
+    # F2-2/F2-3: R1b retry + hypothesis-mutate through the feedback channel —
+    # wired only when at least one legacy R1b flag is on. The unified classifier
+    # (persister-side) turns a FAIL into a RETRY (implementation) or MUTATE
+    # (hypothesis; dominates "both") event; the handler (producer-side) rewrites+
+    # re-pushes (retry) or proposes a new hypothesis + regenerates (mutate). When
+    # both flags are OFF, classify/handle stay None and the pipeline is
+    # byte-identical (the loop never activates). Depth bounds: retry
+    # R1B_MAX_RETRIES_PER_ALPHA; mutate R1B_MAX_MUTATION_DEPTH (DB-chained).
+    _retry_on = bool(getattr(settings, "ENABLE_R1B_RETRY_LOOP", False))
+    _mutate_on = bool(getattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False))
+    _fb_classify = None
+    _fb_handle = None
+    if _retry_on or _mutate_on:
         from backend.agents.pipeline.feedback_r1b import (
-            build_retry_classifier,
-            build_retry_handler,
+            build_feedback_classifier,
+            build_feedback_handler,
         )
-        _retry_classify = build_retry_classifier(
-            max_retries=int(getattr(settings, "R1B_MAX_RETRIES_PER_ALPHA", 3))
+        _fb_classify = build_feedback_classifier(
+            retry_on=_retry_on,
+            mutate_on=_mutate_on,
+            max_retries=int(getattr(settings, "R1B_MAX_RETRIES_PER_ALPHA", 3)),
         )
-        _retry_handle = build_retry_handler(
-            config={"configurable": {"trace_service": None, "run_id": run_id}}
+        _fb_handle = build_feedback_handler(
+            config={"configurable": {"trace_service": None, "run_id": run_id}},
+            mutate_num_alphas=num_alphas,
         )
-        # Retry keys off _r1a_attribution, which node_evaluate writes ONLY when
-        # ENABLE_R1A_HOOK is on (or an R5 LLM-judge override). With neither
-        # source the classifier never emits a RETRY → retry is inert. This is the
-        # SAME implicit dependency as the legacy in-graph retry, but warn loudly
-        # so an operator who flipped only ENABLE_R1B_RETRY_LOOP isn't puzzled.
+        # Both retry and mutate key off _r1a_attribution, which node_evaluate
+        # writes ONLY under ENABLE_R1A_HOOK (or an R5 LLM-judge override). With
+        # neither source the classifier never emits → the feedback loop is inert.
+        # This is the SAME implicit dependency as the legacy in-graph R1b; warn
+        # loudly so a half-configured flip isn't a silent no-op.
         if not (getattr(settings, "ENABLE_R1A_HOOK", False)
                 or getattr(settings, "ENABLE_LLM_JUDGE", False)):
             logger.warning(
-                "[flat-pipeline] task=%s ENABLE_R1B_RETRY_LOOP is on but neither "
-                "ENABLE_R1A_HOOK nor ENABLE_LLM_JUDGE is set — no _r1a_attribution "
-                "will be produced, so the retry loop will never fire (inert).",
-                task_id,
+                "[flat-pipeline] task=%s R1b feedback (retry=%s mutate=%s) is on but "
+                "neither ENABLE_R1A_HOOK nor ENABLE_LLM_JUDGE is set — no "
+                "_r1a_attribution will be produced, so the feedback loop will never "
+                "fire (inert).",
+                task_id, _retry_on, _mutate_on,
             )
 
     stats = {}
@@ -1615,8 +1623,8 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             release_slot=_noop_release,
             refresher=refresher,
             reward_hook=_reward_hook,
-            classify_feedback=_retry_classify,
-            handle_feedback=_retry_handle,
+            classify_feedback=_fb_classify,
+            handle_feedback=_fb_handle,
         )
 
     logger.info(

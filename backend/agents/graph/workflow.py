@@ -65,10 +65,10 @@ class MiningWorkflow:
         self._gen_graph = self._build_generation_graph()
         self._sim_graph = self._build_simulate_graph()
         self._eval_graph = self._build_evaluate_graph()
-        # F2-2 R1b retry sub-graph (code_gen_retry → validate): built lazily on
-        # first run_retry so r1b_loop is only imported when retry is actually
-        # wired (ENABLE_R1B_RETRY_LOOP on). None = not yet built.
-        self._retry_graph = None
+        # F2 R1b feedback sub-graphs (built lazily on first run_retry/run_mutate
+        # so r1b_loop is imported only when the matching flag is actually wired).
+        self._retry_graph = None    # code_gen_retry → validate (F2-2)
+        self._mutate_graph = None   # hypothesis_mutate → END   (F2-3)
 
         logger.info("[MiningWorkflow] Initialized")
     
@@ -359,7 +359,40 @@ class MiningWorkflow:
         if self._retry_graph is None:
             self._retry_graph = self._build_retry_graph()
         return await self._retry_graph.compile().ainvoke(state, config=config)
-    
+
+    def _build_mutate_graph(self) -> StateGraph:
+        """hypothesis_mutate → END for the F2-3 R1b mutate handler.
+
+        Runs node_hypothesis_mutate on a FAIL+HYPOTHESIS state: it groups the
+        failed alpha(s), checks the DB mutation-depth cap, LLM-proposes a revised
+        hypothesis, INSERTs the new Hypothesis row (parent FK + r1b_mutation_depth
+        — its OWN session), and returns ``r1b_pending_new_hypothesis``. It does
+        NOT generate alphas; the handler injects the new hypothesis into a fresh
+        wf.run(generate_only=True) (the legacy consumed-hypothesis path), so the
+        depth cap — chained via the new hypothesis's id on current_hypothesis_id —
+        bounds the mutation chain (and thus feedback fan-out).
+        """
+        from backend.agents.graph.nodes.r1b_loop import node_hypothesis_mutate
+
+        g = StateGraph(MiningState)
+        g.add_node(
+            "hypothesis_mutate",
+            partial(node_hypothesis_mutate, llm_service=self.llm_service),
+        )
+        g.set_entry_point("hypothesis_mutate")
+        g.add_edge("hypothesis_mutate", END)
+        return g
+
+    async def run_mutate(self, state, config: Dict[str, Any] = None):
+        """Run node_hypothesis_mutate on a FAIL+HYPOTHESIS state (F2-3); return
+        final state. ``r1b_pending_new_hypothesis`` is the new hypothesis dict
+        (with ``hypothesis_id`` when the INSERT succeeded), or absent/None when
+        the mutation was a no-op (per-cycle/depth/token budget, cross-pillar
+        drift, or LLM returned an unchanged statement)."""
+        if self._mutate_graph is None:
+            self._mutate_graph = self._build_mutate_graph()
+        return await self._mutate_graph.compile().ainvoke(state, config=config)
+
     def compile(self):
         """Compile the graph with optional checkpointer."""
         return self._graph.compile(checkpointer=self.checkpointer)
