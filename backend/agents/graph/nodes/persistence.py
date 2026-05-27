@@ -690,6 +690,114 @@ async def _incremental_save_alphas(
     return out
 
 
+def _classify_alpha_failure(alpha, *, persist_fail: bool):
+    """Classify one pending alpha into a (error_type, error_message) failure, or
+    None when it must NOT be recorded as a failure.
+
+    Single source of truth for the failure taxonomy, shared by node_save_results
+    (batch path) and _incremental_save_failures (pipeline path). Returns None for:
+    PASS/PASS_PROVISIONAL, retryable transient sims (V-27.61), and BRAIN-accepted
+    FAIL alphas when ENABLE_FAIL_ALPHA_PERSIST routes them to the entity store.
+    """
+    if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
+        return None
+    # P1: BRAIN-accepted FAIL already routed to the alphas table (success path).
+    if (
+        persist_fail
+        and alpha.quality_status == "FAIL"
+        and alpha.alpha_id
+        and alpha.is_simulated
+        and alpha.simulation_success
+    ):
+        return None
+    # V-27.61: retryable transient BRAIN failures are not hypothesis evidence.
+    if isinstance(alpha.metrics, dict) and alpha.metrics.get("_sim_retryable"):
+        return None
+
+    if isinstance(alpha.metrics, dict) and alpha.metrics.get("_pre_brain_skip"):
+        if alpha.metrics.get("_skip_kind") == "dedup":
+            return "DEDUP_SKIP", (
+                alpha.simulation_error
+                or "DB duplicate: already simulated (no quota consumed)"
+            )
+        return "PRESIM_SKIP", (
+            alpha.simulation_error
+            or "Pre-BRAIN skip (classifier/Q10; no quota consumed)"
+        )
+    if alpha.is_valid is False:
+        return "SYNTAX_ERROR", (alpha.validation_error or "Syntax Error")
+    if alpha.is_simulated and not alpha.simulation_success:
+        return "SIMULATION_ERROR", (alpha.simulation_error or "Simulation Failed")
+    if alpha.quality_status == "FAIL":
+        if persist_fail:
+            logger.warning(
+                f"[failure-classify] P1 contract violation: FAIL gate without "
+                f"(alpha_id + is_simulated + simulation_success); "
+                f"alpha_id={alpha.alpha_id} is_simulated={alpha.is_simulated} "
+                f"sim_success={alpha.simulation_success} "
+                f"expression={(alpha.expression or '')[:80]!r}"
+            )
+            return "OTHER", "FAIL gate but BRAIN handle missing / sim unverified"
+        return "QUALITY_CHECK_FAILED", "Metrics below threshold"
+    return "OTHER", (
+        alpha.simulation_error
+        or (
+            f"Unclassified: quality_status={alpha.quality_status or '<none>'} "
+            f"is_simulated={alpha.is_simulated} sim_success={alpha.simulation_success}"
+        )
+    )
+
+
+async def _incremental_save_failures(
+    db_session,
+    task_id: int,
+    run_id: Optional[int],
+    pending_alphas: List,
+    hypothesis_id: Optional[int] = None,
+    rag_ab_arm: Optional[str] = None,
+) -> int:
+    """Write AlphaFailure rows for non-PASS pending alphas — the pipeline
+    persister's equivalent of node_save_results' failure path (which writes via
+    run_with_persistence). Per-row savepoint so one bad row never drops the
+    batch; commits once at the end. Returns the number of failure rows written.
+    """
+    from backend.config import settings as _persist_settings
+    from backend.models import AlphaFailure
+
+    persist_fail = bool(getattr(_persist_settings, "ENABLE_FAIL_ALPHA_PERSIST", False))
+    bandit_arm = await _read_bandit_arm_for_round(db_session, task_id)
+
+    written = 0
+    for alpha in pending_alphas:
+        cls = _classify_alpha_failure(alpha, persist_fail=persist_fail)
+        if cls is None:
+            continue
+        err_type, err_msg = cls
+        try:
+            rec = AlphaFailure(
+                task_id=task_id,
+                run_id=run_id,
+                expression=(alpha.expression[:2000] if alpha.expression else None),
+                error_type=err_type,
+                error_message=(err_msg[:500] if err_msg else None),
+                hypothesis_id=hypothesis_id,
+                bandit_arm_recommended=bandit_arm,
+                rag_ab_arm=rag_ab_arm,
+            )
+            async with db_session.begin_nested():
+                db_session.add(rec)
+                await db_session.flush()
+            written += 1
+        except Exception as _fe:  # noqa: BLE001 — one bad row ≠ dropped batch
+            logger.error(f"[_incremental_save_failures] row INSERT failed (skipped): {_fe}")
+    if written:
+        try:
+            await db_session.commit()
+        except Exception as _ce:  # noqa: BLE001
+            logger.error(f"[_incremental_save_failures] commit failed: {_ce}")
+    return written
+
+
 # =============================================================================
 # NODE: Save Results
 # =============================================================================
@@ -905,84 +1013,13 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
         getattr(_persist_settings, "ENABLE_FAIL_ALPHA_PERSIST", False)
     )
     for alpha in state.pending_alphas:
-        if alpha.quality_status in ("PASS", "PASS_PROVISIONAL"):
+        # Failure taxonomy extracted to _classify_alpha_failure (shared with the
+        # pipeline persister's _incremental_save_failures). None → not recorded
+        # (PASS/PROVISIONAL, retryable, or BRAIN-accepted FAIL when persist-on).
+        _cls = _classify_alpha_failure(alpha, persist_fail=_persist_fail)
+        if _cls is None:
             continue
-        # P1: skip BRAIN-accepted FAIL — already in success_batch
-        if (
-            _persist_fail
-            and alpha.quality_status == "FAIL"
-            and alpha.alpha_id
-            and alpha.is_simulated
-            and alpha.simulation_success
-        ):
-            continue
-        # V-27.61: retryable alphas are transient BRAIN failures (HTTP 200
-        # but empty/error sim), not real hypothesis evidence. Writing them as
-        # AlphaFailure rows poisons refresh_stats's fail_count → inflates the
-        # Hypothesis.alpha_count denormalized column (and the V-27.100 sort
-        # key). Skip — they get re-simulated, not recorded as failures.
-        if isinstance(alpha.metrics, dict) and alpha.metrics.get("_sim_retryable"):
-            continue
-
-        # Determine error type and message
-        err_type = "UNKNOWN"
-        err_msg = "Unknown error"
-
-        # Bug A fix (2026-05-20): pre-BRAIN skips (pre-simulate skeleton
-        # classifier + Q10 hard reject) set is_simulated=True for bookkeeping
-        # but NEVER consumed a BRAIN simulate slot. Label them PRESIM_SKIP so
-        # the quota guard can exclude them — otherwise they inflate the daily
-        # BRAIN-quota denominator (~20% on the news datasets) and pause mining
-        # sessions early. Checked BEFORE the is_simulated branch which would
-        # otherwise mislabel them SIMULATION_ERROR.
-        if isinstance(alpha.metrics, dict) and alpha.metrics.get("_pre_brain_skip"):
-            # Bug A follow-up (2026-05-20): distinguish dedup skips (already
-            # simulated in a prior round/task — no fresh BRAIN slot) from
-            # pre-simulate/Q10 classifier skips. Both excluded from quota.
-            if alpha.metrics.get("_skip_kind") == "dedup":
-                err_type = "DEDUP_SKIP"
-                err_msg = alpha.simulation_error or "DB duplicate: already simulated (no quota consumed)"
-            else:
-                err_type = "PRESIM_SKIP"
-                err_msg = alpha.simulation_error or "Pre-BRAIN skip (classifier/Q10; no quota consumed)"
-        elif alpha.is_valid is False:
-            err_type = "SYNTAX_ERROR"
-            err_msg = alpha.validation_error or "Syntax Error"
-        elif alpha.is_simulated and not alpha.simulation_success:
-            err_type = "SIMULATION_ERROR"
-            err_msg = alpha.simulation_error or "Simulation Failed"
-        elif alpha.quality_status == "FAIL":
-            # P1 contract violation: FAIL gate without alpha_id (or with
-            # alpha_id but is_simulated=False / simulation_success=False)
-            # should not happen — gate verdict is computed only on
-            # simulated alphas. Log it explicitly when flag ON so the
-            # situation is observable but doesn't break the batch.
-            if _persist_fail:
-                logger.warning(
-                    f"[node_save_results] P1 contract violation: FAIL gate "
-                    f"without (alpha_id + is_simulated + simulation_success); "
-                    f"alpha_id={alpha.alpha_id} is_simulated={alpha.is_simulated} "
-                    f"sim_success={alpha.simulation_success} "
-                    f"expression={(alpha.expression or '')[:80]!r}"
-                )
-                err_type = "OTHER"
-                err_msg = "FAIL gate but BRAIN handle missing / sim unverified"
-            else:
-                err_type = "QUALITY_CHECK_FAILED"
-                err_msg = "Metrics below threshold"
-        else:
-            # 2026-05-24: enrich the catch-all so an "OTHER" failure self-describes
-            # rather than logging an opaque "Unknown failure". raw_response is NULL
-            # on the mining path (never plumbed), so error_message is the only
-            # diagnostic we keep — carry the alpha's actual verdict + sim signals.
-            err_type = "OTHER"
-            err_msg = (
-                alpha.simulation_error
-                or (
-                    f"Unclassified: quality_status={alpha.quality_status or '<none>'} "
-                    f"is_simulated={alpha.is_simulated} sim_success={alpha.simulation_success}"
-                )
-            )
+        err_type, err_msg = _cls
 
         rec = FailureRecord(
             expression=alpha.expression,

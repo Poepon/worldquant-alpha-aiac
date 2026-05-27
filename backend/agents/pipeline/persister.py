@@ -46,18 +46,26 @@ def build_persister(
     *,
     run_id: Optional[int],
     save_fn: Optional[Callable[..., Awaitable[List]]] = None,
+    save_failures_fn: Optional[Callable[..., Awaitable[int]]] = None,
 ) -> Callable[[Any, List[SimResult]], Awaitable[int]]:
     """Build the ``persist(session, results) -> persisted_count`` callable for
     run_pipeline_session.
 
     Args:
         run_id: the FLAT session's experiment_runs.id, stamped on every alpha.
-        save_fn: injection seam for tests; defaults to
-            node persistence ``_incremental_save_alphas``.
+        save_fn: injection seam for tests; defaults to node persistence
+            ``_incremental_save_alphas`` (PASS/PASS_PROVISIONAL → alphas table).
+        save_failures_fn: injection seam for tests; defaults to
+            ``_incremental_save_failures`` (non-PASS → alpha_failures log, the
+            failure-attribution path node_save_results writes on the legacy
+            path). Returns the persisted PASS count (failures are a side write).
     """
     if save_fn is None:
         from backend.agents.graph.nodes.persistence import _incremental_save_alphas
         save_fn = _incremental_save_alphas
+    if save_failures_fn is None:
+        from backend.agents.graph.nodes.persistence import _incremental_save_failures
+        save_failures_fn = _incremental_save_failures
 
     async def persist(session: Any, results: List[SimResult]) -> int:
         persisted = 0
@@ -68,6 +76,7 @@ def build_persister(
             pending = _attr(st, "pending_alphas", []) or []
             if not pending:
                 continue
+            hypothesis_id = _resolve_hypothesis_id(st)
             try:
                 # _incremental_save_alphas filters to PASS/PASS_PROVISIONAL,
                 # stamps the bandit arm, links the hypothesis, and commits.
@@ -79,11 +88,23 @@ def build_persister(
                     universe=_attr(st, "universe", None),
                     dataset_id=_attr(st, "dataset_id", None),
                     pending_alphas=pending,
-                    hypothesis_id=_resolve_hypothesis_id(st),
+                    hypothesis_id=hypothesis_id,
                 )
                 persisted += len(saved or [])
             except Exception:  # noqa: BLE001 — one bad result must not drop the batch
                 logger.exception("[pipeline] persist of one result failed (skipped)")
+            # Failure log (non-PASS) — separate write, never blocks the PASS path.
+            try:
+                await save_failures_fn(
+                    session,
+                    task_id=_attr(st, "task_id", None),
+                    run_id=run_id,
+                    pending_alphas=pending,
+                    hypothesis_id=hypothesis_id,
+                    rag_ab_arm=_attr(st, "rag_ab_arm", None),
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception("[pipeline] failure-log write failed (skipped)")
         return persisted
 
     return persist
