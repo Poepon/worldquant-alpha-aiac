@@ -70,9 +70,10 @@ class MiningWorkflow:
         self._retry_graph = None    # code_gen_retry → validate (F2-2)
         self._mutate_graph = None   # hypothesis_mutate → END   (F2-3)
         self._validate_graph = None  # validate → END (F2-4 G5 offspring check)
-        # Sub-phase 3 — generation split at HYPOTHESIS (built lazily; only used
-        # when SIM_PIPELINE_SPLIT_GENERATION is on). Concatenated they ARE the
-        # generation graph, so the split carries no semantic drift.
+        # Sub-phase 3 — generation split at HYPOTHESIS (built lazily; the pipeline
+        # producer always runs split since 2026-05-28). Concatenated they ARE the
+        # full generation graph, so the split carries no semantic drift. (run() /
+        # _gen_graph still exist for the F2 mutate handler's full regeneration.)
         self._hyp_graph = None       # rag → distill → hypothesis → END (stage 1)
         self._codegen_graph = None   # code_gen → validate → [self_correct] (stage 2)
 

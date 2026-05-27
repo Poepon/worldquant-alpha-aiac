@@ -1,4 +1,4 @@
-"""Sub-phase 3: split producer (HYPOTHESIS seam) — build_split_producer.
+"""Sub-phase 3: split producer (HYPOTHESIS seam) — build_producer (the only producer).
 
 Drives the two-stage internal pipeline (hyp-producer → hyp_q → N code-producers)
 with a fake workflow (no DB / LLM / LangGraph), verifying the seam wiring,
@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.agents.pipeline.producer import build_split_producer
+from backend.agents.pipeline.producer import build_producer
 
 
 class _NullSession:
@@ -74,7 +74,7 @@ async def test_split_two_stage_pushes_validated_candidates():
         pushed.append(c)
 
     wf = _FakeWF(3, lambda st: _valid("a", "b"))   # each hypothesis → 2 valid alphas
-    produce = build_split_producer(
+    produce = build_producer(
         session_factory=_sf, workflow_factory=lambda db: wf,
         next_round_inputs=_make_nri(3), num_alphas=4, code_producer_count=2,
     )
@@ -99,7 +99,7 @@ async def test_split_filters_invalid_codegen_output():
                 SimpleNamespace(expression="bad", is_valid=False)]
 
     wf = _FakeWF(2, cg)
-    produce = build_split_producer(
+    produce = build_producer(
         session_factory=_sf, workflow_factory=lambda db: wf,
         next_round_inputs=_make_nri(2), num_alphas=4, code_producer_count=1,
     )
@@ -117,7 +117,7 @@ async def test_split_terminates_on_cursor_exhaustion():
         pushed.append(c)
 
     wf = _FakeWF(0, lambda st: _valid("x"))
-    produce = build_split_producer(
+    produce = build_producer(
         session_factory=_sf, workflow_factory=lambda db: wf,
         next_round_inputs=_make_nri(0), num_alphas=4, code_producer_count=3,
     )
@@ -133,7 +133,7 @@ async def test_split_respects_target_candidates_cap():
         pushed.append(c)
 
     wf = _FakeWF(100, lambda st: _valid("a", "b"))   # plenty of rounds available
-    produce = build_split_producer(
+    produce = build_producer(
         session_factory=_sf, workflow_factory=lambda db: wf,
         next_round_inputs=_make_nri(100), num_alphas=4, code_producer_count=1,
         target_candidates=5,
@@ -152,7 +152,7 @@ async def test_split_stops_on_should_stop():
         pushed.append(c)
 
     wf = _FakeWF(100, lambda st: _valid("a"))
-    produce = build_split_producer(
+    produce = build_producer(
         session_factory=_sf, workflow_factory=lambda db: wf,
         next_round_inputs=_make_nri(100), num_alphas=4, code_producer_count=2,
     )

@@ -100,11 +100,17 @@ async def test_producer_gen_timeout_ends_generation():
     class _HungWF:
         def __init__(self):
             self.run_calls = 0
+            self._hyp_graph = "built"      # skip the split producer's pre-build
+            self._codegen_graph = "built"
 
-        async def run(self, **kwargs):
+        async def run(self, **kwargs):     # stage-1 hypothesis call hangs
+            assert kwargs.get("stop_after_hypothesis")
             self.run_calls += 1
-            await asyncio.sleep(30)        # hung distill/hypothesis/code_gen LLM
-            return {"pending_alphas": [], "state": None, "trace_steps": []}
+            await asyncio.sleep(30)        # hung distill/hypothesis LLM
+            return {"state": None}
+
+        async def run_codegen(self, state, config=None):  # never reached (stage-1 hangs)
+            return {"pending_alphas": [], "trace_steps": []}
 
     wf = _HungWF()
     rounds = {"n": 0}

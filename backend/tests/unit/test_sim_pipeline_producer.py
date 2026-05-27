@@ -1,14 +1,19 @@
-"""Unit tests for the pipeline producer + FLAT assembly (Sub-phase 0 / Unit 2c)."""
+"""End-to-end FLAT pipeline assembly (run_flat_pipeline_session, with fakes).
+
+The producer-level behaviour (two-stage split push / termination / target cap /
+should_stop) lives in test_sim_pipeline_split.py; this file exercises the full
+wiring producer→consumer→persister through run_flat_pipeline_session. (The
+pre-2026-05-28 single-stage producer was removed; the producer is now always the
+HYPOTHESIS-split two-stage one.)
+"""
 
 import contextlib
 from types import SimpleNamespace
 
 import pytest
 
-from backend.agents.graph.state import AlphaCandidate, MiningState
-from backend.agents.pipeline import (
-    Candidate, SimResult, build_producer, run_flat_pipeline_session,
-)
+from backend.agents.graph.state import AlphaCandidate
+from backend.agents.pipeline import Candidate, SimResult, run_flat_pipeline_session
 
 
 @contextlib.asynccontextmanager
@@ -17,166 +22,37 @@ async def _session_factory():
 
 
 class _FakeGenWorkflow:
-    """workflow.run(generate_only=True) → {pending_alphas, state}."""
+    """Split-producer fake: stage-1 run(stop_after_hypothesis=True) → post-hyp
+    state carrying the round's exprs; stage-2 run_codegen(state) → validated
+    pending_alphas. Sub-graph attrs are pre-set so the split's pre-build is a
+    no-op."""
 
     def __init__(self, per_round):
-        # per_round: list of lists of expressions to emit each round
         self._per_round = per_round
         self._i = 0
         self.run_calls = []
+        self._hyp_graph = "built"       # skip the producer's lazy pre-build
+        self._codegen_graph = "built"
 
-    async def run(self, *, task, dataset_id, fields, operators, num_alphas, config, generate_only):
-        assert generate_only is True
+    async def run(self, *, task, dataset_id, fields, operators, num_alphas, config,
+                  generate_only, stop_after_hypothesis=False):
+        assert generate_only and stop_after_hypothesis   # stage 1 only
         self.run_calls.append({"dataset_id": dataset_id, "num_alphas": num_alphas})
         exprs = self._per_round[self._i] if self._i < len(self._per_round) else []
         self._i += 1
-        state = MiningState(
-            task_id=getattr(task, "id", 1), region="USA", universe="TOP3000",
-            dataset_id=dataset_id,
-            pending_alphas=[AlphaCandidate(expression=e, is_valid=True) for e in exprs],
-        )
-        return {"pending_alphas": list(state.pending_alphas), "state": state, "trace_steps": []}
+        return {"state": {"dataset_id": dataset_id, "_exprs": exprs}}
 
+    async def run_codegen(self, state, config=None):
+        exprs = state.get("_exprs", []) if isinstance(state, dict) else []
+        return {"pending_alphas": [AlphaCandidate(expression=e, is_valid=True) for e in exprs],
+                "trace_steps": []}
 
-def _inputs_feeder(datasets):
-    """Returns an async next_round_inputs that yields one round per dataset, then None."""
-    seq = list(datasets)
-
-    async def next_round_inputs(db):
-        if not seq:
-            return None
-        ds = seq.pop(0)
-        return {"task": SimpleNamespace(id=1), "dataset_id": ds, "fields": [], "operators": [], "config": None}
-
-    return next_round_inputs
-
-
-@pytest.mark.asyncio
-async def test_producer_pushes_sim_ready_candidates_per_round():
-    wf = _FakeGenWorkflow(per_round=[["a", "b"], ["c"]])
-    pushed = []
-
-    async def push(c):
-        pushed.append(c)
-
-    produce = build_producer(
-        session_factory=_session_factory,
-        workflow_factory=lambda db: wf,
-        next_round_inputs=_inputs_feeder(["pv1", "anl4"]),
-        num_alphas=10,
-    )
-    await produce(push, lambda: False)
-
-    # 2 rounds → 2 + 1 = 3 candidates.
-    assert len(pushed) == 3
-    assert [c.expression for c in pushed] == ["a", "b", "c"]
-    # Each candidate's payload is a sim-ready MiningState with ONE pending alpha.
-    for c in pushed:
-        assert isinstance(c, Candidate)
-        assert len(c.payload.pending_alphas) == 1
-        assert c.payload.pending_alphas[0].expression == c.expression
-        assert c.payload.trace_steps == []
-    # dataset_id threaded through context + the workflow saw num_alphas=10.
-    assert pushed[0].context["dataset_id"] == "pv1"
-    assert pushed[2].context["dataset_id"] == "anl4"
-    assert wf.run_calls[0]["num_alphas"] == 10
-
-
-@pytest.mark.asyncio
-async def test_producer_stops_on_should_stop():
-    wf = _FakeGenWorkflow(per_round=[["a"], ["b"], ["c"]])
-    pushed = []
-    calls = {"n": 0}
-
-    async def push(c):
-        pushed.append(c)
-
-    def should_stop():
-        calls["n"] += 1
-        return calls["n"] > 1  # stop after the first loop check
-
-    produce = build_producer(
-        session_factory=_session_factory, workflow_factory=lambda db: wf,
-        next_round_inputs=_inputs_feeder(["d1", "d2", "d3"]), num_alphas=4,
-    )
-    await produce(push, should_stop)
-    assert len(pushed) <= 1  # stopped early
-
-
-@pytest.mark.asyncio
-async def test_producer_stops_when_should_continue_false():
-    wf = _FakeGenWorkflow(per_round=[["a"], ["b"], ["c"]])
-    pushed = []
-
-    async def push(c):
-        pushed.append(c)
-
-    produce = build_producer(
-        session_factory=_session_factory, workflow_factory=lambda db: wf,
-        next_round_inputs=_inputs_feeder(["d1", "d2", "d3"]), num_alphas=4,
-        should_continue=lambda: False,  # daily goal already met
-    )
-    await produce(push, lambda: False)
-    assert pushed == []  # never generated a round
-
-
-@pytest.mark.asyncio
-async def test_producer_stops_at_target_candidates():
-    # Unlimited rounds of 2 candidates each; cap at 3 → stop after the round
-    # that crosses the cap (checked before each round → 2 rounds = 4 candidates).
-    class _InfiniteGen:
-        def __init__(self):
-            self.i = 0
-
-        async def run(self, *, task, dataset_id, fields, operators, num_alphas, config, generate_only):
-            self.i += 1
-            state = MiningState(
-                task_id=1, region="USA", universe="TOP3000", dataset_id=dataset_id,
-                pending_alphas=[AlphaCandidate(expression=f"e{self.i}_{k}", is_valid=True) for k in range(2)],
-            )
-            return {"pending_alphas": list(state.pending_alphas), "state": state}
-
-    async def infinite_inputs(db):
-        return {"task": SimpleNamespace(id=1), "dataset_id": "pv1", "fields": [], "operators": [], "config": None}
-
-    pushed = []
-
-    async def push(c):
-        pushed.append(c)
-
-    produce = build_producer(
-        session_factory=_session_factory, workflow_factory=lambda db: _InfiniteGen(),
-        next_round_inputs=infinite_inputs, num_alphas=2, target_candidates=3,
-    )
-    await produce(push, lambda: False)
-    # Stops once produced >= 3; overshoots by at most one round (2 candidates).
-    assert 3 <= len(pushed) <= 4
-
-
-@pytest.mark.asyncio
-async def test_producer_stops_when_inputs_exhausted():
-    wf = _FakeGenWorkflow(per_round=[["a"], ["b"]])
-    pushed = []
-
-    async def push(c):
-        pushed.append(c)
-
-    produce = build_producer(
-        session_factory=_session_factory, workflow_factory=lambda db: wf,
-        next_round_inputs=_inputs_feeder(["only1"]), num_alphas=4,
-    )
-    await produce(push, lambda: False)
-    assert len(pushed) == 1  # one dataset → one round
-
-
-# --- full FLAT assembly end-to-end (fakes) ----------------------------------
 
 class _FakeConsumerWorkflow:
     async def run_simulate(self, state, config=None):
         return state  # passthrough
 
     async def run_evaluate(self, state, config=None):
-        # Mark the single candidate PASS.
         pa = state.pending_alphas if hasattr(state, "pending_alphas") else state["pending_alphas"]
         for a in pa:
             a.simulation_success = True
@@ -185,11 +61,24 @@ class _FakeConsumerWorkflow:
         return state
 
 
+def _inputs_feeder(datasets):
+    seq = list(datasets)
+
+    async def next_round_inputs(db):
+        if not seq:
+            return None
+        ds = seq.pop(0)
+        return {"task": SimpleNamespace(id=1), "dataset_id": ds,
+                "fields": [], "operators": [], "config": None}
+
+    return next_round_inputs
+
+
 @pytest.mark.asyncio
 async def test_run_flat_assembly_wiring():
-    """run_flat_pipeline_session wires producer→consumer→persister end-to-end.
-    Slot primitives + persist are injected so no Redis/BRAIN/DB is touched."""
-
+    """run_flat_pipeline_session wires the split producer → consumer → persister
+    end-to-end. Slot primitives + persist are injected so no Redis/BRAIN/DB is
+    touched."""
     async def _acq():
         return True
 
@@ -216,8 +105,10 @@ async def test_run_flat_assembly_wiring():
         release_slot=_rel,
     )
 
-    assert stats["produced"] == 4     # 2 + 2 candidates
-    assert stats["simulated"] == 4    # all simulated
-    assert stats["persisted"] == 4    # all PASS → persisted
+    assert stats["produced"] == 4      # 2 rounds × 2 candidates
+    assert stats["simulated"] == 4
+    assert stats["persisted"] == 4
     assert all(isinstance(r, SimResult) and r.ok for r in persisted)
     assert all(r.verdict == "PASS" for r in persisted)
+    # stage 1 ran one hypothesis round per dataset
+    assert [c["dataset_id"] for c in gen_wf.run_calls] == ["pv1", "anl4"]

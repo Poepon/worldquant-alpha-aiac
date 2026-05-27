@@ -1678,7 +1678,6 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             reward_hook=_reward_hook,
             classify_feedback=_fb_classify,
             handle_feedback=_fb_handle,
-            split_generation=bool(getattr(settings, "SIM_PIPELINE_SPLIT_GENERATION", False)),
             code_producer_count=int(getattr(settings, "SIM_PIPELINE_CODE_PRODUCER_COUNT", 1)),
             op_timeout=float(getattr(settings, "SIM_PIPELINE_OP_TIMEOUT_SEC", 1200) or 0) or None,
         )

@@ -93,122 +93,16 @@ def build_producer(
     workflow_factory: Callable[[Any], Any],
     next_round_inputs: Callable[[Any], Awaitable[Optional[Dict[str, Any]]]],
     num_alphas: int,
-    should_continue: Optional[Callable[[], bool]] = None,
-    target_candidates: Optional[int] = None,
-    handle_feedback: Optional[Callable[..., Awaitable[None]]] = None,
-    op_timeout: Optional[float] = None,
-) -> Callable[..., Awaitable[None]]:
-    """Build the ``produce(push, should_stop[, feedback_ctx])`` callable.
-
-    Args:
-        session_factory: () -> async context manager → the producer's own session.
-        workflow_factory: (db) -> MiningWorkflow for generation.
-        next_round_inputs: async (db) -> dict | None. Returns the next round's
-            {task, dataset_id, fields, operators, config} (the FLAT cursor /
-            bandit pick), or None to stop (cursor exhausted / ownership lost /
-            task paused). Owns all FLAT-specific round-selection logic.
-        num_alphas: candidates to request per generation round.
-        should_continue: optional () -> bool gate checked before each round.
-        target_candidates: optional cap on TOTAL candidates produced this
-            session (mirrors the legacy loop's daily_goal, which counts alphas
-            ATTEMPTED per round — not persisted-PASS, which at a ~0 PASS rate
-            would never terminate). Stop once produced >= target_candidates.
-        handle_feedback: optional (F2) ``async (event, push, db, wf) -> None``.
-            When set AND the runner passes a ``feedback_ctx`` (3rd produce arg),
-            the producer runs a DRAIN phase after primary generation: it pulls
-            feedback events and lets the handler ``push`` derived candidates
-            (R1b retry/mutate, G5 crossover) using the producer's own ``db`` +
-            ``wf`` (F1: only the producer + persister touch the DB). The runner
-            owns termination (the handler just regenerates).
-    """
-
-    async def produce(push, should_stop, feedback_ctx=None) -> None:
-        rounds = 0
-        produced = 0
-        handled = 0
-        async with session_factory() as db:
-            wf = workflow_factory(db)
-            # --- primary generation phase -------------------------------------
-            while not should_stop():
-                if target_candidates is not None and produced >= target_candidates:
-                    break
-                if should_continue is not None and not should_continue():
-                    break
-                inputs = await next_round_inputs(db)
-                if not inputs:
-                    break
-                rounds += 1
-                # Per-op deadline on the generation LLM chain — a hung distill/
-                # hypothesis/code_gen call must not freeze the pipeline forever.
-                try:
-                    result = await _with_timeout(wf.run(
-                        task=inputs["task"],
-                        dataset_id=inputs["dataset_id"],
-                        fields=inputs.get("fields") or [],
-                        operators=inputs.get("operators") or [],
-                        num_alphas=num_alphas,
-                        config=inputs.get("config"),
-                        generate_only=True,
-                    ), op_timeout)
-                except Exception:  # noqa: BLE001
-                    # END generation (don't `continue`): a timed-out/failed round
-                    # may have left the producer's SHARED asyncpg session
-                    # poisoned/aborted — esp. a wait_for cancel landing mid
-                    # RAG query (the dc7c8e5 greenlet-poison precedent). Reusing
-                    # it would cascade-fail every later round. Break cleanly:
-                    # queued candidates still drain + the feedback phase runs +
-                    # the `async with` closes the session.
-                    logger.exception(
-                        "[pipeline] generation round failed/timed out; ending "
-                        "generation (shared session integrity uncertain)")
-                    break
-                gen_state = result.get("state") if isinstance(result, dict) else None
-                pending = (result.get("pending_alphas") if isinstance(result, dict) else None) or []
-                # The batch's shared generation trace (RAG/DISTILL/HYPOTHESIS/
-                # CODE_GEN/VALIDATE) — carried on each candidate so the persister
-                # can flush a complete per-candidate trajectory (the consumer
-                # appends SIMULATE/EVALUATE). _sim_ready_payload cleared the
-                # state's trace_steps, so this is the only carrier.
-                gen_trace = (result.get("trace_steps") if isinstance(result, dict) else None) or []
-                for ac in pending:
-                    cand = Candidate(
-                        expression=getattr(ac, "expression", "") or "",
-                        context={"dataset_id": inputs["dataset_id"]},
-                        trace_records=list(gen_trace),
-                        payload=_sim_ready_payload(gen_state, ac),
-                    )
-                    await push(cand)
-                    produced += 1
-
-            # --- feedback drain phase (F2; only when wired active) ------------
-            # Runs while consumers/persister are still processing in-flight work,
-            # so a FAIL→retry / FAIL→mutate / PASS→crossover can regenerate. The
-            # runner ends it with a None (quiescence) or on stop.
-            handled = await _drain_feedback(
-                feedback_ctx, handle_feedback, push, db, wf, should_stop, op_timeout)
-        logger.info(
-            "[pipeline] producer finished after %d round(s), %d candidate(s), %d feedback handled",
-            rounds, produced, handled,
-        )
-
-    return produce
-
-
-def build_split_producer(
-    *,
-    session_factory: Callable[[], Any],
-    workflow_factory: Callable[[Any], Any],
-    next_round_inputs: Callable[[Any], Awaitable[Optional[Dict[str, Any]]]],
-    num_alphas: int,
     code_producer_count: int = 1,
     target_candidates: Optional[int] = None,
     handle_feedback: Optional[Callable[..., Awaitable[None]]] = None,
     queue_maxsize: int = 0,
     op_timeout: Optional[float] = None,
 ) -> Callable[..., Awaitable[None]]:
-    """Sub-phase 3: a generation producer split at HYPOTHESIS into two internal
-    stages joined by ``hyp_q`` — exposes the SAME ``produce(push, should_stop[,
-    feedback_ctx])`` contract as build_producer, so the runner is unchanged.
+    """The pipeline's generation producer — split at HYPOTHESIS into two internal
+    stages joined by ``hyp_q``. Returns the ``produce(push, should_stop[,
+    feedback_ctx])`` callable the runner drives. (Sub-phase 3; the prior
+    single-stage producer was removed 2026-05-28 — this is the only path.)
 
     Stage 1 (one hyp-producer, owns the DB session): next_round_inputs →
     wf.run(stop_after_hypothesis=True) → push the post-hypothesis state onto an
@@ -351,7 +245,6 @@ async def run_flat_pipeline_session(
     reward_hook: Optional[Callable[[Any, float], None]] = None,
     classify_feedback: Optional[Callable[[Any], Any]] = None,
     handle_feedback: Optional[Callable[..., Awaitable[None]]] = None,
-    split_generation: bool = False,
     code_producer_count: int = 1,
     op_timeout: Optional[float] = None,
 ) -> dict:
@@ -381,29 +274,19 @@ async def run_flat_pipeline_session(
     # ~0 PASS rate would never terminate and burn the full max_iters every
     # session. Termination otherwise comes from next_round_inputs returning None
     # (cursor exhausted / ownership lost / paused / max_iters).
-    # Sub-phase 3: split the producer at HYPOTHESIS (hyp-producer → hyp_q →
-    # code-producers) when enabled; else the single-stage producer (unchanged).
-    if split_generation:
-        produce = build_split_producer(
-            session_factory=session_factory,
-            workflow_factory=producer_workflow_factory,
-            next_round_inputs=next_round_inputs,
-            num_alphas=num_alphas,
-            code_producer_count=code_producer_count,
-            target_candidates=daily_goal,
-            handle_feedback=handle_feedback,
-            op_timeout=op_timeout,
-        )
-    else:
-        produce = build_producer(
-            session_factory=session_factory,
-            workflow_factory=producer_workflow_factory,
-            next_round_inputs=next_round_inputs,
-            num_alphas=num_alphas,
-            target_candidates=daily_goal,
-            handle_feedback=handle_feedback,
-            op_timeout=op_timeout,
-        )
+    # The producer is split at HYPOTHESIS (hyp-producer → hyp_q → code-producers,
+    # Sub-phase 3) — now the only generation path (single-stage was removed
+    # 2026-05-28). code_producer_count=1 keeps the seam with no extra concurrency.
+    produce = build_producer(
+        session_factory=session_factory,
+        workflow_factory=producer_workflow_factory,
+        next_round_inputs=next_round_inputs,
+        num_alphas=num_alphas,
+        code_producer_count=code_producer_count,
+        target_candidates=daily_goal,
+        handle_feedback=handle_feedback,
+        op_timeout=op_timeout,
+    )
     simulate, evaluate = build_consumer_stages(
         consumer_workflow,
         config={"configurable": {"trace_service": None, "run_id": run_id}},
