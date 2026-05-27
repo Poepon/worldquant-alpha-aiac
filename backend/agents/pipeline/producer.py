@@ -132,6 +132,7 @@ async def run_flat_pipeline_session(
     persist_fn: Optional[Callable[[Any, Any], Awaitable[int]]] = None,
     acquire_slot: Optional[Callable[[], Awaitable[bool]]] = None,
     release_slot: Optional[Callable[[], Awaitable[None]]] = None,
+    refresher: Any = None,
 ) -> dict:
     """Assemble producer + consumer + persister and run one pipeline session.
 
@@ -158,6 +159,7 @@ async def run_flat_pipeline_session(
     simulate, evaluate = build_consumer_stages(
         consumer_workflow,
         config={"configurable": {"trace_service": None, "run_id": run_id}},
+        refresher=refresher,
     )
 
     return await run_pipeline_session(

@@ -1321,6 +1321,10 @@ class Settings(BaseSettings):
     # immediately; higher = micro-batch). Keep small to bound crash-loss of
     # already-simulated-but-unpersisted results (wasted BRAIN quota).
     SIM_PIPELINE_PERSIST_EVERY: int = 1
+    # Drain-and-refresh the shared BRAIN httpx client every N completed sims
+    # (0 = disabled). Combats the long-session client-rot sim-hang (d650222);
+    # the refresh only runs with zero sims in flight. ~32 ≈ a few rounds.
+    SIM_PIPELINE_CLIENT_REFRESH_EVERY: int = 32
 
     # Optimization Chain Settings
     MAX_OPTIMIZATION_VARIANTS: int = 10

@@ -36,6 +36,7 @@ def build_consumer_stages(
     workflow: Any,
     *,
     config: Optional[Dict[str, Any]] = None,
+    refresher: Any = None,
 ) -> Tuple[
     Callable[[Candidate], Awaitable[Any]],
     Callable[[Candidate, Any], Awaitable[SimResult]],
@@ -49,12 +50,22 @@ def build_consumer_stages(
     ``config`` is the RunnableConfig passed to the sub-graphs. It MUST NOT carry
     a shared ``trace_service`` (keep it None) so trace stays in-memory for the
     persister; run_id / other configurable keys are fine.
+
+    ``refresher`` (optional BrainClientRefresher): when set, each BRAIN sim is
+    bracketed by before_sim/after_sim so the shared httpx client is refreshed
+    only when no sim is in flight (drain-and-refresh).
     """
 
     async def simulate(candidate: Candidate) -> Any:
-        # Holds a BRAIN slot (the runner acquired it). Returns the post-sim
-        # state, which evaluate() consumes after the slot is released.
-        return await workflow.run_simulate(candidate.payload, config=config)
+        # Holds a BRAIN slot (managed by simulate_alpha internally). Returns the
+        # post-sim state, which evaluate() consumes.
+        if refresher is None:
+            return await workflow.run_simulate(candidate.payload, config=config)
+        await refresher.before_sim()
+        try:
+            return await workflow.run_simulate(candidate.payload, config=config)
+        finally:
+            await refresher.after_sim()
 
     async def evaluate(candidate: Candidate, sim_state: Any) -> SimResult:
         eval_state = await workflow.run_evaluate(sim_state, config=config)

@@ -1448,8 +1448,20 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     async def _noop_release():
         return None
 
+    # Drain-and-refresh the shared BRAIN client every N sims (Sub-phase 1, F4) —
+    # combats the long-session client-rot sim-hang; runs only with 0 in flight.
+    _refresh_every = int(getattr(settings, "SIM_PIPELINE_CLIENT_REFRESH_EVERY", 0) or 0)
+
     stats = {}
     async with BrainAdapter() as brain:
+        refresher = None
+        if _refresh_every > 0:
+            from backend.agents.pipeline.client_refresh import BrainClientRefresher
+            refresher = BrainClientRefresher(
+                refresh_every=_refresh_every,
+                refresh_fn=_refresh_brain_client,
+                brain=brain,
+            )
         # consumer_wf.db is never used by node_simulate/node_evaluate (they open
         # their own ephemeral sessions); pass the idle injected db.
         consumer_wf = MiningWorkflow(db, brain)
@@ -1464,6 +1476,7 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             daily_goal=daily_goal,
             acquire_slot=_noop_acquire,
             release_slot=_noop_release,
+            refresher=refresher,
         )
 
     logger.info(
