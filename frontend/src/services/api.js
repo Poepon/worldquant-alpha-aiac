@@ -157,6 +157,14 @@ const api = {
     return data
   },
 
+  // Summary-strip aggregates (total + per-status + submit-state buckets).
+  // Optionally scoped to a region.
+  getAlphaStats: async (region) => {
+    const params = region ? { region } : {}
+    const { data } = await client.get('/alphas/stats', { params })
+    return data
+  },
+
   getAlphaTrace: async (id) => {
     const { data } = await client.get(`/alphas/${id}/trace`)
     return data

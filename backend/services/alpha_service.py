@@ -13,7 +13,7 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func
+from sqlalchemy import select, update, func, and_
 
 from backend.services.base import BaseService
 from backend.repositories import AlphaRepository
@@ -31,6 +31,13 @@ class AlphaListFilters:
     human_feedback: Optional[str] = None
     dataset_id: Optional[str] = None
     task_id: Optional[int] = None
+    # Submit-state filter (server-side so pagination/total stay honest):
+    #   submitted   → date_submitted IS NOT NULL
+    #   submittable → can_submit IS TRUE AND date_submitted IS NULL
+    #   rejected    → can_submit IS FALSE
+    #   unchecked   → can_submit IS NULL
+    # None/other → no submit-state constraint.
+    submit_state: Optional[str] = None
     # Expression substring search (case-insensitive ILIKE)
     expression_search: Optional[str] = None
     # IS metric range filters (None = no bound)
@@ -182,6 +189,25 @@ class AlphaService(BaseService):
             query = query.where(Alpha.expression.ilike(pattern))
             count_query = count_query.where(Alpha.expression.ilike(pattern))
 
+        # Submit-state filter — applied to BOTH the page query and the count
+        # query so the reported total matches the rows actually returned. The
+        # frontend used to do this client-side over the current page only,
+        # which made the pagination total lie.
+        submit_cond = None
+        if filters.submit_state == "submitted":
+            submit_cond = Alpha.date_submitted.isnot(None)
+        elif filters.submit_state == "submittable":
+            submit_cond = and_(
+                Alpha.can_submit.is_(True), Alpha.date_submitted.is_(None)
+            )
+        elif filters.submit_state == "rejected":
+            submit_cond = Alpha.can_submit.is_(False)
+        elif filters.submit_state == "unchecked":
+            submit_cond = Alpha.can_submit.is_(None)
+        if submit_cond is not None:
+            query = query.where(submit_cond)
+            count_query = count_query.where(submit_cond)
+
         # Numeric range filters on IS metrics
         for column, lo, hi in (
             (Alpha.is_sharpe,   filters.min_sharpe,   filters.max_sharpe),
@@ -215,9 +241,67 @@ class AlphaService(BaseService):
         
         # Convert to list items
         items = [self._to_list_item(a) for a in alphas]
-        
+
         return items, total
-    
+
+    async def get_alpha_stats(self, region: Optional[str] = None) -> Dict[str, Any]:
+        """Aggregate counts for the Alpha-list summary strip.
+
+        Returns total + per-quality_status breakdown + submit-state buckets.
+        Optionally scoped to a single region so the strip can track the
+        region the user is filtering on. These are independent of the list's
+        own metric/expression filters by design — the strip is an at-a-glance
+        portfolio overview, not a reflection of the active table query.
+        """
+        base_conds = [Alpha.region == region] if region else []
+
+        def _count(*conds):
+            q = select(func.count()).select_from(Alpha)
+            for c in (*base_conds, *conds):
+                q = q.where(c)
+            return q
+
+        status_q = select(Alpha.quality_status, func.count()).select_from(Alpha)
+        for c in base_conds:
+            status_q = status_q.where(c)
+        status_q = status_q.group_by(Alpha.quality_status)
+        # Coalesce NULL quality_status into the PENDING bucket. ACCUMULATE
+        # rather than dict-overwrite: a NULL group and a literal "PENDING"
+        # group are distinct rows here, and a plain `{key: count}` comprehension
+        # would let the second silently clobber the first and drop a count.
+        by_status: Dict[str, int] = {}
+        for status, cnt in (await self.db.execute(status_q)).all():
+            key = status or "PENDING"
+            by_status[key] = by_status.get(key, 0) + cnt
+
+        # total == sum over every status group (NULL group included), so derive
+        # it instead of issuing a separate COUNT(*) round-trip.
+        total = sum(by_status.values())
+
+        submitted = (
+            await self.db.execute(_count(Alpha.date_submitted.isnot(None)))
+        ).scalar() or 0
+        submittable = (
+            await self.db.execute(
+                _count(Alpha.can_submit.is_(True), Alpha.date_submitted.is_(None))
+            )
+        ).scalar() or 0
+        rejected = (
+            await self.db.execute(_count(Alpha.can_submit.is_(False)))
+        ).scalar() or 0
+        unchecked = (
+            await self.db.execute(_count(Alpha.can_submit.is_(None)))
+        ).scalar() or 0
+
+        return {
+            "total": total,
+            "by_status": by_status,
+            "submitted": submitted,
+            "submittable": submittable,
+            "rejected": rejected,
+            "unchecked": unchecked,
+        }
+
     def _to_list_item(self, alpha: Alpha) -> AlphaListItem:
         """Convert Alpha model to AlphaListItem."""
         expression = alpha.expression or "N/A"

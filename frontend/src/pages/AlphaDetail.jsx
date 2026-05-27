@@ -41,6 +41,7 @@ import {
 } from 'recharts'
 import api from '../services/api'
 import { formatRelative, formatDateTime } from '../utils/time'
+import { STATUS_COLORS } from '../utils/alphaStatus'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -374,7 +375,7 @@ export default function AlphaDetail() {
                 </Text>
               </Descriptions.Item>
               <Descriptions.Item label="收益率">
-                {metrics.returns?.toFixed(2)}%
+                {metrics.returns != null ? `${(metrics.returns * 100).toFixed(2)}%` : '--'}
               </Descriptions.Item>
               <Descriptions.Item label="换手率">
                 {metrics.turnover?.toFixed(2) || '--'}

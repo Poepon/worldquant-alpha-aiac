@@ -134,6 +134,11 @@ async def list_alphas(
     human_feedback: Optional[str] = Query(None),
     dataset_id: Optional[str] = Query(None),
     task_id: Optional[int] = Query(None, description="Restrict to a single task"),
+    submit_state: Optional[str] = Query(
+        None,
+        pattern="^(submitted|submittable|rejected|unchecked)$",
+        description="Submit-state bucket: submitted | submittable | rejected | unchecked",
+    ),
     expression: Optional[str] = Query(None, description="Case-insensitive substring on the alpha expression"),
     min_sharpe: Optional[float] = Query(None),
     max_sharpe: Optional[float] = Query(None),
@@ -158,6 +163,7 @@ async def list_alphas(
         human_feedback=human_feedback,
         dataset_id=dataset_id,
         task_id=task_id,
+        submit_state=submit_state,
         expression_search=expression,
         min_sharpe=min_sharpe,
         max_sharpe=max_sharpe,
@@ -205,6 +211,27 @@ async def list_alphas(
     ]
     
     return AlphaListResponse(items=response_items, total=total)
+
+
+class AlphaStatsResponse(BaseModel):
+    total: int
+    by_status: dict          # {quality_status: count}
+    submitted: int           # date_submitted IS NOT NULL
+    submittable: int         # can_submit IS TRUE AND not submitted
+    rejected: int            # can_submit IS FALSE
+    unchecked: int           # can_submit IS NULL
+
+
+@router.get("/stats", response_model=AlphaStatsResponse)
+async def alpha_stats(
+    region: Optional[str] = Query(None, description="Scope the strip to one region"),
+    service: AlphaService = Depends(get_alpha_service),
+):
+    """Aggregate counts for the Alpha-list summary strip (total + per-status +
+    submit-state buckets). Declared before /{alpha_id} so the literal /stats
+    path is not swallowed by the int path param.
+    """
+    return AlphaStatsResponse(**await service.get_alpha_stats(region=region))
 
 
 @router.get("/{alpha_id}", response_model=AlphaDetailResponse)

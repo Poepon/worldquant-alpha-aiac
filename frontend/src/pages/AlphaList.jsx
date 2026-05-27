@@ -17,54 +17,57 @@ import {
   message,
   Tooltip as AntdTooltip,
 } from 'antd'
-import { EyeOutlined, ReloadOutlined, CloudSyncOutlined } from '@ant-design/icons'
+import {
+  EyeOutlined,
+  ReloadOutlined,
+  CloudSyncOutlined,
+  SafetyCertificateOutlined,
+  TrophyOutlined,
+  ClearOutlined,
+} from '@ant-design/icons'
 import api from '../services/api'
 import { formatRelative } from '../utils/time'
+import { STATUS_COLORS, STATUS_LABELS } from '../utils/alphaStatus'
 
 const { Title, Text } = Typography
 const { Search } = Input
 
-const STATUS_COLORS = {
-  PASS: 'success',
-  PASS_PROVISIONAL: 'gold',
-  OPTIMIZE: 'processing',
-  FAIL: 'default',
-  PENDING: 'default',
-  REJECT: 'error',
-}
-
-const STATUS_LABELS = {
-  PASS: '通过',
-  PASS_PROVISIONAL: '临时通过',
-  OPTIMIZE: '待优化',
-  FAIL: '失败',
-  PENDING: '待处理',
-  REJECT: '拒绝',
-}
-
 const REGIONS = ['USA', 'CHN', 'EUR', 'ASI', 'GLB', 'KOR', 'HKG', 'JPN']
+
+const EMPTY_FILTERS = {
+  region: undefined,
+  quality_status: undefined,
+  human_feedback: undefined,
+  min_sharpe: undefined,
+  max_sharpe: undefined,
+  min_fitness: undefined,
+  max_turnover: undefined,
+  min_returns: undefined,
+  expression: '',
+}
 
 export default function AlphaList() {
   const navigate = useNavigate()
-  const [filters, setFilters] = useState({
-    region: undefined,
-    quality_status: undefined,
-    min_sharpe: undefined,
-    expression: '',
-  })
-  // Client-side filter: '' = all, 'submitted' = date_submitted not null,
-  // 'submittable' = can_submit=true + not yet submitted, 'rejected' = can_submit=false
-  const [submitFilter, setSubmitFilter] = useState('')
+  const queryClient = useQueryClient()
+  const [filters, setFilters] = useState(EMPTY_FILTERS)
+  // Submit-state is now a SERVER-side filter (submitted / submittable /
+  // rejected / unchecked) so the pagination total stays honest.
+  const [submitState, setSubmitState] = useState(undefined)
   const [sortBy, setSortBy] = useState('sharpe')
+  const [sortOrder, setSortOrder] = useState('desc')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
+  // Bumped on reset to force-remount the uncontrolled expression Search so its
+  // text clears too (Select/InputNumber clear via controlled state already).
+  const [resetKey, setResetKey] = useState(0)
 
   const queryParams = {
     ...Object.fromEntries(
       Object.entries(filters).filter(([_, v]) => v !== undefined && v !== '' && v !== null),
     ),
+    ...(submitState ? { submit_state: submitState } : {}),
     sort_by: sortBy,
-    sort_order: 'desc',
+    sort_order: sortOrder,
     limit: pageSize,
     offset: (page - 1) * pageSize,
   }
@@ -76,19 +79,29 @@ export default function AlphaList() {
     refetchInterval: 30_000,
   })
 
-  const queryClient = useQueryClient()
+  // Summary strip — region-scoped portfolio overview (independent of the
+  // table's metric/expression filters by design).
+  const { data: stats } = useQuery({
+    queryKey: ['alpha-stats', filters.region],
+    queryFn: () => api.getAlphaStats(filters.region),
+    refetchInterval: 60_000,
+  })
 
   // Sync alphas from WorldQuant BRAIN. Fire-and-forget — POST /alphas/sync
   // dispatches the sync_user_alphas Celery task (IS + OS stages, ~minutes)
-  // and returns immediately. We surface a "started" toast and auto-refetch
-  // after a delay so the new rows surface without a manual refresh.
+  // and returns immediately.
   const syncMutation = useMutation({
     mutationFn: () => api.syncAlphas(),
     onSuccess: () => {
       message.success('已启动 BRAIN 同步,后台运行中(约几分钟)。完成后列表会自动刷新')
-      // Sync runs in the background; refetch a few times as it lands rows.
-      setTimeout(() => queryClient.invalidateQueries(['alphas-list']), 30_000)
-      setTimeout(() => queryClient.invalidateQueries(['alphas-list']), 120_000)
+      setTimeout(() => {
+        queryClient.invalidateQueries(['alphas-list'])
+        queryClient.invalidateQueries(['alpha-stats'])
+      }, 30_000)
+      setTimeout(() => {
+        queryClient.invalidateQueries(['alphas-list'])
+        queryClient.invalidateQueries(['alpha-stats'])
+      }, 120_000)
     },
     onError: (err) => {
       const detail = err?.response?.data?.detail || err.message
@@ -96,29 +109,70 @@ export default function AlphaList() {
     },
   })
 
-  const rawItems = data?.items || []
-  const items = submitFilter
-    ? rawItems.filter((a) => {
-        if (submitFilter === 'submitted') return !!a.date_submitted
-        if (submitFilter === 'submittable') return a.can_submit === true && !a.date_submitted
-        if (submitFilter === 'rejected') return a.can_submit === false
-        return true
-      })
-    : rawItems
+  // Bulk re-check can_submit for PASS alphas (sequential, ~1 req/sec server-side).
+  const refreshCanSubmitMutation = useMutation({
+    mutationFn: () => api.refreshCanSubmitBatch({ quality_status: 'PASS', limit: 50 }),
+    onSuccess: (res) => {
+      message.success(
+        `批量校验完成:扫描 ${res.scanned} · 可提交 ${res.pass_count} · 不可提交 ${res.fail_count} · 跳过 ${res.skipped}`,
+      )
+      queryClient.invalidateQueries(['alphas-list'])
+      queryClient.invalidateQueries(['alpha-stats'])
+    },
+    onError: (err) => {
+      const detail = err?.response?.data?.detail || err.message
+      message.error(`批量校验失败: ${detail}`)
+    },
+  })
+
+  // Re-audit IQC marginal Δscore for the submittable tranche. Fire-and-forget.
+  const refreshIqcMutation = useMutation({
+    mutationFn: () => api.refreshFactorIqc({ scope: 'submittable', limit: 50 }),
+    onSuccess: (res) => {
+      message.success(res.message || `已触发 ${res.enqueued} 个 IQC 审计`)
+      setTimeout(() => queryClient.invalidateQueries(['alphas-list']), 30_000)
+    },
+    onError: (err) => {
+      const detail = err?.response?.data?.detail || err.message
+      message.error(`IQC 审计触发失败: ${detail}`)
+    },
+  })
+
+  const items = data?.items || []
   const total = data?.total || 0
+
+  const resetFilters = () => {
+    setFilters(EMPTY_FILTERS)
+    setSubmitState(undefined)
+    setSortBy('sharpe')
+    setSortOrder('desc')
+    setPage(1)
+    setResetKey((k) => k + 1)
+  }
+
+  const hasActiveFilters =
+    submitState ||
+    Object.entries(filters).some(([_, v]) => v !== undefined && v !== '' && v !== null)
+
+  // Clicking a submit-state chip in the strip drives the server filter.
+  const toggleSubmitState = (value) => {
+    setSubmitState((cur) => (cur === value ? undefined : value))
+    setPage(1)
+  }
 
   const columns = [
     {
       title: 'ID',
       dataIndex: 'id',
       width: 70,
+      fixed: 'left',
       render: (id) => <a onClick={() => navigate(`/alphas/${id}`)}>#{id}</a>,
     },
     {
       title: 'BRAIN 编号',
       dataIndex: 'alpha_id',
       width: 110,
-      render: (aid) => aid ? <Text code style={{ fontSize: 11 }}>{aid}</Text> : '—',
+      render: (aid) => (aid ? <Text code style={{ fontSize: 11 }}>{aid}</Text> : '—'),
     },
     {
       title: '表达式',
@@ -127,7 +181,8 @@ export default function AlphaList() {
       render: (expr) => (
         <AntdTooltip title={expr}>
           <Text code style={{ fontSize: 11 }}>
-            {(expr || '').slice(0, 70)}{(expr || '').length > 70 ? '…' : ''}
+            {(expr || '').slice(0, 70)}
+            {(expr || '').length > 70 ? '…' : ''}
           </Text>
         </AntdTooltip>
       ),
@@ -143,12 +198,12 @@ export default function AlphaList() {
       dataIndex: 'dataset_id',
       width: 100,
       ellipsis: true,
-      render: (d) => d ? <Tag color="cyan">{d}</Tag> : '—',
+      render: (d) => (d ? <Tag color="cyan">{d}</Tag> : '—'),
     },
     {
       title: '状态',
       dataIndex: 'quality_status',
-      width: 130,
+      width: 100,
       render: (s) => <Tag color={STATUS_COLORS[s] || 'default'}>{STATUS_LABELS[s] || s}</Tag>,
     },
     {
@@ -160,7 +215,11 @@ export default function AlphaList() {
       dataIndex: 'sharpe',
       width: 80,
       align: 'right',
-      render: (v) => v != null ? <Text strong>{v.toFixed(2)}</Text> : '—',
+      render: (v) => {
+        if (v == null) return '—'
+        const color = v >= 1.5 ? '#389e0d' : v >= 1.0 ? '#d48806' : undefined
+        return <Text strong style={{ color }}>{v.toFixed(2)}</Text>
+      },
     },
     {
       title: (
@@ -171,7 +230,18 @@ export default function AlphaList() {
       dataIndex: 'fitness',
       width: 80,
       align: 'right',
-      render: (v) => v != null ? v.toFixed(2) : '—',
+      render: (v) => (v != null ? v.toFixed(2) : '—'),
+    },
+    {
+      title: (
+        <AntdTooltip title="年化收益率">
+          <span>收益率</span>
+        </AntdTooltip>
+      ),
+      dataIndex: 'returns',
+      width: 80,
+      align: 'right',
+      render: (v) => (v != null ? `${(v * 100).toFixed(1)}%` : '—'),
     },
     {
       title: (
@@ -182,7 +252,23 @@ export default function AlphaList() {
       dataIndex: 'turnover',
       width: 80,
       align: 'right',
-      render: (v) => v != null ? v.toFixed(2) : '—',
+      render: (v) => (v != null ? v.toFixed(2) : '—'),
+    },
+    {
+      title: (
+        <AntdTooltip title="标准化 Margin — 每单位交易利润。WorldQuant 约 5bps 为盈亏成本线，<0 无提交价值，<5bps 通常不盈利">
+          <span>Margin</span>
+        </AntdTooltip>
+      ),
+      dataIndex: 'margin',
+      width: 90,
+      align: 'right',
+      render: (v) => {
+        if (v == null) return '—'
+        const bps = v * 10000
+        const color = bps < 0 ? '#cf1322' : bps < 5 ? '#d48806' : '#389e0d'
+        return <Text style={{ color }}>{bps.toFixed(1)} bps</Text>
+      },
     },
     {
       title: (
@@ -219,7 +305,7 @@ export default function AlphaList() {
     {
       title: '创建',
       dataIndex: 'created_at',
-      width: 110,
+      width: 100,
       render: (t) => (
         <AntdTooltip title={t ? new Date(t).toLocaleString() : ''}>
           <Text type="secondary" style={{ fontSize: 11 }}>{formatRelative(t)}</Text>
@@ -229,6 +315,7 @@ export default function AlphaList() {
     {
       title: '操作',
       width: 70,
+      fixed: 'right',
       render: (_, row) => (
         <Button
           size="small"
@@ -246,10 +333,40 @@ export default function AlphaList() {
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
         <Col>
           <Title level={3} style={{ margin: 0 }}>Alpha 列表</Title>
-          <Text type="secondary">共 {total} 条 · 默认按 Sharpe 降序</Text>
+          <Text type="secondary">
+            当前筛选 {total} 条 · 按 {sortBy} {sortOrder === 'desc' ? '降序' : '升序'}
+          </Text>
         </Col>
         <Col>
-          <Space>
+          <Space wrap>
+            <Popconfirm
+              title="批量刷新可提交性"
+              description="对最近 50 个 PASS alpha 重新调用 BRAIN 校验 is.checks（顺序执行，约 1 个/秒，可能耗时近 1 分钟）。确认?"
+              okText="开始"
+              cancelText="取消"
+              onConfirm={() => refreshCanSubmitMutation.mutate()}
+            >
+              <Button
+                icon={<SafetyCertificateOutlined />}
+                loading={refreshCanSubmitMutation.isPending}
+              >
+                批量刷新可提交
+              </Button>
+            </Popconfirm>
+            <Popconfirm
+              title="刷新 IQC Δscore"
+              description="对可提交的 alpha 触发 IQC 边际贡献审计（后台排队，稍后刷新查看 Δscore）。确认?"
+              okText="触发"
+              cancelText="取消"
+              onConfirm={() => refreshIqcMutation.mutate()}
+            >
+              <Button
+                icon={<TrophyOutlined />}
+                loading={refreshIqcMutation.isPending}
+              >
+                刷新 IQC Δscore
+              </Button>
+            </Popconfirm>
             <Popconfirm
               title="同步 WorldQuant BRAIN Alphas"
               description="将从 BRAIN 拉取全部 alpha(IS + OS),后台运行约几分钟。确认同步?"
@@ -260,101 +377,215 @@ export default function AlphaList() {
               <Button
                 type="primary"
                 icon={<CloudSyncOutlined />}
-                loading={syncMutation.isLoading}
+                loading={syncMutation.isPending}
               >
                 同步 BRAIN Alphas
               </Button>
             </Popconfirm>
-            <Button
-              icon={<ReloadOutlined />}
-              loading={isFetching}
-              onClick={() => refetch()}
-            >
+            <Button icon={<ReloadOutlined />} loading={isFetching} onClick={() => refetch()}>
               刷新
             </Button>
           </Space>
         </Col>
       </Row>
 
+      {/* Summary strip — clickable submit-state chips drive the server filter */}
+      <Card className="glass-card" size="small" style={{ marginBottom: 16 }}>
+        <Space wrap size={[16, 8]} split={<span style={{ color: 'rgba(255,255,255,0.15)' }}>|</span>}>
+          <Space size={6}>
+            <Text type="secondary">总计</Text>
+            <Text strong style={{ fontSize: 16 }}>{stats?.total ?? '—'}</Text>
+            {filters.region && <Tag color="blue">{filters.region}</Tag>}
+          </Space>
+          {['PASS', 'PASS_PROVISIONAL', 'OPTIMIZE', 'FAIL'].map((s) => (
+            <Space size={6} key={s}>
+              <Text type="secondary">{STATUS_LABELS[s]}</Text>
+              <Text strong>{stats?.by_status?.[s] ?? 0}</Text>
+            </Space>
+          ))}
+          <AntdTooltip title="点击筛选已提交">
+            <Tag
+              color={submitState === 'submitted' ? 'success' : 'default'}
+              style={{ cursor: 'pointer' }}
+              onClick={() => toggleSubmitState('submitted')}
+            >
+              已提交 {stats?.submitted ?? 0}
+            </Tag>
+          </AntdTooltip>
+          <AntdTooltip title="点击筛选可提交且未提交">
+            <Tag
+              color={submitState === 'submittable' ? 'processing' : 'default'}
+              style={{ cursor: 'pointer' }}
+              onClick={() => toggleSubmitState('submittable')}
+            >
+              可提交 {stats?.submittable ?? 0}
+            </Tag>
+          </AntdTooltip>
+          <AntdTooltip title="点击筛选不可提交">
+            <Tag
+              color={submitState === 'rejected' ? 'error' : 'default'}
+              style={{ cursor: 'pointer' }}
+              onClick={() => toggleSubmitState('rejected')}
+            >
+              不可提交 {stats?.rejected ?? 0}
+            </Tag>
+          </AntdTooltip>
+          <AntdTooltip title="点击筛选未校验 can_submit">
+            <Tag
+              style={{ cursor: 'pointer', opacity: submitState === 'unchecked' ? 1 : 0.7 }}
+              color={submitState === 'unchecked' ? 'warning' : 'default'}
+              onClick={() => toggleSubmitState('unchecked')}
+            >
+              未检 {stats?.unchecked ?? 0}
+            </Tag>
+          </AntdTooltip>
+        </Space>
+      </Card>
+
       <Card className="glass-card" style={{ marginBottom: 16 }}>
         <Space wrap size={12}>
-          <Space>
+          <Space size={6}>
             <Text>地区:</Text>
             <Select
               allowClear
               placeholder="全部"
-              style={{ width: 120 }}
+              style={{ width: 110 }}
               value={filters.region}
               onChange={(v) => { setFilters((f) => ({ ...f, region: v })); setPage(1) }}
               options={REGIONS.map((r) => ({ value: r, label: r }))}
             />
           </Space>
-          <Space>
+          <Space size={6}>
             <Text>状态:</Text>
             <Select
               allowClear
               placeholder="全部"
-              style={{ width: 170 }}
+              style={{ width: 140 }}
               value={filters.quality_status}
               onChange={(v) => { setFilters((f) => ({ ...f, quality_status: v })); setPage(1) }}
+              options={Object.entries(STATUS_LABELS).map(([value, label]) => ({ value, label }))}
+            />
+          </Space>
+          <Space size={6}>
+            <Text>反馈:</Text>
+            <Select
+              allowClear
+              placeholder="全部"
+              style={{ width: 120 }}
+              value={filters.human_feedback}
+              onChange={(v) => { setFilters((f) => ({ ...f, human_feedback: v })); setPage(1) }}
               options={[
-                { value: 'PASS', label: '通过' },
-                { value: 'PASS_PROVISIONAL', label: '临时通过' },
-                { value: 'OPTIMIZE', label: '待优化' },
-                { value: 'FAIL', label: '失败' },
-                { value: 'PENDING', label: '待处理' },
-                { value: 'REJECT', label: '拒绝' },
+                { value: 'LIKED', label: '👍 喜欢' },
+                { value: 'DISLIKED', label: '👎 不喜欢' },
+                { value: 'NONE', label: '未评价' },
               ]}
             />
           </Space>
-          <Space>
-            <Text>最小 Sharpe:</Text>
-            <InputNumber
-              placeholder="任意"
-              step={0.1}
-              style={{ width: 100 }}
-              value={filters.min_sharpe}
-              onChange={(v) => { setFilters((f) => ({ ...f, min_sharpe: v })); setPage(1) }}
-            />
-          </Space>
-          <Space>
+          <Space size={6}>
             <Text>提交:</Text>
             <Select
               allowClear
               placeholder="全部"
               style={{ width: 130 }}
-              value={submitFilter || undefined}
-              onChange={(v) => setSubmitFilter(v || '')}
+              value={submitState}
+              onChange={(v) => { setSubmitState(v || undefined); setPage(1) }}
               options={[
                 { value: 'submitted', label: '已提交' },
                 { value: 'submittable', label: '可提交 / 未提交' },
                 { value: 'rejected', label: '不可提交' },
+                { value: 'unchecked', label: '未校验' },
               ]}
             />
           </Space>
-          <Space>
+          <Space size={6}>
+            <Text>Sharpe:</Text>
+            <InputNumber
+              placeholder="≥"
+              step={0.1}
+              style={{ width: 80 }}
+              value={filters.min_sharpe}
+              onChange={(v) => { setFilters((f) => ({ ...f, min_sharpe: v })); setPage(1) }}
+            />
+            <Text type="secondary">~</Text>
+            <InputNumber
+              placeholder="≤"
+              step={0.1}
+              style={{ width: 80 }}
+              value={filters.max_sharpe}
+              onChange={(v) => { setFilters((f) => ({ ...f, max_sharpe: v })); setPage(1) }}
+            />
+          </Space>
+          <Space size={6}>
+            <Text>Fitness ≥</Text>
+            <InputNumber
+              placeholder="任意"
+              step={0.1}
+              style={{ width: 80 }}
+              value={filters.min_fitness}
+              onChange={(v) => { setFilters((f) => ({ ...f, min_fitness: v })); setPage(1) }}
+            />
+          </Space>
+          <Space size={6}>
+            <Text>换手率 ≤</Text>
+            <InputNumber
+              placeholder="任意"
+              step={0.05}
+              style={{ width: 80 }}
+              value={filters.max_turnover}
+              onChange={(v) => { setFilters((f) => ({ ...f, max_turnover: v })); setPage(1) }}
+            />
+          </Space>
+          <Space size={6}>
+            <Text>收益率 ≥</Text>
+            {/* Edited in % for readability; min_returns is stored as the ratio
+                the backend expects (e.g. 8 % → 0.08). */}
+            <InputNumber
+              placeholder="任意"
+              step={1}
+              style={{ width: 80 }}
+              value={filters.min_returns != null ? Number((filters.min_returns * 100).toFixed(4)) : undefined}
+              onChange={(v) => { setFilters((f) => ({ ...f, min_returns: v != null ? v / 100 : undefined })); setPage(1) }}
+            />
+            <Text type="secondary">%</Text>
+          </Space>
+          <Space size={6}>
             <Text>排序:</Text>
             <Select
-              style={{ width: 130 }}
+              style={{ width: 120 }}
               value={sortBy}
               onChange={(v) => { setSortBy(v); setPage(1) }}
               options={[
-                { value: 'sharpe', label: 'sharpe' },
-                { value: 'fitness', label: 'fitness' },
-                { value: 'turnover', label: 'turnover' },
-                { value: 'returns', label: 'returns' },
-                { value: 'created_at', label: 'created_at' },
-                { value: 'id', label: 'id' },
+                { value: 'sharpe', label: 'Sharpe' },
+                { value: 'fitness', label: 'Fitness' },
+                { value: 'turnover', label: '换手率' },
+                { value: 'returns', label: '收益率' },
+                { value: 'drawdown', label: '回撤' },
+                { value: 'created_at', label: '创建时间' },
+                { value: 'id', label: 'ID' },
               ]}
             />
+            <AntdTooltip title={sortOrder === 'desc' ? '降序(点击切换升序)' : '升序(点击切换降序)'}>
+              <Button
+                onClick={() => { setSortOrder((o) => (o === 'desc' ? 'asc' : 'desc')); setPage(1) }}
+              >
+                {sortOrder === 'desc' ? '↓ 降序' : '↑ 升序'}
+              </Button>
+            </AntdTooltip>
           </Space>
           <Search
+            key={resetKey}
             placeholder="搜索表达式 (substring)"
             allowClear
             enterButton
-            style={{ width: 280 }}
+            defaultValue={filters.expression}
+            style={{ width: 260 }}
             onSearch={(v) => { setFilters((f) => ({ ...f, expression: v })); setPage(1) }}
           />
+          {hasActiveFilters && (
+            <Button icon={<ClearOutlined />} onClick={resetFilters}>
+              重置
+            </Button>
+          )}
         </Space>
       </Card>
 
@@ -374,7 +605,7 @@ export default function AlphaList() {
             showTotal: (t) => `共 ${t} 条`,
             onChange: (p, ps) => { setPage(p); setPageSize(ps) },
           }}
-          scroll={{ x: 1200 }}
+          scroll={{ x: 1500 }}
         />
       </Card>
     </div>

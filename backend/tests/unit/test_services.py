@@ -41,9 +41,100 @@ class TestAlphaService:
         filters = AlphaListFilters(region="USA")
         
         items, total = await alpha_service.list_alphas(filters)
-        
+
         assert all(item.region == "USA" for item in items)
-    
+
+    @pytest.mark.asyncio
+    async def test_list_alphas_submit_state(self, alpha_service, db_session):
+        """submit_state filter buckets alphas server-side (honest total)."""
+        rows = [
+            # submitted (date_submitted set)
+            Alpha(expression="e1", region="USA", universe="TOP3000",
+                  can_submit=True, date_submitted=datetime(2026, 5, 1)),
+            # submittable (can_submit True, not yet submitted)
+            Alpha(expression="e2", region="USA", universe="TOP3000",
+                  can_submit=True, date_submitted=None),
+            # rejected (can_submit False)
+            Alpha(expression="e3", region="USA", universe="TOP3000",
+                  can_submit=False),
+            # unchecked (can_submit None)
+            Alpha(expression="e4", region="USA", universe="TOP3000",
+                  can_submit=None),
+        ]
+        for r in rows:
+            db_session.add(r)
+        await db_session.commit()
+
+        async def _count(state):
+            _, total = await alpha_service.list_alphas(
+                AlphaListFilters(submit_state=state)
+            )
+            return total
+
+        assert await _count("submitted") == 1
+        assert await _count("submittable") == 1
+        assert await _count("rejected") == 1
+        assert await _count("unchecked") == 1
+        # No constraint → all four rows.
+        assert await _count(None) == 4
+
+    @pytest.mark.asyncio
+    async def test_get_alpha_stats(self, alpha_service, db_session):
+        """get_alpha_stats aggregates total + per-status + submit buckets."""
+        rows = [
+            Alpha(expression="s1", region="USA", universe="TOP3000",
+                  quality_status="PASS", can_submit=True,
+                  date_submitted=datetime(2026, 5, 1)),
+            Alpha(expression="s2", region="USA", universe="TOP3000",
+                  quality_status="PASS", can_submit=True),
+            Alpha(expression="s3", region="USA", universe="TOP3000",
+                  quality_status="OPTIMIZE", can_submit=False),
+            Alpha(expression="s4", region="CHN", universe="TOP2000U",
+                  quality_status="PENDING", can_submit=None),
+        ]
+        for r in rows:
+            db_session.add(r)
+        await db_session.commit()
+
+        stats = await alpha_service.get_alpha_stats()
+        assert stats["total"] == 4
+        assert stats["submitted"] == 1
+        assert stats["submittable"] == 1
+        assert stats["rejected"] == 1
+        assert stats["unchecked"] == 1
+        assert stats["by_status"]["PASS"] == 2
+
+        # Region scoping.
+        usa = await alpha_service.get_alpha_stats(region="USA")
+        chn = await alpha_service.get_alpha_stats(region="CHN")
+        assert usa["total"] == 3
+        assert chn["total"] == 1
+        assert chn["unchecked"] == 1
+
+    @pytest.mark.asyncio
+    async def test_get_alpha_stats_null_status_merges_into_pending(
+        self, alpha_service, db_session
+    ):
+        """NULL quality_status must accumulate into PENDING, not clobber it."""
+        from sqlalchemy import update as sa_update
+
+        pending = Alpha(expression="p1", region="USA", universe="TOP3000",
+                        quality_status="PENDING")
+        null_row = Alpha(expression="p2", region="USA", universe="TOP3000",
+                         quality_status="PENDING")
+        db_session.add_all([pending, null_row])
+        await db_session.commit()
+        # Force one row to NULL (column default blocks setting None at insert).
+        await db_session.execute(
+            sa_update(Alpha).where(Alpha.id == null_row.id).values(quality_status=None)
+        )
+        await db_session.commit()
+
+        stats = await alpha_service.get_alpha_stats()
+        # Both rows land in PENDING (1 literal + 1 NULL), none dropped.
+        assert stats["by_status"]["PENDING"] == 2
+        assert stats["total"] == 2
+
     @pytest.mark.asyncio
     async def test_get_alpha(self, alpha_service, sample_alpha):
         """Test getting alpha by ID."""
