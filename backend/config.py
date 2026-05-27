@@ -1344,6 +1344,19 @@ class Settings(BaseSettings):
     # budget tilts toward cost-positive datasets. Cold start (no margins yet) →
     # always explore.
     SIM_PIPELINE_EXPLORE_PROB: float = 0.6
+    # Sub-phase 3 — split the producer at HYPOTHESIS into two stages connected by
+    # an internal hyp_q: stage-1 hyp-producer (rag→distill→hypothesis, owns a DB
+    # session) emits hypothesis bundles; stage-2 code-producer(s) (code_gen→
+    # validate→[self_correct], DB-free) consume them and push validated
+    # candidates onto the work queue. The seam makes the hypothesis SOURCE
+    # pluggable (e.g. paper-derived hypotheses pushed onto the same hyp_q).
+    # OFF → the single-stage producer runs unchanged (byte-identical).
+    SIM_PIPELINE_SPLIT_GENERATION: bool = False
+    # Number of stage-2 code-producers draining hyp_q (DB-free, like sim
+    # consumers). 1 keeps the seam with no extra concurrency; >1 parallelises
+    # code_gen (only useful once generation is the bottleneck — i.e. CONSULTANT
+    # 80-slot; at USER the sim wall dominates and 1 suffices).
+    SIM_PIPELINE_CODE_PRODUCER_COUNT: int = 1
 
     # Optimization Chain Settings
     MAX_OPTIMIZATION_VARIANTS: int = 10

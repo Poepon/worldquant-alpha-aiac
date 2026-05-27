@@ -70,6 +70,11 @@ class MiningWorkflow:
         self._retry_graph = None    # code_gen_retry → validate (F2-2)
         self._mutate_graph = None   # hypothesis_mutate → END   (F2-3)
         self._validate_graph = None  # validate → END (F2-4 G5 offspring check)
+        # Sub-phase 3 — generation split at HYPOTHESIS (built lazily; only used
+        # when SIM_PIPELINE_SPLIT_GENERATION is on). Concatenated they ARE the
+        # generation graph, so the split carries no semantic drift.
+        self._hyp_graph = None       # rag → distill → hypothesis → END (stage 1)
+        self._codegen_graph = None   # code_gen → validate → [self_correct] (stage 2)
 
         logger.info("[MiningWorkflow] Initialized")
     
@@ -415,6 +420,63 @@ class MiningWorkflow:
             self._validate_graph = self._build_validate_graph()
         return await self._validate_graph.compile().ainvoke(state, config=config)
 
+    def _build_hyp_graph(self) -> StateGraph:
+        """rag_query → distill_context → hypothesis → END (Sub-phase 3 stage 1).
+
+        Same bindings as the generation graph's head, ending after hypothesis.
+        node_rag_query uses self.rag_service (this workflow's DB session); the
+        hypothesis hooks (G8 / Hypothesis INSERT) open their own ephemeral
+        sessions — so a stage-1 hyp-producer owns one DB session, the F1 DB-owner.
+        """
+        g = StateGraph(MiningState)
+        g.add_node("rag_query", partial(node_rag_query, rag_service=self.rag_service))
+        g.add_node("distill_context", partial(node_distill_context, llm_service=self.llm_service))
+        g.add_node("hypothesis", partial(node_hypothesis, llm_service=self.llm_service))
+        g.set_entry_point("rag_query")
+        g.add_edge("rag_query", "distill_context")
+        g.add_edge("distill_context", "hypothesis")
+        g.add_edge("hypothesis", END)
+        return g
+
+    def _build_codegen_graph(self) -> StateGraph:
+        """code_gen → validate → [self_correct → validate]* → END (stage 2).
+
+        Same bindings as the generation graph's tail (incl. the post-validate
+        self_correct loop). node_code_gen / node_validate / node_self_correct are
+        DB-free w.r.t. a shared session (code_gen's G8/bandit/G10 hooks each open
+        their own ephemeral session; validate loads the operator registry at
+        import) — so N stage-2 code-producers run concurrently DB-free, like the
+        sim consumers.
+        """
+        g = StateGraph(MiningState)
+        g.add_node("code_gen", partial(node_code_gen, llm_service=self.llm_service))
+        g.add_node("validate", node_validate)
+        g.add_node("self_correct", partial(node_self_correct, llm_service=self.llm_service))
+        g.set_entry_point("code_gen")
+        g.add_edge("code_gen", "validate")
+        g.add_conditional_edges(
+            "validate",
+            route_after_validate,
+            {"simulate": END, "self_correct": "self_correct"},
+        )
+        g.add_edge("self_correct", "validate")
+        return g
+
+    async def run_hypothesis(self, state, config: Dict[str, Any] = None):
+        """Run stage 1 (rag→distill→hypothesis) → state carrying the hypothesis +
+        RAG context, ready for code_gen. The hypothesis SOURCE seam (Sub-phase 3):
+        a pluggable producer (e.g. paper-derived) could emit equivalent states."""
+        if self._hyp_graph is None:
+            self._hyp_graph = self._build_hyp_graph()
+        return await self._hyp_graph.compile().ainvoke(state, config=config)
+
+    async def run_codegen(self, state, config: Dict[str, Any] = None):
+        """Run stage 2 (code_gen→validate→[self_correct]) on a post-hypothesis
+        state → pending_alphas (validated candidates) for the sim consumers."""
+        if self._codegen_graph is None:
+            self._codegen_graph = self._build_codegen_graph()
+        return await self._codegen_graph.compile().ainvoke(state, config=config)
+
     def compile(self):
         """Compile the graph with optional checkpointer."""
         return self._graph.compile(checkpointer=self.checkpointer)
@@ -428,6 +490,7 @@ class MiningWorkflow:
         num_alphas: int = 3,
         config: Dict[str, Any] = None,
         generate_only: bool = False,
+        stop_after_hypothesis: bool = False,
     ) -> Dict[str, Any]:
         """Execute the mining workflow (flat hypothesis-driven, post tier-removal).
 
@@ -530,6 +593,16 @@ class MiningWorkflow:
             llm_mode_used=_llm_mode,
         )
         
+        # Sub-phase 3 stage 1: run only rag→distill→hypothesis and return the
+        # post-hypothesis state (reusing ALL the state-building above). A
+        # code-producer then runs run_codegen on it. The hypothesis SOURCE seam.
+        if generate_only and stop_after_hypothesis:
+            if self._hyp_graph is None:
+                self._hyp_graph = self._build_hyp_graph()
+            hyp_state = await self._hyp_graph.compile().ainvoke(initial_state, config=config)
+            logger.info("[MiningWorkflow] stage-1 hypothesis done")
+            return {"state": hyp_state}
+
         # Compile and run. generate_only uses the generation-only graph
         # (ends after validate); the full graph otherwise.
         app = self._gen_graph.compile() if generate_only else self.compile()

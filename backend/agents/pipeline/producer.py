@@ -15,6 +15,7 @@ _run_flat_iteration integration step.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Dict, Optional
 
@@ -47,6 +48,40 @@ def _sim_ready_payload(gen_state: Any, alpha_candidate: Any) -> Any:
         merged.update(update)
         return merged
     return gen_state
+
+
+# Sentinel ending the internal hyp_q in the split (Sub-phase 3) producer.
+_HYP_SENTINEL = object()
+
+
+def _pattr(obj: Any, name: str, default: Any) -> Any:
+    """Read a field off a Pydantic state OR a dict (ainvoke may return either)."""
+    if hasattr(obj, name):
+        return getattr(obj, name)
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return default
+
+
+async def _drain_feedback(feedback_ctx, handle_feedback, push, db, wf, should_stop) -> int:
+    """Run the F2 feedback drain phase — shared by the single-stage and the
+    split-stage producers. No-op (returns 0) when the loop isn't wired."""
+    if feedback_ctx is None or handle_feedback is None:
+        return 0
+    handled = 0
+    feedback_ctx.mark_primary_done()
+    while not should_stop():
+        event = await feedback_ctx.next_event()
+        if event is None:
+            break  # quiescence sentinel (or stop)
+        try:
+            await handle_feedback(event, push, db, wf)
+            handled += 1
+        except Exception:  # noqa: BLE001 — one bad event ≠ dead drain
+            logger.exception("[pipeline] feedback handler failed (skipped)")
+        finally:
+            feedback_ctx.event_done()
+    return handled
 
 
 def build_producer(
@@ -130,22 +165,135 @@ def build_producer(
             # Runs while consumers/persister are still processing in-flight work,
             # so a FAIL→retry / FAIL→mutate / PASS→crossover can regenerate. The
             # runner ends it with a None (quiescence) or on stop.
-            if feedback_ctx is not None and handle_feedback is not None:
-                feedback_ctx.mark_primary_done()
-                while not should_stop():
-                    event = await feedback_ctx.next_event()
-                    if event is None:
-                        break  # quiescence sentinel (or stop)
-                    try:
-                        await handle_feedback(event, push, db, wf)
-                        handled += 1
-                    except Exception:  # noqa: BLE001 — one bad event ≠ dead drain
-                        logger.exception("[pipeline] feedback handler failed (skipped)")
-                    finally:
-                        feedback_ctx.event_done()
+            handled = await _drain_feedback(
+                feedback_ctx, handle_feedback, push, db, wf, should_stop)
         logger.info(
             "[pipeline] producer finished after %d round(s), %d candidate(s), %d feedback handled",
             rounds, produced, handled,
+        )
+
+    return produce
+
+
+def build_split_producer(
+    *,
+    session_factory: Callable[[], Any],
+    workflow_factory: Callable[[Any], Any],
+    next_round_inputs: Callable[[Any], Awaitable[Optional[Dict[str, Any]]]],
+    num_alphas: int,
+    code_producer_count: int = 1,
+    target_candidates: Optional[int] = None,
+    handle_feedback: Optional[Callable[..., Awaitable[None]]] = None,
+    queue_maxsize: int = 0,
+) -> Callable[..., Awaitable[None]]:
+    """Sub-phase 3: a generation producer split at HYPOTHESIS into two internal
+    stages joined by ``hyp_q`` — exposes the SAME ``produce(push, should_stop[,
+    feedback_ctx])`` contract as build_producer, so the runner is unchanged.
+
+    Stage 1 (one hyp-producer, owns the DB session): next_round_inputs →
+    wf.run(stop_after_hypothesis=True) → push the post-hypothesis state onto an
+    internal hyp_q. This is the pluggable hypothesis SOURCE seam — a paper-derived
+    generator would push equivalent states onto the same queue.
+
+    Stage 2 (``code_producer_count`` code-producers, DB-free): drain hyp_q →
+    wf.run_codegen → push validated candidates onto the runner's work queue.
+
+    All coroutines share ONE workflow: only the single hyp-producer touches the
+    DB (run_hypothesis' RAG, sequentially); run_codegen is DB-free, so concurrent
+    code-producers never share a session (F1). The sub-graphs are pre-built to
+    avoid a concurrent lazy-build race.
+    """
+
+    async def produce(push, should_stop, feedback_ctx=None) -> None:
+        cpc = max(1, int(code_producer_count))
+        hq_max = queue_maxsize if queue_maxsize and queue_maxsize > 0 else max(2, 2 * cpc)
+        hyp_q: asyncio.Queue = asyncio.Queue(maxsize=hq_max)
+        st = {"produced": 0, "rounds": 0}
+
+        async with session_factory() as db:
+            wf = workflow_factory(db)
+            # Pre-build both sub-graphs so concurrent code-producers don't race
+            # the lazy build inside run_codegen.
+            if getattr(wf, "_hyp_graph", None) is None:
+                wf._hyp_graph = wf._build_hyp_graph()
+            if getattr(wf, "_codegen_graph", None) is None:
+                wf._codegen_graph = wf._build_codegen_graph()
+
+            def _at_target() -> bool:
+                return target_candidates is not None and st["produced"] >= target_candidates
+
+            async def _hyp_producer() -> None:
+                try:
+                    while not should_stop() and not _at_target():
+                        inputs = await next_round_inputs(db)
+                        if not inputs:
+                            break
+                        st["rounds"] += 1
+                        result = await wf.run(
+                            task=inputs["task"],
+                            dataset_id=inputs["dataset_id"],
+                            fields=inputs.get("fields") or [],
+                            operators=inputs.get("operators") or [],
+                            num_alphas=num_alphas,
+                            config=inputs.get("config"),
+                            generate_only=True,
+                            stop_after_hypothesis=True,
+                        )
+                        hyp_state = result.get("state") if isinstance(result, dict) else None
+                        if hyp_state is not None:
+                            await hyp_q.put((hyp_state, inputs["dataset_id"]))
+                except Exception:  # noqa: BLE001 — a stage-1 crash must still drain stage 2
+                    logger.exception("[pipeline] hyp-producer crashed; draining code-producers")
+                finally:
+                    for _ in range(cpc):
+                        await hyp_q.put(_HYP_SENTINEL)
+
+            async def _code_producer() -> None:
+                while True:
+                    item = await hyp_q.get()
+                    if item is _HYP_SENTINEL:
+                        return
+                    if should_stop() or _at_target():
+                        continue  # drain remaining sentinels; produce nothing more
+                    hyp_state, dataset_id = item
+                    try:
+                        final = await wf.run_codegen(hyp_state)
+                    except Exception:  # noqa: BLE001 — one bad hypothesis ≠ dead producer
+                        logger.exception("[pipeline] code-producer failed a hypothesis (skipped)")
+                        continue
+                    pending = _pattr(final, "pending_alphas", []) or []
+                    gen_trace = _pattr(final, "trace_steps", []) or []
+                    for ac in pending:
+                        if not getattr(ac, "is_valid", None):
+                            continue
+                        cand = Candidate(
+                            expression=getattr(ac, "expression", "") or "",
+                            context={"dataset_id": dataset_id},
+                            trace_records=list(gen_trace),
+                            payload=_sim_ready_payload(final, ac),
+                        )
+                        await push(cand)
+                        st["produced"] += 1
+
+            hyp_task = asyncio.create_task(_hyp_producer(), name="hyp-producer")
+            code_tasks = [
+                asyncio.create_task(_code_producer(), name=f"code-producer-{i}")
+                for i in range(cpc)
+            ]
+            try:
+                await hyp_task
+                await asyncio.gather(*code_tasks)
+            finally:
+                for t in (hyp_task, *code_tasks):
+                    if not t.done():
+                        t.cancel()
+                await asyncio.gather(hyp_task, *code_tasks, return_exceptions=True)
+
+            await _drain_feedback(feedback_ctx, handle_feedback, push, db, wf, should_stop)
+
+        logger.info(
+            "[pipeline] split-producer finished after %d round(s), %d candidate(s)",
+            st["rounds"], st["produced"],
         )
 
     return produce
@@ -171,6 +319,8 @@ async def run_flat_pipeline_session(
     reward_hook: Optional[Callable[[Any, float], None]] = None,
     classify_feedback: Optional[Callable[[Any], Any]] = None,
     handle_feedback: Optional[Callable[..., Awaitable[None]]] = None,
+    split_generation: bool = False,
+    code_producer_count: int = 1,
 ) -> dict:
     """Assemble producer + consumer + persister and run one pipeline session.
 
@@ -198,14 +348,27 @@ async def run_flat_pipeline_session(
     # ~0 PASS rate would never terminate and burn the full max_iters every
     # session. Termination otherwise comes from next_round_inputs returning None
     # (cursor exhausted / ownership lost / paused / max_iters).
-    produce = build_producer(
-        session_factory=session_factory,
-        workflow_factory=producer_workflow_factory,
-        next_round_inputs=next_round_inputs,
-        num_alphas=num_alphas,
-        target_candidates=daily_goal,
-        handle_feedback=handle_feedback,
-    )
+    # Sub-phase 3: split the producer at HYPOTHESIS (hyp-producer → hyp_q →
+    # code-producers) when enabled; else the single-stage producer (unchanged).
+    if split_generation:
+        produce = build_split_producer(
+            session_factory=session_factory,
+            workflow_factory=producer_workflow_factory,
+            next_round_inputs=next_round_inputs,
+            num_alphas=num_alphas,
+            code_producer_count=code_producer_count,
+            target_candidates=daily_goal,
+            handle_feedback=handle_feedback,
+        )
+    else:
+        produce = build_producer(
+            session_factory=session_factory,
+            workflow_factory=producer_workflow_factory,
+            next_round_inputs=next_round_inputs,
+            num_alphas=num_alphas,
+            target_candidates=daily_goal,
+            handle_feedback=handle_feedback,
+        )
     simulate, evaluate = build_consumer_stages(
         consumer_workflow,
         config={"configurable": {"trace_service": None, "run_id": run_id}},
