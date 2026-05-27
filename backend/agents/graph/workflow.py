@@ -65,6 +65,10 @@ class MiningWorkflow:
         self._gen_graph = self._build_generation_graph()
         self._sim_graph = self._build_simulate_graph()
         self._eval_graph = self._build_evaluate_graph()
+        # F2-2 R1b retry sub-graph (code_gen_retry → validate): built lazily on
+        # first run_retry so r1b_loop is only imported when retry is actually
+        # wired (ENABLE_R1B_RETRY_LOOP on). None = not yet built.
+        self._retry_graph = None
 
         logger.info("[MiningWorkflow] Initialized")
     
@@ -304,6 +308,30 @@ class MiningWorkflow:
         g.add_edge("evaluate", END)
         return g
 
+    def _build_retry_graph(self) -> StateGraph:
+        """code_gen_retry → validate → END for the F2 R1b retry handler.
+
+        Rewrites a FAIL+IMPLEMENTATION alpha (LLM) and re-validates it; the
+        pipeline then re-simulates the valid rewrite as a fresh candidate. Reuses
+        the identical node_code_gen_retry binding so the rewrite prompt + the
+        per-alpha/per-round caps (and r1b_retry_log telemetry) match the legacy
+        in-graph cycle exactly. node_code_gen_retry self-guards on
+        r1b_retries_attempted_this_alpha, which rides on the candidate's state
+        across the feedback loop, so the depth cap holds without extra tracking.
+        """
+        from backend.agents.graph.nodes.r1b_loop import node_code_gen_retry
+
+        g = StateGraph(MiningState)
+        g.add_node(
+            "code_gen_retry",
+            partial(node_code_gen_retry, llm_service=self.llm_service),
+        )
+        g.add_node("validate", node_validate)
+        g.set_entry_point("code_gen_retry")
+        g.add_edge("code_gen_retry", "validate")
+        g.add_edge("validate", END)
+        return g
+
     async def run_simulate(self, state, config: Dict[str, Any] = None):
         """Run node_simulate on a (single-candidate) state; return final state."""
         return await self._sim_graph.compile().ainvoke(state, config=config)
@@ -311,6 +339,18 @@ class MiningWorkflow:
     async def run_evaluate(self, state, config: Dict[str, Any] = None):
         """Run node_evaluate on a (post-sim) state; return final state."""
         return await self._eval_graph.compile().ainvoke(state, config=config)
+
+    async def run_retry(self, state, config: Dict[str, Any] = None):
+        """Rewrite + re-validate a FAIL alpha (F2 R1b retry); return final state.
+
+        ``pending_alphas[0]`` is quality_status=PENDING + is_valid on a real
+        rewrite; it stays FAIL when the per-alpha budget was already exhausted
+        (node_code_gen_retry self-guard no-op). The caller pushes only the valid
+        rewrite back onto the work queue.
+        """
+        if self._retry_graph is None:
+            self._retry_graph = self._build_retry_graph()
+        return await self._retry_graph.compile().ainvoke(state, config=config)
     
     def compile(self):
         """Compile the graph with optional checkpointer."""

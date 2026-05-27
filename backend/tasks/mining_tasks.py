@@ -1556,6 +1556,26 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     # combats the long-session client-rot sim-hang; runs only with 0 in flight.
     _refresh_every = int(getattr(settings, "SIM_PIPELINE_CLIENT_REFRESH_EVERY", 0) or 0)
 
+    # F2-2: R1b retry through the feedback channel — wired only when the legacy
+    # retry flag is on. classify (persister-side) turns a FAIL+IMPLEMENTATION
+    # result with budget into a RETRY event; handle (producer-side) rewrites +
+    # re-validates and re-pushes the valid rewrite. When OFF, both stay None and
+    # the pipeline is byte-identical (the feedback loop never activates). Depth
+    # caps at R1B_MAX_RETRIES_PER_ALPHA, carried on the candidate's state.
+    _retry_classify = None
+    _retry_handle = None
+    if getattr(settings, "ENABLE_R1B_RETRY_LOOP", False):
+        from backend.agents.pipeline.feedback_r1b import (
+            build_retry_classifier,
+            build_retry_handler,
+        )
+        _retry_classify = build_retry_classifier(
+            max_retries=int(getattr(settings, "R1B_MAX_RETRIES_PER_ALPHA", 3))
+        )
+        _retry_handle = build_retry_handler(
+            config={"configurable": {"trace_service": None, "run_id": run_id}}
+        )
+
     stats = {}
     async with BrainAdapter() as brain:
         refresher = None
@@ -1582,6 +1602,8 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             release_slot=_noop_release,
             refresher=refresher,
             reward_hook=_reward_hook,
+            classify_feedback=_retry_classify,
+            handle_feedback=_retry_handle,
         )
 
     logger.info(
