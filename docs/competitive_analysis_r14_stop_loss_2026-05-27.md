@@ -78,6 +78,26 @@ legacy FLAT 循环每 round 末调 `check_should_pause(round_pass_count, round_a
 - **率信号 vs 成本信号**:pass-rate(A/D)简单但忽略"贵的 PASS";cost-per-PASS(F)经济意义强但需成本计量。production p50 PASS=0 下,**率信号几乎全是 0/非 0**,SPRT(D)的似然比会退化得接近连续-zero(A)——所以 D 相对 A 的增量在 p50=0 体制下可能很小。
 - **自动 vs 观测**:I 零假停风险,但要人盯;A/D/F/H 自动但有误停风险(需 warmup + 标定)。
 
+## 5c. 过拟合风险筛选(应需求,2026-05-27)
+
+**判据**(DSR / 多重检验支柱的直接应用):一个停止规则若**基于噪声主导的 in-sample 信号做自动决策、且其阈值拟合到历史数据**,则该决策会过拟合短期噪声——在 **production p50 PASS=0** 体制下,pass-rate 信号几乎全是噪声,任何"按 pass-rate 停 task"都是在**把短期 dry-spell 误判为无产出**(假停),不泛化。**过拟合-free 的停止 = 预先承诺的预算上限**(prior 决策,与数据无关),而非 metric-反应式 kill。
+
+| 方案 | 过拟合风险 | 判定 |
+|---|---|---|
+| **A 连续-zero-batch + EMA floor** | **中-高**:consecutive=3 / floor=0.005 是拟合到 production 的阈值;p50=0 下"3 连零"对好 task 的正常 dry-spell 也常发生 → 假停=过拟合短期噪声 | ❌ 踢除 |
+| **D 正式 SPRT** | **高**:必须从稀疏历史 PASS 估 H0/H1 两个率 + α/β——稀疏数据估率是过拟合陷阱本身;p50=0 下似然比退化且率估计极不稳 | ❌ 踢除 |
+| **F 成本-per-PASS** | **高**:分母是噪声 PASS 数(p50=0 → 除零/爆值 → 几乎必触发);阈值若拟合历史 cost-per-PASS 分布则过拟合 | ❌ 踢除 |
+| **H 两层 ASHA + SPRT backstop** | **高**:含 D 的 SPRT + **按噪声 per-dataset 率激进踢数据集**(少数零-PASS 轮就踢=过拟合 per-dataset 噪声,比 task 级更脆) | ❌ 踢除 |
+| **E 纯靠 bandit + 硬上限** | **低**:停止来自**预先承诺的硬上限**(max_iters/target_candidates,prior 非数据反应=DSR-clean 的"控制 N");bandit 是**软降权 + 折扣 Beta 后验(带悲观先验、跨整 session 累积、不硬停、可自愈)**,远比 3-batch 硬触发稳 | ✅ 保留 |
+| **I 只观测不自动停** | **无**:不做自动决策,人工判断 | ✅ 保留 |
+
+**踢除后的结论**:过拟合-free 的集合 = **E(bandit 软重分配 + 预算硬上限)+ I(观测,人工)**。两者恰好都**不含"拟合到噪声 pass-rate 的自动停 task 规则"**。
+
+**关键洞见**:
+1. **真正抗过拟合的停止纪律是"预先承诺的试验预算上限"**(DSR 的"控制 N trials")——而它**已经在 pipeline 里实现了**(`max_iters=100` + `target_candidates=20`,见 2c-step1/2)。所以"过拟合-free R14"其实**主体已就位**(= E 的硬上限部分 + 已接的 dataset bandit)。
+2. **增量 = I(加 cost-per-PASS / pass-rate telemetry 供人看)**——它本身零自动决策=零过拟合,且产出的数据让人能**事后**判断,而非用噪声阈值**事前**自动停。
+3. 换言之:**不新增任何"按 metric 自动停 task"的规则**(A/D/F/H 全踢);保留已有的预算上限 + bandit 软重分配(E),再加观测(I)。这与"R14 是 backstop、主杠杆是 bandit"的结论完全一致,且**用过拟合判据独立推到了同一落点**。
+
 ## 工作量 / 风险预估(供定 build)
 - 复用 `task_stop_loss_service`(零重写)+ 共享 PASS 计数(类比 daily_goal 的 progress dict)+ producer 批次末检查 + 复用 `_stop_reason` 停止路径。**~半天**,中低风险(逻辑复用、flag OFF 不影响 legacy、可单测共享计数+批次判定)。
 - 主要风险:异步 PASS 回填的滞后导致 consecutive_zero 判定偏移一批——backstop 性质可接受,单测覆盖"PASS 滞后一批"场景即可。
