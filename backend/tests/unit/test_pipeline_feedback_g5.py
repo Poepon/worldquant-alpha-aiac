@@ -177,6 +177,37 @@ async def test_handle_g5_invalid_offspring_not_pushed():
 
 
 @pytest.mark.asyncio
+async def test_handle_g5_pushes_only_stamped_offspring():
+    """Only validated alphas carrying _g5_crossover_parent_ids are re-simulated —
+    a non-offspring left in pending_alphas (state-copy edge / validate hook) is
+    NOT pushed (else it would re-simulate an already-PASSED parent)."""
+    pushed = []
+
+    async def push(c):
+        pushed.append(c)
+
+    class _WFExtra:
+        def __init__(self):
+            self.llm_service = SimpleNamespace(model="x")
+            self.validate_calls = 0
+
+        async def run_validate(self, state, config=None):
+            self.validate_calls += 1
+            pend = state["pending_alphas"] if isinstance(state, dict) else state.pending_alphas
+            for a in pend:
+                a.is_valid = True
+            # inject a non-G5 valid alpha (no _g5 stamp) — must be filtered out
+            pend.append(SimpleNamespace(expression="not_offspring", is_valid=True, metrics={}))
+            return state
+
+    rows = [(_alpha(1, 2.0, hyp_id=10), None), (_alpha(2, 1.8, hyp_id=20), None)]
+    handle = build_g5_handler(run_id=99, require_diff_pillar=False)
+    await handle(_pass_event(), push, db=_FakeDB(rows), wf=_WFExtra())
+    assert len(pushed) == 1                       # only the stamped offspring
+    assert pushed[0].expression == "rank(combined)"
+
+
+@pytest.mark.asyncio
 async def test_handle_g5_ignores_non_pass_landed():
     pushed = []
 

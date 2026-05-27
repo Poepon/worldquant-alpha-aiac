@@ -126,6 +126,11 @@ def build_g5_handler(
             .order_by(_desc(Alpha.is_sharpe))
             .limit(20)
         )
+        # NB: this read relies on READ COMMITTED (the engine default — database.py
+        # sets no isolation_level) so the producer's session sees the PASS rows the
+        # persister committed on its SEPARATE session. A stricter isolation level
+        # would hand back a stale snapshot → G5 would never find the just-landed
+        # PASS. The PASS is committed before its PASS_LANDED event (persist_every==1).
         rows = (await db.execute(stmt)).all()
         if len(rows) < 2:
             return
@@ -206,6 +211,12 @@ def build_g5_handler(
         validated = await wf.run_validate(_state_with_pending(st, cands), config=config)
         ds = _sattr(st, "dataset_id", None)
         for a in (_sattr(validated, "pending_alphas", None) or []):
+            # Push ONLY validated G5 offspring (stamped _g5_crossover_parent_ids).
+            # Guards against a state-copy edge (a non-MiningState/non-dict parent
+            # state → _state_with_pending can't inject → validate would run on the
+            # parent's own pending_alphas) re-simulating an already-PASSED parent.
+            if not (getattr(a, "metrics", None) or {}).get("_g5_crossover_parent_ids"):
+                continue
             if not getattr(a, "is_valid", False):
                 continue
             await push(Candidate(
