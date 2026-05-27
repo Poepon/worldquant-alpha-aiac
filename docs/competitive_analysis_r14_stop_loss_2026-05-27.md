@@ -55,6 +55,29 @@ legacy FLAT 循环每 round 末调 `check_should_pause(round_pass_count, round_a
 
 **定位提醒**:R14 是 backstop,**主效率杠杆是 dataset bandit(ASHA 式 reallocation)**——若要更大收益,优先确保 bandit 在 pipeline 路径生效(`next_round_inputs` 已接 `weighted_choice`)。R14 适配价值 = 单数据集 task 或全数据集集体无产出时的"放弃整 task"。
 
+## 5b. 扩展方案菜单(应需求,2026-05-27)
+
+设计轴:**信号**(连续-zero / 累计率 / SPRT 似然比 / 成本-per-PASS)× **动作**(停整 task / 重分配 / 踢数据集 / 只报警)× **位置**(producer 批次 / persister / 独立监控)× **复用度**。
+
+| 方案 | 信号 | 动作 | 锚点 | 工作量 | 风险 | 何时最优 |
+|---|---|---|---|---|---|---|
+| **A 连续-zero-batch 刹车**(推荐基线) | 连续 zero-PASS 生成批次 + EMA floor | 停整 task(resumable) | SPRT 粗版 + 工业 hit-rate | ~半天 | 低(复用 service) | 想忠实移植现有 R14、最小改动 |
+| **D 正式 SPRT** | PASS Bernoulli 流的 log-likelihood ratio,H1=产出率≥阈 vs H0=≤噪声;LLR 越下界→停 | 停整 task | SPRT 最优(Wald) | ~1 天 | 中(α/β + 两个率要标定;误标→假停/永不停) | 想要理论最优期望样本、且愿标定 |
+| **E 纯靠 bandit(涌现式停)** | 无 task-级信号——无产出 task 经 dataset bandit 权重衰减自然枯竭 → 硬上限终止 | 重分配(已有)+ 硬上限兜底 | ASHA"重分配>硬停" | ~0(只需 bandit ON) | 中(单数据集 task / 全数据集皆烂无兜底) | 多数据集 task + bandit 已调好 |
+| **F 成本-per-PASS 经济停** | 累计(LLM+sim 成本)/ PASS 数 > 预算阈 | 停整 task | 工业 capacity / 研究速度>衰减 | ~1 天 | 中(需 per-session 成本计量新面) | 想要经济意义的刹车(成本驱动而非率驱动) |
+| **H 两层 ASHA + backstop** | 每数据集激进早停(从 cursor 轮转**踢出**无产出数据集)+ task 级 SPRT/连续-zero | 重分配 + 踢数据集 + 停整 task | 完整 Successive-Halving | ~2-3 天 | 中高(改 cursor 轮转 + 两级状态) | 想要最彻底的预算效率、数据集多 |
+| **I 只观测不自动停** | cost-per-PASS / pass-rate telemetry | 只报警,人工 pause | 工业"先监控量化" | ~半天 | 最低(无假停) | 怕自动误停、想先看数据再自动化 |
+
+**组合视角**(非互斥):
+- **E + A**:让 bandit 做主重分配(E),A 做"全数据集皆烂"的薄兜底——**我的二选**(贴合"R14 是 backstop"的结论:主力交给已有 bandit,A 阈值可调高,只在集体无产出时停)。
+- **I 先行**:先上观测(I,半天),跑 shadow 看真实 cost-per-PASS / pass-rate 分布,再据真实分布标定 A/D/F 的阈值——**避免拍脑袋标定**(呼应 v3 "先建测量再投特性"的教训)。
+- **D / F / H** 是"更重但更优"路线,适合 shadow 验证 pipeline 有真实收益后再投。
+
+**轴上的关键取舍**:
+- **停 task vs 重分配**:ASHA 明确"重分配优先";AIAC 的 bandit 已是重分配器 → 纯"停 task"的 R14 是次优,**带重分配的方案(E/H)理论上更省**,但 bandit 已覆盖大部分,增量看 shadow。
+- **率信号 vs 成本信号**:pass-rate(A/D)简单但忽略"贵的 PASS";cost-per-PASS(F)经济意义强但需成本计量。production p50 PASS=0 下,**率信号几乎全是 0/非 0**,SPRT(D)的似然比会退化得接近连续-zero(A)——所以 D 相对 A 的增量在 p50=0 体制下可能很小。
+- **自动 vs 观测**:I 零假停风险,但要人盯;A/D/F/H 自动但有误停风险(需 warmup + 标定)。
+
 ## 工作量 / 风险预估(供定 build)
 - 复用 `task_stop_loss_service`(零重写)+ 共享 PASS 计数(类比 daily_goal 的 progress dict)+ producer 批次末检查 + 复用 `_stop_reason` 停止路径。**~半天**,中低风险(逻辑复用、flag OFF 不影响 legacy、可单测共享计数+批次判定)。
 - 主要风险:异步 PASS 回填的滞后导致 consecutive_zero 判定偏移一批——backstop 性质可接受,单测覆盖"PASS 滞后一批"场景即可。
