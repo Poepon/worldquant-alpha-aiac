@@ -180,14 +180,20 @@ async def test_persist_flushes_trace_one_iteration_per_candidate():
     await persist(object(), [r1, r2])
 
     assert len(flush.calls) == 2
-    # Candidate 1 = iteration 1, full trajectory gen + sim/eval (combined order).
+    # Candidate 1 = iteration 1, full trajectory gen + sim/eval + SAVE_RESULTS tail.
     assert flush.calls[0]["iteration"] == 1
     assert flush.calls[0]["task_id"] == 42 and flush.calls[0]["run_id"] == 77
     assert [s["step_type"] for s in flush.calls[0]["steps"]] == \
-        ["RAG_QUERY", "CODE_GEN", "SIMULATE", "EVALUATE"]
+        ["RAG_QUERY", "CODE_GEN", "SIMULATE", "EVALUATE", "SAVE_RESULTS"]
+    # SAVE_RESULTS tail reflects the persist outcome.
+    _save = flush.calls[0]["steps"][-1]
+    assert _save["step_type"] == "SAVE_RESULTS"
+    assert _save["output_data"]["ok"] is True
+    assert _save["status"] == "SUCCESS"
     # Candidate 2 = iteration 2 (per-candidate, monotonic).
     assert flush.calls[1]["iteration"] == 2
-    assert [s["step_type"] for s in flush.calls[1]["steps"]] == ["RAG_QUERY", "SIMULATE"]
+    assert [s["step_type"] for s in flush.calls[1]["steps"]] == \
+        ["RAG_QUERY", "SIMULATE", "SAVE_RESULTS"]
 
 
 @pytest.mark.asyncio

@@ -102,61 +102,74 @@ def build_persister(
         persisted = 0
         for r in results:
             cand = getattr(r, "candidate", None)
-            # Trace flush (one iteration per candidate) — independent of the
-            # alpha persist below; runs even for slot-timeout/empty results so a
-            # generated-but-not-simulated candidate still shows its partial
-            # trajectory. Never blocks alpha capture.
             iter_state["n"] += 1
+            iteration = iter_state["n"]
+            st = getattr(r, "state", None)
+            persisted_here = 0
+
+            # --- persist FIRST (so the SAVE_RESULTS trace below reflects it) ---
+            if st is not None:
+                pending = _attr(st, "pending_alphas", []) or []
+                if pending:
+                    hypothesis_id = _resolve_hypothesis_id(st)
+                    try:
+                        # _incremental_save_alphas filters to PASS/PASS_PROVISIONAL,
+                        # stamps the bandit arm, links the hypothesis, and commits.
+                        saved = await save_fn(
+                            session,
+                            task_id=_attr(st, "task_id", None),
+                            run_id=run_id,
+                            region=_attr(st, "region", None),
+                            universe=_attr(st, "universe", None),
+                            dataset_id=_attr(st, "dataset_id", None),
+                            pending_alphas=pending,
+                            hypothesis_id=hypothesis_id,
+                        )
+                        persisted_here = len(saved or [])
+                        persisted += persisted_here
+                    except Exception:  # noqa: BLE001 — one bad result ≠ dropped batch
+                        logger.exception("[pipeline] persist of one result failed (skipped)")
+                    # Failure log (non-PASS) — separate write, never blocks PASS.
+                    try:
+                        await save_failures_fn(
+                            session,
+                            task_id=_attr(st, "task_id", None),
+                            run_id=run_id,
+                            pending_alphas=pending,
+                            hypothesis_id=hypothesis_id,
+                            rag_ab_arm=_attr(st, "rag_ab_arm", None),
+                        )
+                    except Exception:  # noqa: BLE001
+                        logger.exception("[pipeline] failure-log write failed (skipped)")
+
+            # --- then flush ONE iteration per candidate: gen + sim/eval +
+            # a synthetic SAVE_RESULTS tail (mirrors node_save_results' trace step
+            # so the pipeline trajectory matches legacy). Runs for every candidate
+            # (even slot-timeout) for a complete trajectory; never blocks capture.
             trace_steps = (
                 list(getattr(cand, "trace_records", None) or [])
                 + list(getattr(r, "trace_records", None) or [])
             )
             if trace_steps:
-                _trace_tid = _attr(
-                    getattr(r, "state", None) or getattr(cand, "payload", None),
-                    "task_id", None,
-                )
+                _ok = bool(getattr(r, "ok", False))
+                trace_steps = trace_steps + [{
+                    "step_type": "SAVE_RESULTS",
+                    "input_data": {},
+                    "output_data": {
+                        "verdict": getattr(r, "verdict", None),
+                        "ok": _ok,
+                        "persisted": persisted_here,
+                    },
+                    "duration_ms": 0,
+                    "status": "SUCCESS" if _ok else "PARTIAL_FAILURE",
+                    "error_message": getattr(r, "error", None),
+                }]
+                _trace_tid = _attr(st or getattr(cand, "payload", None), "task_id", None)
                 if _trace_tid is not None:
                     try:
-                        await flush_trace_fn(session, _trace_tid, run_id, iter_state["n"], trace_steps)
+                        await flush_trace_fn(session, _trace_tid, run_id, iteration, trace_steps)
                     except Exception:  # noqa: BLE001 — trace is observability, never fatal
                         logger.exception("[pipeline] trace flush failed (skipped)")
-
-            st = getattr(r, "state", None)
-            if st is None:
-                continue  # slot-timeout / pre-sim failure → nothing more to persist
-            pending = _attr(st, "pending_alphas", []) or []
-            if not pending:
-                continue
-            hypothesis_id = _resolve_hypothesis_id(st)
-            try:
-                # _incremental_save_alphas filters to PASS/PASS_PROVISIONAL,
-                # stamps the bandit arm, links the hypothesis, and commits.
-                saved = await save_fn(
-                    session,
-                    task_id=_attr(st, "task_id", None),
-                    run_id=run_id,
-                    region=_attr(st, "region", None),
-                    universe=_attr(st, "universe", None),
-                    dataset_id=_attr(st, "dataset_id", None),
-                    pending_alphas=pending,
-                    hypothesis_id=hypothesis_id,
-                )
-                persisted += len(saved or [])
-            except Exception:  # noqa: BLE001 — one bad result must not drop the batch
-                logger.exception("[pipeline] persist of one result failed (skipped)")
-            # Failure log (non-PASS) — separate write, never blocks the PASS path.
-            try:
-                await save_failures_fn(
-                    session,
-                    task_id=_attr(st, "task_id", None),
-                    run_id=run_id,
-                    pending_alphas=pending,
-                    hypothesis_id=hypothesis_id,
-                    rag_ab_arm=_attr(st, "rag_ab_arm", None),
-                )
-            except Exception:  # noqa: BLE001
-                logger.exception("[pipeline] failure-log write failed (skipped)")
         return persisted
 
     return persist
