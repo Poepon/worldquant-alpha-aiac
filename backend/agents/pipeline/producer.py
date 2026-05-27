@@ -100,10 +100,17 @@ def build_producer(
                 )
                 gen_state = result.get("state") if isinstance(result, dict) else None
                 pending = (result.get("pending_alphas") if isinstance(result, dict) else None) or []
+                # The batch's shared generation trace (RAG/DISTILL/HYPOTHESIS/
+                # CODE_GEN/VALIDATE) — carried on each candidate so the persister
+                # can flush a complete per-candidate trajectory (the consumer
+                # appends SIMULATE/EVALUATE). _sim_ready_payload cleared the
+                # state's trace_steps, so this is the only carrier.
+                gen_trace = (result.get("trace_steps") if isinstance(result, dict) else None) or []
                 for ac in pending:
                     cand = Candidate(
                         expression=getattr(ac, "expression", "") or "",
                         context={"dataset_id": inputs["dataset_id"]},
+                        trace_records=list(gen_trace),
                         payload=_sim_ready_payload(gen_state, ac),
                     )
                     await push(cand)

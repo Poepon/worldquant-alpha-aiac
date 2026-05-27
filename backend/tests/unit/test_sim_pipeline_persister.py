@@ -47,6 +47,20 @@ async def _noop_failures(session, **kwargs):
     return 0
 
 
+class _RecordingFlush:
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, session, task_id, run_id, iteration, steps):
+        self.calls.append({"task_id": task_id, "run_id": run_id,
+                           "iteration": iteration, "steps": list(steps)})
+        return len(steps)
+
+
+async def _noop_flush(session, task_id, run_id, iteration, steps):
+    return 0
+
+
 @pytest.mark.asyncio
 async def test_persist_calls_save_per_result_with_context():
     save = _RecordingSave(returns=1)
@@ -146,6 +160,61 @@ async def test_failure_log_error_does_not_block_pass_persist():
     n = await persist(object(), [_result(_state())])
     # PASS persistence still succeeds even if the failure-log write blows up.
     assert n == 2
+
+
+@pytest.mark.asyncio
+async def test_persist_flushes_trace_one_iteration_per_candidate():
+    flush = _RecordingFlush()
+    persist = build_persister(
+        run_id=77, save_fn=_RecordingSave(), save_failures_fn=_noop_failures,
+        flush_trace_fn=flush,
+    )
+
+    def _res(gen_steps, sim_steps):
+        cand = SimpleNamespace(trace_records=gen_steps, payload=_state())
+        return SimResult(candidate=cand, ok=True, state=_state(), trace_records=sim_steps)
+
+    r1 = _res([{"step_type": "RAG_QUERY"}, {"step_type": "CODE_GEN"}],
+              [{"step_type": "SIMULATE"}, {"step_type": "EVALUATE"}])
+    r2 = _res([{"step_type": "RAG_QUERY"}], [{"step_type": "SIMULATE"}])
+    await persist(object(), [r1, r2])
+
+    assert len(flush.calls) == 2
+    # Candidate 1 = iteration 1, full trajectory gen + sim/eval (combined order).
+    assert flush.calls[0]["iteration"] == 1
+    assert flush.calls[0]["task_id"] == 42 and flush.calls[0]["run_id"] == 77
+    assert [s["step_type"] for s in flush.calls[0]["steps"]] == \
+        ["RAG_QUERY", "CODE_GEN", "SIMULATE", "EVALUATE"]
+    # Candidate 2 = iteration 2 (per-candidate, monotonic).
+    assert flush.calls[1]["iteration"] == 2
+    assert [s["step_type"] for s in flush.calls[1]["steps"]] == ["RAG_QUERY", "SIMULATE"]
+
+
+@pytest.mark.asyncio
+async def test_trace_flush_error_does_not_block_alpha_persist():
+    save = _RecordingSave(returns=2)
+
+    async def boom_flush(session, task_id, run_id, iteration, steps):
+        raise RuntimeError("trace_steps down")
+
+    persist = build_persister(
+        run_id=1, save_fn=save, save_failures_fn=_noop_failures, flush_trace_fn=boom_flush,
+    )
+    cand = SimpleNamespace(trace_records=[{"step_type": "RAG_QUERY"}], payload=_state())
+    r = SimResult(candidate=cand, ok=True, state=_state(), trace_records=[{"step_type": "SIMULATE"}])
+    n = await persist(object(), [r])
+    assert n == 2  # alpha persist unaffected by trace flush blowing up
+
+
+@pytest.mark.asyncio
+async def test_persist_skips_trace_when_no_records():
+    flush = _RecordingFlush()
+    persist = build_persister(
+        run_id=1, save_fn=_RecordingSave(), save_failures_fn=_noop_failures, flush_trace_fn=flush,
+    )
+    # _state()'s candidate has no trace_records and SimResult none → nothing to flush.
+    await persist(object(), [_result(_state())])
+    assert flush.calls == []
 
 
 @pytest.mark.asyncio
