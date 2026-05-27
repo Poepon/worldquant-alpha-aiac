@@ -1335,6 +1335,15 @@ class Settings(BaseSettings):
     # so a small per-dataset batch + continuous generation still saturates the
     # slots while covering ~target_candidates/this_value distinct datasets.
     SIM_PIPELINE_DATASET_BATCH: int = 4
+    # Option C step-2 — economic-quality dataset steering (ε-greedy). With this
+    # probability the producer EXPLORES (picks the least-covered dataset, C-step1
+    # breadth); otherwise it EXPLOITS (picks the dataset with the highest mean
+    # alpha margin so far this session — economic value, denser/less-noisy than
+    # PASS-rate, anchored to the real ~5bps cost-positive floor, not fit to
+    # history). Kept explore-heavy (default 0.6) so breadth is preserved while
+    # budget tilts toward cost-positive datasets. Cold start (no margins yet) →
+    # always explore.
+    SIM_PIPELINE_EXPLORE_PROB: float = 0.6
 
     # Optimization Chain Settings
     MAX_OPTIMIZATION_VARIANTS: int = 10

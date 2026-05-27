@@ -72,6 +72,7 @@ def build_persister(
     save_fn: Optional[Callable[..., Awaitable[List]]] = None,
     save_failures_fn: Optional[Callable[..., Awaitable[int]]] = None,
     flush_trace_fn: Optional[Callable[..., Awaitable[int]]] = None,
+    reward_hook: Optional[Callable[[Any, float], None]] = None,
 ) -> Callable[[Any, List[SimResult]], Awaitable[int]]:
     """Build the ``persist(session, results) -> persisted_count`` callable for
     run_pipeline_session.
@@ -141,6 +142,20 @@ def build_persister(
                         )
                     except Exception:  # noqa: BLE001
                         logger.exception("[pipeline] failure-log write failed (skipped)")
+
+            # Option C step-2: feed the dataset reward (mean alpha margin) for a
+            # simulated candidate so the producer can tilt selection toward
+            # cost-positive datasets. margin is on the result metrics; dataset on
+            # the candidate context. Soft-fail — steering, never fatal.
+            if reward_hook is not None and getattr(r, "ok", False):
+                try:
+                    _m = r.metrics if isinstance(getattr(r, "metrics", None), dict) else {}
+                    _margin = _m.get("margin", _m.get("is_margin"))
+                    _ds = (getattr(cand, "context", None) or {}).get("dataset_id")
+                    if _margin is not None and _ds is not None:
+                        reward_hook(_ds, float(_margin))
+                except Exception:  # noqa: BLE001
+                    logger.debug("[pipeline] reward_hook failed (skipped)", exc_info=True)
 
             # --- then flush ONE iteration per candidate: gen + sim/eval +
             # a synthetic SAVE_RESULTS tail (mirrors node_save_results' trace step

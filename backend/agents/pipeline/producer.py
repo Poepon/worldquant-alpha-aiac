@@ -140,6 +140,7 @@ async def run_flat_pipeline_session(
     acquire_slot: Optional[Callable[[], Awaitable[bool]]] = None,
     release_slot: Optional[Callable[[], Awaitable[None]]] = None,
     refresher: Any = None,
+    reward_hook: Optional[Callable[[Any, float], None]] = None,
 ) -> dict:
     """Assemble producer + consumer + persister and run one pipeline session.
 
@@ -149,7 +150,7 @@ async def run_flat_pipeline_session(
     ``persist_fn`` is an injection seam for tests; defaults to the real
     build_persister(run_id).
     """
-    persist = persist_fn or build_persister(run_id=run_id)
+    persist = persist_fn or build_persister(run_id=run_id, reward_hook=reward_hook)
 
     # daily_goal is a PRODUCED-candidate cap (≈ legacy's alphas-attempted-per-
     # round counting), NOT a persisted-PASS gate — gating on persisted-PASS at a

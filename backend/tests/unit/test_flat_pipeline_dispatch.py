@@ -107,6 +107,21 @@ def test_pick_least_covered_dataset_spreads_across_distinct():
     assert _pick_least_covered_dataset([], {}) is None
 
 
+def test_pick_dataset_epsilon_greedy_explore_vs_exploit():
+    from backend.tasks.mining_tasks import _pick_dataset
+    ds = ["a", "b", "c"]
+    cov = {"a": 0, "b": 4, "c": 4}                 # a least-covered
+    reward = {"b": (0.004, 2), "c": (0.001, 1)}    # b mean margin 0.002 > c 0.001
+    # cold start (no reward) → always explore (least-covered), even on an exploit roll
+    assert _pick_dataset(ds, cov, {}, 0.5, lambda: 0.99) == "a"
+    # explore roll (rand < explore_prob) → least-covered
+    assert _pick_dataset(ds, cov, reward, 0.5, lambda: 0.1) == "a"
+    # exploit roll (rand >= explore_prob) + reward present → highest mean margin
+    assert _pick_dataset(ds, cov, reward, 0.5, lambda: 0.9) == "b"
+    # a has no reward (mean = -inf) → never picked on exploit
+    assert _pick_dataset(ds, cov, reward, 0.0, lambda: 0.9) != "a"
+
+
 class _FakePdb:
     def __init__(self, task, run):
         self._task, self._run = task, run

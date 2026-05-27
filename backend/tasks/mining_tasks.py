@@ -6,6 +6,7 @@ Contains the main mining task execution logic.
 
 import asyncio
 import os
+import random
 from datetime import datetime
 from typing import Optional
 
@@ -1266,6 +1267,28 @@ def _pick_least_covered_dataset(datasets, coverage):
     return min(datasets, key=lambda d: coverage.get(d, 0))
 
 
+def _dataset_mean_margin(reward, dataset):
+    """Mean alpha margin for a dataset this session (reward[d]=(sum, n)); -inf
+    when no margins recorded yet (so exploit never picks an unmeasured one)."""
+    s, n = reward.get(dataset, (0.0, 0))
+    return (s / n) if n else float("-inf")
+
+
+def _pick_dataset(datasets, coverage, reward, explore_prob, rand):
+    """Option C step-2 ε-greedy dataset pick: EXPLORE (least-covered, breadth)
+    with probability ``explore_prob`` or while no margins are known yet;
+    otherwise EXPLOIT (highest mean alpha margin — economic value). Keeps C-step1
+    breadth while tilting budget toward cost-positive datasets. Low-overfit:
+    ε + dense margin signal, no historical threshold fitting.
+    """
+    if not datasets:
+        return None
+    has_reward = any(reward.get(d, (0.0, 0))[1] for d in datasets)
+    if not has_reward or rand() < explore_prob:
+        return _pick_least_covered_dataset(datasets, coverage)
+    return max(datasets, key=lambda d: _dataset_mean_margin(reward, d))
+
+
 async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_key, lock_token):
     """ENABLE_SIM_PIPELINE FLAT path (Sub-phase 0 / Unit 2c-step2).
 
@@ -1371,6 +1394,15 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     # resume re-spreads from scratch — acceptable; trace/breadth is observability
     # + steering, not correctness).
     _coverage: dict = {}
+    # Option C step-2: per-dataset (margin_sum, n) reward — the persister feeds
+    # each simulated candidate's margin via _reward_hook; the producer ε-greedy
+    # exploits high-mean-margin datasets while still exploring (breadth).
+    _reward: dict = {}
+    _explore_prob = float(getattr(settings, "SIM_PIPELINE_EXPLORE_PROB", 0.6) or 0.6)
+
+    def _reward_hook(dataset, margin):
+        s, n = _reward.get(dataset, (0.0, 0))
+        _reward[dataset] = (s + float(margin), n + 1)
 
     async def _persist_cursor(pdb):
         # Best-effort cursor persistence on the producer's session so a
@@ -1420,10 +1452,10 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
                 )
                 return None
 
-            # Option C: coverage-greedy pick (least-covered dataset) spreads the
-            # session across distinct datasets. bandit (Option S's future home,
-            # currently OFF) still overrides when enabled.
-            dataset_id = _pick_least_covered_dataset(datasets, _coverage)
+            # Option C: ε-greedy pick — explore (least-covered, breadth) or
+            # exploit (highest mean alpha margin, economic value). bandit
+            # (currently OFF) still overrides when enabled.
+            dataset_id = _pick_dataset(datasets, _coverage, _reward, _explore_prob, random.random)
             if bandit_on and ds_weight_map:
                 from backend.selection_strategy import weighted_choice
                 _picked = weighted_choice(
@@ -1507,6 +1539,7 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             acquire_slot=_noop_acquire,
             release_slot=_noop_release,
             refresher=refresher,
+            reward_hook=_reward_hook,
         )
 
     logger.info(
