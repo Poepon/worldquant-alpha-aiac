@@ -1254,6 +1254,201 @@ async def _rebuild_flat_db_session(old_db, task_id, run_id, brain):
     return new_db, task, run, mining_agent
 
 
+async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_key, lock_token):
+    """ENABLE_SIM_PIPELINE FLAT path (Sub-phase 0 / Unit 2c-step2).
+
+    Producer-consumer pipeline that overlaps LLM generation with BRAIN
+    simulation so the sim slots stay saturated. Fully isolated from the legacy
+    loop — flag OFF means ``_run_flat_iteration`` never calls this, so the
+    established path is byte-identical and a bug here can only affect a
+    deliberately flag-enabled (shadow) session.
+
+    Session model (the F1 concurrency contract): the producer and the persister
+    each get their OWN ``AsyncSessionLocal`` session; the N sim consumers are
+    DB-free (node_simulate/node_evaluate open their own ephemeral sessions).
+    The injected ``db`` is used only for read-only setup + finalization, never
+    during the concurrent run.
+
+    Deferred to Sub-phase 1 (so kept simple here): per-round BRAIN client
+    refresh (F4) and consecutive-failure session rebuild — generation rounds
+    rarely poison a session (sim, the slow/hang-prone step, is now in the
+    DB-free consumers).
+    """
+    from backend.database import AsyncSessionLocal
+    from backend.agents.graph.workflow import MiningWorkflow
+    from backend.agents.pipeline import run_flat_pipeline_session
+
+    task_id = task.id
+    run_id = run.id if run is not None else None
+    max_iters = int(getattr(settings, "FLAT_CONTINUOUS_MAX_ITERATIONS", 100) or 100)
+    daily_goal = int(getattr(settings, "FLAT_CONTINUOUS_DAILY_GOAL", 20) or 20)
+    num_alphas = task.daily_goal or settings.ALPHAS_PER_ROUND
+
+    logger.info(
+        f"[flat-pipeline] task={task_id} region={task.region} starting "
+        f"pipeline session (num_alphas={num_alphas}, daily_goal={daily_goal})"
+    )
+
+    datasets = list(task.target_datasets or [])
+    if not datasets:
+        datasets = await _get_datasets_to_mine(db, task)
+    if not datasets:
+        logger.warning(f"[flat-pipeline] task={task_id} no datasets; exiting")
+        if run is not None:
+            run.status = "COMPLETED"
+            run.finished_at = datetime.utcnow()
+            await db.commit()
+        return {"warning": "no_datasets", "total_alphas": 0}
+
+    operators = await _get_operators(db)
+
+    # Bandit weights (read once on the injected session, same query as the loop).
+    bandit_on = bool(getattr(settings, "ENABLE_DATASET_VALUE_BANDIT", False))
+    ds_weight_map: dict = {}
+    if bandit_on:
+        try:
+            wrows = await db.execute(
+                select(DatasetMetadata.dataset_id, DatasetCellStats.mining_weight)
+                .select_from(DatasetMetadata)
+                .outerjoin(
+                    DatasetCellStats,
+                    and_(
+                        DatasetCellStats.dataset_ref == DatasetMetadata.id,
+                        DatasetCellStats.universe == task.universe,
+                        DatasetCellStats.delay == _task_delay(task),
+                    ),
+                )
+                .where(
+                    DatasetMetadata.region == task.region,
+                    DatasetMetadata.dataset_id.in_(datasets),
+                )
+            )
+            ds_weight_map = {
+                did: float(w if w is not None else 1.0) for did, w in wrows.all()
+            }
+        except Exception as _wm_err:  # noqa: BLE001
+            logger.warning(f"[flat-pipeline] dataset-bandit weight fetch failed: {_wm_err}")
+            ds_weight_map = {}
+
+    # Cursor + iteration count seeded from runtime_state (pause-resume), advanced
+    # in-memory by the producer and persisted per round on the producer session.
+    state = {"cursor": 0, "iterations": 0}
+    if isinstance(run.runtime_state, dict):
+        state["cursor"] = int(run.runtime_state.get("flat_cursor", 0) or 0)
+        state["iterations"] = int(run.runtime_state.get("flat_iterations", 0) or 0)
+
+    async def _persist_cursor(pdb):
+        # Best-effort cursor persistence on the producer's session so a
+        # pause-resume skips already-attempted slots. Never fatal.
+        try:
+            run_p = await pdb.get(ExperimentRun, run_id)
+            if run_p is not None and isinstance(run_p.runtime_state, dict):
+                run_p.runtime_state["flat_cursor"] = state["cursor"]
+                run_p.runtime_state["flat_iterations"] = state["iterations"]
+                flag_modified(run_p, "runtime_state")
+                await pdb.commit()
+        except Exception as _cur_ex:  # noqa: BLE001
+            logger.warning(f"[flat-pipeline] cursor persist failed (non-fatal): {_cur_ex}")
+
+    async def next_round_inputs(pdb):
+        # Bounded scan for the next usable dataset; advances cursor each probe so
+        # an empty-fields dataset is skipped, not retried forever.
+        for _ in range(len(datasets) + 1):
+            if state["iterations"] >= max_iters:
+                return None
+            if not _verify_cascade_ownership(
+                lock_key, lock_token, where="flat-pipeline producer"
+            ):
+                logger.info(f"[flat-pipeline] task={task_id} ownership lost; stopping producer")
+                return None
+            task_p = await pdb.get(MiningTask, task_id)
+            if task_p is None or task_p.status in ("PAUSED", "STOPPED", "EARLY_STOPPED"):
+                logger.info(
+                    f"[flat-pipeline] task={task_id} status="
+                    f"{getattr(task_p, 'status', 'GONE')}; stopping producer"
+                )
+                return None
+
+            dataset_id = datasets[state["cursor"] % len(datasets)]
+            if bandit_on and ds_weight_map:
+                from backend.selection_strategy import weighted_choice
+                _picked = weighted_choice(
+                    datasets, [ds_weight_map.get(d, 1.0) for d in datasets]
+                )
+                if _picked is not None:
+                    dataset_id = _picked
+
+            fields = await _prepare_round_fields(pdb, task_p, dataset_id)
+            state["cursor"] += 1
+            state["iterations"] += 1
+            await _persist_cursor(pdb)
+            if not fields:
+                continue  # nothing to mine on this dataset → try the next
+            pool = await _build_dataset_pool(pdb, task_p, dataset_id)
+            config = {
+                "configurable": {
+                    "run_id": run_id,
+                    "available_dataset_pool": pool,
+                }
+            }
+            return {
+                "task": task_p,
+                "dataset_id": dataset_id,
+                "fields": fields,
+                "operators": operators,
+                "config": config,
+            }
+        return None
+
+    num_consumers = BrainAdapter._current_sim_slot_limit()
+    stats = {}
+    async with BrainAdapter() as brain:
+        # consumer_wf.db is never used by node_simulate/node_evaluate (they open
+        # their own ephemeral sessions); pass the idle injected db.
+        consumer_wf = MiningWorkflow(db, brain)
+        stats = await run_flat_pipeline_session(
+            session_factory=AsyncSessionLocal,
+            producer_workflow_factory=lambda pdb: MiningWorkflow(pdb, brain),
+            consumer_workflow=consumer_wf,
+            next_round_inputs=next_round_inputs,
+            run_id=run_id,
+            num_alphas=num_alphas,
+            num_consumers=num_consumers,
+            daily_goal=daily_goal,
+        )
+
+    logger.info(
+        f"[flat-pipeline] task={task_id} pipeline finished: "
+        f"produced={stats.get('produced')} simulated={stats.get('simulated')} "
+        f"persisted={stats.get('persisted')} errors={stats.get('errors')} "
+        f"slot_timeouts={stats.get('slot_timeouts')} "
+        f"persist_failures={stats.get('persist_failures')}"
+    )
+
+    # Finalization (mirror the legacy loop): reflect PAUSED/STOPPED vs COMPLETED
+    # on the run + sync task.status. The producer persisted runtime_state on its
+    # own session, so refresh run here before touching it on the injected db.
+    if run is not None:
+        try:
+            await db.refresh(task)
+            await db.refresh(run)
+        except Exception:  # noqa: BLE001
+            pass
+        if task.status in ("PAUSED", "STOPPED"):
+            run.status = task.status
+        else:
+            run.status = "COMPLETED"
+            if task.status == "RUNNING":
+                task.status = "COMPLETED"
+        run.finished_at = datetime.utcnow()
+        try:
+            await db.commit()
+        except Exception as _fin_ex:  # noqa: BLE001
+            logger.error(f"[flat-pipeline] finalization commit failed: {_fin_ex}")
+
+    return {"total_alphas": stats.get("persisted", 0), "pipeline_stats": stats}
+
+
 async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_token):
     """Flat session main loop (post tier-system removal, 2026-05-18).
 
@@ -1268,6 +1463,14 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
     Exits cleanly on task.status in (PAUSED, STOPPED, EARLY_STOPPED) at any
     iteration boundary, preserving cursor in runtime_state.
     """
+    # ENABLE_SIM_PIPELINE (Sub-phase 0 / Unit 2c): producer-consumer pipeline
+    # path. Flag OFF (default) → the legacy serial loop below runs
+    # byte-identical; ON → delegate to the isolated pipeline implementation.
+    if bool(getattr(settings, "ENABLE_SIM_PIPELINE", False)):
+        return await _run_flat_iteration_pipeline(
+            db, task, run, celery_task_id, lock_key=lock_key, lock_token=lock_token
+        )
+
     # 2026-05-25: track the originally-injected session. On round failure we
     # may rebuild a clean replacement (see _rebuild_flat_db_session); the
     # original is owned by run_mining_task._run's `async with`, so only a
