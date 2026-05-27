@@ -1359,9 +1359,16 @@ class Settings(BaseSettings):
     # producer gen round / a feedback handler / a consumer sim / a consumer
     # evaluate-with-self_corr) is individually bounded. A hung socket then fails
     # that one operation cleanly (logged + counted) instead of parking the
-    # asyncio loop in select forever. 0 disables (tests). Default = the legacy
-    # per-round budget.
-    SIM_PIPELINE_OP_TIMEOUT_SEC: int = 1200
+    # asyncio loop in select forever. 0 disables (tests).
+    # INVARIANT (2026-05-28 — task 3736): this MUST stay comfortably below the
+    # watchdog dead-threshold (CASCADE_WATCHDOG_DEAD_MIN min). The watchdog's
+    # liveness signal is the latest trace_step; when BRAIN stalls every sim, no
+    # trace is written until each hung op times out and flushes a failure-trace.
+    # If op_timeout ≈ the watchdog threshold (was 1200s vs 1500s — 5min margin),
+    # trace can go stale past the threshold and the watchdog spuriously revives a
+    # still-live session (→ duplicate runs). _pipeline_op_timeout() also hard-caps
+    # it below the watchdog window. 600s gives a 15min margin under the 25min default.
+    SIM_PIPELINE_OP_TIMEOUT_SEC: int = 600
     # Sub-phase 3 — the producer is split at HYPOTHESIS into two stages joined by
     # an internal hyp_q (stage-1 hyp-producer rag→distill→hypothesis owns the DB
     # session; stage-2 code-producers code_gen→validate→[self_correct] are

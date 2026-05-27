@@ -100,6 +100,21 @@ def test_task_skip_states_redelivery_guard():
         assert st not in _TASK_SKIP_STATES, f"{st} must NOT be skipped (legit dispatch)"
 
 
+def test_pipeline_op_timeout_capped_below_watchdog(monkeypatch):
+    """The per-op deadline must stay below the watchdog dead-threshold so a hung
+    op's failure-trace refreshes liveness BEFORE the watchdog spuriously revives
+    a still-live session (task 3736). Cap = watchdog-5min; 0 disables."""
+    from backend.tasks.mining_tasks import _pipeline_op_timeout
+    monkeypatch.setattr(m.settings, "CASCADE_WATCHDOG_DEAD_MIN", 25)  # 1500s
+    monkeypatch.setattr(m.settings, "SIM_PIPELINE_OP_TIMEOUT_SEC", 600)
+    assert _pipeline_op_timeout() == 600.0           # comfortable margin, uncapped
+    monkeypatch.setattr(m.settings, "SIM_PIPELINE_OP_TIMEOUT_SEC", 5000)
+    assert _pipeline_op_timeout() == 1200.0          # misconfig → capped at watchdog-5min
+    assert _pipeline_op_timeout() < 25 * 60          # ALWAYS below the watchdog window
+    monkeypatch.setattr(m.settings, "SIM_PIPELINE_OP_TIMEOUT_SEC", 0)
+    assert _pipeline_op_timeout() is None             # disabled
+
+
 def test_pick_least_covered_dataset_spreads_across_distinct():
     from backend.tasks.mining_tasks import _pick_least_covered_dataset
     ds = ["analyst4", "fundamental2", "fundamental6", "news12"]

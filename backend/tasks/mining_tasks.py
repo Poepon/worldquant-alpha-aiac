@@ -101,6 +101,21 @@ def _is_cascade_schedule(task) -> bool:
 _TASK_SKIP_STATES = ("COMPLETED", "FAILED", "STOPPED", "EARLY_STOPPED", "PAUSED")
 
 
+def _pipeline_op_timeout():
+    """Per-operation hard deadline for the sim pipeline, HARD-CAPPED below the
+    watchdog dead-threshold (task 3736). The watchdog's liveness signal is the
+    latest trace_step; when BRAIN stalls every sim, trace only refreshes when a
+    hung op times out and flushes its failure-trace. So op_timeout must fire
+    (and refresh trace) well before the watchdog declares the session dead and
+    spuriously revives it. Cap at watchdog-5min so the invariant holds even if
+    SIM_PIPELINE_OP_TIMEOUT_SEC is misconfigured above the window. None = off."""
+    op = int(getattr(settings, "SIM_PIPELINE_OP_TIMEOUT_SEC", 600) or 0)
+    if op <= 0:
+        return None
+    wd_sec = int(getattr(settings, "CASCADE_WATCHDOG_DEAD_MIN", 25) or 25) * 60
+    return float(min(op, max(60, wd_sec - 300)))
+
+
 @celery_app.task(bind=True, name="backend.tasks.run_mining_task")
 def run_mining_task(self, task_id: int, run_id: int | None = None):
     """
@@ -1679,7 +1694,7 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             classify_feedback=_fb_classify,
             handle_feedback=_fb_handle,
             code_producer_count=int(getattr(settings, "SIM_PIPELINE_CODE_PRODUCER_COUNT", 1)),
-            op_timeout=float(getattr(settings, "SIM_PIPELINE_OP_TIMEOUT_SEC", 1200) or 0) or None,
+            op_timeout=_pipeline_op_timeout(),
         )
 
     logger.info(
