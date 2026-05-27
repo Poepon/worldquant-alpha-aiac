@@ -69,6 +69,7 @@ class MiningWorkflow:
         # so r1b_loop is imported only when the matching flag is actually wired).
         self._retry_graph = None    # code_gen_retry → validate (F2-2)
         self._mutate_graph = None   # hypothesis_mutate → END   (F2-3)
+        self._validate_graph = None  # validate → END (F2-4 G5 offspring check)
 
         logger.info("[MiningWorkflow] Initialized")
     
@@ -392,6 +393,27 @@ class MiningWorkflow:
         if self._mutate_graph is None:
             self._mutate_graph = self._build_mutate_graph()
         return await self._mutate_graph.compile().ainvoke(state, config=config)
+
+    def _build_validate_graph(self) -> StateGraph:
+        """validate → END for the F2-4 G5 offspring check.
+
+        The crossover handler builds offspring AlphaCandidates directly (no LLM
+        generation), puts them on a copied parent state, and runs validate so
+        only syntactically/semantically valid offspring are re-simulated. Reuses
+        the identical node_validate binding as the generation graph.
+        """
+        g = StateGraph(MiningState)
+        g.add_node("validate", node_validate)
+        g.set_entry_point("validate")
+        g.add_edge("validate", END)
+        return g
+
+    async def run_validate(self, state, config: Dict[str, Any] = None):
+        """Validate a state's pending_alphas (F2-4 G5); return final state with
+        is_valid set on each. The caller re-simulates only the valid ones."""
+        if self._validate_graph is None:
+            self._validate_graph = self._build_validate_graph()
+        return await self._validate_graph.compile().ainvoke(state, config=config)
 
     def compile(self):
         """Compile the graph with optional checkpointer."""

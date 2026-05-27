@@ -1405,6 +1405,12 @@ class Settings(BaseSettings):
     G5_CROSSOVER_LOOKBACK_ROUNDS: int = 10
     G5_CROSSOVER_TOP_K_OFFSPRING: int = 2
     G5_CROSSOVER_REQUIRE_DIFFERENT_PILLAR: bool = True
+    # F2-4 pipeline-only: hard cap on total G5 crossovers per pipeline session.
+    # A crossover offspring that PASSes can itself trigger another crossover with
+    # the growing PASS pool; at a low PASS rate this converges, but the cap
+    # guarantees the feedback loop terminates (quiescence) regardless of rate.
+    # Pair-dedup (each parent pair crossed once) bounds it further.
+    G5_PIPELINE_MAX_CROSSOVERS: int = 20
     # LLM model override — None / "" uses LLMService default。同 LLM_MUTATE_MODEL 模式
     LLM_CROSSOVER_MODEL: str = ""
 

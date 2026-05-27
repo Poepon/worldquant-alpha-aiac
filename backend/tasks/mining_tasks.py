@@ -1556,46 +1556,80 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     # combats the long-session client-rot sim-hang; runs only with 0 in flight.
     _refresh_every = int(getattr(settings, "SIM_PIPELINE_CLIENT_REFRESH_EVERY", 0) or 0)
 
-    # F2-2/F2-3: R1b retry + hypothesis-mutate through the feedback channel —
-    # wired only when at least one legacy R1b flag is on. The unified classifier
-    # (persister-side) turns a FAIL into a RETRY (implementation) or MUTATE
-    # (hypothesis; dominates "both") event; the handler (producer-side) rewrites+
-    # re-pushes (retry) or proposes a new hypothesis + regenerates (mutate). When
-    # both flags are OFF, classify/handle stay None and the pipeline is
-    # byte-identical (the loop never activates). Depth bounds: retry
-    # R1B_MAX_RETRIES_PER_ALPHA; mutate R1B_MAX_MUTATION_DEPTH (DB-chained).
+    # F2-2/3/4: R1b retry + hypothesis-mutate + G5 crossover through the feedback
+    # channel — wired only for whichever legacy flag is on. A composed classifier
+    # (persister-side) maps a FAIL → RETRY (implementation) / MUTATE (hypothesis,
+    # dominates "both"), and a PASS → PASS_LANDED (G5 trigger); a dispatching
+    # handler (producer-side) rewrites+re-pushes (retry), proposes a hypothesis +
+    # regenerates (mutate), or crosses the best PASS pair + pushes offspring (G5).
+    # All flags OFF → classify/handle stay None → pipeline byte-identical. Bounds:
+    # retry R1B_MAX_RETRIES_PER_ALPHA; mutate R1B_MAX_MUTATION_DEPTH (DB-chained);
+    # G5 pair-dedupe + G5_PIPELINE_MAX_CROSSOVERS.
     _retry_on = bool(getattr(settings, "ENABLE_R1B_RETRY_LOOP", False))
     _mutate_on = bool(getattr(settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False))
+    _g5_on = bool(getattr(settings, "ENABLE_G5_CROSSOVER", False))
     _fb_classify = None
     _fb_handle = None
-    if _retry_on or _mutate_on:
-        from backend.agents.pipeline.feedback_r1b import (
-            build_feedback_classifier,
-            build_feedback_handler,
+    if _retry_on or _mutate_on or _g5_on:
+        from backend.agents.pipeline.types import (
+            FEEDBACK_MUTATE, FEEDBACK_PASS_LANDED, FEEDBACK_RETRY,
         )
-        _fb_classify = build_feedback_classifier(
-            retry_on=_retry_on,
-            mutate_on=_mutate_on,
-            max_retries=int(getattr(settings, "R1B_MAX_RETRIES_PER_ALPHA", 3)),
-        )
-        _fb_handle = build_feedback_handler(
-            config={"configurable": {"trace_service": None, "run_id": run_id}},
-            mutate_num_alphas=num_alphas,
-        )
-        # Both retry and mutate key off _r1a_attribution, which node_evaluate
-        # writes ONLY under ENABLE_R1A_HOOK (or an R5 LLM-judge override). With
-        # neither source the classifier never emits → the feedback loop is inert.
-        # This is the SAME implicit dependency as the legacy in-graph R1b; warn
-        # loudly so a half-configured flip isn't a silent no-op.
-        if not (getattr(settings, "ENABLE_R1A_HOOK", False)
-                or getattr(settings, "ENABLE_LLM_JUDGE", False)):
-            logger.warning(
-                "[flat-pipeline] task=%s R1b feedback (retry=%s mutate=%s) is on but "
-                "neither ENABLE_R1A_HOOK nor ENABLE_LLM_JUDGE is set — no "
-                "_r1a_attribution will be produced, so the feedback loop will never "
-                "fire (inert).",
-                task_id, _retry_on, _mutate_on,
+        _fb_config = {"configurable": {"trace_service": None, "run_id": run_id}}
+        _classifiers = []
+        _r1b_handle = None
+        _g5_handle = None
+        if _retry_on or _mutate_on:
+            from backend.agents.pipeline.feedback_r1b import (
+                build_feedback_classifier,
+                build_feedback_handler,
             )
+            _classifiers.append(build_feedback_classifier(
+                retry_on=_retry_on, mutate_on=_mutate_on,
+                max_retries=int(getattr(settings, "R1B_MAX_RETRIES_PER_ALPHA", 3)),
+            ))
+            _r1b_handle = build_feedback_handler(
+                config=_fb_config, mutate_num_alphas=num_alphas)
+            # retry/mutate key off _r1a_attribution, written by node_evaluate ONLY
+            # under ENABLE_R1A_HOOK (or an R5 override). With neither, the
+            # classifier never emits → that part of the loop is inert; warn so a
+            # half-configured flip isn't a silent no-op.
+            if not (getattr(settings, "ENABLE_R1A_HOOK", False)
+                    or getattr(settings, "ENABLE_LLM_JUDGE", False)):
+                logger.warning(
+                    "[flat-pipeline] task=%s R1b feedback (retry=%s mutate=%s) is on "
+                    "but neither ENABLE_R1A_HOOK nor ENABLE_LLM_JUDGE is set — no "
+                    "_r1a_attribution will be produced, so retry/mutate stay inert.",
+                    task_id, _retry_on, _mutate_on,
+                )
+        if _g5_on:
+            from backend.agents.pipeline.feedback_g5 import (
+                build_g5_classifier,
+                build_g5_handler,
+            )
+            _classifiers.append(build_g5_classifier())
+            _g5_handle = build_g5_handler(
+                run_id=run_id, config=_fb_config,
+                top_k=int(getattr(settings, "G5_CROSSOVER_TOP_K_OFFSPRING", 2)),
+                min_sharpe=float(getattr(settings, "G5_CROSSOVER_MIN_PARENT_SHARPE", 1.25)),
+                require_diff_pillar=bool(getattr(
+                    settings, "G5_CROSSOVER_REQUIRE_DIFFERENT_PILLAR", True)),
+                max_crossovers=int(getattr(settings, "G5_PIPELINE_MAX_CROSSOVERS", 20)),
+            )
+
+        def _fb_classify(result, _cs=_classifiers):
+            for _c in _cs:
+                _ev = _c(result)
+                if _ev is not None:
+                    return _ev
+            return None
+
+        async def _fb_handle(event, push, db, wf):
+            if event.kind in (FEEDBACK_RETRY, FEEDBACK_MUTATE):
+                if _r1b_handle is not None:
+                    await _r1b_handle(event, push, db, wf)
+            elif event.kind == FEEDBACK_PASS_LANDED:
+                if _g5_handle is not None:
+                    await _g5_handle(event, push, db, wf)
 
     stats = {}
     async with BrainAdapter() as brain:
