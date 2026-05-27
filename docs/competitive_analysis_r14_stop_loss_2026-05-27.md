@@ -121,6 +121,36 @@ legacy FLAT 循环每 round 末调 `check_should_pause(round_pass_count, round_a
 - **R 的核**:表达式指纹(便宜、即用)vs PnL 相关(准但需先 sim——鸡生蛋)。pre-sim 只能用指纹核;PnL 核要 sim 后才有 → R 在 pre-sim 阶段用指纹,post-sim 的 self-corr 仍由提交门把关。
 - **过拟合残余**:新颖性信号本身也可能被"刷新颖性"游戏(生成无意义但指纹远的 alpha)——需配合既有 semantic validator + 提交门(self-corr 是 vs **真实**提交池,无法刷)兜底。
 
+## 7. 经济意义刹车,去过拟合化(2026-05-27)
+
+需求:**也要经济意义的刹车**,但须满足前面的约束(自动 + 低过拟合 + 高多样性)。原 **F(cost-per-PASS)被踢的根因 = 比率的分母是噪声 PASS 数**(p50=0 → 除零/爆值/拟合历史分布)。修法是把经济信号从「比率」拆成两个**各自去过拟合**的件:
+
+### F′ — 成本预算上限(过拟合-free 的经济"停")
+- **机制**:累计真实成本(LLM token × 价 + sim 数 × 日配额占比)≥ 预设预算 `SIM_PIPELINE_COST_BUDGET` → 停 producer(resumable)。
+- **为何低过拟合**:**预先承诺的天花板(prior 决策)+ 分子确定**(token/sim 计数确定,非噪声)+ **无 PASS 分母** → 这就是把现有 count-based 硬上限(max_iters/target_candidates)**升级成 $-有意义的预算**,抗过拟合性等同(都是 DSR 的"控制 N/预算"纪律,不反应 metric)。
+- **为何不丢多样性**:它只封**总花费**;花在哪由 S/R 的多样性信号决定。
+- **AIAC 已有件**:`cost_tracker`(G2 contextvar 计量)+ `MAX_TOKENS_PER_DAY`/`MAX_SIMULATIONS_PER_DAY` → 复用,低工作量。
+
+### margin-as-quality — 经济价值进 reward(而非另起噪声 kill)
+- **机制**:把经济价值用 **margin(bps,`marginal_analysis.py` 的 is_margin;地板≈5bps 真实交易成本,<0 无提交价值)** 注入 S 的 reward / Q 的"quality"维度:`reward = 多样性(正交性) × 经济价值(margin 超过 cost-positive 地板)`。
+- **为何低过拟合**:**margin 是连续且每个 simmed alpha 都有(比二元稀疏 PASS 稠密得多)**;地板 5bps 是**真实交易成本(经济常数,非拟合历史 performance)** → 阈值不过拟合,估计也因信号稠密而更稳。
+- **为何高多样性**:这正是 **Quality-Diversity 的"quality"= 经济 margin、"diversity"= 广度 cell** —— 导流偏向**又多样又 cost-positive** 的区域(MAP-Elites 1504.04909 的 quality 维设成 margin)。
+- **AIAC 已有件**:`marginal_analysis.py` 的 margin/is_margin + per-region scales。
+
+### 修订后的合成(自动 + 低过拟合 + 高多样性 + 经济)
+```
+总花费天花板:  F′  成本预算($,预先承诺,无噪声分母)         ← 经济"停"
+花在哪/生成:    S  bandit reward = 正交性 × margin(超 5bps)    ← 多样性×经济价值
+占哪个稀缺槽:    R  DPP 指纹核选最多样候选去 sim                  ← 多样性
+```
+- **三件都自动、低过拟合、高多样性,且经济意义体现在 F′(预算)+ S 的 margin-quality(价值)两处**,均**绕开噪声 pass-rate**。
+- vs 原 F:**F′ 是绝对预算(无分母)不是 per-PASS 比率;经济价值改用稠密的 margin 而非稀疏 PASS** → 去过拟合化。
+
+**残余取舍**:
+- margin 也可被"高 margin 但同质"的 alpha 占据 → 所以是 **正交性 × margin 的乘积**(既要多样又要经济),非单 margin。
+- margin 在 sim 后才有 → 它进的是**下一轮的 cell reward**(per-cell 累积),不是当轮门;当轮多样性靠 R 的指纹核(pre-sim 即用)。
+- F′ 的预算值要拍:用真实 token 价 + 日配额折算,**按经济(不按历史 pass 分布)设**,避免把 F′ 的阈值也过拟合。
+
 ## 工作量 / 风险预估(供定 build)
 - 复用 `task_stop_loss_service`(零重写)+ 共享 PASS 计数(类比 daily_goal 的 progress dict)+ producer 批次末检查 + 复用 `_stop_reason` 停止路径。**~半天**,中低风险(逻辑复用、flag OFF 不影响 legacy、可单测共享计数+批次判定)。
 - 主要风险:异步 PASS 回填的滞后导致 consecutive_zero 判定偏移一批——backstop 性质可接受,单测覆盖"PASS 滞后一批"场景即可。
