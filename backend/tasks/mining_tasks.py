@@ -1575,6 +1575,19 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
         _retry_handle = build_retry_handler(
             config={"configurable": {"trace_service": None, "run_id": run_id}}
         )
+        # Retry keys off _r1a_attribution, which node_evaluate writes ONLY when
+        # ENABLE_R1A_HOOK is on (or an R5 LLM-judge override). With neither
+        # source the classifier never emits a RETRY → retry is inert. This is the
+        # SAME implicit dependency as the legacy in-graph retry, but warn loudly
+        # so an operator who flipped only ENABLE_R1B_RETRY_LOOP isn't puzzled.
+        if not (getattr(settings, "ENABLE_R1A_HOOK", False)
+                or getattr(settings, "ENABLE_LLM_JUDGE", False)):
+            logger.warning(
+                "[flat-pipeline] task=%s ENABLE_R1B_RETRY_LOOP is on but neither "
+                "ENABLE_R1A_HOOK nor ENABLE_LLM_JUDGE is set — no _r1a_attribution "
+                "will be produced, so the retry loop will never fire (inert).",
+                task_id,
+            )
 
     stats = {}
     async with BrainAdapter() as brain:

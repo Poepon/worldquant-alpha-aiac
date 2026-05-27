@@ -318,6 +318,14 @@ class MiningWorkflow:
         in-graph cycle exactly. node_code_gen_retry self-guards on
         r1b_retries_attempted_this_alpha, which rides on the candidate's state
         across the feedback loop, so the depth cap holds without extra tracking.
+
+        Intentional simplification vs the legacy graph (code_gen_retry → validate
+        → [self_correct → validate]* → simulate): there is NO self_correct branch
+        here — a rewrite that fails validation is dropped (the handler re-pushes
+        only a valid rewrite). node_code_gen_retry already emits operator-
+        signature-aware expressions so invalid rewrites are rare, and the validate
+        gate guarantees an invalid one is never re-simulated. Re-simulation happens
+        by pushing a fresh candidate (consumer), not by an in-graph cycle.
         """
         from backend.agents.graph.nodes.r1b_loop import node_code_gen_retry
 
