@@ -85,10 +85,14 @@ def build_feedback_classifier(
         # but dedupe stops N same-hypothesis candidates each spawning a mutation.
         if mutate_on and attr in ("hypothesis", "both"):
             hyp = (getattr(a, "hypothesis", "") or "").strip()
-            if hyp and hyp not in mutate_requested:
-                mutate_requested.add(hyp)
-                return FeedbackEvent(kind=FEEDBACK_MUTATE, result=result)
-            return None  # no hypothesis text, or already mutating this one
+            if hyp:
+                if hyp not in mutate_requested:
+                    mutate_requested.add(hyp)
+                    return FeedbackEvent(kind=FEEDBACK_MUTATE, result=result)
+                # already mutating this hypothesis → mutate dominates → drop
+                return None
+            # no hypothesis text → mutate can't fire; a "both" alpha still falls
+            # through to the retry path below (a pure "hypothesis" one won't match).
 
         if retry_on and attr in ("implementation", "both"):
             retries = _sattr(getattr(result, "state", None),
@@ -136,6 +140,22 @@ async def _do_mutate(event: FeedbackEvent, push, db, wf, config, num_alphas: int
     new_hyp = _sattr(mut_state, "r1b_pending_new_hypothesis", None)
     if not (isinstance(new_hyp, dict) and new_hyp.get("statement")):
         return  # no-op mutation (per-cycle/depth/token budget or cross-pillar drift)
+    if not new_hyp.get("hypothesis_id"):
+        # The Hypothesis row INSERT did not persist (returns None on DB / FK
+        # failure) → no DB depth anchor. Regenerating would inject
+        # hypothesis_id=None → the new candidates' current_hypothesis_id=None →
+        # node_hypothesis_mutate's depth check (gated on a non-None parent) is
+        # SKIPPED for every further mutation → the depth cap is disabled and the
+        # chain runs unbounded (each mutation yields a fresh statement the dedupe
+        # can't catch → quiescence never reached). Drop this mutation instead of
+        # risking an unbounded feedback loop. (Legacy tolerates a missing id
+        # because the outer round loop bounds it; the pipeline has no such bound.)
+        logger.warning(
+            "[pipeline] mutate produced a hypothesis with no persisted id "
+            "(INSERT failed?); skipping regeneration to keep the mutation chain "
+            "depth-bounded"
+        )
+        return
 
     task_id = _sattr(st, "task_id", None)
     if task_id is None or db is None:

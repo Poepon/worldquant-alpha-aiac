@@ -96,6 +96,15 @@ def test_classify_mutate_empty_hypothesis_text_skipped():
     assert classify(_result(attr="hypothesis", hyp="")) is None
 
 
+def test_classify_both_empty_hyp_falls_through_to_retry():
+    """A "both" alpha with no hypothesis text can't mutate → it must still be
+    retryable (mutate can't fire, retry can)."""
+    classify = build_feedback_classifier(retry_on=True, mutate_on=True, max_retries=3)
+    assert classify(_result(attr="both", hyp="", retries=0)).kind == FEEDBACK_RETRY
+    # pure "hypothesis" with no text → nothing to do (not retryable)
+    assert classify(_result(attr="hypothesis", hyp="")) is None
+
+
 # --------------------------------------------------------------------------- #
 # Handler — retry path                                                         #
 # --------------------------------------------------------------------------- #
@@ -230,6 +239,26 @@ async def test_handle_mutate_noop_when_no_new_hypothesis():
     await handle(_mutate_event(), push, db=_FakeDB(SimpleNamespace(id=7, config={})), wf=wf)
     assert wf.mutate_called == 1
     assert wf.run_kwargs is None      # generation never driven
+    assert pushed == []
+
+
+@pytest.mark.asyncio
+async def test_handle_mutate_no_hypothesis_id_skips_regeneration():
+    """INSERT failed → new_hyp has a statement but no persisted hypothesis_id →
+    skip regeneration (else current_hypothesis_id=None disables the depth cap →
+    unbounded mutation chain)."""
+    pushed = []
+
+    async def push(c):
+        pushed.append(c)
+
+    # statement present, but NO hypothesis_id (INSERT failed)
+    wf = _MutateWF({"r1b_pending_new_hypothesis": {"statement": "revised"}},
+                   {"pending_alphas": [SimpleNamespace(expression="x")]})
+    handle = build_feedback_handler()
+    await handle(_mutate_event(), push, db=_FakeDB(SimpleNamespace(id=7, config={})), wf=wf)
+    assert wf.mutate_called == 1
+    assert wf.run_kwargs is None      # regeneration NOT driven
     assert pushed == []
 
 
