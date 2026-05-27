@@ -173,3 +173,49 @@ async def test_pipeline_next_round_inputs_smoke(monkeypatch):
     # Finalization marked COMPLETED (no ownership loss).
     assert run.status == "COMPLETED"
     assert res["pipeline_stats"]["persisted"] == 1
+
+
+@pytest.mark.asyncio
+async def test_pipeline_ownership_loss_closes_run_not_task(monkeypatch):
+    """On ownership loss, next_round_inputs returns None and finalization closes
+    THIS (superseded) run as STOPPED without marking the task COMPLETED — fixes
+    the orphan-RUNNING-run class (run 1196)."""
+    async def _datasets(db, task):
+        return ["pv1"]
+
+    async def _ops(db):
+        return []
+
+    monkeypatch.setattr(m, "_get_datasets_to_mine", _datasets)
+    monkeypatch.setattr(m, "_get_operators", _ops)
+    monkeypatch.setattr(m, "_verify_cascade_ownership", lambda *a, **k: False)  # lost
+    monkeypatch.setattr(m, "BrainAdapter", _FakeBrain)
+    monkeypatch.setattr(m.settings, "ENABLE_DATASET_VALUE_BANDIT", False)
+
+    import backend.agents.graph.workflow as wf_mod
+    monkeypatch.setattr(wf_mod, "MiningWorkflow", lambda *a, **k: object())
+    from backend.adapters.brain_adapter import BRAIN_AUTH_CIRCUIT
+    monkeypatch.setattr(BRAIN_AUTH_CIRCUIT, "is_open", lambda: False)
+
+    task = SimpleNamespace(id=7, status="RUNNING", config={}, universe="TOP3000",
+                           region="USA", target_datasets=None, daily_goal=0)
+    run = SimpleNamespace(id=99, runtime_state={}, status="RUNNING", finished_at=None)
+    captured = {}
+
+    import backend.agents.pipeline as pipe_mod
+
+    async def _fake_rfps(*, next_round_inputs, **kw):
+        captured["inputs"] = await next_round_inputs(_FakePdb(task, run))
+        return {"produced": 0, "simulated": 0, "persisted": 0,
+                "errors": 0, "slot_timeouts": 0, "persist_failures": 0}
+
+    monkeypatch.setattr(pipe_mod, "run_flat_pipeline_session", _fake_rfps)
+
+    await m._run_flat_iteration_pipeline(
+        _AsyncDB(), task, run, "cid", lock_key="lk", lock_token="tok",
+    )
+    # Producer stopped immediately on lost ownership.
+    assert captured["inputs"] is None
+    # Superseded run closed; task NOT marked COMPLETED (left for the new owner).
+    assert run.status == "STOPPED"
+    assert task.status == "RUNNING"

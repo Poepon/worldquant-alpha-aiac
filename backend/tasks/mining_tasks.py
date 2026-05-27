@@ -1493,13 +1493,23 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     if run is not None:
         if _stop_reason["ownership_lost"]:
             # Ownership was taken over mid-session — a replacement worker is
-            # meant to continue from the preserved cursor. Do NOT mark COMPLETED
-            # (that would race the new owner / falsely finish the session); leave
-            # run + task untouched (legacy's ownership-takeover case).
+            # meant to continue the TASK from the preserved cursor. Do NOT touch
+            # task.status (that would race the new owner / falsely COMPLETE it).
+            # But DO close THIS (superseded) run so it doesn't linger as an
+            # orphan RUNNING row — otherwise the watchdog's trace-liveness probe
+            # / the UI see a dead run as alive (the run-1196 orphan class).
             logger.info(
                 f"[flat-pipeline] task={task_id} exited on ownership loss — "
-                f"leaving run/task for the new owner (cursor preserved)"
+                f"closing this superseded run, leaving task for the new owner"
             )
+            try:
+                await db.refresh(run)
+                if run.status == "RUNNING":
+                    run.status = "STOPPED"
+                    run.finished_at = datetime.utcnow()
+                    await db.commit()
+            except Exception as _own_ex:  # noqa: BLE001
+                logger.warning(f"[flat-pipeline] superseded-run close failed: {_own_ex}")
         else:
             try:
                 await db.refresh(task)
