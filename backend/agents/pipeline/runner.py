@@ -30,6 +30,15 @@ logger = logging.getLogger(__name__)
 # run avoids any chance of a real payload comparing equal to it.
 _SENTINEL = object()
 
+
+async def _with_timeout(coro, timeout):
+    """await ``coro`` under an optional per-operation hard deadline. timeout
+    falsy/<=0 → no bound (await directly). A hung network call then raises
+    asyncio.TimeoutError (cancelling coro) instead of parking forever."""
+    if timeout and timeout > 0:
+        return await asyncio.wait_for(coro, timeout)
+    return await coro
+
 # Type aliases for the injected stages.
 PushFn = Callable[[Candidate], Awaitable[None]]
 # produce(push, should_stop) — or produce(push, should_stop, feedback_ctx) when
@@ -73,6 +82,7 @@ async def run_pipeline_session(
     release_slot: Optional[Callable[[], Awaitable[None]]] = None,
     stop_event: Optional[asyncio.Event] = None,
     classify_feedback: Optional[ClassifyFeedbackFn] = None,
+    op_timeout: Optional[float] = None,
 ) -> dict:
     """Run one pipeline session to completion and return run stats.
 
@@ -265,7 +275,10 @@ async def run_pipeline_session(
                             SimResult(candidate=item, ok=False, error="slot_acquire_timeout")
                         )
                         continue
-                    sim_outcome = await simulate(item)
+                    # Per-op deadline: a hung BRAIN sim raises TimeoutError
+                    # (→ the except below records a failed SimResult) instead of
+                    # parking the loop forever. The slot is freed in the finally.
+                    sim_outcome = await _with_timeout(simulate(item), op_timeout)
                     # Count the sim the moment it returns — BRAIN quota is spent
                     # here, regardless of whether evaluate/persist later fail.
                     stats["simulated"] += 1
@@ -273,8 +286,10 @@ async def run_pipeline_session(
                     if acquired:
                         await release_slot()
                 # Evaluate happens OUTSIDE the slot — the sim is done, no need to
-                # hold the slot during pure compute.
-                result = await evaluate(item, sim_outcome)
+                # hold the slot during pure compute. Bounded too: evaluate's
+                # self_corr can hit a BRAIN /correlations call (no slot) that
+                # could otherwise hang.
+                result = await _with_timeout(evaluate(item, sim_outcome), op_timeout)
                 await persist_q.put(result)
             except Exception as exc:  # noqa: BLE001 — one bad candidate ≠ dead consumer
                 stats["errors"] += 1

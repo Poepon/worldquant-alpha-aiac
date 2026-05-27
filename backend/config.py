@@ -1351,6 +1351,15 @@ class Settings(BaseSettings):
     # candidates onto the work queue. The seam makes the hypothesis SOURCE
     # pluggable (e.g. paper-derived hypotheses pushed onto the same hyp_q).
     # OFF → the single-stage producer runs unchanged (byte-identical).
+    # Per-OPERATION hard deadline for the pipeline (2026-05-27 — task 3735 hang).
+    # The legacy round path wraps each round in wait_for(MINING_ROUND_TIMEOUT_SEC);
+    # the pipeline runs ONE long session, so instead every network await (a
+    # producer gen round / a feedback handler / a consumer sim / a consumer
+    # evaluate-with-self_corr) is individually bounded. A hung socket then fails
+    # that one operation cleanly (logged + counted) instead of parking the
+    # asyncio loop in select forever. 0 disables (tests). Default = the legacy
+    # per-round budget.
+    SIM_PIPELINE_OP_TIMEOUT_SEC: int = 1200
     SIM_PIPELINE_SPLIT_GENERATION: bool = False
     # Number of stage-2 code-producers draining hyp_q (DB-free, like sim
     # consumers). 1 keeps the seam with no extra concurrency; >1 parallelises

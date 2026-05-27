@@ -21,7 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from backend.agents.pipeline.consumer import build_consumer_stages
 from backend.agents.pipeline.persister import build_persister
-from backend.agents.pipeline.runner import run_pipeline_session
+from backend.agents.pipeline.runner import _with_timeout, run_pipeline_session
 from backend.agents.pipeline.types import Candidate
 
 logger = logging.getLogger(__name__)
@@ -63,9 +63,12 @@ def _pattr(obj: Any, name: str, default: Any) -> Any:
     return default
 
 
-async def _drain_feedback(feedback_ctx, handle_feedback, push, db, wf, should_stop) -> int:
+async def _drain_feedback(feedback_ctx, handle_feedback, push, db, wf, should_stop,
+                          op_timeout=None) -> int:
     """Run the F2 feedback drain phase — shared by the single-stage and the
-    split-stage producers. No-op (returns 0) when the loop isn't wired."""
+    split-stage producers. No-op (returns 0) when the loop isn't wired. Each
+    handler call is bounded by op_timeout (its rewrite/mutate/crossover does LLM
+    + BRAIN I/O that must not hang the drain)."""
     if feedback_ctx is None or handle_feedback is None:
         return 0
     handled = 0
@@ -75,10 +78,10 @@ async def _drain_feedback(feedback_ctx, handle_feedback, push, db, wf, should_st
         if event is None:
             break  # quiescence sentinel (or stop)
         try:
-            await handle_feedback(event, push, db, wf)
+            await _with_timeout(handle_feedback(event, push, db, wf), op_timeout)
             handled += 1
-        except Exception:  # noqa: BLE001 — one bad event ≠ dead drain
-            logger.exception("[pipeline] feedback handler failed (skipped)")
+        except Exception:  # noqa: BLE001 — one bad/slow event ≠ dead drain
+            logger.exception("[pipeline] feedback handler failed/timed out (skipped)")
         finally:
             feedback_ctx.event_done()
     return handled
@@ -93,6 +96,7 @@ def build_producer(
     should_continue: Optional[Callable[[], bool]] = None,
     target_candidates: Optional[int] = None,
     handle_feedback: Optional[Callable[..., Awaitable[None]]] = None,
+    op_timeout: Optional[float] = None,
 ) -> Callable[..., Awaitable[None]]:
     """Build the ``produce(push, should_stop[, feedback_ctx])`` callable.
 
@@ -134,15 +138,22 @@ def build_producer(
                 if not inputs:
                     break
                 rounds += 1
-                result = await wf.run(
-                    task=inputs["task"],
-                    dataset_id=inputs["dataset_id"],
-                    fields=inputs.get("fields") or [],
-                    operators=inputs.get("operators") or [],
-                    num_alphas=num_alphas,
-                    config=inputs.get("config"),
-                    generate_only=True,
-                )
+                # Per-op deadline on the generation LLM chain — a hung distill/
+                # hypothesis/code_gen call fails this round (skipped) instead of
+                # freezing the producer (and thus the whole pipeline) forever.
+                try:
+                    result = await _with_timeout(wf.run(
+                        task=inputs["task"],
+                        dataset_id=inputs["dataset_id"],
+                        fields=inputs.get("fields") or [],
+                        operators=inputs.get("operators") or [],
+                        num_alphas=num_alphas,
+                        config=inputs.get("config"),
+                        generate_only=True,
+                    ), op_timeout)
+                except Exception:  # noqa: BLE001 — a slow/failed round ≠ dead producer
+                    logger.exception("[pipeline] generation round failed/timed out (skipped)")
+                    continue
                 gen_state = result.get("state") if isinstance(result, dict) else None
                 pending = (result.get("pending_alphas") if isinstance(result, dict) else None) or []
                 # The batch's shared generation trace (RAG/DISTILL/HYPOTHESIS/
@@ -166,7 +177,7 @@ def build_producer(
             # so a FAIL→retry / FAIL→mutate / PASS→crossover can regenerate. The
             # runner ends it with a None (quiescence) or on stop.
             handled = await _drain_feedback(
-                feedback_ctx, handle_feedback, push, db, wf, should_stop)
+                feedback_ctx, handle_feedback, push, db, wf, should_stop, op_timeout)
         logger.info(
             "[pipeline] producer finished after %d round(s), %d candidate(s), %d feedback handled",
             rounds, produced, handled,
@@ -185,6 +196,7 @@ def build_split_producer(
     target_candidates: Optional[int] = None,
     handle_feedback: Optional[Callable[..., Awaitable[None]]] = None,
     queue_maxsize: int = 0,
+    op_timeout: Optional[float] = None,
 ) -> Callable[..., Awaitable[None]]:
     """Sub-phase 3: a generation producer split at HYPOTHESIS into two internal
     stages joined by ``hyp_q`` — exposes the SAME ``produce(push, should_stop[,
@@ -229,16 +241,20 @@ def build_split_producer(
                         if not inputs:
                             break
                         st["rounds"] += 1
-                        result = await wf.run(
-                            task=inputs["task"],
-                            dataset_id=inputs["dataset_id"],
-                            fields=inputs.get("fields") or [],
-                            operators=inputs.get("operators") or [],
-                            num_alphas=num_alphas,
-                            config=inputs.get("config"),
-                            generate_only=True,
-                            stop_after_hypothesis=True,
-                        )
+                        try:
+                            result = await _with_timeout(wf.run(
+                                task=inputs["task"],
+                                dataset_id=inputs["dataset_id"],
+                                fields=inputs.get("fields") or [],
+                                operators=inputs.get("operators") or [],
+                                num_alphas=num_alphas,
+                                config=inputs.get("config"),
+                                generate_only=True,
+                                stop_after_hypothesis=True,
+                            ), op_timeout)
+                        except Exception:  # noqa: BLE001 — slow/failed round ≠ dead stage 1
+                            logger.exception("[pipeline] hyp round failed/timed out (skipped)")
+                            continue
                         hyp_state = result.get("state") if isinstance(result, dict) else None
                         if hyp_state is not None:
                             await hyp_q.put((hyp_state, inputs["dataset_id"]))
@@ -257,9 +273,9 @@ def build_split_producer(
                         continue  # drain remaining sentinels; produce nothing more
                     hyp_state, dataset_id = item
                     try:
-                        final = await wf.run_codegen(hyp_state)
-                    except Exception:  # noqa: BLE001 — one bad hypothesis ≠ dead producer
-                        logger.exception("[pipeline] code-producer failed a hypothesis (skipped)")
+                        final = await _with_timeout(wf.run_codegen(hyp_state), op_timeout)
+                    except Exception:  # noqa: BLE001 — one bad/slow hypothesis ≠ dead producer
+                        logger.exception("[pipeline] code-producer failed/timed out a hypothesis (skipped)")
                         continue
                     pending = _pattr(final, "pending_alphas", []) or []
                     gen_trace = _pattr(final, "trace_steps", []) or []
@@ -289,7 +305,8 @@ def build_split_producer(
                         t.cancel()
                 await asyncio.gather(hyp_task, *code_tasks, return_exceptions=True)
 
-            await _drain_feedback(feedback_ctx, handle_feedback, push, db, wf, should_stop)
+            await _drain_feedback(
+                feedback_ctx, handle_feedback, push, db, wf, should_stop, op_timeout)
 
         logger.info(
             "[pipeline] split-producer finished after %d round(s), %d candidate(s)",
@@ -321,6 +338,7 @@ async def run_flat_pipeline_session(
     handle_feedback: Optional[Callable[..., Awaitable[None]]] = None,
     split_generation: bool = False,
     code_producer_count: int = 1,
+    op_timeout: Optional[float] = None,
 ) -> dict:
     """Assemble producer + consumer + persister and run one pipeline session.
 
@@ -359,6 +377,7 @@ async def run_flat_pipeline_session(
             code_producer_count=code_producer_count,
             target_candidates=daily_goal,
             handle_feedback=handle_feedback,
+            op_timeout=op_timeout,
         )
     else:
         produce = build_producer(
@@ -368,6 +387,7 @@ async def run_flat_pipeline_session(
             num_alphas=num_alphas,
             target_candidates=daily_goal,
             handle_feedback=handle_feedback,
+            op_timeout=op_timeout,
         )
     simulate, evaluate = build_consumer_stages(
         consumer_workflow,
@@ -388,4 +408,5 @@ async def run_flat_pipeline_session(
         acquire_slot=acquire_slot,
         release_slot=release_slot,
         classify_feedback=classify_feedback,
+        op_timeout=op_timeout,
     )
