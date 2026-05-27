@@ -1325,6 +1325,16 @@ class Settings(BaseSettings):
     # (0 = disabled). Combats the long-session client-rot sim-hang (d650222);
     # the refresh only runs with zero sims in flight. ~32 ≈ a few rounds.
     SIM_PIPELINE_CLIENT_REFRESH_EVERY: int = 32
+    # Diversity steering (option C / MAP-Elites coverage axis = dataset): the
+    # pipeline producer generates THIS many candidates per dataset visit and
+    # picks the LEAST-covered dataset each visit, so one session spreads across
+    # many distinct datasets (breadth = data sources, per competitive-analysis
+    # v3) instead of concentrating ~ALPHAS_PER_ROUND on the first dataset. Kept
+    # SMALL: unlike the legacy serial loop (where ALPHAS_PER_ROUND=10 amortizes
+    # the LLM gen over more sims — Option A), the pipeline overlaps gen with sim,
+    # so a small per-dataset batch + continuous generation still saturates the
+    # slots while covering ~target_candidates/this_value distinct datasets.
+    SIM_PIPELINE_DATASET_BATCH: int = 4
 
     # Optimization Chain Settings
     MAX_OPTIMIZATION_VARIANTS: int = 10

@@ -1254,6 +1254,18 @@ async def _rebuild_flat_db_session(old_db, task_id, run_id, brain):
     return new_db, task, run, mining_agent
 
 
+def _pick_least_covered_dataset(datasets, coverage):
+    """Diversity steering (option C / MAP-Elites coverage axis = dataset): pick
+    the dataset with the FEWEST candidates generated so far this session. min()
+    returns the first least-covered in list order, so it round-robins through
+    all distinct datasets before repeating any — spreading a session across the
+    breadth axis (data sources) instead of concentrating on the first dataset.
+    """
+    if not datasets:
+        return None
+    return min(datasets, key=lambda d: coverage.get(d, 0))
+
+
 async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_key, lock_token):
     """ENABLE_SIM_PIPELINE FLAT path (Sub-phase 0 / Unit 2c-step2).
 
@@ -1290,7 +1302,11 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     run_id = run.id if run is not None else None
     max_iters = int(getattr(settings, "FLAT_CONTINUOUS_MAX_ITERATIONS", 100) or 100)
     daily_goal = int(getattr(settings, "FLAT_CONTINUOUS_DAILY_GOAL", 20) or 20)
-    num_alphas = task.daily_goal or settings.ALPHAS_PER_ROUND
+    # Option C diversity steering: the pipeline uses a SMALL per-dataset batch
+    # (not the legacy ALPHAS_PER_ROUND=10) so coverage-greedy selection spreads
+    # the session across many distinct datasets. gen/sim overlap keeps slots
+    # saturated despite the small batch (see config note).
+    num_alphas = int(getattr(settings, "SIM_PIPELINE_DATASET_BATCH", 4) or 4)
 
     logger.info(
         f"[flat-pipeline] task={task_id} region={task.region} starting "
@@ -1349,6 +1365,13 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     # ownership takeover (a replacement worker is meant to continue).
     _stop_reason = {"ownership_lost": False}
 
+    # Option C diversity steering: per-dataset coverage this session (candidates
+    # generated). next_round_inputs picks the least-covered dataset → the
+    # session spreads across distinct datasets (breadth). Session-local (a
+    # resume re-spreads from scratch — acceptable; trace/breadth is observability
+    # + steering, not correctness).
+    _coverage: dict = {}
+
     async def _persist_cursor(pdb):
         # Best-effort cursor persistence on the producer's session so a
         # pause-resume skips already-attempted slots. Never fatal.
@@ -1397,7 +1420,10 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
                 )
                 return None
 
-            dataset_id = datasets[state["cursor"] % len(datasets)]
+            # Option C: coverage-greedy pick (least-covered dataset) spreads the
+            # session across distinct datasets. bandit (Option S's future home,
+            # currently OFF) still overrides when enabled.
+            dataset_id = _pick_least_covered_dataset(datasets, _coverage)
             if bandit_on and ds_weight_map:
                 from backend.selection_strategy import weighted_choice
                 _picked = weighted_choice(
@@ -1408,6 +1434,10 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
 
             fields = await _prepare_round_fields(pdb, task_p, dataset_id)
             state["cursor"] += 1
+            # Mark this dataset covered (incl. the empty-fields skip below) so
+            # coverage-greedy moves to the next distinct dataset rather than
+            # re-picking it.
+            _coverage[dataset_id] = _coverage.get(dataset_id, 0) + num_alphas
             if not fields:
                 # Skip empty dataset: persist the cursor advance (so resume
                 # skips it too) but DON'T spend an iteration on it.

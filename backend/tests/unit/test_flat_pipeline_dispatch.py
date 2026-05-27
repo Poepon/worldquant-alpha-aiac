@@ -88,6 +88,25 @@ async def test_flag_off_runs_legacy_not_pipeline(monkeypatch):
     assert run.status == "COMPLETED"
 
 
+def test_pick_least_covered_dataset_spreads_across_distinct():
+    from backend.tasks.mining_tasks import _pick_least_covered_dataset
+    ds = ["analyst4", "fundamental2", "fundamental6", "news12"]
+    cov = {}
+    # All zero → first; then it round-robins through ALL distinct before repeat.
+    picked = []
+    for _ in range(len(ds)):
+        d = _pick_least_covered_dataset(ds, cov)
+        picked.append(d)
+        cov[d] = cov.get(d, 0) + 4
+    assert picked == ds  # each distinct dataset chosen once before any repeat
+    # Next pick repeats the first (all equal again) — spread, not concentrated.
+    assert _pick_least_covered_dataset(ds, cov) == "analyst4"
+    # Skewed coverage → least-covered wins.
+    assert _pick_least_covered_dataset(ds, {"analyst4": 100, "fundamental2": 0,
+                                            "fundamental6": 100, "news12": 100}) == "fundamental2"
+    assert _pick_least_covered_dataset([], {}) is None
+
+
 class _FakePdb:
     def __init__(self, task, run):
         self._task, self._run = task, run
