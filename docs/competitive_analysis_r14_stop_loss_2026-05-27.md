@@ -98,6 +98,29 @@ legacy FLAT 循环每 round 末调 `check_should_pause(round_pass_count, round_a
 2. **增量 = I(加 cost-per-PASS / pass-rate telemetry 供人看)**——它本身零自动决策=零过拟合,且产出的数据让人能**事后**判断,而非用噪声阈值**事前**自动停。
 3. 换言之:**不新增任何"按 metric 自动停 task"的规则**(A/D/F/H 全踢);保留已有的预算上限 + bandit 软重分配(E),再加观测(I)。这与"R14 是 backstop、主杠杆是 bandit"的结论完全一致,且**用过拟合判据独立推到了同一落点**。
 
+## 6. 重构:多样性-最大化预算分配(自动 + 低过拟合 + 高多样性,2026-05-27)
+
+需求:**不要人工(踢除 I)、低过拟合(踢除 A/D/F/H 的噪声-pass-rate 自动停)、高多样性**。这三约束**本身就选定了方案族**:自动→算法分配;低过拟合→信号必须**结构性**(覆盖/新颖性/相似度,非噪声 pass-rate);高多样性→多样性即显式目标。= **Quality-Diversity / 新颖性搜索 / DPP** 族。**问题从"何时停"重构为"如何把已封顶的预算(max_iters/target_candidates 仍是抗过拟合的硬上限)自动花在最大化多样性上"。**
+
+| 方案 | 机制 | 为何低过拟合 | 为何高多样性 | 锚点 / AIAC 已有件 | 工作量 |
+|---|---|---|---|---|---|
+| **Q MAP-Elites / QD steering** | 行为空间=广度轴(数据源×region×delay×pillar);每 cell 存最佳 elite;producer 把生成预算导向**空/可改进 cell**(illuminate 全空间) | 分配信号=**cell 覆盖度(结构计数)**,非 pass-rate;保 elite 不按率停 | 多样性是**字面目标**(全广度空间每 cell 一个 elite) | MAP-Elites(1504.04909)+ v3 广度=数据源 + self-corr 门;dataset bandit cells / diversity_tracker | 中-高 |
+| **R DPP 多样 sim-批选择** | sim 槽是稀缺资源;在已生成候选里用 **DPP/贪心 max-min**(表达式指纹相似核)选**最多样**的去 sim,低冗余 | 相似核是**结构指纹**,非 performance | DPP repulsion = 多样性即构造 | DPP batch AL(1906.07975)+ diversity_tracker 指纹 | 中 |
+| **S 新颖性-reward 导流 bandit** | 把现有 dataset/cell bandit 的 **reward 从 binary can_submit 换成 新颖性/正交性**(该 cell 近期 alpha vs 已提交池的平均距离 / self-corr) | 新颖性是**更稠密、更少噪声**的结构信号(PASS 稀疏 p50=0,新颖性密) | 奖励探索**不相关区域**=直接 self-corr<0.7 的货币 | 新颖性搜索(Lehman-Stanley)+ v3 self-corr 门;**bandit 已在 next_round_inputs 接好**,只换 reward fn | 中(低,复用 bandit) |
+| **T 分层覆盖 round-robin(零 metric)** | 按广度 cell(数据源×region×delay)分层轮转花预算,**完全不用 performance 信号** | **零拟合规则**(无 metric) | 覆盖多样性(均匀铺满广度) | 分层抽样 + DSR 控-N;cursor%len 已是粗 round-robin | 低 |
+
+**组合(非互斥)**:
+- **S + R** —— **我的首选**:S 决定**从哪个 cell 生成**(新颖性-reward 导流,复用已接的 bandit,只换 reward),R 决定**生成出的候选里哪些值得占稀缺 sim 槽**(DPP 选最多样)。两者都自动、低过拟合、高多样性,且**叠在已有预算硬上限之上**(硬上限=抗过拟合的"停",S/R=抗过拟合的"花在多样性上")。
+- **Q** 是把 S/R 统一到一个 illuminate-全空间 的框架(最完整、最大工作量),适合 shadow 验证 S/R 有真实多样性收益后再升级。
+- **T** 是零风险地板(纯覆盖),可作 S 的冷启/兜底(bandit 没数据时先分层铺)。
+
+**与"踢除"结论的一致性**:硬上限(预算)仍是抗过拟合的停止纪律(保留);**新增的不是"按率停"而是"按结构性多样性信号花"** —— 完全绕开了 A/D/F/H 的噪声-pass-rate 过拟合面,且 reward/选择用的是新颖性/相似度(结构信号,p50=0 下远比 PASS 稠密稳健)。
+
+**关键取舍**:
+- **S 的 reward 定义**:用 self-corr vs 已提交池(v3 的绑定门货币,最贴价值)还是表达式指纹距离(更便宜但离"真正交"远一层)?self-corr 更准但需 correlation_service 在导流时可算;指纹距离便宜可即用。
+- **R 的核**:表达式指纹(便宜、即用)vs PnL 相关(准但需先 sim——鸡生蛋)。pre-sim 只能用指纹核;PnL 核要 sim 后才有 → R 在 pre-sim 阶段用指纹,post-sim 的 self-corr 仍由提交门把关。
+- **过拟合残余**:新颖性信号本身也可能被"刷新颖性"游戏(生成无意义但指纹远的 alpha)——需配合既有 semantic validator + 提交门(self-corr 是 vs **真实**提交池,无法刷)兜底。
+
 ## 工作量 / 风险预估(供定 build)
 - 复用 `task_stop_loss_service`(零重写)+ 共享 PASS 计数(类比 daily_goal 的 progress dict)+ producer 批次末检查 + 复用 `_stop_reason` 停止路径。**~半天**,中低风险(逻辑复用、flag OFF 不影响 legacy、可单测共享计数+批次判定)。
 - 主要风险:异步 PASS 回填的滞后导致 consecutive_zero 判定偏移一批——backstop 性质可接受,单测覆盖"PASS 滞后一批"场景即可。
