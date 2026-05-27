@@ -1588,7 +1588,8 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
                 max_retries=int(getattr(settings, "R1B_MAX_RETRIES_PER_ALPHA", 3)),
             ))
             _r1b_handle = build_feedback_handler(
-                config=_fb_config, mutate_num_alphas=num_alphas)
+                config=_fb_config, mutate_num_alphas=num_alphas,
+                max_mutations=int(getattr(settings, "R1B_PIPELINE_MAX_MUTATIONS", 20) or 0))
             # retry/mutate key off _r1a_attribution, written by node_evaluate ONLY
             # under ENABLE_R1A_HOOK (or an R5 override). With neither, the
             # classifier never emits → that part of the loop is inert; warn so a

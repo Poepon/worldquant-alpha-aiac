@@ -132,7 +132,15 @@ async def _do_retry(event: FeedbackEvent, push, wf, config) -> None:
     await push(cand)
 
 
-async def _do_mutate(event: FeedbackEvent, push, db, wf, config, num_alphas: int) -> None:
+async def _do_mutate(event: FeedbackEvent, push, db, wf, config, num_alphas: int,
+                     mut_counter: Optional[dict] = None, max_mutations: int = 0) -> None:
+    # HARD per-session cap (task 3735 amplification). The DB depth cap is skipped
+    # when the failed alpha has no current_hypothesis_id (parent=None — common on
+    # fresh FLAT alphas), and the classifier's statement-dedupe can't catch
+    # ever-changing LLM statements, so many distinct failing hypotheses could each
+    # spawn a FULL (~95s LLM) regeneration unbounded. This guarantees termination.
+    if mut_counter is not None and max_mutations and mut_counter["n"] >= max_mutations:
+        return
     st = getattr(event.result, "state", None)
     if st is None:
         return
@@ -165,6 +173,9 @@ async def _do_mutate(event: FeedbackEvent, push, db, wf, config, num_alphas: int
     task = await db.get(MiningTask, task_id)
     if task is None:
         return
+    # This mutation will regenerate — count it against the session cap.
+    if mut_counter is not None:
+        mut_counter["n"] += 1
     # Inject via the legacy consumed-slot path: wf.run reads + clears
     # task.config["__r1b_consumed_pending_hypothesis"] and node_hypothesis injects
     # it (skipping the exploration LLM call), so new alphas link to the mutated
@@ -195,17 +206,23 @@ async def _do_mutate(event: FeedbackEvent, push, db, wf, config, num_alphas: int
 
 
 def build_feedback_handler(
-    *, config: Optional[dict] = None, mutate_num_alphas: int = 4
+    *, config: Optional[dict] = None, mutate_num_alphas: int = 4,
+    max_mutations: int = 0,
 ) -> Callable[[FeedbackEvent, Callable[[Candidate], Awaitable[None]], Any, Any], Awaitable[None]]:
     """Build the producer-side dispatching handler. RETRY → rewrite + re-push;
     MUTATE → propose hypothesis + regenerate + push the new candidates. Owns its
     work on the producer's db + wf (run_retry/run_mutate; node_*_mutate/retry open
-    their own r1b_retry_log sessions, so this never shares the producer's db)."""
+    their own r1b_retry_log sessions, so this never shares the producer's db).
+
+    ``max_mutations`` is a hard per-session cap on mutate regenerations (0 = off),
+    held in a closure counter — the backstop for the parent=None depth-chain gap."""
+    mut_counter = {"n": 0}
 
     async def handle(event: FeedbackEvent, push, db, wf) -> None:
         if event.kind == FEEDBACK_RETRY:
             await _do_retry(event, push, wf, config)
         elif event.kind == FEEDBACK_MUTATE:
-            await _do_mutate(event, push, db, wf, config, mutate_num_alphas)
+            await _do_mutate(event, push, db, wf, config, mutate_num_alphas,
+                             mut_counter, max_mutations)
 
     return handle

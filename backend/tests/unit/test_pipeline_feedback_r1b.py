@@ -197,6 +197,28 @@ def _mutate_event(hyp="momentum on revisions"):
 
 
 @pytest.mark.asyncio
+async def test_handle_mutate_session_cap_bounds_regenerations():
+    """max_mutations hard-caps total mutate regenerations per session — the
+    backstop for the parent=None depth-chain gap (task 3735 amplification).
+    After the cap, further MUTATE events are no-ops (no run_mutate, no push)."""
+    pushed = []
+
+    async def push(c):
+        pushed.append(c)
+
+    mut_state = {"r1b_pending_new_hypothesis": {"statement": "h", "hypothesis_id": 9}}
+    gen_result = {"pending_alphas": [SimpleNamespace(expression="x", is_valid=True)],
+                  "trace_steps": [], "state": {"dataset_id": "pv1"}}
+    wf = _MutateWF(mut_state, gen_result)
+    db = _FakeDB(SimpleNamespace(id=7, config={}))
+    handle = build_feedback_handler(config={"configurable": {"run_id": 5}},
+                                    mutate_num_alphas=1, max_mutations=2)
+    for _ in range(4):                      # fire 4 mutate events
+        await handle(_mutate_event(), push, db=db, wf=wf)
+    assert wf.mutate_called == 2            # capped at 2 (events 3,4 short-circuit)
+
+
+@pytest.mark.asyncio
 async def test_handle_mutate_generates_and_pushes():
     pushed = []
 

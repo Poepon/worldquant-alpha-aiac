@@ -730,6 +730,15 @@ class Settings(BaseSettings):
     # parent's depth and refuses when >= this cap to prevent runaway BRAIN
     # + LLM cost on shallow hypothesis spaces.
     R1B_MAX_MUTATION_DEPTH: int = 3
+    # Pipeline-only (2026-05-28 — task 3735 amplification): a HARD per-session cap
+    # on R1b mutate regenerations in the sim-pipeline. The DB depth cap
+    # (R1B_MAX_MUTATION_DEPTH) is SKIPPED when the failed alpha has no
+    # current_hypothesis_id (parent=None) — common on fresh FLAT alphas — and the
+    # classifier's statement-dedupe can't catch ever-changing LLM statements, so
+    # without this cap many distinct failing hypotheses each spawn a FULL (~95s
+    # LLM) regeneration with no overall bound. This guarantees the mutate feedback
+    # loop terminates regardless of depth-chaining. 0 disables.
+    R1B_PIPELINE_MAX_MUTATIONS: int = 20
     R1B_MUTATE_MODEL: str = "claude-haiku-4-5-20251001"
     # ----- R1b.3 — cross-round failure trees -----
     ENABLE_R1B_FAILURE_TREE: bool = False
