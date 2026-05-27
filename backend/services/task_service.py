@@ -592,6 +592,7 @@ class TaskService(BaseService):
         universe: str = "TOP3000",
         datasets: Optional[List[str]] = None,
         delay: int = 1,
+        enable_pipeline: bool = False,
     ) -> "MiningSessionInfo":
         """Create a new FLAT_CONTINUOUS task and dispatch its worker.
 
@@ -632,6 +633,12 @@ class TaskService(BaseService):
         _config = {"flat_cursor": 0, "hypothesis_centric_variant": _level}
         if delay != 1:
             _config["delay"] = int(delay)
+        # Per-session pipeline opt-in (isolated shadow) — _run_flat_iteration
+        # dispatches to the producer-consumer path when this is set OR the global
+        # ENABLE_SIM_PIPELINE flag is on. Omitted when False so legacy sessions'
+        # config stays byte-identical.
+        if enable_pipeline:
+            _config["enable_sim_pipeline"] = True
 
         task = MiningTask(
             task_name=f"flat-session-{region}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",

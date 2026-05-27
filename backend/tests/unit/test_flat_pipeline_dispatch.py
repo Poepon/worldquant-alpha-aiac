@@ -40,6 +40,28 @@ async def test_flag_on_delegates_to_pipeline(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_per_task_config_delegates_to_pipeline(monkeypatch):
+    """Global flag OFF but task.config['enable_sim_pipeline']=True → pipeline
+    (isolated single-session shadow)."""
+    called = {}
+
+    async def fake_pipeline(db, task, run, celery_task_id, *, lock_key, lock_token):
+        called["yes"] = True
+        return {"pipeline": True}
+
+    monkeypatch.setattr(m, "_run_flat_iteration_pipeline", fake_pipeline)
+    monkeypatch.setattr(m.settings, "ENABLE_SIM_PIPELINE", False)  # global OFF
+
+    res = await m._run_flat_iteration(
+        _AsyncDB(),
+        SimpleNamespace(id=7, config={"enable_sim_pipeline": True}),
+        SimpleNamespace(), "cid", lock_key="lk", lock_token="tok",
+    )
+    assert res == {"pipeline": True}
+    assert called.get("yes") is True
+
+
+@pytest.mark.asyncio
 async def test_flag_off_runs_legacy_not_pipeline(monkeypatch):
     called = {}
 

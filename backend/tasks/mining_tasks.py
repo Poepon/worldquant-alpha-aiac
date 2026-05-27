@@ -1536,9 +1536,15 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
     iteration boundary, preserving cursor in runtime_state.
     """
     # ENABLE_SIM_PIPELINE (Sub-phase 0 / Unit 2c): producer-consumer pipeline
-    # path. Flag OFF (default) → the legacy serial loop below runs
-    # byte-identical; ON → delegate to the isolated pipeline implementation.
-    if bool(getattr(settings, "ENABLE_SIM_PIPELINE", False)):
+    # path. Triggers on the GLOBAL flag OR a per-session opt-in
+    # (task.config["enable_sim_pipeline"], set by start_flat_session
+    # enable_pipeline=True) — the latter lets a single shadow session run the
+    # pipeline without flipping the global flag / touching other tasks. Both
+    # OFF (default) → the legacy serial loop below runs byte-identical.
+    _pipeline_on = bool(getattr(settings, "ENABLE_SIM_PIPELINE", False)) or bool(
+        (getattr(task, "config", None) or {}).get("enable_sim_pipeline")
+    )
+    if _pipeline_on:
         return await _run_flat_iteration_pipeline(
             db, task, run, celery_task_id, lock_key=lock_key, lock_token=lock_token
         )
