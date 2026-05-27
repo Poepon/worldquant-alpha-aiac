@@ -88,6 +88,18 @@ async def test_flag_off_runs_legacy_not_pipeline(monkeypatch):
     assert run.status == "COMPLETED"
 
 
+def test_task_skip_states_redelivery_guard():
+    """run_mining_task's entry guard must SKIP terminal/halted states (Celery
+    redelivery + watchdog revival after a worker restart — task 3735) but must
+    NOT skip a fresh PENDING (ONESHOT) or active RUNNING (FLAT/resume) dispatch
+    (else legit work never runs)."""
+    from backend.tasks.mining_tasks import _TASK_SKIP_STATES
+    for st in ("STOPPED", "EARLY_STOPPED", "PAUSED", "COMPLETED", "FAILED"):
+        assert st in _TASK_SKIP_STATES, f"{st} must be skipped on redelivery"
+    for st in ("PENDING", "RUNNING"):
+        assert st not in _TASK_SKIP_STATES, f"{st} must NOT be skipped (legit dispatch)"
+
+
 def test_pick_least_covered_dataset_spreads_across_distinct():
     from backend.tasks.mining_tasks import _pick_least_covered_dataset
     ds = ["analyst4", "fundamental2", "fundamental6", "news12"]

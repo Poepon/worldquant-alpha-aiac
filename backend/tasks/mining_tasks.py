@@ -92,6 +92,15 @@ def _is_cascade_schedule(task) -> bool:
     return sched.upper() == "CASCADE"
 
 
+# Terminal/halted task states that a (re)delivered run_mining_task must NOT
+# re-run — the Celery-redelivery + watchdog-revival guard. A LEGIT dispatch
+# always arrives PENDING (fresh ONESHOT) or RUNNING (fresh FLAT / resume), so
+# these are only ever seen on a stale redelivery/revival. (2026-05-28 task 3735:
+# STOPPED/EARLY_STOPPED/PAUSED were missing → a redelivered STOPPED task set
+# itself RUNNING and re-mined for minutes.)
+_TASK_SKIP_STATES = ("COMPLETED", "FAILED", "STOPPED", "EARLY_STOPPED", "PAUSED")
+
+
 @celery_app.task(bind=True, name="backend.tasks.run_mining_task")
 def run_mining_task(self, task_id: int, run_id: int | None = None):
     """
@@ -117,12 +126,21 @@ def run_mining_task(self, task_id: int, run_id: int | None = None):
                 logger.error(f"Task {task_id} not found")
                 return {"error": "Task not found"}
 
-            # Idempotency check (2026-05-03): skip if already in terminal state.
-            # Required after the seed-loop bug fix because Celery may redeliver
-            # unack'd tasks after worker restart, and we don't want a previously
-            # COMPLETED / EARLY_STOPPED task to be re-run.
-            if task.status in ("COMPLETED", "FAILED"):
-                logger.info(f"Task {task_id} already in terminal state {task.status}, skipping")
+            # Idempotency check (2026-05-03; STOPPED/EARLY_STOPPED/PAUSED added
+            # 2026-05-28 — task 3735): skip if the task is in a terminal/halted
+            # state. Celery redelivers unack'd queued tasks after a worker
+            # restart, and the watchdog dispatches revival tasks; we must NOT
+            # re-run a task the operator/system has already STOPPED. The original
+            # tuple only had COMPLETED/FAILED (the comment even named
+            # EARLY_STOPPED but the code dropped it), so a redelivered STOPPED
+            # task fell through to line ~295 which set status=RUNNING, defeating
+            # the STOPPED state and the per-round STOPPED checks below — task 3735
+            # re-mined for minutes despite being STOPPED. Every LEGIT dispatch
+            # arrives PENDING (fresh ONESHOT) or RUNNING (fresh FLAT / resume —
+            # resume_flat_session flips RUNNING before dispatch; intervene never
+            # dispatches), so skipping these non-RUNNING states is safe.
+            if task.status in _TASK_SKIP_STATES:
+                logger.info(f"Task {task_id} in terminal/halted state {task.status}, skipping (redelivery/revival guard)")
                 return {"skipped": True, "status": task.status}
 
             # 2026-05-11: concurrent-run guard (cascade-stuck-T2 RCA).
