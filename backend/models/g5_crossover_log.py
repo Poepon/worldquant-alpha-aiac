@@ -61,7 +61,9 @@ class G5CrossoverLog(SQLAlchemyBase):
 
     # LLM call cost + offspring
     offspring_count = Column(Integer, nullable=False, default=0)
-    offspring_expressions = Column(JSONB, nullable=True)  # [{expression, strategy, rationale}, ...]
+    # none_as_null: persist Python None as SQL NULL, not JSONB scalar 'null'
+    # (the latter breaks jsonb_array_elements in /ops/g5/crossover-stats).
+    offspring_expressions = Column(JSONB(none_as_null=True), nullable=True)  # [{expression, strategy, rationale}, ...]
     llm_model = Column(String(50), nullable=True)
     llm_cost_usd = Column(Float, nullable=True)
     llm_tokens_used = Column(Integer, nullable=True)

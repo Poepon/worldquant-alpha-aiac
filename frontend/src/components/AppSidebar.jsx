@@ -21,6 +21,7 @@ import {
   FundOutlined,
   ReadOutlined,
   CheckSquareOutlined,
+  SendOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -60,6 +61,7 @@ const menuItems = [
     label: '运维监控',
     children: [
       { key: '/ops/overview', label: '总览' },
+      { key: '/ops/submit-backlog', icon: <SendOutlined />, label: '提交积压' },
       { key: '/ops/feature-flags', label: 'Feature Flag' },
       { key: '/ops/alpha-health', label: 'Alpha 健康度' },
       { key: '/ops/hypothesis-health', label: 'Hypothesis 触发器' },

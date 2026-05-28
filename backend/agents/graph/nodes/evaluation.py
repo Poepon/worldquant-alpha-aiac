@@ -979,10 +979,16 @@ async def _evaluate_single_alpha(
         from backend.config import settings as _r11_settings
         if getattr(_r11_settings, "ENABLE_CAPACITY_SCORE", False):
             from backend.services import capacity_estimator as _cap_svc
+            # region/universe come from the mining state, NOT the candidate:
+            # AlphaCandidate has no region/universe attr, so the old
+            # getattr(alpha, ...) returned None and estimate_from_alpha_dict
+            # short-circuited to 0 (capacity was never stamped on any alpha).
+            # turnover lives on the post-sim metrics dict ("turnover" key).
+            _cap_metrics = alpha.metrics if isinstance(alpha.metrics, dict) else {}
             _alpha_for_cap = {
-                "region": getattr(alpha, "region", None),
-                "universe": getattr(alpha, "universe", None),
-                "turnover": getattr(alpha, "is_turnover", None),
+                "region": ctx.state.region,
+                "universe": ctx.state.universe,
+                "turnover": _cap_metrics.get("turnover"),
             }
             _cap_usd = _cap_svc.estimate_from_alpha_dict(_alpha_for_cap)
             if _cap_usd > 0:

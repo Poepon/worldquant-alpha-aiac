@@ -362,10 +362,14 @@ async def _incremental_save_alphas(
         # a SECOND commit after the alpha INSERT had already committed —
         # a worker crash between the two left rows with fields_used=NULL
         # and no scheduled backfill. Now both arrive atomically.
+        # NB: fall back to [] not None. A fieldless expression with None here
+        # persists as a JSONB scalar 'null' (ORM None → json-null, not SQL
+        # NULL), which breaks jsonb_array_elements_text in field_fitness_stats.
+        # [] matches the column's default=[] intent and is array-typed.
         try:
-            fields_used_for_insert = _extract_used_fields(alpha.expression) or None
+            fields_used_for_insert = _extract_used_fields(alpha.expression) or []
         except Exception:
-            fields_used_for_insert = None
+            fields_used_for_insert = []
 
         # (B 2026-05-22 / a-fix 2026-05-23) Attribute the alpha to the dataset of
         # its ACTUAL fields, derived from fields_used — NOT the FLAT/ONESHOT

@@ -3472,7 +3472,11 @@ async def g5_crossover_stats(
         "SELECT "
         "  COUNT(*) AS total_calls, "
         "  COALESCE(SUM(offspring_count), 0) AS total_offspring, "
-        "  COALESCE(SUM(jsonb_array_length(COALESCE(outcome_alpha_ids, '[]'::jsonb))), 0) AS total_outcome_alphas, "
+        # Same json-null guard as the strategy CTE below — jsonb_array_length
+        # also errors on a scalar, so degrade non-arrays to '[]' (length 0).
+        "  COALESCE(SUM(jsonb_array_length("
+        "    CASE WHEN jsonb_typeof(outcome_alpha_ids) = 'array' "
+        "         THEN outcome_alpha_ids ELSE '[]'::jsonb END)), 0) AS total_outcome_alphas, "
         "  COALESCE(SUM(outcome_pass_count), 0) AS total_pass "
         "FROM g5_crossover_log "
         "WHERE created_at > now() - (:days || ' day')::interval"
@@ -3494,7 +3498,14 @@ async def g5_crossover_stats(
         "         offspring_count, "
         "         outcome_pass_count "
         "  FROM g5_crossover_log, "
-        "       jsonb_array_elements(COALESCE(offspring_expressions, '[]'::jsonb)) AS elem "
+        # COALESCE only traps SQL NULL — historical rows persisted Python None
+        # as JSONB scalar 'null' (not SQL NULL), and jsonb_array_elements()
+        # errors on any non-array scalar. Guard by jsonb_typeof so json-null /
+        # scalar / object all degrade to '[]' instead of 500-ing the endpoint.
+        "       jsonb_array_elements("
+        "         CASE WHEN jsonb_typeof(offspring_expressions) = 'array' "
+        "              THEN offspring_expressions ELSE '[]'::jsonb END"
+        "       ) AS elem "
         "  WHERE created_at > now() - (:days || ' day')::interval "
         ") "
         "SELECT COALESCE(strategy, '(unspecified)') AS s, "
@@ -4426,3 +4437,198 @@ async def direction_bandit_telemetry(
 # The /cascade-deprecation/drain endpoint (and its sibling /readiness above)
 # read/wrote the dropped task.mining_mode column. With cascade permanently
 # retired and the column gone, both endpoints are deleted entirely.
+
+
+# =============================================================================
+# Submit-backlog drain (2026-05-28)
+# =============================================================================
+# The #1 strategic lever is draining the can_submit backlog (121 submittable,
+# unsubmitted alphas as of 2026-05-28) — see competitive analysis v3. The
+# IQC marginal audit already persists a SUBMIT / NEUTRAL / SKIP verdict +
+# composite score onto alpha.metrics._iqc_marginal (audit_iqc_marginal_for_alpha
+# → backfill sweep). This pair of endpoints surfaces that as a drainable,
+# verdict-ranked queue and lets the operator kick a one-pass re-audit of the
+# whole backlog (covers stale-schema rows the periodic beat would chew through
+# 50 at a time).
+
+
+class BacklogItem(BaseModel):
+    alpha_pk: int
+    brain_id: Optional[str] = None
+    region: Optional[str] = None
+    universe: Optional[str] = None
+    sharpe: Optional[float] = None
+    fitness: Optional[float] = None
+    turnover: Optional[float] = None
+    margin: Optional[float] = None       # alpha's own standalone IS margin (ratio)
+    verdict: Optional[str] = None        # SUBMIT / NEUTRAL / SKIP / UNKNOWN
+    composite: Optional[float] = None    # marginal composite_score (ranks within verdict)
+    margin_bps: Optional[float] = None   # from the marginal scorecard (×10000)
+    scope: Optional[str] = None          # resolved BRAIN scope of the audit
+    audited_at: Optional[str] = None
+    stale: bool = False
+    pending: bool = False                # no recommendation yet → needs (re-)scan
+
+
+class BacklogSummary(BaseModel):
+    total: int = 0
+    submit: int = 0
+    neutral: int = 0
+    skip: int = 0
+    unknown: int = 0
+    pending: int = 0                     # no verdict yet (never/stale-schema audit)
+    audited: int = 0                     # total - pending
+
+
+class SubmitBacklogOut(BaseModel):
+    scope: Optional[str] = None          # configured IQC audit scope label
+    region: Optional[str] = None
+    summary: BacklogSummary
+    items: List[BacklogItem]
+
+
+class BacklogScanOut(BaseModel):
+    enqueued: int = 0
+    skipped_inflight: int = 0
+    scope: Optional[str] = None
+    scanned_limit: int = 0
+    message: Optional[str] = None
+
+
+@router.get("/submit-backlog", response_model=SubmitBacklogOut)
+async def submit_backlog(
+    region: Optional[str] = None,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> SubmitBacklogOut:
+    """Verdict-ranked view of the can_submit backlog (submittable + unsubmitted).
+
+    Reads the persisted IQC marginal verdict from alpha.metrics._iqc_marginal
+    (no BRAIN call here — POST /submit-backlog/scan refreshes it). Ranks
+    SUBMIT > NEUTRAL > UNKNOWN > SKIP, then by composite_score desc; rows with no
+    verdict yet (never-audited or stale-schema) sort last and are flagged
+    ``pending``. ``summary.pending`` is the scan-progress gap.
+    """
+    from sqlalchemy import text as _text
+    from backend.config import settings as _stg
+
+    region = (region or "").strip() or None
+    _where = "can_submit IS TRUE AND date_submitted IS NULL"
+    _params: Dict[str, Any] = {}
+    if region:
+        _where += " AND region = :region"
+        _params["region"] = region
+
+    rows = (await db.execute(_text(
+        f"""
+        SELECT id, alpha_id, region, universe,
+               is_sharpe, is_fitness, is_turnover, is_margin,
+               metrics->'_iqc_marginal'->>'recommendation' AS verdict,
+               (metrics->'_iqc_marginal'->>'composite_score')::float AS composite,
+               (metrics->'_iqc_marginal'->>'margin_bps')::float AS margin_bps,
+               metrics->'_iqc_marginal'->>'scope' AS scope,
+               metrics->'_iqc_marginal'->>'audited_at' AS audited_at,
+               COALESCE((metrics->'_iqc_marginal'->>'stale')::boolean, false) AS stale,
+               NOT (metrics->'_iqc_marginal' ? 'recommendation') AS pending
+        FROM alphas
+        WHERE {_where}
+        ORDER BY
+          CASE metrics->'_iqc_marginal'->>'recommendation'
+            WHEN 'SUBMIT' THEN 0 WHEN 'NEUTRAL' THEN 1
+            WHEN 'UNKNOWN' THEN 2 WHEN 'SKIP' THEN 3 ELSE 4 END,
+          (metrics->'_iqc_marginal'->>'composite_score')::float DESC NULLS LAST,
+          is_sharpe DESC NULLS LAST
+        """
+    ), _params)).all()
+
+    items = [
+        BacklogItem(
+            alpha_pk=int(r[0]),
+            brain_id=r[1],
+            region=r[2],
+            universe=r[3],
+            sharpe=float(r[4]) if r[4] is not None else None,
+            fitness=float(r[5]) if r[5] is not None else None,
+            turnover=float(r[6]) if r[6] is not None else None,
+            margin=float(r[7]) if r[7] is not None else None,
+            verdict=r[8],
+            composite=float(r[9]) if r[9] is not None else None,
+            margin_bps=float(r[10]) if r[10] is not None else None,
+            scope=r[11],
+            audited_at=r[12],
+            stale=bool(r[13]),
+            pending=bool(r[14]),
+        )
+        for r in rows
+    ]
+
+    s = (await db.execute(_text(
+        f"""
+        SELECT
+          COUNT(*) AS total,
+          COUNT(*) FILTER (WHERE metrics->'_iqc_marginal'->>'recommendation' = 'SUBMIT') AS submit,
+          COUNT(*) FILTER (WHERE metrics->'_iqc_marginal'->>'recommendation' = 'NEUTRAL') AS neutral,
+          COUNT(*) FILTER (WHERE metrics->'_iqc_marginal'->>'recommendation' = 'SKIP') AS skip,
+          COUNT(*) FILTER (WHERE metrics->'_iqc_marginal'->>'recommendation' = 'UNKNOWN') AS unknown,
+          COUNT(*) FILTER (WHERE NOT (COALESCE(metrics, '{{}}'::jsonb)->'_iqc_marginal' ? 'recommendation')) AS pending
+        FROM alphas
+        WHERE {_where}
+        """
+    ), _params)).one()
+    total = int(s[0] or 0)
+    pending = int(s[5] or 0)
+    summary = BacklogSummary(
+        total=total,
+        submit=int(s[1] or 0),
+        neutral=int(s[2] or 0),
+        skip=int(s[3] or 0),
+        unknown=int(s[4] or 0),
+        pending=pending,
+        audited=total - pending,
+    )
+
+    _comp, _team = _stg.iqc_audit_scope()
+    _scope_label = (
+        f"competitions/{_comp}" if _comp else (f"teams/{_team}" if _team else None)
+    )
+    return SubmitBacklogOut(
+        scope=_scope_label, region=region, summary=summary, items=items,
+    )
+
+
+@router.post("/submit-backlog/scan", response_model=BacklogScanOut)
+async def submit_backlog_scan(
+    limit: int = Query(200, ge=1, le=500),
+    _token: str = Depends(_require_ops_token),
+) -> BacklogScanOut:
+    """Kick a one-pass IQC marginal re-audit across the whole backlog.
+
+    Reuses iqc_audit_backfill_sweep (now covering stale-schema rows too) with a
+    larger ``limit`` so a manual drain doesn't wait for the 50-at-a-time beat.
+    The sweep enqueues per-alpha audit tasks (BRAIN call each, ~5-20s) consumed
+    by the Celery worker; this returns immediately with the enqueued count.
+    Re-poll GET /submit-backlog to watch summary.pending shrink as verdicts land.
+    """
+    from backend.config import settings as _stg
+
+    _comp, _team = _stg.iqc_audit_scope()
+    if not (_comp or _team):
+        return BacklogScanOut(
+            enqueued=0, scanned_limit=int(limit),
+            message="IQC 审计 scope 未配置(IQC_AUTO_AUDIT_COMPETITION/TEAM 均空),无法扫描",
+        )
+    from backend.tasks.refresh_tasks import _iqc_audit_backfill_sweep_async
+    result = await _iqc_audit_backfill_sweep_async(limit=int(limit))
+    _scope_label = (
+        f"competitions/{_comp}" if _comp else f"teams/{_team}"
+    )
+    return BacklogScanOut(
+        enqueued=int(result.get("enqueued", 0) or 0),
+        skipped_inflight=int(result.get("skipped_inflight", 0) or 0),
+        scope=_scope_label,
+        scanned_limit=int(limit),
+        message=(
+            f"已入队 {result.get('enqueued', 0)} 个边际审计任务(worker 后台逐个调 BRAIN);"
+            f"轮询本页看 pending 递减"
+        ),
+    )

@@ -87,7 +87,13 @@ async def refresh_field_fitness_cache(
                         jsonb_array_elements_text(a.fields_used) AS field_id,
                         (a.metrics->>'fitness')::float AS fit
                     FROM alphas a
-                    WHERE a.fields_used IS NOT NULL
+                    -- jsonb_typeof guard, not IS NOT NULL: the latter still
+                    -- passes a JSONB scalar 'null' (a fieldless expr persisted
+                    -- as Python None), and jsonb_array_elements_text() errors on
+                    -- any non-array scalar. Only true arrays survive; SQL NULL /
+                    -- json-null / scalar / object are all dropped (correct — a
+                    -- fieldless alpha has nothing to attribute fit to anyway).
+                    WHERE jsonb_typeof(a.fields_used) = 'array'
                       AND a.region = :region
                       AND a.metrics ? 'fitness'
                       AND (a.metrics->>'fitness')::float IS NOT NULL

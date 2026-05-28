@@ -643,15 +643,19 @@ IQC_AUDIT_BACKFILL_LIMIT = _iqc_settings.IQC_AUDIT_BACKFILL_LIMIT
 
 
 @celery_app.task(name="backend.tasks.iqc_audit_backfill_sweep")
-def iqc_audit_backfill_sweep() -> Dict:
+def iqc_audit_backfill_sweep(limit: int | None = None) -> Dict:
     """Beat-driven sweep enqueuing IQC marginal audits for can_submit=true
-    alphas missing the _iqc_marginal metric. Idempotent: alphas already
-    audited are skipped by the WHERE clause.
+    alphas that are stale, never-audited, OR carry a stale-schema audit
+    (old _iqc_marginal without a `recommendation` — pre-scorecard / old
+    competition). Idempotent: fully-current audits are skipped by the WHERE
+    clause. ``limit`` overrides the per-sweep cap (None → settings); a manual
+    backlog-drain trigger passes a larger value to cover the whole backlog in
+    one pass instead of waiting for the beat to chew through it 50 at a time.
     """
-    return run_async(_iqc_audit_backfill_sweep_async())
+    return run_async(_iqc_audit_backfill_sweep_async(limit=limit))
 
 
-async def _iqc_audit_backfill_sweep_async() -> Dict:
+async def _iqc_audit_backfill_sweep_async(limit: int | None = None) -> Dict:
     from sqlalchemy import text as _text
     from backend.config import settings
     from backend.database import AsyncSessionLocal
@@ -699,14 +703,34 @@ async def _iqc_audit_backfill_sweep_async() -> Dict:
                       AND alpha_id IS NOT NULL
                       AND date_submitted IS NULL
                       AND (metrics IS NULL OR NOT (metrics ? '_iqc_marginal'))
+                    UNION ALL
+                    -- Stale-schema: a row that WAS audited but predates the
+                    -- marginal scorecard (no `recommendation` key — e.g. the
+                    -- 2026-05-20 IQC2026S1 audits). stale=false so the first
+                    -- branch misses it and `_iqc_marginal` exists so the second
+                    -- misses it too; without this branch these never refresh to
+                    -- the current scope + verdict. Lowest priority (re-audit
+                    -- live candidates first).
+                    SELECT id, 2 AS audit_priority, updated_at
+                    FROM alphas
+                    WHERE can_submit = true
+                      AND alpha_id IS NOT NULL
+                      AND date_submitted IS NULL
+                      AND metrics ? '_iqc_marginal'
+                      AND NOT (metrics->'_iqc_marginal' ? 'recommendation')
+                      AND COALESCE((metrics->'_iqc_marginal'->>'audit_failures')::int, 0) < :max_fail
                 ) AS pri
                 ORDER BY audit_priority ASC, updated_at DESC NULLS LAST
                 LIMIT :lim
                 """
             ),
             # V-26.83: cap sourced from settings so beat-level tuning doesn't
-            # need a code edit. Aliased module constant keeps imports stable.
-            {"lim": _iqc_settings.IQC_AUDIT_BACKFILL_LIMIT, "max_fail": max_failures},
+            # need a code edit. A manual backlog-drain trigger may pass a larger
+            # `limit` to cover the whole backlog in one sweep.
+            {
+                "lim": int(limit) if limit else _iqc_settings.IQC_AUDIT_BACKFILL_LIMIT,
+                "max_fail": max_failures,
+            },
         )
         pks = [r[0] for r in rows.all()]
 

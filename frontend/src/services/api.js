@@ -738,6 +738,20 @@ const api = {
     const { data } = await client.get('/ops/g3v2/parse-stats', { params: { days } })
     return data
   },
+
+  // Submit-backlog drain (2026-05-28) — verdict-ranked can_submit queue.
+  getOpsSubmitBacklog: async (region = null) => {
+    const params = {}
+    if (region) params.region = region
+    const { data } = await client.get('/ops/submit-backlog', { params })
+    return data
+  },
+  // Kick a one-pass IQC marginal re-audit across the backlog (BRAIN-backed,
+  // worker-async). Returns the enqueued count; re-poll getOpsSubmitBacklog.
+  scanSubmitBacklog: async (limit = 200) => {
+    const { data } = await client.post('/ops/submit-backlog/scan', null, { params: { limit } })
+    return data
+  },
 }
 
 export default api
