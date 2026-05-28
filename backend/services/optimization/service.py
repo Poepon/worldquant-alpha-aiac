@@ -102,6 +102,20 @@ class OptimizationService:
             trigger_source=trigger_source,
             sim_budget_granted=int(budget),
         )
+        # Commit the open_cycle row so it survives a later mid-cycle
+        # rollback (review fix E). Without this, an exception during
+        # generator/simulator/persister would rollback the entire session
+        # and the optimization_runs row would vanish — telemetry would
+        # show no record of the failure, defeating the GO/STOP gate audit.
+        db = getattr(self.repository, "db", None)
+        if db is not None:
+            try:
+                await db.commit()
+            except Exception as commit_ex:  # noqa: BLE001
+                logger.warning(
+                    "[OptimizationService] open_cycle commit failed "
+                    "(continuing without durability guarantee): %s", commit_ex,
+                )
 
         try:
             variants = await self.generator.generate(parent_alpha)
@@ -161,10 +175,35 @@ class OptimizationService:
             logger.exception(
                 "[OptimizationService] cycle %s failed: %s", opt_run_id, err,
             )
+            # Recover session from any mid-cycle flush poisoning before
+            # stamping the error (review fix E). A failed db.flush() in
+            # Persister/Simulator leaves the session in InvalidRequest state;
+            # finish_cycle's own flush would then silently no-op, leaving
+            # optimization_runs.error NULL despite the visible exception.
+            if db is not None:
+                try:
+                    await db.rollback()
+                except Exception as rb_ex:  # noqa: BLE001
+                    logger.warning(
+                        "[OptimizationService] poison recovery rollback "
+                        "failed for cycle %s: %s", opt_run_id, rb_ex,
+                    )
             try:
                 await self.repository.finish_cycle(
                     opt_run_id=opt_run_id, error=err
                 )
+                # Make the error stamp durable so /ops/optimization/cycles
+                # sees it on the next refresh — without this commit, the
+                # outer session manager's rollback (on re-raise) would wipe
+                # the stamp again.
+                if db is not None:
+                    try:
+                        await db.commit()
+                    except Exception as commit_ex:  # noqa: BLE001
+                        logger.warning(
+                            "[OptimizationService] error-stamp commit "
+                            "failed for cycle %s: %s", opt_run_id, commit_ex,
+                        )
             except Exception as fin_ex:  # noqa: BLE001
                 logger.warning(
                     "[OptimizationService] finish_cycle error-stamp also "

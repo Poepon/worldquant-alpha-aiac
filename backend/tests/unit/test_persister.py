@@ -145,11 +145,73 @@ async def test_alpha_id_collision_returns_none_slot(db_session):
     w1 = _make_winner(brain_alpha_id="collide-1")
     pks1 = await persister.save([w1], parent_alpha_id=parent_id, opt_run_id=opt_run_id)
     assert pks1[0] is not None
+    w1_pk = pks1[0]
 
     # Second winner with same brain_alpha_id — UNIQUE violation
     w2 = _make_winner(brain_alpha_id="collide-1", sharpe=3.0)
     pks2 = await persister.save([w2], parent_alpha_id=parent_id, opt_run_id=opt_run_id)
     assert pks2 == [None]
+
+    # SAVEPOINT semantics (review fix A): w1 MUST still be in DB after w2's
+    # collision rollback. Without the savepoint guard, the previous impl's
+    # db.rollback() would have wiped w1 too.
+    w1_row = await db_session.get(Alpha, w1_pk)
+    assert w1_row is not None
+    assert w1_row.alpha_id == "collide-1"
+
+
+@pytest.mark.asyncio
+async def test_multi_winner_save_with_mid_list_collision(db_session):
+    """Multi-winner save() where winner #3 collides with an existing row:
+    winners #1 and #2 (already flushed in the same save() loop) MUST
+    survive the rollback of #3. This is the bug the SAVEPOINT fix
+    targets — without it, db.rollback() inside _save_one would also
+    undo the prior winners' pending flushes, corrupting SubmitPolicy's
+    1:1 index alignment.
+    """
+    parent_id, opt_run_id = await _seed_parent_and_run(db_session)
+    persister = Persister(db_session)
+
+    # Pre-seed a row that will collide with winner #3 of the batch.
+    pre_existing = Alpha(
+        alpha_id="batch-w3",
+        expression="pre_existing",
+        region="USA",
+        universe="TOP3000",
+    )
+    db_session.add(pre_existing)
+    await db_session.flush()
+
+    winners = [
+        _make_winner(brain_alpha_id="batch-w1"),
+        _make_winner(brain_alpha_id="batch-w2"),
+        _make_winner(brain_alpha_id="batch-w3"),   # COLLIDES
+        _make_winner(brain_alpha_id="batch-w4"),
+        _make_winner(brain_alpha_id="batch-w5"),
+    ]
+    pks = await persister.save(
+        winners, parent_alpha_id=parent_id, opt_run_id=opt_run_id,
+    )
+
+    # 1:1 alignment preserved with a None gap at the collision index
+    assert len(pks) == 5
+    assert pks[0] is not None
+    assert pks[1] is not None
+    assert pks[2] is None   # the colliding slot
+    assert pks[3] is not None
+    assert pks[4] is not None
+
+    # All 4 non-colliding winners are queryable in the DB — proves SAVEPOINT
+    # isolation worked. Pre-fix, w1/w2 (flushed before the collision) would
+    # have been rolled back along with the failed w3.
+    for i, pk in enumerate(pks):
+        if pk is None:
+            continue
+        row = await db_session.get(Alpha, pk)
+        assert row is not None, f"winner #{i} (pk={pk}) missing from DB"
+        # Each winner is properly wired to the cycle
+        assert row.optimization_run_id == opt_run_id
+        assert row.parent_alpha_id == parent_id
 
 
 @pytest.mark.asyncio

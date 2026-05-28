@@ -165,19 +165,26 @@ class Persister:
             metrics_snapshot_at=datetime.utcnow(),
         )
 
+        # SAVEPOINT (begin_nested) so a single winner's IntegrityError doesn't
+        # nuke prior successful flushes in the same save() loop. Without this,
+        # a multi-winner save() where winner #3 collides would db.rollback()
+        # the whole session and lose winners #1 and #2 — corrupting the 1:1
+        # alignment SubmitPolicy.decide depends on. Mirrors the canonical
+        # pattern in backend/agents/graph/nodes/persistence.py:454.
         try:
-            self.db.add(alpha)
-            await self.db.flush()
+            async with self.db.begin_nested():
+                self.db.add(alpha)
+                await self.db.flush()
             return int(alpha.id)
         except IntegrityError as ex:
             # Most likely Alpha.alpha_id unique collision (BRAIN re-issued an
-            # id we've seen). Keep the slot in the return list as None so
-            # SubmitPolicy's index-aligned decisions don't drift.
+            # id we've seen). The SAVEPOINT auto-rolled back; session stays
+            # valid for the next winner. Keep the slot in the return list as
+            # None so SubmitPolicy's index-aligned decisions don't drift.
             logger.info(
                 "[Persister] alpha_id collision on %s (skipped): %s",
                 winner.brain_alpha_id, ex,
             )
-            await self.db.rollback()
             return None
 
 
