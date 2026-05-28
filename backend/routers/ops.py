@@ -4468,6 +4468,14 @@ class BacklogItem(BaseModel):
     audited_at: Optional[str] = None
     stale: bool = False
     pending: bool = False                # no recommendation yet → needs (re-)scan
+    # Locally-computed self-correlation (≥ 0.7 vs already-submitted = BRAIN's hard
+    # submission gate). BRAIN's own SELF_CORRELATION check often stamps PENDING-
+    # no-value, which leaves `can_submit=true` even when this local value already
+    # breaches 0.7 — so we surface it explicitly: the submit will fail at BRAIN
+    # if self_corr ≥ 0.7. Null = no local stamp yet (refresh-can-submit will fill).
+    self_corr: Optional[float] = None
+    self_corr_source: Optional[str] = None        # which path stamped it
+    self_corr_counterpart: Optional[str] = None   # the already-submitted alpha that breaches
 
 
 class BacklogSummary(BaseModel):
@@ -4478,6 +4486,15 @@ class BacklogSummary(BaseModel):
     unknown: int = 0
     pending: int = 0                     # no verdict yet (never/stale-schema audit)
     audited: int = 0                     # total - pending
+    # Self-correlation gate (≥ 0.7 = BRAIN-side hard reject at submit time).
+    # Many backlog rows carry can_submit=true only because BRAIN's
+    # SELF_CORRELATION check is PENDING-no-value, but the LOCAL _self_corr
+    # already breached — these will fail at submit. The breakdown highlights
+    # how many of `total` will actually clear the gate.
+    self_corr_breach: int = 0            # local _self_corr ≥ 0.7
+    self_corr_near: int = 0              # 0.5 ≤ _self_corr < 0.7
+    self_corr_safe: int = 0              # _self_corr < 0.5
+    self_corr_unknown: int = 0           # no local _self_corr stamp
 
 
 class SubmitBacklogOut(BaseModel):
@@ -4529,10 +4546,18 @@ async def submit_backlog(
                metrics->'_iqc_marginal'->>'scope' AS scope,
                metrics->'_iqc_marginal'->>'audited_at' AS audited_at,
                COALESCE((metrics->'_iqc_marginal'->>'stale')::boolean, false) AS stale,
-               NOT (metrics->'_iqc_marginal' ? 'recommendation') AS pending
+               NOT (metrics->'_iqc_marginal' ? 'recommendation') AS pending,
+               (metrics->>'_self_corr')::float AS self_corr,
+               metrics->>'_self_corr_source' AS self_corr_source,
+               metrics->>'_self_corr_counterpart' AS self_corr_counterpart
         FROM alphas
         WHERE {_where}
         ORDER BY
+          -- Self-corr gate first: anything that will fail at BRAIN sinks to the
+          -- bottom regardless of verdict (SUBMIT-verdict-but-breach is a trap).
+          CASE
+            WHEN (metrics->>'_self_corr')::float >= 0.7 THEN 1 ELSE 0
+          END,
           CASE metrics->'_iqc_marginal'->>'recommendation'
             WHEN 'SUBMIT' THEN 0 WHEN 'NEUTRAL' THEN 1
             WHEN 'UNKNOWN' THEN 2 WHEN 'SKIP' THEN 3 ELSE 4 END,
@@ -4558,6 +4583,9 @@ async def submit_backlog(
             audited_at=r[12],
             stale=bool(r[13]),
             pending=bool(r[14]),
+            self_corr=float(r[15]) if r[15] is not None else None,
+            self_corr_source=r[16],
+            self_corr_counterpart=r[17],
         )
         for r in rows
     ]
@@ -4570,7 +4598,12 @@ async def submit_backlog(
           COUNT(*) FILTER (WHERE metrics->'_iqc_marginal'->>'recommendation' = 'NEUTRAL') AS neutral,
           COUNT(*) FILTER (WHERE metrics->'_iqc_marginal'->>'recommendation' = 'SKIP') AS skip,
           COUNT(*) FILTER (WHERE metrics->'_iqc_marginal'->>'recommendation' = 'UNKNOWN') AS unknown,
-          COUNT(*) FILTER (WHERE NOT (COALESCE(metrics, '{{}}'::jsonb)->'_iqc_marginal' ? 'recommendation')) AS pending
+          COUNT(*) FILTER (WHERE NOT (COALESCE(metrics, '{{}}'::jsonb)->'_iqc_marginal' ? 'recommendation')) AS pending,
+          COUNT(*) FILTER (WHERE (metrics->>'_self_corr')::float >= 0.7) AS sc_breach,
+          COUNT(*) FILTER (WHERE (metrics->>'_self_corr')::float >= 0.5
+                                AND (metrics->>'_self_corr')::float < 0.7) AS sc_near,
+          COUNT(*) FILTER (WHERE (metrics->>'_self_corr')::float < 0.5) AS sc_safe,
+          COUNT(*) FILTER (WHERE NOT (metrics ? '_self_corr')) AS sc_unknown
         FROM alphas
         WHERE {_where}
         """
@@ -4585,6 +4618,10 @@ async def submit_backlog(
         unknown=int(s[4] or 0),
         pending=pending,
         audited=total - pending,
+        self_corr_breach=int(s[6] or 0),
+        self_corr_near=int(s[7] or 0),
+        self_corr_safe=int(s[8] or 0),
+        self_corr_unknown=int(s[9] or 0),
     )
 
     _comp, _team = _stg.iqc_audit_scope()

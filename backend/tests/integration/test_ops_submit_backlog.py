@@ -66,27 +66,31 @@ async def client_factory():
 
 # BacklogItem column order:
 # id, alpha_id, region, universe, is_sharpe, is_fitness, is_turnover, is_margin,
-# verdict, composite, margin_bps, scope, audited_at, stale, pending
+# verdict, composite, margin_bps, scope, audited_at, stale, pending,
+# self_corr, self_corr_source, self_corr_counterpart
 _ROW_SUBMIT = (
     14841, "AbC123", "USA", "TOP3000", 1.32, 1.10, 0.25, 0.012,
     "SUBMIT", 0.941, 120.12, "competitions/IQC2026S2", "2026-05-20T09:55:56Z",
-    False, False,
+    False, False, 0.42, "brain_check", "xAm1YvQp",
 )
 _ROW_NEUTRAL = (
     14790, "XyZ999", "USA", "TOP3000", 1.82, 0.90, 0.30, 0.0006,
     "NEUTRAL", -0.154, 6.0, "competitions/IQC2026S2", "2026-05-20T09:55:56Z",
-    False, False,
+    False, False, 0.85, "brain_check", "abc123XY",  # breach: ≥ 0.7
 )
 _ROW_PENDING = (
     15000, "Pen001", "USA", "TOP3000", 1.50, 1.00, 0.20, 0.001,
-    None, None, None, None, None, False, True,
+    None, None, None, None, None, False, True, None, None, None,
 )
 
 
 @pytest.mark.asyncio
 async def test_submit_backlog_assembles_and_flags_pending(client_factory):
-    """Queue rows pass through with verdict/composite; summary derives audited."""
-    summary = (3, 1, 1, 0, 0, 1)  # total, submit, neutral, skip, unknown, pending
+    """Queue rows pass through with verdict/composite/self_corr; summary
+    derives audited + self_corr breakdown."""
+    # summary: total, submit, neutral, skip, unknown, pending,
+    # sc_breach, sc_near, sc_safe, sc_unknown
+    summary = (3, 1, 1, 0, 0, 1,    1, 0, 1, 1)
     client = await client_factory(
         rows=[_ROW_SUBMIT, _ROW_NEUTRAL, _ROW_PENDING], summary=summary,
     )
@@ -99,25 +103,35 @@ async def test_submit_backlog_assembles_and_flags_pending(client_factory):
     assert body["summary"]["total"] == 3
     assert body["summary"]["pending"] == 1
     assert body["summary"]["audited"] == 2  # total - pending
+    assert body["summary"]["self_corr_breach"] == 1
+    assert body["summary"]["self_corr_safe"] == 1
+    assert body["summary"]["self_corr_unknown"] == 1
     items = body["items"]
     assert len(items) == 3
     assert items[0]["verdict"] == "SUBMIT"
     assert items[0]["composite"] == 0.941
     assert items[0]["margin_bps"] == 120.12
-    # pending row surfaces with no verdict + pending flag
+    assert items[0]["self_corr"] == 0.42
+    assert items[0]["self_corr_counterpart"] == "xAm1YvQp"
+    # the breach row surfaces with self_corr >= 0.7
+    breach = next(it for it in items if it["alpha_pk"] == 14790)
+    assert breach["self_corr"] == 0.85
+    # pending row surfaces with no verdict + pending flag + no self_corr
     pend = next(it for it in items if it["alpha_pk"] == 15000)
     assert pend["pending"] is True
     assert pend["verdict"] is None
+    assert pend["self_corr"] is None
 
 
 @pytest.mark.asyncio
 async def test_submit_backlog_empty(client_factory):
-    client = await client_factory(rows=[], summary=(0, 0, 0, 0, 0, 0))
+    client = await client_factory(rows=[], summary=(0,) * 10)
     async with client as ac:
         r = await ac.get("/api/v1/ops/submit-backlog")
     body = r.json()
     assert body["summary"]["total"] == 0
     assert body["summary"]["audited"] == 0
+    assert body["summary"]["self_corr_breach"] == 0
     assert body["items"] == []
 
 

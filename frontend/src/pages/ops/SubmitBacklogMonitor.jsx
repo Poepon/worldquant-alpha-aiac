@@ -55,6 +55,14 @@ function verdictTag(verdict, pending) {
   return <Tag color={m.color}>{m.label}</Tag>
 }
 
+// Self-correlation gate: ≥0.7 vs already-submitted is BRAIN's hard reject.
+function selfCorrTag(v) {
+  if (v === null || v === undefined) return <Tag color="default">未算</Tag>
+  if (v >= 0.7) return <Tag color="error">撞门 {v.toFixed(3)}</Tag>
+  if (v >= 0.5) return <Tag color="gold">近门槛 {v.toFixed(3)}</Tag>
+  return <Tag color="success">{v.toFixed(3)}</Tag>
+}
+
 export default function SubmitBacklogMonitor() {
   const qc = useQueryClient()
   const [region, setRegion] = useState(null)
@@ -164,6 +172,26 @@ export default function SubmitBacklogMonitor() {
     },
     {
       title: (
+        <Tooltip title="Self-correlation vs 已提交集(BRAIN 硬门 < 0.7)。BRAIN 端 SELF_CORRELATION 经常 PENDING 不出值,can_submit 仍 true,但本地算的撞门会让真实 submit 被 BRAIN 拒。">
+          <Space size={4}>Self-corr <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
+      dataIndex: 'self_corr',
+      key: 'self_corr',
+      width: 130,
+      render: (v, r) => (
+        <Space direction="vertical" size={0}>
+          {selfCorrTag(v)}
+          {r.self_corr_counterpart ? (
+            <Text type="secondary" style={{ fontSize: 11 }}>
+              撞: <Text code style={{ fontSize: 11 }}>{r.self_corr_counterpart}</Text>
+            </Text>
+          ) : null}
+        </Space>
+      ),
+    },
+    {
+      title: (
         <Tooltip title="边际综合评分（marginal composite_score）— 同推荐档内排序依据">
           <Space size={4}>综合评分 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
@@ -225,7 +253,11 @@ export default function SubmitBacklogMonitor() {
   const rowSelection = {
     selectedRowKeys,
     onChange: setSelectedRowKeys,
-    getCheckboxProps: (r) => ({ disabled: r.pending }),
+    // Disable selection for pending-rescan rows AND self-corr breach rows —
+    // the latter will be rejected by BRAIN at submit time regardless of verdict.
+    getCheckboxProps: (r) => ({
+      disabled: r.pending || (r.self_corr !== null && r.self_corr !== undefined && r.self_corr >= 0.7),
+    }),
   }
 
   return (
@@ -335,6 +367,82 @@ export default function SubmitBacklogMonitor() {
           </Card>
         </Col>
       </Row>
+
+      {/* Self-correlation gate row — BRAIN's hard reject ≥0.7. */}
+      <Row gutter={[16, 16]} style={{ marginTop: 12 }}>
+        <Col xs={12} sm={6} lg={6}>
+          <Card className="glass-card">
+            <Tooltip title="本地算 self-corr ≥ 0.7 vs 已提交集 → BRAIN 提交时硬门拒。这些不应被选去批量提交,checkbox 已禁用。">
+              <Statistic
+                title={
+                  <Space>
+                    Self-corr 撞门
+                    <InfoCircleOutlined style={{ color: '#9c88ff' }} />
+                  </Space>
+                }
+                value={summary.self_corr_breach ?? 0}
+                valueStyle={{ color: '#ff4d4f' }}
+              />
+              <Text type="secondary" style={{ fontSize: 12 }}>≥ 0.7,提交会被拒</Text>
+            </Tooltip>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6} lg={6}>
+          <Card className="glass-card">
+            <Statistic
+              title="近门槛"
+              value={summary.self_corr_near ?? 0}
+              valueStyle={{ color: '#ffb700' }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>0.5 - 0.7,谨慎</Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6} lg={6}>
+          <Card className="glass-card">
+            <Statistic
+              title="安全"
+              value={summary.self_corr_safe ?? 0}
+              valueStyle={{ color: '#00ff88' }}
+            />
+            <Text type="secondary" style={{ fontSize: 12 }}>&lt; 0.5</Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6} lg={6}>
+          <Card className="glass-card">
+            <Tooltip title="本地未算 self-corr(BRAIN 端可能 PENDING 不出值)。提交前需用 refresh-can-submit 触发本地重算,或冒险提交。">
+              <Statistic
+                title={
+                  <Space>
+                    未算
+                    <InfoCircleOutlined style={{ color: '#9c88ff' }} />
+                  </Space>
+                }
+                value={summary.self_corr_unknown ?? 0}
+                valueStyle={{ color: '#888' }}
+              />
+              <Text type="secondary" style={{ fontSize: 12 }}>无本地 _self_corr</Text>
+            </Tooltip>
+          </Card>
+        </Col>
+      </Row>
+
+      {/* Self-corr trap warning — only when meaningful breach exists. */}
+      {(summary.self_corr_breach ?? 0) > 0 && (
+        <Alert
+          type="error"
+          showIcon
+          style={{ marginTop: 12 }}
+          message={
+            <span>
+              <strong>提交陷阱</strong>:积压里有 <strong>{summary.self_corr_breach}</strong> 个本地算 self-corr ≥ 0.7,
+              虽然 <code>can_submit=true</code>(因为 BRAIN 端 SELF_CORRELATION 常 PENDING 不出值)但
+              真实提交时会被 BRAIN 拒。表格里这些行 checkbox 已禁用、且已沉到队列末尾。
+              真正可提交 ≈ <strong>{(summary.self_corr_safe ?? 0) + (summary.self_corr_near ?? 0)}</strong> 个
+              + <strong>{summary.self_corr_unknown ?? 0}</strong> 个未算(冒险或先 refresh)。
+            </span>
+          }
+        />
+      )}
 
       {/* Batch actions */}
       <Space style={{ marginTop: 16, marginBottom: 8 }} wrap>
