@@ -179,6 +179,60 @@ async def test_producer_next_round_inputs_timeout_ends_cleanly():
 
 
 @pytest.mark.asyncio
+async def test_drain_feedback_handler_timeout_breaks_drain():
+    """A hung F2 feedback handler (R1B mutate / G5 crossover) must END the drain
+    on op_timeout — NOT log+continue. The previous log+continue path caused a
+    permanent freeze on task 3738, 2026-05-28: wait_for cancelled the mutate
+    handler mid asyncpg query, poisoned the producer's SHARED db session
+    (dc7c8e5 class), and the next drain iteration hung on that same session with
+    no timer (loop parked in select forever). Mirrors the gen-op break-on-timeout.
+
+    Proof: when 2 events are queued and the FIRST handler hangs, the SECOND
+    event is NOT consumed (drain broke), and produce() returns cleanly within
+    op_timeout instead of freezing."""
+    class _FakeCtx:
+        def __init__(self, events):
+            self._events = list(events)
+            self.primary_done = False
+            self.events_done = 0
+        def mark_primary_done(self):
+            self.primary_done = True
+        async def next_event(self):
+            return self._events.pop(0) if self._events else None
+        def event_done(self):
+            self.events_done += 1
+
+    class _WF:
+        def __init__(self):
+            self._hyp_graph = "built"
+            self._codegen_graph = "built"
+
+    async def nri(db):                     # no main rounds; drain starts immediately
+        return None
+
+    handled_log = []
+
+    async def hung_handler(event, push, db, wf):
+        handled_log.append(("started", event))
+        await asyncio.sleep(30)            # hang past op_timeout
+        handled_log.append(("done", event))  # must NOT reach this
+
+    ctx = _FakeCtx(events=["ev_first", "ev_second"])
+    produce = build_producer(
+        session_factory=_sf, workflow_factory=lambda db: _WF(),
+        next_round_inputs=nri, num_alphas=4,
+        handle_feedback=hung_handler, op_timeout=0.1,
+    )
+    # Critical: produce() must RETURN (drain broke after the first timeout),
+    # not hang waiting on the second event. If the bug were still present,
+    # asyncio.wait_for here would itself time out.
+    await asyncio.wait_for(produce(lambda c: None, lambda: False, ctx), timeout=10)
+    assert handled_log == [("started", "ev_first")]   # only first handler started
+    assert ctx.events_done == 1                       # event_done() called once (finally)
+    assert ctx._events == ["ev_second"]               # second event NOT consumed (break worked)
+
+
+@pytest.mark.asyncio
 async def test_no_timeout_when_op_timeout_none():
     """op_timeout=None → operations run unbounded (existing behaviour); a fast
     sim completes normally."""

@@ -80,8 +80,21 @@ async def _drain_feedback(feedback_ctx, handle_feedback, push, db, wf, should_st
         try:
             await _with_timeout(handle_feedback(event, push, db, wf), op_timeout)
             handled += 1
-        except Exception:  # noqa: BLE001 — one bad/slow event ≠ dead drain
-            logger.exception("[pipeline] feedback handler failed/timed out (skipped)")
+        except Exception:  # noqa: BLE001
+            # END the drain (DO NOT `continue` — the previous "log + skip"
+            # caused a permanent freeze on task 3738, 2026-05-28): a timed-
+            # out/failed handler may have wait_for-cancelled mid asyncpg
+            # query and poisoned the producer's SHARED `db` session
+            # (dc7c8e5 class). The next iteration's handler/next_event would
+            # then hang on that same session with no timer → loop parks in
+            # select forever (same root as the next_round_inputs gap
+            # `be1d287` closed). Mirrors the gen-op break-on-timeout at L166.
+            # event_done() in finally → outstanding decrements → quiescence
+            # for any remaining events when produce() returns cleanly.
+            logger.exception(
+                "[pipeline] feedback handler failed/timed out; ending drain "
+                "(shared session integrity uncertain)")
+            break
         finally:
             feedback_ctx.event_done()
     return handled
