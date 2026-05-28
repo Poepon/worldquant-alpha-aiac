@@ -38,6 +38,7 @@ const EMPTY_FILTERS = {
   region: undefined,
   quality_status: undefined,
   human_feedback: undefined,
+  delay: undefined,
   min_sharpe: undefined,
   max_sharpe: undefined,
   min_fitness: undefined,
@@ -478,6 +479,20 @@ export default function AlphaList() {
                 { value: 'LIKED', label: '👍 喜欢' },
                 { value: 'DISLIKED', label: '👎 不喜欢' },
                 { value: 'NONE', label: '未评价' },
+              ]}
+            />
+          </Space>
+          <Space size={6}>
+            <Text>Delay:</Text>
+            <Select
+              allowClear
+              placeholder="全部"
+              style={{ width: 100 }}
+              value={filters.delay}
+              onChange={(v) => { setFilters((f) => ({ ...f, delay: v })); setPage(1) }}
+              options={[
+                { value: 0, label: '0 (原生)' },
+                { value: 1, label: '1' },
               ]}
             />
           </Space>

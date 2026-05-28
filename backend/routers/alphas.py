@@ -134,6 +134,7 @@ async def list_alphas(
     human_feedback: Optional[str] = Query(None),
     dataset_id: Optional[str] = Query(None),
     task_id: Optional[int] = Query(None, description="Restrict to a single task"),
+    delay: Optional[int] = Query(None, description="Filter by delay setting (0 or 1)"),
     submit_state: Optional[str] = Query(
         None,
         pattern="^(submitted|submittable|rejected|unchecked)$",
@@ -163,6 +164,7 @@ async def list_alphas(
         human_feedback=human_feedback,
         dataset_id=dataset_id,
         task_id=task_id,
+        delay=delay,
         submit_state=submit_state,
         expression_search=expression,
         min_sharpe=min_sharpe,

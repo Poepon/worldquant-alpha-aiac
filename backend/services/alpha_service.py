@@ -38,6 +38,8 @@ class AlphaListFilters:
     #   unchecked   → can_submit IS NULL
     # None/other → no submit-state constraint.
     submit_state: Optional[str] = None
+    # Delay setting filter (0 = delay-0 native, 1 = delay-1; other values rare)
+    delay: Optional[int] = None
     # Expression substring search (case-insensitive ILIKE)
     expression_search: Optional[str] = None
     # IS metric range filters (None = no bound)
@@ -183,6 +185,10 @@ class AlphaService(BaseService):
         if filters.task_id:
             query = query.where(Alpha.task_id == filters.task_id)
             count_query = count_query.where(Alpha.task_id == filters.task_id)
+
+        if filters.delay is not None:
+            query = query.where(Alpha.delay == filters.delay)
+            count_query = count_query.where(Alpha.delay == filters.delay)
 
         if filters.expression_search:
             pattern = f"%{filters.expression_search}%"
