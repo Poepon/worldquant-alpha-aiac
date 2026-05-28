@@ -896,6 +896,21 @@ class Settings(BaseSettings):
     EVAL_SCORE_PASS: float = 0.8
     EVAL_SCORE_OPTIMIZE: float = 0.3
 
+    # ── Optimization closure (Stage A — 2026-05-28)
+    # Plan: docs/optimization_closure_plan_v1_2026-05-28.md §6. ALL gated by
+    # ENABLE_OPTIMIZATION_LOOP — flag default OFF; flipping ON wires the 6h
+    # beat task and starts spending OPT_DAILY_SIM_BUDGET sims/day on Stage A
+    # (settings_sweep) variant generation. NEVER auto-submits — Stage A
+    # SubmitPolicy returns "queue" for every winner (manual review via
+    # ops/submit-backlog). Stage B is the auto-submit upgrade and is gated
+    # on Stage A's 14-day GO/STOP conversion-rate decision.
+    ENABLE_OPTIMIZATION_LOOP: bool = False
+    OPT_BEAT_INTERVAL_HOURS: int = 6        # 4 cycles/day @ 02/08/14/20 SH
+    OPT_CANDIDATES_PER_CYCLE: int = 10      # near-gate alphas picked per beat
+    OPT_DAILY_SIM_BUDGET: int = 400         # 10 × 10 × 4 = 400 sim/day; <= 40% of BRAIN cap
+    OPT_NEAR_GATE_BAND: float = 0.5         # sharpe distance from hard_gate to qualify
+    OPT_SIM_TIMEOUT_SECONDS: int = 600      # per-sim hard timeout (BRAIN p95 ≈ 90-120s)
+
     # ── Marginal-contribution submit recommendation (backend/marginal_analysis.py)
     # Calibration for the multi-dimensional before-and-after scorecard. Scalar
     # tunables here; per-dim scales/weights are dict properties below (loaded as

@@ -953,6 +953,22 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         ),
     ),
     # --- Breadth: dataset-steering value bandit (2026-05-22) ---
+    # --- Optimization closure Stage A (2026-05-28) ---
+    "ENABLE_OPTIMIZATION_LOOP": FlagSpec(
+        name="ENABLE_OPTIMIZATION_LOOP",
+        flag_type="bool",
+        group="Phase16-A",
+        description=(
+            "Optimization closure Stage A — 6h beat scans 1230 delay-1 near-gate "
+            "alphas, runs SettingsSweepGenerator (10 variants × 10 candidates × 4 "
+            "cycles = 400 sim/day), winners queue into ops/submit-backlog. "
+            "NEVER auto-submits (Stage A SubmitPolicy returns 'queue' for every "
+            "winner). 14d GO/STOP gate via /ops/optimization/cycles: conversion "
+            "rate >20% → Stage B; <10% → STOP (selection limited per "
+            "competitive_analysis_v3). Plan: docs/optimization_closure_plan_v1_"
+            "2026-05-28.md."
+        ),
+    ),
     "ENABLE_DATASET_VALUE_BANDIT": FlagSpec(
         name="ENABLE_DATASET_VALUE_BANDIT",
         flag_type="bool",
