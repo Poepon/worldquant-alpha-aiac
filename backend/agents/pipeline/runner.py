@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Awaitable, Callable, List, Optional
 
 from backend.agents.pipeline.types import Candidate, FeedbackEvent, SimResult
@@ -29,6 +30,18 @@ logger = logging.getLogger(__name__)
 # Sentinel signalling "no more work" through a queue. A distinct object per
 # run avoids any chance of a real payload comparing equal to it.
 _SENTINEL = object()
+
+
+class PipelineHeartbeatExpired(RuntimeError):
+    """Raised when the session-level heartbeat supervisor observes no pipeline
+    progress for the heartbeat timeout. Catches the freeze CLASS (asyncpg pool
+    poisoning, queue deadlock, any unwrapped await) that per-op `op_timeout`
+    cannot — validated 2026-05-28 across tasks 3737/3738/3739, where 3 different
+    unwrapped DB-op points each caused permanent freeze when wait_for cancel
+    poisoned a shared asyncpg connection. `run_mining_task` catches this →
+    finalizes task as PAUSED → re-dispatch resumes on a fresh worker process.
+    """
+    pass
 
 
 async def _with_timeout(coro, timeout):
@@ -83,6 +96,7 @@ async def run_pipeline_session(
     stop_event: Optional[asyncio.Event] = None,
     classify_feedback: Optional[ClassifyFeedbackFn] = None,
     op_timeout: Optional[float] = None,
+    heartbeat_timeout_sec: Optional[float] = None,
 ) -> dict:
     """Run one pipeline session to completion and return run stats.
 
@@ -183,6 +197,20 @@ async def run_pipeline_session(
     # the terminating sentinel) is outstanding == 0 after primary gen finished.
     wstate = {"outstanding": 0, "primary_done": False, "done_signalled": False}
 
+    # --- Session-level heartbeat supervisor (catches the freeze CLASS) -------
+    # `beat()` updates the last-progress timestamp; the supervisor task below
+    # cancels the main pipeline if no beat for `heartbeat_timeout_sec` (covers
+    # any unwrapped await / poisoned asyncpg pool / queue deadlock, not just
+    # network ops `op_timeout` can bound). When disabled → no-op.
+    _heartbeat_active = heartbeat_timeout_sec is not None and heartbeat_timeout_sec > 0
+    _last_progress = [time.monotonic()]
+    if _heartbeat_active:
+        def beat() -> None:
+            _last_progress[0] = time.monotonic()
+    else:
+        def beat() -> None:
+            pass
+
     def _maybe_signal_done() -> None:
         if (
             _feedback_active
@@ -201,6 +229,7 @@ async def run_pipeline_session(
             wstate["outstanding"] += 1  # before the (maybe-blocking) put
         await work_q.put(candidate)
         stats["produced"] += 1
+        beat()  # progress signal for the heartbeat supervisor
 
     async def _next_feedback() -> Optional[FeedbackEvent]:
         # Block for the next event, but wake every few seconds to re-check the
@@ -231,6 +260,7 @@ async def run_pipeline_session(
     def _event_done() -> None:
         wstate["outstanding"] -= 1
         _maybe_signal_done()
+        beat()  # progress: drain processed an event (success OR timeout-skipped)
 
     _feedback_ctx = (
         _FeedbackCtx(_next_feedback, _mark_primary_done, _event_done)
@@ -314,6 +344,7 @@ async def run_pipeline_session(
                 async with session_factory() as session:
                     n = await persist(session, list(batch))
                 stats["persisted"] += int(n or 0)
+                beat()  # progress: persister flushed a batch
             except Exception:  # noqa: BLE001 — never let a persist error kill the loop
                 # The batch is dropped (results already simulated → wasted BRAIN
                 # quota), so make the loss observable rather than silent. A
@@ -362,7 +393,10 @@ async def run_pipeline_session(
     persister_task = asyncio.create_task(_persister(), name="pipeline-persister")
     all_tasks = [producer_task, *consumer_tasks, persister_task]
 
-    try:
+    # The whole drain chain runs as a SINGLE awaitable task so the heartbeat
+    # supervisor can cancel it in one shot (cancellation propagates to the child
+    # tasks via the existing finally below).
+    async def _main_chain() -> None:
         # Producer finishes (or crashes) → it has queued one sentinel per consumer.
         await producer_task
         # All consumers drain the queue + their sentinel, then exit.
@@ -372,13 +406,61 @@ async def run_pipeline_session(
         # finished), so the persister flushes on the sentinel.
         await persist_q.put(_SENTINEL)
         await persister_task
+
+    main_task = asyncio.create_task(_main_chain(), name="pipeline-main")
+    heartbeat_fired = [False]
+    sup_task: Optional[asyncio.Task] = None
+    if _heartbeat_active:
+        async def _supervisor() -> None:
+            # Poll at most a quarter of the timeout so a missed beat is caught
+            # quickly relative to the bound, but never poll faster than 30s
+            # (cheap timer; nothing else to do).
+            check_interval = min(30.0, max(5.0, heartbeat_timeout_sec / 4))
+            try:
+                while not main_task.done():
+                    await asyncio.sleep(check_interval)
+                    if main_task.done():
+                        return
+                    if time.monotonic() - _last_progress[0] > heartbeat_timeout_sec:
+                        heartbeat_fired[0] = True
+                        logger.warning(
+                            "[pipeline] heartbeat expired (no progress for >%ds) — "
+                            "aborting session (produced=%d persisted=%d errors=%d)",
+                            int(heartbeat_timeout_sec),
+                            stats["produced"], stats["persisted"], stats["errors"],
+                        )
+                        main_task.cancel(msg="pipeline heartbeat expired")
+                        return
+            except asyncio.CancelledError:
+                pass  # supervisor cancelled by the outer finally — normal shutdown
+        sup_task = asyncio.create_task(_supervisor(), name="pipeline-heartbeat")
+
+    try:
+        try:
+            await main_task
+        except asyncio.CancelledError:
+            if heartbeat_fired[0]:
+                raise PipelineHeartbeatExpired(
+                    f"no pipeline progress for >{int(heartbeat_timeout_sec)}s; "
+                    f"aborted (produced={stats['produced']}, "
+                    f"persisted={stats['persisted']}, errors={stats['errors']})"
+                ) from None
+            raise
     finally:
+        # Supervisor first so it can't fire mid-cleanup.
+        if sup_task is not None and not sup_task.done():
+            sup_task.cancel()
+            try:
+                await sup_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         # Never leak child coroutines. On the happy path every task is already
-        # done (this is a no-op). On cancellation (e.g. the caller's per-round
-        # wait_for deadline) or a child BaseException escaping the gather, cancel
-        # whatever is still pending and drain it — otherwise orphaned consumers
-        # keep burning BRAIN slots and the persister keeps writing after the
-        # session is over (the exact zombie class this project fights).
+        # done (this is a no-op). On cancellation (e.g. the heartbeat or the
+        # caller's per-round wait_for deadline) or a child BaseException
+        # escaping the gather, cancel whatever is still pending and drain it —
+        # otherwise orphaned consumers keep burning BRAIN slots and the
+        # persister keeps writing after the session is over (the exact zombie
+        # class this project fights).
         for t in all_tasks:
             if not t.done():
                 t.cancel()

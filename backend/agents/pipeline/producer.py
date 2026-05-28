@@ -271,6 +271,7 @@ async def run_flat_pipeline_session(
     handle_feedback: Optional[Callable[..., Awaitable[None]]] = None,
     code_producer_count: int = 1,
     op_timeout: Optional[float] = None,
+    heartbeat_timeout_sec: Optional[float] = None,
 ) -> dict:
     """Assemble producer + consumer + persister and run one pipeline session.
 
@@ -331,4 +332,5 @@ async def run_flat_pipeline_session(
         release_slot=release_slot,
         classify_feedback=classify_feedback,
         op_timeout=op_timeout,
+        heartbeat_timeout_sec=heartbeat_timeout_sec,
     )

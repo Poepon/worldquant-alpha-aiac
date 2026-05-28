@@ -1380,6 +1380,18 @@ class Settings(BaseSettings):
     # code_gen (only useful once generation is the bottleneck — i.e. CONSULTANT
     # 80-slot; at USER the sim wall dominates and 1 suffices).
     SIM_PIPELINE_CODE_PRODUCER_COUNT: int = 1
+    # Session-level heartbeat-abort for the pipeline. Tracks `last progress`
+    # across push/persist/feedback-drain; if no progress for N seconds the
+    # supervisor cancels the entire pipeline session and raises
+    # PipelineHeartbeatExpired. Catches the freeze CLASS that per-op
+    # `SIM_PIPELINE_OP_TIMEOUT_SEC` cannot — validated 2026-05-28 across tasks
+    # 3737/3738/3739 (3 different unwrapped DB-op points each caused permanent
+    # freeze when wait_for cancel poisoned a shared asyncpg connection).
+    # Must be > the longest single sim/eval (op_timeout 600s + safety) and
+    # < watchdog CASCADE_WATCHDOG_DEAD_MIN*60 (the supervisor must fire BEFORE
+    # the watchdog dup-revives a wedged session). 900s = 15min sits cleanly in
+    # the 600-1500s band. Set 0 to disable.
+    SIM_PIPELINE_HEARTBEAT_TIMEOUT_SEC: int = 900
 
     # Optimization Chain Settings
     MAX_OPTIMIZATION_VARIANTS: int = 10

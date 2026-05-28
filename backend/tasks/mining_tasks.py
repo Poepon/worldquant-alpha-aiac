@@ -101,6 +101,21 @@ def _is_cascade_schedule(task) -> bool:
 _TASK_SKIP_STATES = ("COMPLETED", "FAILED", "STOPPED", "EARLY_STOPPED", "PAUSED")
 
 
+def _pipeline_heartbeat_timeout():
+    """Session-level heartbeat-abort window for the pipeline. Catches the freeze
+    CLASS (poisoned asyncpg pool / queue deadlock / any unwrapped await) that
+    per-op `op_timeout` cannot — see tasks 3737/3738/3739. Hard-capped below the
+    watchdog dead-threshold so the abort always fires BEFORE watchdog dup-revives
+    a wedged session. None / 0 = disabled."""
+    hb = int(getattr(settings, "SIM_PIPELINE_HEARTBEAT_TIMEOUT_SEC", 900) or 0)
+    if hb <= 0:
+        return None
+    wd_sec = int(getattr(settings, "CASCADE_WATCHDOG_DEAD_MIN", 25) or 25) * 60
+    # Cap at watchdog-180s so even a tight watchdog override leaves headroom
+    # for the abort cleanup before revive fires.
+    return float(min(hb, max(60, wd_sec - 180)))
+
+
 def _pipeline_op_timeout():
     """Per-operation hard deadline for the sim pipeline, HARD-CAPPED below the
     watchdog dead-threshold (task 3736). The watchdog's liveness signal is the
@@ -1678,24 +1693,54 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
         # consumer_wf.db is never used by node_simulate/node_evaluate (they open
         # their own ephemeral sessions); pass the idle injected db.
         consumer_wf = MiningWorkflow(db, brain)
-        stats = await run_flat_pipeline_session(
-            session_factory=AsyncSessionLocal,
-            producer_workflow_factory=lambda pdb: MiningWorkflow(pdb, brain),
-            consumer_workflow=consumer_wf,
-            next_round_inputs=next_round_inputs,
-            run_id=run_id,
-            num_alphas=num_alphas,
-            num_consumers=num_consumers,
-            daily_goal=daily_goal,
-            acquire_slot=_noop_acquire,
-            release_slot=_noop_release,
-            refresher=refresher,
-            reward_hook=_reward_hook,
-            classify_feedback=_fb_classify,
-            handle_feedback=_fb_handle,
-            code_producer_count=int(getattr(settings, "SIM_PIPELINE_CODE_PRODUCER_COUNT", 1)),
-            op_timeout=_pipeline_op_timeout(),
-        )
+        from backend.agents.pipeline.runner import PipelineHeartbeatExpired
+        try:
+            stats = await run_flat_pipeline_session(
+                session_factory=AsyncSessionLocal,
+                producer_workflow_factory=lambda pdb: MiningWorkflow(pdb, brain),
+                consumer_workflow=consumer_wf,
+                next_round_inputs=next_round_inputs,
+                run_id=run_id,
+                num_alphas=num_alphas,
+                num_consumers=num_consumers,
+                daily_goal=daily_goal,
+                acquire_slot=_noop_acquire,
+                release_slot=_noop_release,
+                refresher=refresher,
+                reward_hook=_reward_hook,
+                classify_feedback=_fb_classify,
+                handle_feedback=_fb_handle,
+                code_producer_count=int(getattr(settings, "SIM_PIPELINE_CODE_PRODUCER_COUNT", 1)),
+                op_timeout=_pipeline_op_timeout(),
+                heartbeat_timeout_sec=_pipeline_heartbeat_timeout(),
+            )
+        except PipelineHeartbeatExpired as _hb:
+            # The supervisor caught the freeze CLASS (any unwrapped DB op /
+            # poisoned asyncpg pool / queue deadlock) and cancelled the session.
+            # Finalise as PAUSED so the producer-persisted flat_cursor resumes
+            # cleanly on the next dispatch (fresh worker process = fresh pool).
+            # Do NOT re-raise — let the standard finalisation below mark the run
+            # PAUSED via the task.status refresh path.
+            logger.warning(
+                f"[flat-pipeline] task={task_id} HEARTBEAT-ABORT: {_hb} — "
+                f"marking task PAUSED for clean re-dispatch on a fresh worker."
+            )
+            try:
+                from sqlalchemy import update as _sa_update
+                await db.execute(
+                    _sa_update(MiningTask).where(MiningTask.id == task_id).values(status="PAUSED")
+                )
+                await db.commit()
+            except Exception:  # noqa: BLE001 — best-effort; finalisation will retry
+                try:
+                    await db.rollback()
+                except Exception:
+                    pass
+            stats = {
+                "produced": 0, "simulated": 0, "persisted": 0, "errors": 0,
+                "slot_timeouts": 0, "persist_failures": 0,
+                "heartbeat_aborted": True,
+            }
 
     logger.info(
         f"[flat-pipeline] task={task_id} pipeline finished: "
