@@ -1,0 +1,36 @@
+"""Optimization closure (Stage A).
+
+Plan: ``docs/optimization_closure_plan_v1_2026-05-28.md``.
+
+Stage A scope:
+  - SettingsSweepGenerator (10 variants per candidate)
+  - StageASubmitPolicy (always "queue" — NEVER auto-submit)
+  - 6h beat schedule (gated by ``ENABLE_OPTIMIZATION_LOOP``)
+  - ``/ops/optimization/cycles`` telemetry
+
+Public exports kept minimal — callers go through OptimizationService.
+"""
+
+from backend.services.optimization.protocols import (
+    Variant,
+    VariantSimResult,
+    VariantGenerator,
+    Simulator,
+    WinnerSelector,
+    Persister,
+    SubmitPolicy,
+    OptimizationRunRepository,
+    KnowledgeFeedback,
+)
+
+__all__ = [
+    "Variant",
+    "VariantSimResult",
+    "VariantGenerator",
+    "Simulator",
+    "WinnerSelector",
+    "Persister",
+    "SubmitPolicy",
+    "OptimizationRunRepository",
+    "KnowledgeFeedback",
+]

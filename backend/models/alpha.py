@@ -95,6 +95,21 @@ class Alpha(SQLAlchemyBase):
     # 2026-05-18). The old ``factor_tier`` column was dropped — all alpha
     # quality classification now flows through the flat EVAL_* threshold band.
     parent_alpha_id = Column(Integer, ForeignKey("alphas.id"), nullable=True, index=True)
+
+    # Optimization closure (Stage A, 2026-05-28). NULL for mining-origin
+    # alphas; set for rows produced by OptimizationService.Persister.
+    # Alembic: {hex}_phase16_a_optimization_runs.
+    optimization_run_id = Column(
+        Integer, ForeignKey("optimization_runs.id"), nullable=True
+    )
+    # Family root id: points at the topmost ancestor in the parent_alpha_id
+    # chain (self.id for root rows, parent.parent_alpha_family_id otherwise).
+    # Stage A dedup key for "have we already produced a variant from this
+    # lineage" queries. Backfilled once in the migration via WITH RECURSIVE.
+    parent_alpha_family_id = Column(
+        Integer, ForeignKey("alphas.id"), nullable=True
+    )
+
     metrics_snapshot_at = Column(DateTime(timezone=True), nullable=True)  # Last refresh from BRAIN
     # TODO #1 (2026-05-14): rolling OS-metric snapshots for decay/half-life
     # analysis. Daily Celery beat appends weekly. Each entry: snapshot_date,
@@ -130,7 +145,17 @@ class Alpha(SQLAlchemyBase):
     # Relationships
     task = relationship("MiningTask", back_populates="alphas")
     trace_step = relationship("TraceStep", back_populates="alpha")
-    parent = relationship("Alpha", remote_side=[id], backref="children")
+    # ``parent`` follows the hypothesis-lineage FK (parent_alpha_id), NOT the
+    # optimization-family FK (parent_alpha_family_id) which also targets
+    # alphas.id. Disambiguated via foreign_keys=[parent_alpha_id] — without
+    # it SQLAlchemy can't pick between the two self-referential FKs and
+    # raises AmbiguousForeignKeysError at mapper-configure time.
+    parent = relationship(
+        "Alpha",
+        remote_side=[id],
+        backref="children",
+        foreign_keys="Alpha.parent_alpha_id",
+    )
     # Phase 2: typed hypothesis link. The Text `hypothesis` column above is
     # kept for legacy compat (LLM-emitted summary text); hypothesis_obj is
     # the structured row.

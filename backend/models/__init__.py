@@ -133,6 +133,9 @@ from backend.models.distilled_logic import DistilledLogic
 # posterior for R8-v3 'bandit' select mode; weekly cron updates pass/fail)
 from backend.models.cognitive_layer_bandit import CognitiveLayerBanditState
 
+# Phase 16-A optimization closure (Stage A, 2026-05-28) — one row per cycle.
+from backend.models.optimization import OptimizationRun
+
 __all__ = [
     # Enums
     "MiningStatus",
@@ -185,4 +188,6 @@ __all__ = [
     "LLMProvider",
     "FeatureFlagOverride",
     "FeatureFlagAudit",
+    # Optimization closure
+    "OptimizationRun",
 ]
