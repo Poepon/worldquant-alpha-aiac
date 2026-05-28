@@ -136,6 +136,49 @@ async def test_producer_gen_timeout_ends_generation():
 
 
 @pytest.mark.asyncio
+async def test_producer_next_round_inputs_timeout_ends_cleanly():
+    """A hung next_round_inputs (DB op on the producer's shared, possibly-poisoned
+    asyncpg session) must NOT park the loop forever: op_timeout fires, the outer
+    handler runs the finally (sentinels sent), the code-producers drain off the
+    empty hyp_q, and produce() RETURNS instead of deadlocking (task 3737).
+
+    The proof is that ``await asyncio.wait_for(produce(...), 10)`` returns at all —
+    if the sentinels weren't sent, the internal code-producer would block on
+    ``hyp_q.get()`` forever and this would raise TimeoutError."""
+    class _WF:
+        def __init__(self):
+            self._hyp_graph = "built"
+            self._codegen_graph = "built"
+
+        async def run(self, **kwargs):
+            return {"state": object()}
+
+        async def run_codegen(self, state, config=None):
+            return {"pending_alphas": [], "trace_steps": []}
+
+    wf = _WF()
+    calls = {"n": 0}
+
+    async def nri(db):                     # hangs on the very first probe
+        calls["n"] += 1
+        await asyncio.sleep(30)            # hung DB op (poisoned session / lock)
+        return {"task": object(), "dataset_id": "pv1", "fields": [], "operators": []}
+
+    pushed = []
+
+    async def push(c):
+        pushed.append(c)
+
+    produce = build_producer(
+        session_factory=_sf, workflow_factory=lambda db: wf,
+        next_round_inputs=nri, num_alphas=4, code_producer_count=2, op_timeout=0.1,
+    )
+    await asyncio.wait_for(produce(push, lambda: False), timeout=10)
+    assert calls["n"] == 1                  # timed out on the 1st probe; no retry
+    assert pushed == []                     # nothing produced, no hang
+
+
+@pytest.mark.asyncio
 async def test_no_timeout_when_op_timeout_none():
     """op_timeout=None → operations run unbounded (existing behaviour); a fast
     sim completes normally."""

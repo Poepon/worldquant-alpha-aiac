@@ -139,7 +139,18 @@ def build_producer(
             async def _hyp_producer() -> None:
                 try:
                     while not should_stop() and not _at_target():
-                        inputs = await next_round_inputs(db)
+                        # next_round_inputs runs DB-heavy cursor/bandit/ownership
+                        # reads + cursor writes on the producer's SHARED asyncpg
+                        # session. It is the one producer-loop await that must
+                        # also be bounded: if a prior wait_for-cancel poisoned the
+                        # session (dc7c8e5 class) or a lock stalls, an UNWRAPPED
+                        # hang here parks the loop with no timer (select forever),
+                        # the hyp-producer never reaches its finally → sentinels
+                        # never sent → code-producers block on an empty hyp_q →
+                        # TOTAL permanent freeze (observed task 3737, 2026-05-28).
+                        # On timeout the outer `except` below drains stage 2
+                        # cleanly (cursor already persisted → re-dispatch resumes).
+                        inputs = await _with_timeout(next_round_inputs(db), op_timeout)
                         if not inputs:
                             break
                         st["rounds"] += 1
