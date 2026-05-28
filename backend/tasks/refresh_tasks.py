@@ -663,6 +663,14 @@ async def _iqc_audit_backfill_sweep_async(limit: int | None = None) -> Dict:
     competition, team_id = settings.iqc_audit_scope()
     if not (competition or team_id):
         return {"skipped": True, "reason": "IQC audit scope unset (competition + team empty)"}
+    # Canonical scope label — matches what the service stamps to
+    # _iqc_marginal["scope"]. Used by the stale-schema branch below to flag
+    # rows whose audit was done under a different scope (e.g. teams/X stamped
+    # before the IQC2026S2 cutover) — they look "fresh" by recommendation
+    # presence but the verdict is for a different merged portfolio.
+    current_scope_label = (
+        f"competitions/{competition}" if competition else f"teams/{team_id}"
+    )
 
     enqueued = 0
     async with AsyncSessionLocal() as db:
@@ -704,20 +712,28 @@ async def _iqc_audit_backfill_sweep_async(limit: int | None = None) -> Dict:
                       AND date_submitted IS NULL
                       AND (metrics IS NULL OR NOT (metrics ? '_iqc_marginal'))
                     UNION ALL
-                    -- Stale-schema: a row that WAS audited but predates the
-                    -- marginal scorecard (no `recommendation` key — e.g. the
-                    -- 2026-05-20 IQC2026S1 audits). stale=false so the first
-                    -- branch misses it and `_iqc_marginal` exists so the second
-                    -- misses it too; without this branch these never refresh to
-                    -- the current scope + verdict. Lowest priority (re-audit
-                    -- live candidates first).
+                    -- Stale-schema: a row that WAS audited but either predates
+                    -- the marginal scorecard (no `recommendation` key — e.g.
+                    -- the 2026-05-20 IQC2026S1 audits) OR was audited under a
+                    -- different scope than the one currently configured (e.g.
+                    -- teams/X stamped before the IQC2026S2 cutover — the row
+                    -- looks "fresh" by recommendation but the verdict is for
+                    -- a different merged portfolio than what /alphas/{id}/
+                    -- marginal-contribution computes today). stale=false so
+                    -- the first branch misses it and `_iqc_marginal` exists
+                    -- so the second misses it too; without this branch these
+                    -- never refresh to the current scope. Lowest priority
+                    -- (re-audit live candidates first).
                     SELECT id, 2 AS audit_priority, updated_at
                     FROM alphas
                     WHERE can_submit = true
                       AND alpha_id IS NOT NULL
                       AND date_submitted IS NULL
                       AND metrics ? '_iqc_marginal'
-                      AND NOT (metrics->'_iqc_marginal' ? 'recommendation')
+                      AND (
+                            NOT (metrics->'_iqc_marginal' ? 'recommendation')
+                         OR metrics->'_iqc_marginal'->>'scope' IS DISTINCT FROM :current_scope
+                      )
                       AND COALESCE((metrics->'_iqc_marginal'->>'audit_failures')::int, 0) < :max_fail
                 ) AS pri
                 ORDER BY audit_priority ASC, updated_at DESC NULLS LAST
@@ -730,6 +746,7 @@ async def _iqc_audit_backfill_sweep_async(limit: int | None = None) -> Dict:
             {
                 "lim": int(limit) if limit else _iqc_settings.IQC_AUDIT_BACKFILL_LIMIT,
                 "max_fail": max_failures,
+                "current_scope": current_scope_label,
             },
         )
         pks = [r[0] for r in rows.all()]
