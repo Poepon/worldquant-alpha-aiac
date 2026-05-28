@@ -72,15 +72,17 @@ delay-1 的 1230 个近门 alpha 是理论金矿。**上限数学**:即使只有
 │     Persister.save(winners, parent_alpha_id, opt_run_id)       │
 │     SubmitPolicy.decide(persisted) → action                    │
 │     KnowledgeFeedback.on_winner(alpha)   ← C 才接;A/B 是 no-op │
-├─ Layer 2: VariantGenerator(A→B→C 的 SWAP 点)─────────────────┤
-│  A: SettingsSweepGenerator(decay/window/neut,~11 变异)        │
+├─ Layer 2: VariantGenerator(A→B→C 的 SWAP / COMPOSE 点)──────┤
+│  A: SettingsSweepGenerator(decay/window/neut,10 变异)         │
 │  B: CompositeGenerator(Settings, ExpressionRewrites)~30        │
 │  C: GeneticOptimizerGenerator(全 GA,240 sim)— tier 路由      │
 ├─ Layer 1: 共享原语(A 建好,B/C 不动)────────────────────────┤
 │  - select_near_gate_candidates(delay, limit, exclude_hashes)   │
+│  - OptimizationRunRepository(open/finish cycle + record_submit)│
 │  - OptimizationRun(DDL 在下面)                                │
 │  - SimBudget 计数器(per-cycle/per-day;A 不限也要记)          │
 │  - SelfCorrCache(每个 winner 都算,A→C;B+ 才消费)            │
+│  - derive_parent_alpha_family_id(alpha_id, db)(WITH RECURSIVE)│
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -138,12 +140,35 @@ class Persister(Protocol):
         self, winners: List[VariantSimResult],
         parent_alpha_id: int, opt_run_id: int
     ) -> List[int]: ...
-    # 返回新落库的本地 alpha PK 列表
+    # 返回新落库的本地 alpha PK 列表;内部对每个 winner 调用
+    # derive_parent_alpha_family_id 写 alphas.parent_alpha_family_id
 
 class SubmitPolicy(Protocol):
     async def decide(
         self, persisted_pks: List[int]
     ) -> List[Literal["submit", "queue", "skip"]]: ...
+    # 返回与 persisted_pks 等长、一一对应的 action 列表
+    # 语义:
+    #   "submit" — 调 alpha_service.submit_alpha,SubmitPolicy 自负责调用
+    #   "queue"  — 保留 alpha 行,can_submit=True,进 ops/submit-backlog 等人工
+    #   "skip"   — 保留 alpha 行,can_submit=False,不进 backlog(失败/不值)
+
+class OptimizationRunRepository(Protocol):
+    """生命周期管理:open → (Persister/SubmitPolicy 期间累加计数)→ finish。
+    OptimizationService 在 run_one_cycle 头尾调用 open/finish,
+    Persister 调 record_persist,SubmitPolicy 调 record_submit。
+    """
+    async def open_cycle(
+        self, parent_alpha_id: int, generator_name: str,
+        trigger_source: str, sim_budget_granted: int,
+    ) -> int: ...  # 返回 opt_run_id
+    async def record_persist(
+        self, opt_run_id: int, n_variants: int, n_winners: int, sim_spent: int,
+    ) -> None: ...
+    async def record_submit(self, opt_run_id: int, n_submitted: int) -> None: ...
+    async def finish_cycle(
+        self, opt_run_id: int, error: Optional[str] = None
+    ) -> None: ...
 
 class KnowledgeFeedback(Protocol):
     async def on_winner(self, alpha) -> None: ...   # A/B 无操作;C 接 RAG
@@ -172,10 +197,38 @@ CREATE TABLE optimization_runs (
 CREATE INDEX ix_opt_runs_parent ON optimization_runs(parent_alpha_id);
 CREATE INDEX ix_opt_runs_started ON optimization_runs(cycle_started_at DESC);
 
--- alphas 表:加链接(winner 指回它的 cycle)
+-- alphas 表:加链接 + Q3 dedup 列(expression_hash 已存在,跳;
+-- parent_alpha_family_id 新增)
 ALTER TABLE alphas ADD COLUMN optimization_run_id INTEGER
     REFERENCES optimization_runs(id);
 CREATE INDEX ix_alphas_opt_run ON alphas(optimization_run_id) WHERE optimization_run_id IS NOT NULL;
+
+-- expression_hash 已被 mining_agent / workflow.py 在写(模型已存在),
+-- 若 DB 实际无此列则 ADD IF NOT EXISTS;有则跳。
+ALTER TABLE alphas ADD COLUMN IF NOT EXISTS expression_hash VARCHAR(64);
+CREATE INDEX IF NOT EXISTS ix_alphas_expr_hash ON alphas(expression_hash) WHERE expression_hash IS NOT NULL;
+
+-- Q3 dedup 第二维:parent_alpha_family_id = 谱系链 root 的 alpha.id。
+-- 新行由 Persister 在 INSERT 前算并写入(见下 derive 算法)。
+ALTER TABLE alphas ADD COLUMN parent_alpha_family_id INTEGER REFERENCES alphas(id);
+CREATE INDEX ix_alphas_family ON alphas(parent_alpha_family_id) WHERE parent_alpha_family_id IS NOT NULL;
+```
+
+**`parent_alpha_family_id` 派生算法**(`derive_parent_alpha_family_id`):
+- 根 alpha(parent_alpha_id IS NULL):family_id = 自身 id(Persister INSERT 后回写)
+- 后裔 alpha:family_id = 父亲的 family_id(parent 已写过 family_id,所以一跳就到)
+- 历史回填(一次性 migration):
+
+```sql
+-- 一次性回填(放在 Alembic upgrade 末尾)
+WITH RECURSIVE chain AS (
+    SELECT id, id AS family_id FROM alphas WHERE parent_alpha_id IS NULL
+    UNION ALL
+    SELECT a.id, c.family_id
+    FROM alphas a JOIN chain c ON a.parent_alpha_id = c.id
+)
+UPDATE alphas SET parent_alpha_family_id = chain.family_id
+FROM chain WHERE alphas.id = chain.id;
 ```
 
 **为什么用表而不是 metadata JSONB**:转化率查询是 GO-gate 信号——
@@ -189,29 +242,62 @@ CREATE INDEX ix_alphas_opt_run ON alphas(optimization_run_id) WHERE optimization
 
 **代码**:
 - `backend/services/optimization/service.py`(OptimizationService 类 + 4 层接线)
-- `backend/services/optimization/generators/settings_sweep.py`(我手工实证过的 11 变异 generator)
-- `backend/services/optimization/simulator.py`(并发 sim,用 `_acquire_sim_slot`,op_timeout 600s,记账 budget)
+- `backend/services/optimization/repository.py`(OptimizationRunRepository 实现)
+- `backend/services/optimization/generators/settings_sweep.py`(10 变异 generator:4 decay × 4 window × 2 neut[INDUSTRY+SECTOR],砍 SUBINDUSTRY 因为 15621 实测和 INDUSTRY 差 0.01 sharpe 等效)
+- `backend/services/optimization/simulator.py`(并发 sim,用 `_acquire_sim_slot`,op_timeout 600s,记账 SimBudget)
 - `backend/services/optimization/winner_selector.py`(用 `settings.eval_thresholds(delay)`)
-- `backend/services/optimization/persister.py`(写 `alphas` + `optimization_run`;计算并存 `_self_corr`)
+- `backend/services/optimization/persister.py`(写 `alphas` + 调 `derive_parent_alpha_family_id`;计算并存 `_self_corr`;调 `OptimizationRunRepository.record_persist`)
 - `backend/services/optimization/submit_policy.py`(Stage A:永远返回 "queue")
 - `backend/tasks/optimization_tasks.py`(beat 调度的 `run_optimization_cycle`)
-- Alembic migration:`optimization_runs` 表 + `alphas.optimization_run_id` + `alphas.expression_hash`(若未存在)+ `alphas.parent_alpha_family_id`(Q3 决策)
-- **legacy 清理**(Q4 决策):删除 `mining_agent._run_optimization_chain` / `_simulate_optimization_variants` / `_identify_optimization_candidates` 三个函数 + 它们的调用点(:797-803 + :918)+ `RoundResult.optimization_candidates` 字段。端口 `_skip_optimize_pool` 过滤器到新 `select_near_gate_candidates` SQL where 子句。
+- Alembic migration:`optimization_runs` 表 + `alphas` 3 新列 + 一次性回填 family_id(见 §5)
+- **legacy 清理**(Q4 决策):**先 grep 确认** `RoundResult.optimization_candidates` 无其他生产引用(已知 evolution_strategy.py:332 用了,需一并清),然后删除:
+   - `mining_agent._run_optimization_chain`(:1427-1495)
+   - `mining_agent._simulate_optimization_variants`(:1496-1566)
+   - `mining_agent._identify_optimization_candidates`(:944-~995)
+   - 调用点(:797-803 + :918)+ `RoundResult.optimization_candidates` 字段 + evolution_strategy.py:332 引用
+   - 端口 `_skip_optimize_pool` 过滤器到新 `select_near_gate_candidates` SQL where 子句
 - flag:`ENABLE_OPTIMIZATION_LOOP`(默认 OFF)
-- config:`OPT_BEAT_INTERVAL_HOURS=6` / `OPT_CANDIDATES_PER_CYCLE=10` / `OPT_DAILY_SIM_BUDGET=400`(A 不限但记录)
-- telemetry:`GET /ops/optimization/cycles`(近 50 个 cycle + 转化率汇总)
+- config:`OPT_BEAT_INTERVAL_HOURS=6` / `OPT_CANDIDATES_PER_CYCLE=10` / `OPT_DAILY_SIM_BUDGET=400`(A 软限制但全程记录,Stage B allocator 启用硬限)
+- telemetry:`GET /ops/optimization/cycles` response schema:
+  ```python
+  class CycleSummary(BaseModel):
+      id: int
+      parent_alpha_id: int
+      generator_name: str
+      n_variants: int
+      n_winners: int
+      n_submitted: int           # SubmitPolicy 决策的 "submit" 数
+      sim_budget_used: int
+      cycle_started_at: datetime
+      cycle_finished_at: Optional[datetime]
+      error: Optional[str]
+  # 顶层响应:{cycles: List[CycleSummary], conversion_rate_14d: float,
+  #             total_variants_14d: int, total_winners_14d: int}
+  ```
 
-**预算**:10 候选 × 11 变异 = 110 sim/cycle × 4 cycle/天 = 440 sim/天(~44% BRAIN 配额;mining 还有 560)。
+**测试任务**(必须建,缺这块就别开工):
+- `tests/unit/test_optimization_protocols.py` — protocol 接口 conformance test
+- `tests/unit/test_settings_sweep_generator.py` — 10 变异生成、tag 命名、settings 字段完整
+- `tests/unit/test_winner_selector_delay_aware.py` — 喂 delay-0 / delay-1 sim 结果,断言用对的 band
+- `tests/unit/test_persister_family_id.py` — **必须 in-memory aiosqlite real-ORM**(memory `feedback_orm_constructor_real_test`),覆盖 root alpha 与后裔 alpha 的 family_id 派生 + INSERT 实测
+- `tests/unit/test_submit_policy_stage_a.py` — Stage A 永远返回 "queue" 的硬不变量
+- `tests/unit/test_optimization_run_repository.py` — open/finish/record_* 的状态机
+- `tests/integration/test_optimization_cycle_e2e.py` — fake BrainAdapter + 整 cycle 跑完,断言 optimization_runs 行写齐
+- 回归 baseline:`backend/tests/baseline.json` — 加新 cycle 跑通的 sentinel,不影响主 6 指标
+
+**预算**:10 候选 × 10 变异 = 100 sim/cycle × 4 cycle/天 = **400 sim/天**(40% BRAIN 配额;mining 还有 600)。与 `OPT_DAILY_SIM_BUDGET=400` 严格一致。
 
 **SubmitPolicy**:永远 "queue" → winner 落 `submit-backlog` 页,用户手动 submit。
 
-**14 天观察指标**:
-- 全 cycle 的 `n_variants_total`
-- `n_winners / n_variants`(转化率)
-- `n_winners_human_submitted / n_winners`(人工转化率)
-- `n_winners_actually_pass_brain / n_winners_human_submitted`(gate 通过率)
+**Backlog 页 UI 增强**(可选,Stage A 期间任选完成):`SubmitBacklogMonitor` 列加 `origin` 列展示 "mining" / "opt:settings_sweep",方便人工筛选。**WONT-FIX 也可**(可从 alpha.metrics._origin 字段读),Stage A 默认 WONT-FIX。
 
-**GO 到 B**:winner 转化率 >20% AND 累计 ≥30 个 cycle(≥330 个变异 sim 过)。
+**14 天观察指标**(Stage A 不依赖 BRAIN 异步反馈):
+- 全 cycle `n_variants_total` / `n_cycles_total`
+- `n_winners / n_variants`(变异转化率 — **唯一硬 GO/STOP 指标**)
+- `n_winners_human_submitted / n_winners`(人工提交率 — soft signal,反映 winner 主观质量感)
+- *BRAIN gate 通过率延后到 Stage B 观察期*:Stage A 走人工 queue,人工有自由不 submit,BRAIN 实际通过率受人工选择偏置干扰,不可作为 Stage A 自动门信号。
+
+**GO 到 B**:变异转化率 >20% AND 累计 ≥30 个 cycle(≥300 个变异 sim 过 = 与 400/天 × 14d × 5% 安全冗余对齐)。
 **STOP**:转化率 <10% — selection 墙被实证确认,放弃优化路径。
 **部分通过**(10-20%):持等,调 SettingsSweepGenerator 参数再判,不直接升档。
 
@@ -294,7 +380,7 @@ CREATE INDEX ix_alphas_opt_run ON alphas(optimization_run_id) WHERE optimization
    端口的过滤器进入 §6 Stage A 的 `select_near_gate_candidates` SQL where 子句。
 
 5. **A 的 beat 间隔**:✅ **6h(每天 4 cycle,北京 02/08/14/20)**
-   与 `OPT_DAILY_SIM_BUDGET=400` 完美匹配(100 sim/cycle)。与 mining session 错峰(BRAIN 配额 UTC 00:00 重置 = 北京 08:00,8h-tick 顺势承接配额重置)。`quota_guard_pause_at_threshold`(已存在)作为兜底。`OPT_BEAT_INTERVAL_HOURS=6` 可 .env 覆盖,默认 6。
+   与 `OPT_DAILY_SIM_BUDGET=400` 完美匹配(100 sim/cycle)。BRAIN 配额 UTC 00:00 重置 = 北京 08:00,与 6h 节奏的 08:00 cycle 正好对齐(刚重置完一池子配额就跑)。`quota_guard_pause_at_threshold`(已存在)作为兜底。`OPT_BEAT_INTERVAL_HOURS=6` 可 .env 覆盖,默认 6。
 
 ---
 
