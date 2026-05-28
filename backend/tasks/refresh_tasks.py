@@ -165,7 +165,10 @@ async def _refresh_kb_referenced_alphas_async() -> Dict:
             # BRAIN role-switch (P3-Brain): read task-snapshot sharpe override
             # so running tasks don't get re-judged by Consultant 1.58 mid-run.
             _role_snapshot = await read_role_snapshot(alpha.task_id, db)
+            # delay-aware (2026-05-28): judge each alpha against ITS own delay's
+            # band so a delay-0 alpha isn't passed on delay-1 thresholds.
             t = _eval_thresholds(
+                delay=int(getattr(alpha, "delay", 1) or 1),
                 sharpe_submit_min_override=_role_snapshot.get("effective_sharpe_submit_min"),
             )
             sharpe_ok = (alpha.is_sharpe or 0) >= t["sharpe_min"]
@@ -417,7 +420,8 @@ async def _refresh_can_submit_async(alpha_pk: int) -> Dict:
                 from backend.agents.graph.nodes.evaluation import _eval_thresholds
                 _snap = await read_role_snapshot(alpha.task_id, db)
                 _t = _eval_thresholds(
-                    sharpe_submit_min_override=_snap.get("effective_sharpe_submit_min")
+                    delay=int(getattr(alpha, "delay", 1) or 1),
+                    sharpe_submit_min_override=_snap.get("effective_sharpe_submit_min"),
                 )
                 if _should_promote_provisional(
                     quality_status=alpha.quality_status,

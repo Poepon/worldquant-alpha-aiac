@@ -104,38 +104,38 @@ import redis.asyncio as _rb_redis_aio
 # =============================================================================
 
 
-def _eval_thresholds(*, sharpe_submit_min_override: Optional[float] = None) -> Dict:
-    """Single flat threshold dict — replaces the retired tier_thresholds module.
+def _eval_thresholds(
+    *,
+    delay: int = 1,
+    sharpe_submit_min_override: Optional[float] = None,
+) -> Dict:
+    """Single flat threshold dict — delegates to Settings.eval_thresholds(delay)
+    for the per-delay band (2026-05-28 fix: delay-0 has stricter BRAIN gates —
+    sharpe>=2.0/fit>=1.3/sub-univ>=0.81 vs delay-1's 1.5/1.2/0.2 — confirmed
+    empirically on alpha 15621).
+
+    delay defaults to 1 for legacy callers that don't yet thread delay; new
+    mining/sync callers MUST pass ``delay`` from MiningState.delay or
+    Alpha.delay so a delay-0 alpha isn't judged on delay-1 thresholds.
 
     brain_role_snapshot override (P3-Brain) is still respected: when a running
     task carries an elevated sharpe_min in its startup snapshot, that wins over
-    settings.EVAL_SHARPE_MIN so flag flips don't re-judge mid-round alphas.
+    the band's default sharpe_min so flag flips don't re-judge mid-round alphas.
+    The override applies to whichever band (delay-0 or delay-1) is selected.
     """
-    sharpe_min = (
-        sharpe_submit_min_override if sharpe_submit_min_override is not None
-        else max(
-            settings.EVAL_SHARPE_MIN,
-            getattr(settings, "effective_sharpe_submit_min", settings.EVAL_SHARPE_MIN),
-        )
-    )
-    return {
-        "sharpe_min": sharpe_min,
-        "fitness_min": settings.EVAL_FITNESS_MIN,
-        "turnover_min": settings.EVAL_TURNOVER_MIN,
-        "turnover_max": settings.EVAL_TURNOVER_MAX,
-        "subuniv_min": settings.EVAL_SUBUNIV_MIN,
-        "self_corr_max": settings.EVAL_SELF_CORR_MAX,
-        "check_self_corr": True,
-        "check_concentrated": True,
-        "score_pass": settings.EVAL_SCORE_PASS,
-        "score_optimize": settings.EVAL_SCORE_OPTIMIZE,
-        "provisional": {
-            "sharpe_min": settings.EVAL_PROVISIONAL_SHARPE_MIN,
-            "fitness_min": settings.EVAL_PROVISIONAL_FITNESS_MIN,
-            "turnover_max": settings.EVAL_PROVISIONAL_TURNOVER_MAX,
-            "subuniv_min": settings.EVAL_PROVISIONAL_SUBUNIV_MIN,
-        },
-    }
+    band = settings.eval_thresholds(delay)
+    # Both branches use max(band_default, ...) so the delay-aware band acts as
+    # a FLOOR — a weaker override (e.g. a delay-0 task's Consultant snapshot
+    # of 1.58, frozen from the delay-1-centric property) cannot lower the
+    # delay-0 band's 2.0 BRAIN gate. The original "override always wins"
+    # semantics was correct when only delay-1 was supported (override was
+    # always ≥ band); it's wrong now that delay-0 has a stricter band.
+    if sharpe_submit_min_override is not None:
+        band["sharpe_min"] = max(band["sharpe_min"], float(sharpe_submit_min_override))
+    else:
+        eff = settings.effective_sharpe_submit_min_for(delay)
+        band["sharpe_min"] = max(band["sharpe_min"], eff)
+    return band
 
 
 def _unpack_eval_thresholds(tier_cfg: Dict) -> Dict:
@@ -1912,7 +1912,11 @@ async def node_evaluate(
     # BRAIN role-switch (P3-Brain): pass task-startup snapshot to keep running
     # tasks consistent across Consultant flag toggles (avoids re-judging
     # mid-round alphas with new sharpe bar).
+    # delay-aware (2026-05-28): MiningState.delay is injected from
+    # task.config["delay"] at workflow start; delay=0 yields the stricter
+    # BRAIN-aligned band (sharpe>=2.0/fit>=1.3/sub-univ>=0.81).
     tier_cfg = _eval_thresholds(
+        delay=int(getattr(state, "delay", 1) or 1),
         sharpe_submit_min_override=getattr(state, "effective_sharpe_submit_min", None),
     )
 

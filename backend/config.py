@@ -855,6 +855,14 @@ class Settings(BaseSettings):
     # EVAL_SHARPE_MIN at runtime via the _eval_thresholds helper in
     # backend/agents/graph/nodes/evaluation.py, so Consultant-mode tasks keep
     # their elevated bar.
+    # The names without `_DELAY{0,1}` suffix are the **delay-1** values
+    # (historical default; legacy callers that don't yet pass delay land here).
+    # `_DELAY0` companions are the delay-0 band — BRAIN's actual submission
+    # gates are stricter on delay-0 (alpha 15621 empirical, 2026-05-28:
+    # LOW_SHARPE limit=2.0 / LOW_FITNESS=1.3 / LOW_SUB_UNIVERSE_SHARPE=0.81
+    # vs the looser delay-1 gates). Use `Settings.eval_thresholds(delay)`
+    # below to pick the right band — never read these constants directly
+    # in code that knows the alpha's delay.
     EVAL_SHARPE_MIN: float = 1.5
     EVAL_FITNESS_MIN: float = 1.2
     EVAL_TURNOVER_MIN: float = 0.01
@@ -866,6 +874,24 @@ class Settings(BaseSettings):
     EVAL_PROVISIONAL_FITNESS_MIN: float = 1.0
     EVAL_PROVISIONAL_TURNOVER_MAX: float = 0.55
     EVAL_PROVISIONAL_SUBUNIV_MIN: float = 0.15
+
+    # Delay-0 PASS band — matches BRAIN's stricter delay-0 checks (15621
+    # empirical). Set above the BRAIN limits so a locally-PASS alpha actually
+    # clears BRAIN's gate. turnover band is the same as delay-1 (BRAIN's
+    # turnover gate is delay-agnostic per the 15621 response).
+    EVAL_SHARPE_MIN_DELAY0: float = 2.0          # BRAIN LOW_SHARPE limit=2.0
+    EVAL_FITNESS_MIN_DELAY0: float = 1.3         # BRAIN LOW_FITNESS limit=1.3
+    EVAL_TURNOVER_MIN_DELAY0: float = 0.01
+    EVAL_TURNOVER_MAX_DELAY0: float = 0.7        # BRAIN HIGH_TURNOVER limit=0.7
+    EVAL_SUBUNIV_MIN_DELAY0: float = 0.81        # BRAIN LOW_SUB_UNIVERSE_SHARPE=0.81
+    EVAL_SELF_CORR_MAX_DELAY0: float = 0.7       # self-corr is content-based, not delay-based
+
+    # Delay-0 PROVISIONAL — sits just below the hard PASS band (same 0.25 sharpe
+    # gap as the delay-1 band: 2.0→1.75).
+    EVAL_PROVISIONAL_SHARPE_MIN_DELAY0: float = 1.75
+    EVAL_PROVISIONAL_FITNESS_MIN_DELAY0: float = 1.15
+    EVAL_PROVISIONAL_TURNOVER_MAX_DELAY0: float = 0.7
+    EVAL_PROVISIONAL_SUBUNIV_MIN_DELAY0: float = 0.7
 
     EVAL_SCORE_PASS: float = 0.8
     EVAL_SCORE_OPTIMIZE: float = 0.3
@@ -1672,10 +1698,79 @@ class Settings(BaseSettings):
 
     @property
     def effective_sharpe_submit_min(self) -> float:
-        """提交 sharpe 门槛 — Consultant 取 max(SHARPE_MIN, 1.58)。"""
+        """提交 sharpe 门槛 — Consultant 取 max(SHARPE_MIN, 1.58)。
+
+        **DEPRECATED in delay-aware code**: this property assumes delay=1.
+        Call sites that know the alpha's delay should use
+        ``effective_sharpe_submit_min_for(delay)`` instead. Kept as a
+        delay-1 default for legacy callers that don't yet thread delay.
+        """
         if self.ENABLE_BRAIN_CONSULTANT_MODE:
             return max(self.SHARPE_MIN, self.CONSULTANT_SHARPE_SUBMIT_MIN)
         return self.SHARPE_MIN
+
+    def effective_sharpe_submit_min_for(self, delay: int) -> float:
+        """Delay-aware BRAIN submit-gate sharpe minimum (2026-05-28 fix).
+
+        delay=0 → 2.0 (BRAIN's stricter delay-0 gate, 15621 empirical);
+        delay=1 → SHARPE_MIN (1.5 default). Consultant mode bumps either
+        branch via max(., CONSULTANT_SHARPE_SUBMIT_MIN).
+        """
+        base = self.EVAL_SHARPE_MIN_DELAY0 if int(delay) == 0 else self.SHARPE_MIN
+        if self.ENABLE_BRAIN_CONSULTANT_MODE:
+            return max(base, self.CONSULTANT_SHARPE_SUBMIT_MIN)
+        return base
+
+    def eval_thresholds(self, delay: int = 1) -> dict:
+        """Delay-aware PASS / PROVISIONAL band (2026-05-28 fix for delay-0).
+
+        Single source of truth for the local-PASS evaluation band. delay-0
+        returns the strict BRAIN-aligned band (sharpe>=2.0/fit>=1.3/sub-univ
+        >=0.81, matching the actual BRAIN checks observed on alpha 15621);
+        delay-1 returns the legacy band (1.5/1.2/0.2).
+
+        Returns the same keys ``_eval_thresholds()`` in evaluation.py used to
+        return, plus the nested ``provisional`` dict. Callers should pass
+        ``state.delay`` (mining) or ``alpha.delay`` (sync/refresh).
+        """
+        d = 0 if int(delay) == 0 else 1
+        if d == 0:
+            return {
+                "sharpe_min": self.EVAL_SHARPE_MIN_DELAY0,
+                "fitness_min": self.EVAL_FITNESS_MIN_DELAY0,
+                "turnover_min": self.EVAL_TURNOVER_MIN_DELAY0,
+                "turnover_max": self.EVAL_TURNOVER_MAX_DELAY0,
+                "subuniv_min": self.EVAL_SUBUNIV_MIN_DELAY0,
+                "self_corr_max": self.EVAL_SELF_CORR_MAX_DELAY0,
+                "check_self_corr": True,
+                "check_concentrated": True,
+                "score_pass": self.EVAL_SCORE_PASS,
+                "score_optimize": self.EVAL_SCORE_OPTIMIZE,
+                "provisional": {
+                    "sharpe_min": self.EVAL_PROVISIONAL_SHARPE_MIN_DELAY0,
+                    "fitness_min": self.EVAL_PROVISIONAL_FITNESS_MIN_DELAY0,
+                    "turnover_max": self.EVAL_PROVISIONAL_TURNOVER_MAX_DELAY0,
+                    "subuniv_min": self.EVAL_PROVISIONAL_SUBUNIV_MIN_DELAY0,
+                },
+            }
+        return {
+            "sharpe_min": self.EVAL_SHARPE_MIN,
+            "fitness_min": self.EVAL_FITNESS_MIN,
+            "turnover_min": self.EVAL_TURNOVER_MIN,
+            "turnover_max": self.EVAL_TURNOVER_MAX,
+            "subuniv_min": self.EVAL_SUBUNIV_MIN,
+            "self_corr_max": self.EVAL_SELF_CORR_MAX,
+            "check_self_corr": True,
+            "check_concentrated": True,
+            "score_pass": self.EVAL_SCORE_PASS,
+            "score_optimize": self.EVAL_SCORE_OPTIMIZE,
+            "provisional": {
+                "sharpe_min": self.EVAL_PROVISIONAL_SHARPE_MIN,
+                "fitness_min": self.EVAL_PROVISIONAL_FITNESS_MIN,
+                "turnover_max": self.EVAL_PROVISIONAL_TURNOVER_MAX,
+                "subuniv_min": self.EVAL_PROVISIONAL_SUBUNIV_MIN,
+            },
+        }
 
     @property
     def effective_region_universes(self) -> dict:

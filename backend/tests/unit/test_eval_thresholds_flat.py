@@ -95,10 +95,16 @@ def test_explicit_override_wins_over_settings():
 
 
 def test_override_zero_is_treated_as_explicit_value_not_none():
-    """0.0 is a valid override (drops the bar). Must NOT be confused with
-    None (falsy) — explicit zero wins."""
-    t = _eval_thresholds(sharpe_submit_min_override=0.0)
-    assert t["sharpe_min"] == 0.0
+    """0.0 is a valid explicit override value — must NOT be confused with
+    None (falsy). 2026-05-28 semantics: override now acts as a FLOOR (max
+    with the band), so an explicit 0.0 leaves the band's default in place
+    rather than dropping the bar to 0. The earlier "override always wins"
+    semantics is wrong for delay-0 (would let a Consultant snapshot of 1.58
+    weaken the delay-0 band's 2.0 BRAIN gate)."""
+    t_d1 = _eval_thresholds(delay=1, sharpe_submit_min_override=0.0)
+    assert t_d1["sharpe_min"] == 1.5  # delay-1 band default, not 0.0
+    t_d0 = _eval_thresholds(delay=0, sharpe_submit_min_override=0.0)
+    assert t_d0["sharpe_min"] == 2.0  # delay-0 band default, not 0.0
 
 
 def test_no_tier_kwarg_accepted():
@@ -107,3 +113,42 @@ def test_no_tier_kwarg_accepted():
     TypeError immediately."""
     with pytest.raises(TypeError):
         _eval_thresholds(tier=2)  # type: ignore[call-arg]
+
+
+def test_delay0_band_is_stricter_than_delay1():
+    """2026-05-28: delay-0 BRAIN gates are stricter than delay-1's. The helper
+    must return the delay-0 band (sharpe>=2.0/fit>=1.3/sub-univ>=0.81 — alpha
+    15621 empirical) when delay=0 is passed, NOT the legacy delay-1 band."""
+    d1 = _eval_thresholds(delay=1)
+    d0 = _eval_thresholds(delay=0)
+    assert d0["sharpe_min"] >= 2.0
+    assert d0["fitness_min"] >= 1.3
+    assert d0["subuniv_min"] >= 0.81
+    assert d0["sharpe_min"] > d1["sharpe_min"]
+    assert d0["fitness_min"] > d1["fitness_min"]
+    assert d0["subuniv_min"] > d1["subuniv_min"]
+    # self_corr is content-based, not delay-based.
+    assert d0["self_corr_max"] == d1["self_corr_max"]
+    # Provisional band on delay-0 must also be stricter than delay-1's.
+    assert d0["provisional"]["sharpe_min"] > d1["provisional"]["sharpe_min"]
+
+
+def test_delay_defaults_to_1_for_legacy_callers():
+    """Callers that don't yet thread delay land on the delay-1 band (backward
+    compatible: pre-fix behaviour preserved for un-migrated call sites)."""
+    assert _eval_thresholds() == _eval_thresholds(delay=1)
+
+
+def test_override_does_not_weaken_delay0_band():
+    """A Consultant snapshot override (1.58) must NOT lower delay-0's 2.0
+    sharpe floor — the BRAIN-aligned band always dominates a weaker override."""
+    t = _eval_thresholds(delay=0, sharpe_submit_min_override=1.58)
+    assert t["sharpe_min"] >= 2.0
+
+
+def test_override_higher_than_delay0_still_wins():
+    """If the override is HIGHER than the delay-0 band (e.g. a tightened
+    Consultant snapshot at 2.5), it must win (the override is the explicit
+    task-startup contract)."""
+    t = _eval_thresholds(delay=0, sharpe_submit_min_override=2.5)
+    assert t["sharpe_min"] == 2.5

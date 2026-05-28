@@ -213,7 +213,10 @@ async def _refresh_os_alpha_metrics(brain: "BrainAdapter", region: str) -> Dict:
             # BRAIN role-switch (P3-Brain): read task-snapshot sharpe override
             # so running tasks don't get re-judged by Consultant 1.58 mid-run.
             _role_snapshot = await read_role_snapshot(alpha.task_id, db)
+            # delay-aware (2026-05-28): a delay-0 alpha synced from BRAIN must
+            # be judged on its own band (sharpe>=2.0), not delay-1's 1.5.
             t = _eval_thresholds(
+                delay=int(getattr(alpha, "delay", 1) or 1),
                 sharpe_submit_min_override=_role_snapshot.get("effective_sharpe_submit_min"),
             )
             sharpe_ok = (alpha.is_sharpe or 0) >= t["sharpe_min"]
@@ -996,7 +999,13 @@ def _derive_verdict_from_brain(a_data, is_metrics, os_metrics, expression, can_s
     brain_failed_checks = brain_eval.get("failed_checks", [])
     brain_check_details_present = bool(brain_eval.get("check_details"))
 
-    th = _unpack_eval_thresholds(_eval_thresholds())
+    # delay-aware (2026-05-28): BRAIN alpha dict carries delay under settings;
+    # default to 1 to preserve legacy behaviour when missing/unexpected.
+    try:
+        _delay = int((a_data.get("settings") or {}).get("delay", 1) or 1)
+    except Exception:  # noqa: BLE001
+        _delay = 1
+    th = _unpack_eval_thresholds(_eval_thresholds(delay=_delay))
 
     # meets_thresholds — mirror evaluation.py:455-464.
     if brain_check_details_present:
