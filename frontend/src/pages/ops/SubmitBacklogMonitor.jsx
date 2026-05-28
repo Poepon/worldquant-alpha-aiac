@@ -49,9 +49,31 @@ const VERDICT_META = {
   UNKNOWN: { color: 'default', label: '数据不足' },
 }
 
-function verdictTag(verdict, pending) {
+function verdictTag(verdict, pending, selfCorr) {
   if (pending || !verdict) return <Tag color="default">待扫描</Tag>
   const m = VERDICT_META[verdict] || { color: 'default', label: verdict }
+  // Self-corr breach overrides the verdict visually — submission will be
+  // rejected at BRAIN regardless of the marginal scorecard. The verdict
+  // (quality gate) stays informative under tooltip: a SUBMIT-but-breach
+  // means "the factor idea is good, but the implementation collides with
+  // an already-submitted alpha — rework to de-correlate, don't discard".
+  if (selfCorr !== null && selfCorr !== undefined && selfCorr >= 0.7) {
+    return (
+      <Tooltip
+        title={
+          <span>
+            边际推荐本应 <strong>{m.label}</strong>(质量门),但 self-corr ≥ 0.7
+            已撞门(资格门)→ 实际无法提交。<br />
+            意味"想法对但实现重复" — 可重做去相关,而非删除。
+          </span>
+        }
+      >
+        <Tag color="default" style={{ opacity: 0.5, textDecoration: 'line-through' }}>
+          {m.label}
+        </Tag>
+      </Tooltip>
+    )
+  }
   return <Tag color={m.color}>{m.label}</Tag>
 }
 
@@ -168,7 +190,7 @@ export default function SubmitBacklogMonitor() {
       dataIndex: 'verdict',
       key: 'verdict',
       width: 100,
-      render: (v, r) => verdictTag(v, r.pending),
+      render: (v, r) => verdictTag(v, r.pending, r.self_corr),
     },
     {
       title: (
