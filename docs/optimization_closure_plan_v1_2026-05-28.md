@@ -195,7 +195,8 @@ CREATE INDEX ix_alphas_opt_run ON alphas(optimization_run_id) WHERE optimization
 - `backend/services/optimization/persister.py`(写 `alphas` + `optimization_run`;计算并存 `_self_corr`)
 - `backend/services/optimization/submit_policy.py`(Stage A:永远返回 "queue")
 - `backend/tasks/optimization_tasks.py`(beat 调度的 `run_optimization_cycle`)
-- Alembic migration:`optimization_runs` 表 + `alphas.optimization_run_id`
+- Alembic migration:`optimization_runs` 表 + `alphas.optimization_run_id` + `alphas.expression_hash`(若未存在)+ `alphas.parent_alpha_family_id`(Q3 决策)
+- **legacy 清理**(Q4 决策):删除 `mining_agent._run_optimization_chain` / `_simulate_optimization_variants` / `_identify_optimization_candidates` 三个函数 + 它们的调用点(:797-803 + :918)+ `RoundResult.optimization_candidates` 字段。端口 `_skip_optimize_pool` 过滤器到新 `select_near_gate_candidates` SQL where 子句。
 - flag:`ENABLE_OPTIMIZATION_LOOP`(默认 OFF)
 - config:`OPT_BEAT_INTERVAL_HOURS=6` / `OPT_CANDIDATES_PER_CYCLE=10` / `OPT_DAILY_SIM_BUDGET=400`(A 不限但记录)
 - telemetry:`GET /ops/optimization/cycles`(近 50 个 cycle + 转化率汇总)
@@ -271,22 +272,29 @@ CREATE INDEX ix_alphas_opt_run ON alphas(optimization_run_id) WHERE optimization
 
 ---
 
-## 8. 开工前必决的问题(A 启动前决定)
+## 8. 开工前必决的问题 — 已逐项决策(2026-05-28 确认)
 
-1. **A 的触发源**:`should_optimize` 信号(已算,语义"这个 alpha 应优化")vs SQL 近门带扫描(具体,但绕开 verdict 系统)?
-   - 推荐:**SQL 近门带**(简单 + 可观测)。`should_optimize` 还带 cascade 时代的历史包袱。
+1. **A 的触发源**:✅ **SQL 近门带扫描**
+   `SELECT ... FROM alphas WHERE is_sharpe BETWEEN (hard_gate - 0.5) AND hard_gate AND optimization_run_id IS NULL AND NOT COALESCE((metrics->>'_skip_optimize_pool')::bool, false) ORDER BY is_sharpe DESC LIMIT N`
+   理由:具体、可观测、绕开 cascade 时代的 `should_optimize` 信号包袱。`_skip_optimize_pool` 过滤器从 legacy `_identify_optimization_candidates` 端口而来(P1-D 窗口扰动鲁棒性 gate)。
 
-2. **优化 vs mining 配额**:硬分(比如 400/600)vs 动态(opt 拿 mining 剩下的)?
-   - 推荐:Stage A **硬分**(可预测、好调试)。Stage B allocator 上线后改动态。
+2. **优化 vs mining 配额**:✅ **Stage A 硬分 400 opt / 600 mining**
+   config `OPT_DAILY_SIM_BUDGET=400`(默认 OFF flag 时为 0)。Stage B allocator 上线后改动态。
 
-3. **dedup key**:只 `expression_hash` 还是 `(expression_hash, parent_alpha_id_family)` 避免重复优化同一个家族链?
-   - 推荐:第一天就**两个都记**;A 按 `expression_hash` 查询,B 加家族感知 dedup 无需改 schema。
+3. **dedup key**:✅ **两个都记,A 按 `expression_hash` 查询**
+   alpha 行加 `expression_hash` + `parent_alpha_family_id`(从 parent_alpha_id 谱系链 root 推导)。Stage A SQL `WHERE expression_hash NOT IN (SELECT expression_hash FROM alphas WHERE optimization_run_id IS NOT NULL)`。Stage B 可加 family-aware dedup 无需改 schema。
 
-4. **legacy `mining_agent._run_optimization_chain` 怎么办**:留(并行路径)、删(legacy 已退役)、还是迁移(新 OptimizationService 是它的继任者)?
-   - 推荐:**A 时期直接删**。它是 cascade 时代挂在死路径上的 hook,留着是未来的混淆来源。
+4. **legacy `mining_agent._run_optimization_chain` 处理**:✅ **Option A — 删除 + 端口 `_skip_optimize_pool` 过滤器到新 service**
+   ROI 分析:Option A 0.5 天清 ~200 行死码 + 保留唯一真 IP(鲁棒性 gate);Option B(保留 + DEPRECATED)长期负 ROI;Option C(完整迁移)负 ROI(扩散 pre-delay-aware bug `sharpe>1.2`)。删除范围:
+   - `_run_optimization_chain` 函数体(mining_agent.py:1427-1495)
+   - `_simulate_optimization_variants` 函数体(:1496-1566)
+   - `_identify_optimization_candidates` 函数体(:944-~995)
+   - 调用点(:797-803 + :918 + 其他 `optimization_candidates` 引用)
+   - `RoundResult.optimization_candidates` 字段
+   端口的过滤器进入 §6 Stage A 的 `select_near_gate_candidates` SQL where 子句。
 
-5. **A 的 beat 间隔**:6h 意味着 ~4 cycle/天。要不要绑定 BRAIN 日配额重置时间(00:00 UTC)?
-   - 推荐:6h 基线,由 `_pipeline_heartbeat_timeout()` 同款 backstop 兜底。配额重置最好交给 `quota_guard_pause_at_threshold`(已存在)。
+5. **A 的 beat 间隔**:✅ **6h(每天 4 cycle,北京 02/08/14/20)**
+   与 `OPT_DAILY_SIM_BUDGET=400` 完美匹配(100 sim/cycle)。与 mining session 错峰(BRAIN 配额 UTC 00:00 重置 = 北京 08:00,8h-tick 顺势承接配额重置)。`quota_guard_pause_at_threshold`(已存在)作为兜底。`OPT_BEAT_INTERVAL_HOURS=6` 可 .env 覆盖,默认 6。
 
 ---
 
