@@ -2864,9 +2864,12 @@ async def node_evaluate(
     # P0: baseline + Nσ-residual screening (docs/alphagbm_skills_research_2026-05-15.md).
     # Annotates each successfully-simulated alpha with its residual against the
     # (hypothesis-family × dataset × region) grid baseline. SOFT SIGNAL ONLY —
-    # never touches quality_status / hard_gate / near_pass / submission gates;
-    # the residual is consumed downstream by _identify_optimization_candidates
-    # to prioritise the optimization budget. Opt-in via BASELINE_SCREEN_ENABLED.
+    # never touches quality_status / hard_gate / near_pass / submission gates.
+    # Historically consumed by the retired ``_identify_optimization_candidates``
+    # in mining_agent.py to prioritise the optimization budget. Post-Phase-16-A
+    # the residual is dormant (annotation only); it could be revived by the new
+    # OptimizationService near-gate SQL if Stage A's GO/STOP gate calls for it.
+    # Opt-in via BASELINE_SCREEN_ENABLED.
     # The whole block is best-effort: any failure leaves alphas un-annotated and
     # evaluation proceeds exactly as before.
     baseline_discoveries = 0

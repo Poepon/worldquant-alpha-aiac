@@ -170,15 +170,7 @@ Provide structured analysis following the observe-evaluate-decide framework.
     ],
     "patterns_discovered": ["New patterns discovered this round"],
     "confidence_adjustments": ["Beliefs that should be updated based on evidence"]
-  }},
-  "optimization_candidates": [
-    {{
-      "expression": "Alpha expression worth optimizing",
-      "current_metrics": "Current performance",
-      "improvement_potential": "Why this is worth optimizing",
-      "suggested_modifications": ["Specific modification ideas"]
-    }}
-  ]
+  }}
 }}
 ```"""
 

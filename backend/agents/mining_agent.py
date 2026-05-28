@@ -793,15 +793,11 @@ class MiningAgent:
                         max_iterations=max_iterations,
                     )
                     
-                    # === OPTIMIZATION CHAIN (if applicable) ===
-                    if round_result.optimization_candidates:
-                        await self._run_optimization_chain(
-                            task=task,
-                            candidates=round_result.optimization_candidates,
-                            strategy=current_strategy,
-                            iteration=iteration
-                        )
-                    
+                    # Optimization chain hand-off retired 2026-05-28 (Phase 16-A).
+                    # OptimizationService.run_optimization_cycle beat task now
+                    # owns the near-gate alpha optimization path — see
+                    # backend/services/optimization/service.py.
+
                 except Exception as e:
                     logger.error(f"[MiningAgent] Round {iteration} error: {e}")
                     # Rollback any failed transaction
@@ -914,12 +910,11 @@ class MiningAgent:
             reverse=True
         )[:5]
         
-        # Identify optimization candidates (weak but promising)
-        result.optimization_candidates = await self._identify_optimization_candidates(
-            alphas=failed,
-            task_id=task_id
-        )
-        
+        # Optimization-candidate identification retired 2026-05-28 (Phase 16-A).
+        # Near-gate alpha selection now lives in
+        # backend.tasks.optimization_tasks._select_near_gate_candidates
+        # (SQL band scan) — see plan §8 Q1.
+
         return result
     
     async def _query_recent_failures(self, task_id: str) -> List[Dict]:
@@ -940,80 +935,6 @@ class MiningAgent:
             }
             for f in failures
         ]
-    
-    async def _identify_optimization_candidates(
-        self,
-        alphas: List[Alpha],
-        task_id: str
-    ) -> List[Dict]:
-        """
-        Identify weak alphas that are worth optimizing.
-        
-        Criteria (from alpha_scoring.should_optimize):
-        - Positive but below threshold
-        - Risk-neutralized significantly better than raw
-        - IS/OS gap suggests overfitting (fixable with decay/window)
-        """
-        from backend.alpha_scoring import should_optimize
-        
-        candidates = []
-        
-        for a in alphas:
-            # Consider alphas that were optimized or simulated but failed quality
-            status = getattr(a, "quality_status", None)
-            is_sim = getattr(a, "is_simulated", False)
-
-            if not is_sim:
-                continue
-
-            metrics = getattr(a, "metrics", {}) or {}
-
-            # P1-D (M-8): alphas downgraded by the window-perturbation
-            # robustness gate carry ``_skip_optimize_pool=True``. They have
-            # already burned config-fragility budget upstream — re-running GA
-            # on them would double-burn BRAIN quota for a candidate the gate
-            # already said is not robust. Skip them here.
-            if metrics.get("_skip_optimize_pool"):
-                continue
-
-            # If explicit optimize status, always include
-            if status == "OPTIMIZE":
-                candidates.append({
-                    "expression": a.expression,
-                    "hypothesis": getattr(a, "hypothesis", ""),
-                    "metrics": metrics,
-                    "reason": metrics.get("_optimize_reason", "Marked for optimization")
-                })
-                continue
-            
-            # Wrap metrics in structure alpha_scoring expects if needed
-            sim_result = {
-                "train": metrics,
-                "is_stats": [metrics],
-                "riskNeutralized": metrics.get("riskNeutralized", {}),
-                "investabilityConstrained": metrics.get("investabilityConstrained", {})
-            }
-            
-            should_opt, reason = should_optimize(sim_result)
-            
-            if should_opt:
-                candidates.append({
-                    "expression": a.expression,
-                    "hypothesis": getattr(a, "hypothesis", ""),
-                    "metrics": metrics,
-                    "reason": reason
-                })
-
-        # P0 baseline screening: spend the optimization budget first on alphas
-        # that genuinely beat their (hypothesis-family × dataset) cell baseline.
-        # baseline_residual_sigma is a soft signal — it only reorders the top-5
-        # cut here, it never gates PASS/FAIL. Missing annotation sorts as 0.0.
-        candidates.sort(
-            key=lambda c: (c.get("metrics") or {}).get("baseline_residual_sigma") or 0.0,
-            reverse=True,
-        )
-
-        return candidates[:5]  # Limit to top 5
     
     async def _evolve_strategy(
         self,
@@ -1073,17 +994,9 @@ class MiningAgent:
                 # (update_last_round treats None as "skip update + warn").
                 await self._clear_bandit_last_select(task)
 
-        # CRITICAL FIX: If we have optimization candidates, FORCE exploit/optimize mode
-        # to ensure we don't skip the opportunity to refine them.
-        if round_result.optimization_candidates:
-            logger.info(f"[Strategy] Found {len(round_result.optimization_candidates)} optimization candidates. Forcing EXPLOIT mode.")
-            rule_strategy.mode = StrategyMode.EXPLOIT
-            rule_strategy.focus_hypotheses = [
-                f"Optimize: {c['reason']}" for c in round_result.optimization_candidates
-            ]
-            rule_strategy.reasoning = "Focusing on optimizing identified promising alphas."
-            return rule_strategy
-
+        # EXPLOIT-mode override on optimization_candidates retired 2026-05-28
+        # (Phase 16-A) — see backend/services/optimization/service.py for the
+        # new dedicated path.
 
         # Try LLM-based strategy enhancement
         try:
@@ -1354,7 +1267,6 @@ class MiningAgent:
                     "round_metrics": round_result.to_dict(),
                     "next_action": strategy.action_summary,
                     "next_reasoning": strategy.reasoning,
-                    "optimization_candidates": len(round_result.optimization_candidates),
                 },
             )
             
@@ -1424,147 +1336,12 @@ class MiningAgent:
             except Exception:
                 pass
     
-    async def _run_optimization_chain(
-        self,
-        task: MiningTask,
-        candidates: List[Dict],
-        strategy: EvolutionStrategy,
-        iteration: int
-    ):
-        """
-        Run optimization chain on promising weak alphas.
-        
-        This is the Chain-of-Alpha style optimization loop.
-        """
-        from backend.optimization_chain import (
-            generate_local_rewrites,
-            generate_settings_variants,
-            OptimizationContext,
-        )
-        
-        logger.info(f"[MiningAgent] Running optimization chain on {len(candidates)} candidates")
-        
-        for candidate in candidates[:3]:  # Limit to top 3
-            expression = candidate.get("expression", "")
-            metrics = candidate.get("metrics", {})
-            reason = candidate.get("reason", "")
-            
-            if not expression:
-                continue
-            
-            try:
-                # Generate expression variants
-                expr_variants = generate_local_rewrites(
-                    expression=expression,
-                    sim_result=metrics,
-                    feedback=reason,
-                    max_variants=10
-                )
-                
-                # Generate settings variants. Pass turnover context so the
-                # turnover-targeted decay (Gap 2) is tried first on a 3-slot
-                # USER account. turnover may be flat or nested under 'is'.
-                _turnover = (
-                    metrics.get("turnover")
-                    or (metrics.get("is", {}) or {}).get("turnover")
-                    or 0.0
-                )
-                settings_variants = generate_settings_variants(
-                    {
-                        "neutralization": "INDUSTRY",
-                        "decay": 4,
-                        "truncation": 0.02,
-                    },
-                    context=OptimizationContext(
-                        expression=expression,
-                        turnover=float(_turnover or 0.0),
-                    ),
-                )
-                
-                # Simulate top variants (budget-limited)
-                await self._simulate_optimization_variants(
-                    task=task,
-                    original_expression=expression,
-                    expr_variants=expr_variants[:5],
-                    settings_variants=settings_variants[:3],
-                    iteration=iteration
-                )
-                
-            except Exception as e:
-                logger.warning(f"Optimization failed for {expression[:50]}: {e}")
-    
-    async def _simulate_optimization_variants(
-        self,
-        task: MiningTask,
-        original_expression: str,
-        expr_variants: List[Dict],
-        settings_variants: List[Dict],
-        iteration: int
-    ):
-        """Simulate optimization variants and save improvements."""
-        logger.info(
-            f"[MiningAgent] Simulating {len(expr_variants)} variants for optimization"
-        )
+    # Legacy `_run_optimization_chain` + `_simulate_optimization_variants`
+    # methods retired 2026-05-28 (Phase 16-A). Optimization now lives in
+    # backend/services/optimization/service.py + backend/tasks/optimization_tasks.py
+    # (settings_sweep generator + delay-aware band + NEVER-auto-submit
+    # safety gate). See docs/optimization_closure_plan_v1_2026-05-28.md.
 
-        # delay-0 native mining: variants must sim at (and persist) the task's
-        # delay, not a hardcoded 1 — else a delay-0 task's optimization variants
-        # silently run at delay-1. Defaults to 1 for delay-1 tasks (unchanged).
-        _opt_delay = int((task.config or {}).get("delay", 1))
-
-        # Process Expression Variants
-        for variant in expr_variants:
-            try:
-                expression = variant.get("expression")
-                if not expression:
-                    continue
-                    
-                # Simulate
-                result = await self.brain.simulate_alpha(
-                    expression=expression,
-                    region=task.region,
-                    universe=task.universe,
-                    delay=_opt_delay,
-                    decay=4,
-                    neutralization="INDUSTRY"
-                )
-                
-                if result.get("success"):
-                    # Check if improved (using simplified check here, fuller one in chain)
-                    metrics = result.get("metrics", {})
-                    sharpe = metrics.get("sharpe", 0)
-                    
-                    if sharpe > 1.2: # Simple threshold for now
-                        # PASS only when all three BRAIN red-lines clear; otherwise OPTIMIZE.
-                        fitness = metrics.get("fitness", 0) or 0
-                        turnover = metrics.get("turnover", 0) or 0
-                        hard_gate_pass = (
-                            sharpe >= 1.5
-                            and fitness >= 1.0
-                            and 0.01 <= turnover <= 0.7
-                        )
-                        # Save successful optimization
-                        alpha = Alpha(
-                            task_id=task.id,
-                            alpha_id=result.get("alpha_id"),
-                            expression=expression,
-                            hypothesis=f"Optimization of {original_expression[:20]}...",
-                            logic_explanation=f"Variant: {variant.get('description')}",
-                            region=task.region,
-                            universe=task.universe,
-                            dataset_id=task.dataset_id if hasattr(task, 'dataset_id') else "unknown",
-                            delay=_opt_delay,
-                            simulation_status="SUCCESS",
-                            quality_status="PASS" if hard_gate_pass else "OPTIMIZE",
-                            metrics=metrics
-                        )
-                        self.db.add(alpha)
-                        logger.info(f"[MiningAgent] Optimization success: {expression[:30]} (Sharpe: {sharpe})")
-                        
-            except Exception as e:
-                logger.warning(f"Optimization simulation failed: {e}")
-                
-        await self.db.commit()
-    
     @property
     def workflow(self) -> MiningWorkflow:
         """Access the underlying LangGraph workflow."""

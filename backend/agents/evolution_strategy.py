@@ -218,9 +218,13 @@ class RoundResult:
     problematic_fields: List[str] = field(default_factory=list)
     problematic_operators: List[str] = field(default_factory=list)
     
-    # Optimization candidates
-    optimization_candidates: List[Dict] = field(default_factory=list)
-    
+    # Optimization-candidate field retired 2026-05-28 (Phase 16-A).
+    # OptimizationService now owns the near-gate alpha optimization path;
+    # mining no longer hands a per-round candidate list downstream. The
+    # ``optimization_targets`` tuple on EvolutionStrategy stays (still
+    # populated by the LLM strategy path); only the rule-based feed from
+    # this round_result is gone.
+
     @property
     def success_rate(self) -> float:
         """Calculate success rate."""
@@ -326,11 +330,10 @@ class RuleBasedTransition:
         # Build amplification list from successful patterns
         amplify = tuple(round_result.successful_patterns[:5])
         
-        # Identify optimization candidates
-        opt_targets = tuple(
-            c.get("expression", "") 
-            for c in round_result.optimization_candidates[:3]
-        )
+        # Optimization candidates no longer flow through round_result
+        # (Phase 16-A, 2026-05-28). EvolutionStrategy.optimization_targets
+        # is still populated by the LLM strategy enhancement path below.
+        opt_targets: tuple = ()
         
         return EvolutionStrategy(
             mode=mode,
