@@ -4669,3 +4669,132 @@ async def submit_backlog_scan(
             f"轮询本页看 pending 递减"
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 16-A optimization closure Stage A telemetry (2026-05-28)
+# ---------------------------------------------------------------------------
+#
+# The 14d conversion-rate GO/STOP gate per plan §6:
+#   conversion_rate_14d = SUM(n_winners) / SUM(n_variants)
+#
+# Decision matrix:
+#   >20%  → Stage B promotion
+#   <10%  → STOP (selection-limited per competitive_analysis_v3)
+#   10-20%→ tune SettingsSweepGenerator params, retry
+#
+# Pulls last N days of optimization_runs (default 14) grouped by generator.
+# ---------------------------------------------------------------------------
+
+
+class CycleSummary(BaseModel):
+    """One optimization_runs row's public projection."""
+
+    id: int
+    parent_alpha_id: int
+    generator_name: str
+    trigger_source: str
+    n_variants: int
+    n_winners: int
+    n_submitted: int                 # SubmitPolicy "submit" count
+    sim_budget_used: int
+    sim_budget_granted: int
+    cycle_started_at: datetime
+    cycle_finished_at: Optional[datetime]
+    error: Optional[str]
+
+
+class OptimizationCyclesOut(BaseModel):
+    """Top-level /ops/optimization/cycles response."""
+
+    cycles: List[CycleSummary]
+    conversion_rate_14d: float        # n_winners / max(1, n_variants)
+    total_variants_14d: int
+    total_winners_14d: int
+    total_submitted_14d: int
+    total_cycles_14d: int
+    window_days: int
+
+
+@router.get(
+    "/optimization/cycles",
+    response_model=OptimizationCyclesOut,
+)
+async def optimization_cycles(
+    days: int = Query(default=14, ge=1, le=90),
+    limit: int = Query(default=200, ge=1, le=1000),
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> OptimizationCyclesOut:
+    """Stage A telemetry — conversion rate (the GO/STOP gate signal) +
+    recent cycle rows.
+
+    The aggregate counters come straight from optimization_runs (no
+    alphas-JSONB scan needed — that was the whole reason for the
+    dedicated table per plan §5). The cycle list is truncated to ``limit``
+    most-recent rows for the UI; ``conversion_rate_14d`` always reflects
+    the full window regardless of ``limit``.
+    """
+    from sqlalchemy import text as _text
+
+    agg_row = (await db.execute(_text(
+        """
+        SELECT
+            COALESCE(SUM(n_variants), 0)   AS total_variants,
+            COALESCE(SUM(n_winners), 0)    AS total_winners,
+            COALESCE(SUM(n_submitted), 0)  AS total_submitted,
+            COUNT(*)                       AS total_cycles
+        FROM optimization_runs
+        WHERE cycle_started_at > NOW() - (:days || ' day')::interval
+        """
+    ), {"days": str(int(days))})).first()
+
+    total_variants = int(agg_row[0] or 0) if agg_row else 0
+    total_winners = int(agg_row[1] or 0) if agg_row else 0
+    total_submitted = int(agg_row[2] or 0) if agg_row else 0
+    total_cycles = int(agg_row[3] or 0) if agg_row else 0
+
+    conv = (
+        round(total_winners / total_variants, 4)
+        if total_variants > 0 else 0.0
+    )
+
+    rows = (await db.execute(_text(
+        """
+        SELECT id, parent_alpha_id, generator_name, trigger_source,
+               n_variants, n_winners, n_submitted,
+               sim_budget_used, sim_budget_granted,
+               cycle_started_at, cycle_finished_at, error
+        FROM optimization_runs
+        WHERE cycle_started_at > NOW() - (:days || ' day')::interval
+        ORDER BY cycle_started_at DESC
+        LIMIT :limit
+        """
+    ), {"days": str(int(days)), "limit": int(limit)})).all()
+
+    cycles = [
+        CycleSummary(
+            id=int(r[0]),
+            parent_alpha_id=int(r[1]),
+            generator_name=str(r[2]),
+            trigger_source=str(r[3]),
+            n_variants=int(r[4] or 0),
+            n_winners=int(r[5] or 0),
+            n_submitted=int(r[6] or 0),
+            sim_budget_used=int(r[7] or 0),
+            sim_budget_granted=int(r[8] or 0),
+            cycle_started_at=r[9],
+            cycle_finished_at=r[10],
+            error=r[11],
+        )
+        for r in rows
+    ]
+    return OptimizationCyclesOut(
+        cycles=cycles,
+        conversion_rate_14d=conv,
+        total_variants_14d=total_variants,
+        total_winners_14d=total_winners,
+        total_submitted_14d=total_submitted,
+        total_cycles_14d=total_cycles,
+        window_days=int(days),
+    )

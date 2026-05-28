@@ -83,6 +83,10 @@ from backend.tasks.dataset_weight_refresh import run_dataset_weight_refresh  # n
 from backend.tasks.r1b_outcome_reconcile import reconcile_r1b_outcomes  # noqa: F401
 # Data quality (2026-05-22): self-heal invalid (BRAIN-rejected) data fields
 from backend.tasks.datafield_prune import prune_invalid_datafields  # noqa: F401
+# Phase 16-A optimization closure Stage A (2026-05-28) — 6h beat task
+# that scans near-gate alphas and runs SettingsSweepGenerator cycles.
+# Gated by ENABLE_OPTIMIZATION_LOOP (default OFF).
+from backend.tasks.optimization_tasks import run_optimization_cycle  # noqa: F401
 
 __all__ = [
     # Utilities

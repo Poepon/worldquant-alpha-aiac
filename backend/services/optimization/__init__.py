@@ -22,6 +22,10 @@ from backend.services.optimization.protocols import (
     OptimizationRunRepository,
     KnowledgeFeedback,
 )
+from backend.services.optimization.service import (
+    NoOpKnowledgeFeedback,
+    OptimizationService,
+)
 
 __all__ = [
     "Variant",
@@ -33,4 +37,6 @@ __all__ = [
     "SubmitPolicy",
     "OptimizationRunRepository",
     "KnowledgeFeedback",
+    "NoOpKnowledgeFeedback",
+    "OptimizationService",
 ]

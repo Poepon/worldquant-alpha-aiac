@@ -320,4 +320,14 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.prune_invalid_datafields",
         "schedule": crontab(hour=6, minute=20),
     },
+    # Phase 16-A optimization closure Stage A (2026-05-28): every 6h at
+    # :15 past the hour (Asia/Shanghai 02:15 / 08:15 / 14:15 / 20:15).
+    # minute=15 dodges the 06:00 sync-datasets / 06:15 refresh-kb / 06:20
+    # datafield-prune cluster. 08:15 SH falls 15min after the UTC 00:00
+    # BRAIN quota reset — fresh budget on the morning cycle. Gated by
+    # ENABLE_OPTIMIZATION_LOOP (default OFF). Per plan §6 + §8 Q5.
+    "run-optimization-cycle": {
+        "task": "backend.tasks.run_optimization_cycle",
+        "schedule": crontab(hour="*/6", minute=15),
+    },
 }
