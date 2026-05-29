@@ -1537,8 +1537,15 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
         try:
             await db.refresh(task)
             await db.refresh(run)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as _refresh_ex:  # noqa: BLE001
+            # Refresh失败 → task.status/run.runtime_state 是 stale 内存状态。
+            # 后续 finalize 分支会在 stale 上判断 PAUSED/STOPPED/COMPLETED;若同时
+            # 外部 PATCH 把 task PAUSE,会被误覆盖 COMPLETED。低概率 race,但留
+            # audit trail 方便事后定位。
+            logger.warning(
+                f"[flat-pipeline] task={task_id} finalization refresh failed "
+                f"(task.status may be stale → external PAUSE race possible): {_refresh_ex}"
+            )
         try:
             if isinstance(run.runtime_state, dict):
                 run.runtime_state["stop_reason"] = _stop_reason["code"]
