@@ -1468,7 +1468,11 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
 
     # Why the producer stopped — finalization must NOT mark COMPLETED on an
     # ownership takeover (a replacement worker is meant to continue).
-    _stop_reason = {"ownership_lost": False}
+    # `code` is the human-readable reason persisted to task.config[last_stop_reason]
+    # + run.runtime_state[stop_reason] for observability — distinguishes natural
+    # completion (max_iters / daily_goal) from external interruption
+    # (auth_circuit_open / heartbeat_abort / task_paused / ownership_lost).
+    _stop_reason = {"ownership_lost": False, "code": None}
 
     # Option C diversity steering: per-dataset coverage this session (candidates
     # generated). next_round_inputs picks the least-covered dataset → the
@@ -1509,6 +1513,7 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
         # legacy loop, which never spends the iteration budget on skips).
         for _ in range(len(datasets) + 1):
             if state["iterations"] >= max_iters:
+                _stop_reason["code"] = _stop_reason["code"] or "max_iters_reached"
                 return None
             # BRAIN auth circuit OPEN → the consumers' sims would fast-fail, so
             # don't burn LLM generation on candidates that can't simulate. Stop
@@ -1522,11 +1527,13 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
                     f"[flat-pipeline] task={task_id} BRAIN auth circuit OPEN — "
                     f"stopping producer (cursor preserved, resumable)"
                 )
+                _stop_reason["code"] = "auth_circuit_open"
                 return None
             if not _verify_cascade_ownership(
                 lock_key, lock_token, where="flat-pipeline producer"
             ):
                 _stop_reason["ownership_lost"] = True
+                _stop_reason["code"] = "ownership_lost"
                 logger.info(f"[flat-pipeline] task={task_id} ownership lost; stopping producer")
                 return None
             task_p = await pdb.get(MiningTask, task_id)
@@ -1534,6 +1541,9 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
                 logger.info(
                     f"[flat-pipeline] task={task_id} status="
                     f"{getattr(task_p, 'status', 'GONE')}; stopping producer"
+                )
+                _stop_reason["code"] = (
+                    f"task_{task_p.status.lower()}" if task_p is not None else "task_gone"
                 )
                 return None
 
@@ -1725,6 +1735,7 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
                 f"[flat-pipeline] task={task_id} HEARTBEAT-ABORT: {_hb} — "
                 f"marking task PAUSED for clean re-dispatch on a fresh worker."
             )
+            _stop_reason["code"] = "heartbeat_abort"
             try:
                 from sqlalchemy import update as _sa_update
                 await db.execute(
@@ -1754,6 +1765,40 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
     # on the run + sync task.status. The producer persisted runtime_state on its
     # own session, so refresh run here before touching it on the injected db.
     if run is not None:
+        # Stop-reason inference for natural completion paths (set neither in
+        # next_round_inputs nor in heartbeat-abort) — distinguishes
+        # daily_goal_reached from a generic "completed". Falls back to
+        # "completed" if nothing else fits.
+        if _stop_reason["code"] is None:
+            if state["iterations"] >= max_iters:
+                _stop_reason["code"] = "max_iters_reached"
+            elif stats.get("persisted", 0) >= daily_goal:
+                _stop_reason["code"] = "daily_goal_reached"
+            else:
+                _stop_reason["code"] = "completed"
+
+        # Persist stop_reason for observability (task.config for task-list
+        # speed-read, run.runtime_state for per-run history). Best-effort —
+        # never fail finalization on a serialisation issue.
+        try:
+            await db.refresh(task)
+            await db.refresh(run)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            if isinstance(run.runtime_state, dict):
+                run.runtime_state["stop_reason"] = _stop_reason["code"]
+                flag_modified(run, "runtime_state")
+            if task.config is None:
+                task.config = {}
+            task.config["last_stop_reason"] = _stop_reason["code"]
+            task.config["last_stop_reason_at"] = datetime.utcnow().isoformat()
+            flag_modified(task, "config")
+        except Exception as _sr_ex:  # noqa: BLE001
+            logger.warning(
+                f"[flat-pipeline] stop_reason persist failed (non-fatal): {_sr_ex}"
+            )
+
         if _stop_reason["ownership_lost"]:
             # Ownership was taken over mid-session — a replacement worker is
             # meant to continue the TASK from the preserved cursor. Do NOT touch
@@ -1766,7 +1811,6 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
                 f"closing this superseded run, leaving task for the new owner"
             )
             try:
-                await db.refresh(run)
                 if run.status == "RUNNING":
                     run.status = "STOPPED"
                     run.finished_at = datetime.utcnow()
@@ -1774,11 +1818,6 @@ async def _run_flat_iteration_pipeline(db, task, run, celery_task_id, *, lock_ke
             except Exception as _own_ex:  # noqa: BLE001
                 logger.warning(f"[flat-pipeline] superseded-run close failed: {_own_ex}")
         else:
-            try:
-                await db.refresh(task)
-                await db.refresh(run)
-            except Exception:  # noqa: BLE001
-                pass
             if task.status in ("PAUSED", "STOPPED"):
                 run.status = task.status
             else:

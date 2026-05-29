@@ -16,6 +16,7 @@ import {
   Spin,
   Empty,
   Select,
+  Tooltip as AntdTooltip,
   message,
 } from 'antd'
 import {
@@ -347,6 +348,29 @@ export default function TaskDetail() {
               {task.task_name}
             </Title>
             <Tag color={statusColors[task.status] || 'default'}>{task.status}</Tag>
+            {task?.config?.last_stop_reason && task.status !== 'RUNNING' && (() => {
+              const r = task.config.last_stop_reason
+              const txt = {
+                max_iters_reached: '迭代上限',
+                daily_goal_reached: '日 PASS 达标',
+                completed: '正常完成',
+                auth_circuit_open: 'BRAIN 认证断',
+                ownership_lost: 'watchdog 移交',
+                heartbeat_abort: 'freeze 兜底',
+                task_paused: '外部 PAUSE',
+                task_stopped: '外部 STOP',
+                task_early_stopped: 'early stop',
+                task_gone: 'task 不存在',
+              }[r] || r
+              const color = ['auth_circuit_open', 'heartbeat_abort'].includes(r)
+                ? 'warning' : 'default'
+              const at = task.config.last_stop_reason_at
+              return (
+                <AntdTooltip title={at ? `于 ${new Date(at).toLocaleString()}` : ''}>
+                  <Tag color={color}>退出原因: {txt}</Tag>
+                </AntdTooltip>
+              )
+            })()}
           </Space>
         </Col>
         <Col>

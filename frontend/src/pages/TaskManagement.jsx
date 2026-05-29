@@ -227,8 +227,8 @@ export default function TaskManagement() {
       title: '状态',
       dataIndex: 'status',
       key: 'status',
-      width: 100,
-      render: (status) => {
+      width: 130,
+      render: (status, record) => {
         const colors = {
           PENDING: 'default',
           RUNNING: 'processing',
@@ -237,7 +237,32 @@ export default function TaskManagement() {
           FAILED: 'error',
           STOPPED: 'default',
         }
-        return <Tag color={colors[status] || 'default'}>{status}</Tag>
+        const reason = record?.config?.last_stop_reason
+        // 醒目的退出原因(非自然完成)— 用户能区分"配额烧光"vs"BRAIN 断"vs"freeze"
+        const reasonText = {
+          max_iters_reached: '迭代上限',
+          daily_goal_reached: '日 PASS 达标',
+          completed: '正常完成',
+          auth_circuit_open: 'BRAIN 认证断',
+          ownership_lost: 'watchdog 移交',
+          heartbeat_abort: 'freeze 兜底',
+          task_paused: '外部 PAUSE',
+          task_stopped: '外部 STOP',
+          task_early_stopped: 'early stop',
+          task_gone: 'task 不存在',
+        }
+        const reasonColor = ['auth_circuit_open', 'heartbeat_abort'].includes(reason)
+          ? 'warning' : 'default'
+        return (
+          <Space direction="vertical" size={2}>
+            <Tag color={colors[status] || 'default'}>{status}</Tag>
+            {reason && status !== 'RUNNING' && (
+              <Tag color={reasonColor} style={{ fontSize: 11 }}>
+                {reasonText[reason] || reason}
+              </Tag>
+            )}
+          </Space>
+        )
       },
     },
     {
