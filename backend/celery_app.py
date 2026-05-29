@@ -300,6 +300,16 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_dataset_weight_refresh",
         "schedule": crontab(hour=5, minute=15),
     },
+    # Orchestrator Sub-phase 1 skeleton (2026-05-29): cron 1h fallback for
+    # the event-driven path (Q7 DECIDED). Main path is
+    # orchestrator_evaluate_after_finalize invoked by _run_flat_iteration
+    # finalize (Sub-phase 2 接);this beat is防丢事件兜底,扫描全 task pool
+    # 补 launch 决策。flag-gated by ENABLE_AUTO_ORCHESTRATOR (default OFF →
+    # task fires but no-ops)。每 1h 一次,与 quota_guard/watchdog 不撞。
+    "orchestrator-periodic-scan": {
+        "task": "backend.tasks.orchestrator_periodic_scan",
+        "schedule": 3600,   # every 1 hour (in seconds)
+    },
     # R1b CoSTEER outcome reconciliation (Break 2 fix, 2026-05-22): daily
     # 05:45 SH fill r1b_retry_log.outcome (pass/fail/sharpe) from the alphas
     # each retry/mutate produced — the feedback half of the loop, previously

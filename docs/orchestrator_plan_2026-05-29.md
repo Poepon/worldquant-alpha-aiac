@@ -206,7 +206,7 @@ EMA 状态 `task.config[stop_loss_state]` 复用串行同 key(`task_stop_loss_se
 
 ## 7. Phase 1 实施 sub-phase(依据 Q1-Q7 决策)
 
-1. **Sub-phase 1**(0.4d):骨架 — `backend/tasks/orchestrator.py` celery task module + `task.config["launched_by"]` 标记 + start_flat_session 默认 "manual"
+1. **Sub-phase 1**(0.4d)✅ **SHIPPED 2026-05-29** — `backend/tasks/orchestrator.py`(2 个 stub celery task,flag OFF short-circuit)+ `task.config["launched_by"]` schema field + `start_flat_session(launched_by="manual")` 默认参数 + `ENABLE_AUTO_ORCHESTRATOR` flag default OFF + beat schedule `orchestrator-periodic-scan` 1h + 8 单测全 PASS
 2. **Sub-phase 2**(1d):事件路径 — `_run_flat_iteration` finalize 末尾 schedule `orchestrator_evaluate_after_finalize.delay(task_id)` + 消费端读 task pool + 配额 + 决策规则
 3. **Sub-phase 3**(0.5d):规则引擎 — 历史 PASS rate EMA(7d window)+ region/dataset 加权采样 + Q5 阈值
 4. **Sub-phase 4**(0.2d):cron 1h fallback + 安全阈值 + 监控 endpoint `/ops/orchestrator/status`

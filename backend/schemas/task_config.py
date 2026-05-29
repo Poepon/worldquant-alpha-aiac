@@ -103,3 +103,10 @@ class TaskConfig(BaseModel):
     # ExperimentRun.config_snapshot inherited keys (cascade watchdog)
     watchdog_revive: Optional[WatchdogReviveInfo] = None
     cascade_lock_token: Optional[str] = None
+
+    # Orchestrator Sub-phase 1 (2026-05-29) — 标 task 是谁启的:
+    #   "manual" (default,向后兼容历史 task)
+    #   "orchestrator" (auto-orchestrator 启的,orchestrator 决策影响范围内)
+    # orchestrator 只对 launched_by="orchestrator" 的 task 做让位决策,user
+    # 手动启的 task 完全不动(Q6 DECIDED)。
+    launched_by: Optional[str] = None

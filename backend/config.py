@@ -750,6 +750,10 @@ class Settings(BaseSettings):
     # weekly Sunday 04:00 SH beat task ``run_failure_tree_pruner`` deletes
     # rows older than this value. Operational tunable — no feature flag.
     R1B_FAILURE_TREE_RETENTION_DAYS: int = 90
+    # ----- Mining orchestrator (2026-05-29) -----
+    # Sub-phase 1 骨架阶段 default OFF。Sub-phase 2/3 ship + Phase B soak 通过
+    # 后翻转。docs/orchestrator_plan_2026-05-29.md Q1-Q7 DECIDED。
+    ENABLE_AUTO_ORCHESTRATOR: bool = False
     # ----- R1b outcome reconciliation (Break 2 fix, 2026-05-22) -----
     # Max pending r1b_retry_log rows reconcile_r1b_outcomes processes per run.
     R1B_RECONCILE_MAX_ROWS: int = 1000

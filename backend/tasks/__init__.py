@@ -79,6 +79,12 @@ from backend.tasks.logic_distill_tasks import run_weekly_logic_distill  # noqa: 
 from backend.tasks.cognitive_layer_bandit_tasks import run_cognitive_layer_bandit_update  # noqa: F401
 # Breadth (2026-05-22): daily dataset-steering value-bandit mining_weight refresh
 from backend.tasks.dataset_weight_refresh import run_dataset_weight_refresh  # noqa: F401
+# Orchestrator Sub-phase 1 skeleton (2026-05-29): event-driven evaluate +
+# cron 1h fallback scan. flag-gated by ENABLE_AUTO_ORCHESTRATOR (default OFF).
+from backend.tasks.orchestrator import (  # noqa: F401
+    orchestrator_evaluate_after_finalize,
+    orchestrator_periodic_scan,
+)
 # R1b CoSTEER (2026-05-22): outcome reconciliation — fills r1b_retry_log.outcome
 from backend.tasks.r1b_outcome_reconcile import reconcile_r1b_outcomes  # noqa: F401
 # Data quality (2026-05-22): self-heal invalid (BRAIN-rejected) data fields

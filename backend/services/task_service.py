@@ -593,6 +593,7 @@ class TaskService(BaseService):
         datasets: Optional[List[str]] = None,
         delay: int = 1,
         enable_pipeline: bool = False,
+        launched_by: str = "manual",
     ) -> "MiningSessionInfo":
         """Create a new FLAT_CONTINUOUS task and dispatch its worker.
 
@@ -633,6 +634,10 @@ class TaskService(BaseService):
         _config = {"flat_cursor": 0, "hypothesis_centric_variant": _level}
         if delay != 1:
             _config["delay"] = int(delay)
+        # Orchestrator Sub-phase 1 (Q6 DECIDED 2026-05-29):标记 task 是 manual
+        # 启的还是 orchestrator 启的。orchestrator 让位决策只动自己启的 task,
+        # user 手动启的 task 不被自动化干预。default "manual" 保留向后兼容。
+        _config["launched_by"] = launched_by
         # Per-session pipeline opt-in (isolated shadow) — _run_flat_iteration
         # dispatches to the producer-consumer path when this is set OR the global
         # ENABLE_SIM_PIPELINE flag is on. Omitted when False so legacy sessions'
