@@ -1,7 +1,7 @@
 # Mining Orchestrator plan (占位)
 
 - 日期: 2026-05-29
-- 状态: **stub / 未开工**,待 [serial→pipeline 迁移](./serial_to_pipeline_migration_plan_2026-05-29.md) Phase C 完成后启动
+- 状态: **Phase 1 全 5 sub-phase SHIPPED 2026-05-29 晚**(flag `ENABLE_AUTO_ORCHESTRATOR` default OFF,等 Phase B soak 通过后翻转)
 - 起源: serial→pipeline 迁移 v3 的 R14 决策(§2.5)发现 — R14 + 无 orchestrator = 反目标(配额空转死结)。R14 真正价值依赖 orchestrator,所以打包到本 plan
 
 ---
@@ -209,8 +209,8 @@ EMA 状态 `task.config[stop_loss_state]` 复用串行同 key(`task_stop_loss_se
 1. **Sub-phase 1**(0.4d)✅ **SHIPPED 2026-05-29** — `backend/tasks/orchestrator.py`(2 个 stub celery task,flag OFF short-circuit)+ `task.config["launched_by"]` schema field + `start_flat_session(launched_by="manual")` 默认参数 + `ENABLE_AUTO_ORCHESTRATOR` flag default OFF + beat schedule `orchestrator-periodic-scan` 1h + 8 单测全 PASS
 2. **Sub-phase 2**(1d)✅ **SHIPPED 2026-05-29** — `_run_flat_iteration` finalize 末尾投递 `orchestrator_evaluate_after_finalize.delay(task_id)`(try/except 非阻塞)+ 消费端完整规则(idempotency 5min / quota_state / max_running 3 / daily_limit 10 / short_lived 5min)+ 真实 launch wire `start_flat_session(launched_by="orchestrator", enable_pipeline=True)` + Q5 阈值配置 5 项 + 12 单测全 PASS
 3. **Sub-phase 3**(0.5d)✅ **SHIPPED 2026-05-29** — 规则引擎:7d Beta-Bernoulli posterior `(passes+α)/(total+α+β)` 加权采样 region + top-N dataset(无放回);cold-start fallback 复用 finalize 触发 task 的 region/universe。Config 4 项(`ORCHESTRATOR_LOOKBACK_DAYS=7` / `PRIOR_PASSES=1` / `PRIOR_FAILS=1` / `DATASETS_PER_TASK=3`)。20 单测全 PASS(含加权采样均匀性 / 偏度 / 零权重 / 不重复 / cold-start / warm)
-4. **Sub-phase 4**(0.2d):cron 1h fallback + 安全阈值 + 监控 endpoint `/ops/orchestrator/status`
-5. **Sub-phase 5**(0.1d):测试 + plan v3 同步
+4. **Sub-phase 4**(0.2d)✅ **SHIPPED 2026-05-29** — `GET /api/v1/ops/orchestrator/status` 监控 endpoint(`OrchestratorStatusOut` 模型 + `OrchestratorRecentDecision`)实时返回 flag / thresholds / pool counts(orchestrator_running + today_launches)/ quota_state / region_pass_rates_7d / 最近 20 个 orchestrator 决策(`task.config["orchestrator_processed_at"]` 反向扫)。cron 1h fallback + 阈值 Sub-phase 1+2 已 ship,本步骤补监控。22 单测 PASS
+5. **Sub-phase 5**(0.1d)✅ **SHIPPED 2026-05-29** — plan v3/此 plan 全 sub-phase 同步标 SHIPPED;累计 22 单测 PASS(Sub-phase 1+2+3+4)
 
 ---
 

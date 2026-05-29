@@ -307,3 +307,46 @@ def test_orchestrator_thresholds_includes_sub3():
     assert getattr(settings, "ORCHESTRATOR_PRIOR_PASSES", None) == 1
     assert getattr(settings, "ORCHESTRATOR_PRIOR_FAILS", None) == 1
     assert getattr(settings, "ORCHESTRATOR_DATASETS_PER_TASK", None) == 3
+
+
+# ---------------------------------------------------------------------------
+# Sub-phase 4: /ops/orchestrator/status endpoint
+# ---------------------------------------------------------------------------
+
+def test_orchestrator_status_endpoint_imports():
+    """endpoint 函数 + 响应模型可 import,不会循环 import。"""
+    from backend.routers.ops import (
+        get_orchestrator_status,
+        OrchestratorStatusOut,
+        OrchestratorRecentDecision,
+    )
+    assert callable(get_orchestrator_status)
+    # 响应模型可构造
+    out = OrchestratorStatusOut(
+        enabled=False,
+        thresholds={"max_running": 3},
+        pool={"orchestrator_running": 0, "today_orchestrator_launches": 0},
+        quota={"over_threshold": False},
+        region_pass_rates_7d={},
+        recent_decisions=[],
+    )
+    assert out.enabled is False
+    assert out.thresholds["max_running"] == 3
+
+
+def test_orchestrator_status_recent_decision_model():
+    """OrchestratorRecentDecision 接受 task config 标识字段。"""
+    from backend.routers.ops import OrchestratorRecentDecision
+    d = OrchestratorRecentDecision(
+        task_id=42,
+        region="USA",
+        status="COMPLETED",
+        processed_at="2026-05-29T10:00:00",
+        processed_source="event",
+        launched_by="orchestrator",
+    )
+    assert d.task_id == 42
+    assert d.launched_by == "orchestrator"
+    # nullable 字段
+    d2 = OrchestratorRecentDecision(task_id=7)
+    assert d2.region is None

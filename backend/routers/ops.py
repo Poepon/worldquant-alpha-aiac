@@ -4796,3 +4796,88 @@ async def optimization_cycles(
         total_cycles_14d=total_cycles,
         window_days=int(days),
     )
+
+
+# ===========================================================================
+# Orchestrator Sub-phase 4 — /ops/orchestrator/status (2026-05-29)
+# ===========================================================================
+
+class OrchestratorRecentDecision(BaseModel):
+    task_id: int
+    region: Optional[str] = None
+    status: Optional[str] = None
+    processed_at: Optional[str] = None
+    processed_source: Optional[str] = None
+    launched_by: Optional[str] = None
+
+
+class OrchestratorStatusOut(BaseModel):
+    enabled: bool
+    thresholds: Dict[str, int]
+    pool: Dict[str, int]
+    quota: Dict[str, Any]
+    region_pass_rates_7d: Dict[str, Dict[str, float]]
+    recent_decisions: List[OrchestratorRecentDecision]
+
+
+@router.get("/orchestrator/status", response_model=OrchestratorStatusOut)
+async def get_orchestrator_status(
+    db: AsyncSession = Depends(get_db),
+    _token: str = Depends(_require_ops_token),
+) -> OrchestratorStatusOut:
+    """Orchestrator 监控看板 — 实时读 flag / 阈值 / pool / 配额 / 历史 PASS rate
+    + 最近 20 个 orchestrator 决策。前端轮询用。
+    """
+    from backend.tasks.orchestrator import (
+        _orchestrator_enabled,
+        _orchestrator_thresholds,
+        _count_orchestrator_running,
+        _count_today_orchestrator_launches,
+        _read_quota_state,
+        _compute_region_pass_rates,
+    )
+    from backend.config import settings
+    from backend.models import MiningTask
+    from sqlalchemy import select as _select, desc
+
+    th = _orchestrator_thresholds()
+    th["lookback_days"] = int(getattr(settings, "ORCHESTRATOR_LOOKBACK_DAYS", 7))
+    th["datasets_per_task"] = int(getattr(settings, "ORCHESTRATOR_DATASETS_PER_TASK", 3))
+
+    running_count = await _count_orchestrator_running(db)
+    today_launches = await _count_today_orchestrator_launches(db)
+    quota_state = await _read_quota_state()
+    region_rates = await _compute_region_pass_rates(db, th["lookback_days"])
+
+    # 最近 20 个有 orchestrator_processed_at 标的 task(按 modified_at 排)
+    rows = (await db.execute(
+        _select(MiningTask).order_by(desc(MiningTask.modified_at)).limit(200)
+    )).scalars().all()
+    decisions: List[OrchestratorRecentDecision] = []
+    for t in rows:
+        cfg = t.config if isinstance(t.config, dict) else {}
+        proc_at = cfg.get("orchestrator_processed_at")
+        if not proc_at:
+            continue
+        decisions.append(OrchestratorRecentDecision(
+            task_id=t.id,
+            region=t.region,
+            status=t.status,
+            processed_at=proc_at,
+            processed_source=cfg.get("orchestrator_processed_source"),
+            launched_by=cfg.get("launched_by"),
+        ))
+        if len(decisions) >= 20:
+            break
+
+    return OrchestratorStatusOut(
+        enabled=_orchestrator_enabled(),
+        thresholds=th,
+        pool={
+            "orchestrator_running": running_count,
+            "today_orchestrator_launches": today_launches,
+        },
+        quota=quota_state,
+        region_pass_rates_7d=region_rates,
+        recent_decisions=decisions,
+    )
