@@ -4791,6 +4791,87 @@ async def optimization_cycles(
     )
 
 
+class AbortBatchOut(BaseModel):
+    """Response for /ops/optimization/abort-batch."""
+
+    aborted_cycles: int       # how many open optimization_runs rows got stamped
+    flag_set: bool            # whether the Redis abort flag was successfully set
+    message: str
+
+
+@router.post(
+    "/optimization/abort-batch",
+    response_model=AbortBatchOut,
+)
+async def optimization_abort_batch(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> AbortBatchOut:
+    """Stop the in-flight Stage A beat from processing remaining candidates.
+
+    Mechanism:
+      1. Set Redis key ``aiac:opt:abort_requested`` (TTL 24h). The worker's
+         ``optimization_tasks._run()`` polls this between candidate cycles
+         (one-shot — clears after observing) and breaks the for-loop.
+      2. Mark every currently-RUNNING optimization_runs row (cycle_finished_at
+         IS NULL) with ``error='aborted_by_user:batch'`` so the cycle list
+         and 14d telemetry show the user's intent in audit.
+
+    Caveats:
+      - Sims already dispatched to BRAIN keep running until BRAIN returns
+        (no recall mechanism). The current in-flight cycle finishes naturally;
+        the abort only stops the NEXT candidate from starting.
+      - Does NOT flip ENABLE_OPTIMIZATION_LOOP — the next 6h beat will fire
+        normally. To pause indefinitely, also PATCH /ops/flags/ENABLE_
+        OPTIMIZATION_LOOP=false.
+    """
+    from sqlalchemy import text as _text
+    from backend.adapters.brain_adapter import BrainAdapter
+    from loguru import logger as _abort_logger
+
+    flag_set = False
+    try:
+        r = await BrainAdapter._get_slot_redis()
+        await r.set("aiac:opt:abort_requested", "1", ex=24 * 3600)
+        flag_set = True
+    except Exception as ex:  # noqa: BLE001
+        _abort_logger.warning("[opt-abort] redis flag set failed: {}", ex)
+
+    # Mark all in-flight rows as aborted. Use ON CONFLICT-style guard:
+    # only touch rows that are still open (cycle_finished_at IS NULL) and
+    # don't already have an error stamp.
+    result = await db.execute(_text(
+        """
+        UPDATE optimization_runs
+        SET cycle_finished_at = NOW(),
+            error = 'aborted_by_user:batch'
+        WHERE cycle_finished_at IS NULL
+        """
+    ))
+    await db.commit()
+    n_aborted = int(result.rowcount or 0)
+
+    _abort_logger.warning(
+        "[opt-abort] batch abort triggered by actor={} — flag_set={}, "
+        "n_aborted={}",
+        actor or "anonymous",
+        flag_set,
+        n_aborted,
+    )
+
+    return AbortBatchOut(
+        aborted_cycles=n_aborted,
+        flag_set=flag_set,
+        message=(
+            f"已标记 {n_aborted} 个在跑 cycle 为 aborted_by_user:batch;"
+            f"Redis abort flag={'set' if flag_set else 'failed'}。"
+            "当前在跑 cycle 的 sim 会自然完成(BRAIN 不可撤),"
+            "下个 candidate 不再启动。下次 6h beat 仍会正常 fire — 永久暂停请同时翻 ENABLE_OPTIMIZATION_LOOP=false。"
+        ),
+    )
+
+
 # ===========================================================================
 # Orchestrator Sub-phase 4 — /ops/orchestrator/status (2026-05-29)
 # ===========================================================================

@@ -80,8 +80,44 @@ async def _run() -> Dict[str, Any]:
         // max(1, len(candidates)),
     )
 
+    # User-abort flag: POST /ops/optimization/abort-batch sets this Redis key.
+    # We check between candidate cycles (one-shot: clear after observing) so
+    # the operator can stop a bad batch mid-flight without flipping
+    # ENABLE_OPTIMIZATION_LOOP (which would also block the next beat).
+    # Sims already dispatched to BRAIN keep running until BRAIN returns —
+    # the abort only short-circuits the candidate-loop iteration.
+    from backend.adapters.brain_adapter import BrainAdapter
+    _redis = None
+    try:
+        _redis = await BrainAdapter._get_slot_redis()
+    except Exception as _redis_ex:  # noqa: BLE001
+        logger.warning(
+            "[optimization_tasks] redis unavailable for abort flag (continuing without abort support): %s",
+            _redis_ex,
+        )
+
     cycles: List[Dict[str, Any]] = []
+    aborted = False
     for cand in candidates:
+        # Between-cycle abort check. Skip on Redis failure (soft-fail to
+        # legacy behaviour rather than block the batch).
+        if _redis is not None:
+            try:
+                if await _redis.get("aiac:opt:abort_requested"):
+                    # One-shot: clear so it doesn't carry into the next beat.
+                    await _redis.delete("aiac:opt:abort_requested")
+                    logger.warning(
+                        "[optimization_tasks] user abort observed — exiting beat after %d/%d cycles",
+                        len(cycles), len(candidates),
+                    )
+                    aborted = True
+                    break
+            except Exception as _check_ex:  # noqa: BLE001
+                logger.warning(
+                    "[optimization_tasks] abort-flag check failed (continuing): %s",
+                    _check_ex,
+                )
+
         try:
             summary = await _run_one(cand, per_cycle_budget)
             cycles.append(summary)
@@ -102,6 +138,7 @@ async def _run() -> Dict[str, Any]:
         "n_cycles": len(cycles),
         "cycles": cycles,
         "per_cycle_budget": per_cycle_budget,
+        "aborted_by_user": aborted,
     }
 
 

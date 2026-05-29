@@ -767,6 +767,13 @@ const api = {
     })
     return data
   },
+  // Stop the in-flight Stage A beat. Sets Redis abort flag (consumed
+  // one-shot by worker between cycles) + stamps all RUNNING cycle rows
+  // error='aborted_by_user:batch'. Does NOT flip ENABLE_OPTIMIZATION_LOOP.
+  abortOpsOptimizationBatch: async () => {
+    const { data } = await client.post('/ops/optimization/abort-batch')
+    return data
+  },
 }
 
 export default api

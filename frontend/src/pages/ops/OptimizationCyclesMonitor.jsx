@@ -1,10 +1,12 @@
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Alert,
+  Button,
   Card,
   Col,
+  Popconfirm,
   Progress,
   Row,
   Space,
@@ -14,6 +16,7 @@ import {
   Tag,
   Tooltip,
   Typography,
+  message,
 } from 'antd'
 import {
   ThunderboltOutlined,
@@ -21,6 +24,7 @@ import {
   CloseCircleTwoTone,
   QuestionCircleTwoTone,
   ClockCircleTwoTone,
+  StopOutlined,
 } from '@ant-design/icons'
 
 import api from '../../services/api'
@@ -134,11 +138,22 @@ function formatDuration(sec) {
 }
 
 export default function OptimizationCyclesMonitor() {
+  const qc = useQueryClient()
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['ops/optimization-cycles'],
     queryFn: () => api.getOpsOptimizationCycles(14, 100),
     refetchInterval: 30_000,
     staleTime: 10_000,
+  })
+
+  const abortMutation = useMutation({
+    mutationFn: () => api.abortOpsOptimizationBatch(),
+    onSuccess: (res) => {
+      message.warning(res?.message || `已中止本批次,标记 ${res?.aborted_cycles ?? 0} 个 cycle`)
+      qc.invalidateQueries({ queryKey: ['ops/optimization-cycles'] })
+    },
+    onError: (e) =>
+      message.error(e?.response?.data?.detail || e?.message || '中止失败'),
   })
 
   const cycles = data?.cycles || []
@@ -396,7 +411,45 @@ export default function OptimizationCyclesMonitor() {
           </Card>
         </Col>
         <Col xs={24} md={12}>
-          <Card title={`当前进行中 cycle (${runningCycles.length})`} size="small">
+          <Card
+            title={`当前进行中 cycle (${runningCycles.length})`}
+            size="small"
+            extra={
+              runningCycles.length > 0 && (
+                <Popconfirm
+                  title="中止本次 Stage A beat 运行?"
+                  description={
+                    <div style={{ maxWidth: 320 }}>
+                      <Text>会做 3 件事:</Text>
+                      <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
+                        <li>设 Redis abort 标志(worker 跑完当前 cycle 后跳出 for-loop)</li>
+                        <li>把所有进行中 cycle 行标 <Tag color="error" style={{margin:0}}>aborted_by_user:batch</Tag></li>
+                        <li>已 dispatch 到 BRAIN 的 sim 自然完成(不可撤)</li>
+                      </ul>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        下次 6h beat 仍会正常 fire。永久暂停 → 同时翻
+                        ENABLE_OPTIMIZATION_LOOP=false。
+                      </Text>
+                    </div>
+                  }
+                  okText="中止"
+                  okType="danger"
+                  cancelText="取消"
+                  onConfirm={() => abortMutation.mutate()}
+                  disabled={abortMutation.isPending}
+                >
+                  <Button
+                    size="small"
+                    danger
+                    icon={<StopOutlined />}
+                    loading={abortMutation.isPending}
+                  >
+                    中止本批次
+                  </Button>
+                </Popconfirm>
+              )
+            }
+          >
             {runningCycles.length === 0 ? (
               <Text type="secondary">
                 无进行中 cycle。下个 beat: 北京时间 02:15 / 08:15 / 14:15 / 20:15 每 6h fire 一次,单 beat 串行跑 10 个候选 cycle(~2.5-3h 跑完)。
