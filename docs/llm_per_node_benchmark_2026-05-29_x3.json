@@ -1,0 +1,603 @@
+{
+  "runs": 3,
+  "models": [
+    "qwen3.7-max",
+    "qwen3.6-plus",
+    "qwen3.6-flash",
+    "deepseek-v4-pro",
+    "deepseek-v4-flash",
+    "kimi-k2.6",
+    "kimi-k2.5",
+    "glm-5.1",
+    "glm-5"
+  ],
+  "nodes": {
+    "code_gen": {
+      "kind": "expr",
+      "ranking": [
+        {
+          "model": "qwen3.6-plus",
+          "score_mean": 0.7346,
+          "score_std": 0.0466,
+          "avg_latency_s": 137.3333,
+          "tokens": 11417.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.689,
+            "diversity": 1.0,
+            "score": 0.689,
+            "model": "qwen3.6-plus",
+            "calls": 1,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 137.1,
+            "tokens": 11419
+          }
+        },
+        {
+          "model": "glm-5.1",
+          "score_mean": 0.6307,
+          "score_std": 0.0018,
+          "avg_latency_s": 117.9667,
+          "tokens": 9743.6667,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.631,
+            "diversity": 1.0,
+            "score": 0.6313,
+            "model": "glm-5.1",
+            "calls": 1,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 80.8,
+            "tokens": 8163
+          }
+        },
+        {
+          "model": "qwen3.7-max",
+          "score_mean": 0.5601,
+          "score_std": 0.158,
+          "avg_latency_s": 101.6333,
+          "tokens": 9771,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.426,
+            "diversity": 1.0,
+            "score": 0.4256,
+            "model": "qwen3.7-max",
+            "calls": 1,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 94.0,
+            "tokens": 10647
+          }
+        },
+        {
+          "model": "deepseek-v4-pro",
+          "score_mean": 0.5368,
+          "score_std": 0.1088,
+          "avg_latency_s": 146.3667,
+          "tokens": 9073,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.632,
+            "diversity": 1.0,
+            "score": 0.6319,
+            "model": "deepseek-v4-pro",
+            "calls": 1,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 117.0,
+            "tokens": 8563
+          }
+        },
+        {
+          "model": "kimi-k2.5",
+          "score_mean": 0.4982,
+          "score_std": 0.1216,
+          "avg_latency_s": 51.9333,
+          "tokens": 5542.6667,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.377,
+            "diversity": 1.0,
+            "score": 0.3774,
+            "model": "kimi-k2.5",
+            "calls": 1,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 51.2,
+            "tokens": 5433
+          }
+        },
+        {
+          "model": "qwen3.6-flash",
+          "score_mean": 0.4678,
+          "score_std": 0.1087,
+          "avg_latency_s": 61.6,
+          "tokens": 11877.6667,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.581,
+            "diversity": 1.0,
+            "score": 0.581,
+            "model": "qwen3.6-flash",
+            "calls": 1,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 55.4,
+            "tokens": 10909
+          }
+        },
+        {
+          "model": "glm-5",
+          "score_mean": 0.4478,
+          "score_std": 0.1427,
+          "avg_latency_s": 100.1,
+          "tokens": 8204.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.341,
+            "diversity": 1.0,
+            "score": 0.3412,
+            "model": "glm-5",
+            "calls": 1,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 93.1,
+            "tokens": 8795
+          }
+        },
+        {
+          "model": "deepseek-v4-flash",
+          "score_mean": 0.3383,
+          "score_std": 0.3249,
+          "avg_latency_s": 61.6,
+          "tokens": 4114.3333,
+          "sample": {
+            "n": 0,
+            "valid_rate": 0.0,
+            "p_pass": 0.0,
+            "diversity": 0.0,
+            "score": 0.0,
+            "model": "deepseek-v4-flash",
+            "calls": 1,
+            "call_fail": 1,
+            "last_err": "Connection error.",
+            "avg_latency_s": 109.2,
+            "tokens": 0
+          }
+        },
+        {
+          "model": "kimi-k2.6",
+          "score_mean": 0.2173,
+          "score_std": 0.1882,
+          "avg_latency_s": 36.5333,
+          "tokens": 3711.3333,
+          "sample": {
+            "n": 0,
+            "valid_rate": 0.0,
+            "p_pass": 0.0,
+            "diversity": 0.0,
+            "score": 0.0,
+            "model": "kimi-k2.6",
+            "calls": 1,
+            "call_fail": 1,
+            "last_err": "Request timed out.",
+            "avg_latency_s": 13.4,
+            "tokens": 0
+          }
+        }
+      ]
+    },
+    "self_correct": {
+      "kind": "expr",
+      "ranking": [
+        {
+          "model": "deepseek-v4-flash",
+          "score_mean": 0.435,
+          "score_std": 0.0,
+          "avg_latency_s": 12.5,
+          "tokens": 11900.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.435,
+            "diversity": 1.0,
+            "score": 0.435,
+            "fix_rate": 1.0,
+            "model": "deepseek-v4-flash",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 12.7,
+            "tokens": 12193
+          }
+        },
+        {
+          "model": "qwen3.6-plus",
+          "score_mean": 0.4177,
+          "score_std": 0.0299,
+          "avg_latency_s": 33.5667,
+          "tokens": 16616,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.435,
+            "diversity": 1.0,
+            "score": 0.435,
+            "fix_rate": 1.0,
+            "model": "qwen3.6-plus",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 34.8,
+            "tokens": 16980
+          }
+        },
+        {
+          "model": "deepseek-v4-pro",
+          "score_mean": 0.4133,
+          "score_std": 0.0694,
+          "avg_latency_s": 34.7333,
+          "tokens": 11165.3333,
+          "sample": {
+            "n": 4,
+            "valid_rate": 1.0,
+            "p_pass": 0.488,
+            "diversity": 1.0,
+            "score": 0.4877,
+            "fix_rate": 0.8,
+            "model": "deepseek-v4-pro",
+            "calls": 5,
+            "call_fail": 1,
+            "last_err": "Connection error.",
+            "avg_latency_s": 50.0,
+            "tokens": 9054
+          }
+        },
+        {
+          "model": "qwen3.6-flash",
+          "score_mean": 0.402,
+          "score_std": 0.0,
+          "avg_latency_s": 15.2667,
+          "tokens": 17670.6667,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.402,
+            "diversity": 1.0,
+            "score": 0.402,
+            "fix_rate": 1.0,
+            "model": "qwen3.6-flash",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 17.0,
+            "tokens": 18279
+          }
+        },
+        {
+          "model": "qwen3.7-max",
+          "score_mean": 0.4005,
+          "score_std": 0.0299,
+          "avg_latency_s": 20.2667,
+          "tokens": 13273.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.435,
+            "diversity": 1.0,
+            "score": 0.435,
+            "fix_rate": 1.0,
+            "model": "qwen3.7-max",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 14.9,
+            "tokens": 12544
+          }
+        },
+        {
+          "model": "kimi-k2.5",
+          "score_mean": 0.3612,
+          "score_std": 0.0191,
+          "avg_latency_s": 12.7,
+          "tokens": 9464.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.383,
+            "diversity": 1.0,
+            "score": 0.3832,
+            "fix_rate": 1.0,
+            "model": "kimi-k2.5",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 11.8,
+            "tokens": 9538
+          }
+        },
+        {
+          "model": "glm-5",
+          "score_mean": 0.3612,
+          "score_std": 0.0191,
+          "avg_latency_s": 24.2333,
+          "tokens": 10794,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.35,
+            "diversity": 1.0,
+            "score": 0.3502,
+            "fix_rate": 1.0,
+            "model": "glm-5",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 18.5,
+            "tokens": 10694
+          }
+        },
+        {
+          "model": "kimi-k2.6",
+          "score_mean": 0.3502,
+          "score_std": 0.0,
+          "avg_latency_s": 13.4333,
+          "tokens": 9699,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.35,
+            "diversity": 1.0,
+            "score": 0.3502,
+            "fix_rate": 1.0,
+            "model": "kimi-k2.6",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 13.4,
+            "tokens": 9732
+          }
+        },
+        {
+          "model": "glm-5.1",
+          "score_mean": 0.3502,
+          "score_std": 0.0,
+          "avg_latency_s": 16.7,
+          "tokens": 10524.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.35,
+            "diversity": 1.0,
+            "score": 0.3502,
+            "fix_rate": 1.0,
+            "model": "glm-5.1",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 17.2,
+            "tokens": 10940
+          }
+        }
+      ]
+    },
+    "r1b_retry": {
+      "kind": "expr",
+      "ranking": [
+        {
+          "model": "qwen3.6-flash",
+          "score_mean": 0.4147,
+          "score_std": 0.0409,
+          "avg_latency_s": 17.3667,
+          "tokens": 17068,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.42,
+            "diversity": 1.0,
+            "score": 0.4203,
+            "fix_rate": 1.0,
+            "model": "qwen3.6-flash",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 17.7,
+            "tokens": 17024
+          }
+        },
+        {
+          "model": "qwen3.6-plus",
+          "score_mean": 0.3697,
+          "score_std": 0.0046,
+          "avg_latency_s": 60.4,
+          "tokens": 22417.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.365,
+            "diversity": 1.0,
+            "score": 0.3645,
+            "fix_rate": 1.0,
+            "model": "qwen3.6-plus",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 60.0,
+            "tokens": 22346
+          }
+        },
+        {
+          "model": "deepseek-v4-pro",
+          "score_mean": 0.3676,
+          "score_std": 0.0692,
+          "avg_latency_s": 41.2667,
+          "tokens": 12421.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.289,
+            "diversity": 1.0,
+            "score": 0.2886,
+            "fix_rate": 1.0,
+            "model": "deepseek-v4-pro",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 47.2,
+            "tokens": 13271
+          }
+        },
+        {
+          "model": "glm-5",
+          "score_mean": 0.3563,
+          "score_std": 0.0646,
+          "avg_latency_s": 26.2,
+          "tokens": 10197.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.402,
+            "diversity": 1.0,
+            "score": 0.4024,
+            "fix_rate": 1.0,
+            "model": "glm-5",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 19.6,
+            "tokens": 8988
+          }
+        },
+        {
+          "model": "deepseek-v4-flash",
+          "score_mean": 0.342,
+          "score_std": 0.0141,
+          "avg_latency_s": 16.3333,
+          "tokens": 11371,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.35,
+            "diversity": 1.0,
+            "score": 0.3502,
+            "fix_rate": 1.0,
+            "model": "deepseek-v4-flash",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 15.1,
+            "tokens": 12068
+          }
+        },
+        {
+          "model": "glm-5.1",
+          "score_mean": 0.3066,
+          "score_std": 0.0161,
+          "avg_latency_s": 21.9667,
+          "tokens": 10411.6667,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.302,
+            "diversity": 1.0,
+            "score": 0.3022,
+            "fix_rate": 1.0,
+            "model": "glm-5.1",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 20.1,
+            "tokens": 10114
+          }
+        },
+        {
+          "model": "qwen3.7-max",
+          "score_mean": 0.2842,
+          "score_std": 0.0144,
+          "avg_latency_s": 29.2333,
+          "tokens": 14292,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.311,
+            "diversity": 0.8,
+            "score": 0.2798,
+            "fix_rate": 1.0,
+            "model": "qwen3.7-max",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 30.6,
+            "tokens": 14958
+          }
+        },
+        {
+          "model": "kimi-k2.5",
+          "score_mean": 0.2787,
+          "score_std": 0.0279,
+          "avg_latency_s": 3.6667,
+          "tokens": 6475.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.298,
+            "diversity": 1.0,
+            "score": 0.2977,
+            "fix_rate": 1.0,
+            "model": "kimi-k2.5",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 3.9,
+            "tokens": 6464
+          }
+        },
+        {
+          "model": "kimi-k2.6",
+          "score_mean": 0.2684,
+          "score_std": 0.0016,
+          "avg_latency_s": 3.6667,
+          "tokens": 6408.3333,
+          "sample": {
+            "n": 5,
+            "valid_rate": 1.0,
+            "p_pass": 0.267,
+            "diversity": 1.0,
+            "score": 0.2672,
+            "fix_rate": 1.0,
+            "model": "kimi-k2.6",
+            "calls": 5,
+            "call_fail": 0,
+            "last_err": null,
+            "avg_latency_s": 4.0,
+            "tokens": 6410
+          }
+        }
+      ]
+    }
+  },
+  "recommendation_LLM_FUNCTION_MODEL_MAP": {
+    "code_gen": {
+      "model": "qwen3.6-plus",
+      "provider": "openai"
+    },
+    "self_correct": {
+      "model": "deepseek-v4-flash",
+      "provider": "openai"
+    },
+    "r1b_retry": {
+      "model": "qwen3.6-flash",
+      "provider": "openai"
+    }
+  }
+}

@@ -59,8 +59,9 @@ _THINKING_EFFORT_OVERRIDES_CACHE: Dict[str, str] = _load_thinking_overrides()
 def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
     """Load the per-functional-block (node_key) → {model, provider, ...} routing map.
 
-    Default is the per-node benchmark recommendation (runs=1, 2026-05-29 —
-    docs/llm_per_node_benchmark_2026-05-29_FINAL.json; pending runs=3 finalize).
+    Default is the per-node benchmark recommendation (2026-05-29 — code_gen/
+    self_correct/r1b_retry finalized at runs=3, others runs=1; see
+    docs/llm_per_node_benchmark_2026-05-29_FINAL.json).
     This is only the STARTUP default — the ops console writes overrides into
     ``_flag_override_cache["LLM_FUNCTION_MODEL_MAP"]`` (a json feature-flag) which
     ``resolve_model_for`` consults FIRST. The whole map is consulted only when
@@ -70,13 +71,18 @@ def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
     LLM_FUNCTION_MODEL_MAP env never crashes Settings() construction. env keys
     merge OVER the defaults (partial-override).
     """
+    # Per-node benchmark FINAL (2026-05-29): code_gen/self_correct/r1b_retry =
+    # runs=3 means (runs=1 was unreliable — dsv4-flash code_gen std 0.32);
+    # others = runs=1 (Phase C A/B re-validates). code_gen=qwen3.6-plus is the
+    # quality pick (0.735) accepting ~137s/call. docs/llm_per_node_benchmark_
+    # 2026-05-29_FINAL.json.
     defaults: Dict[str, Dict[str, str]] = {
         "hypothesis":          {"model": "deepseek-v4-pro",   "provider": "openai"},
-        "code_gen":            {"model": "deepseek-v4-flash", "provider": "openai"},
-        "self_correct":        {"model": "qwen3.7-max",       "provider": "openai"},
-        "r1b_retry":           {"model": "glm-5",             "provider": "openai"},
+        "code_gen":            {"model": "qwen3.6-plus",      "provider": "openai"},
+        "self_correct":        {"model": "deepseek-v4-flash", "provider": "openai"},
+        "r1b_retry":           {"model": "qwen3.6-flash",     "provider": "openai"},
         "llm_mutate_alpha":    {"model": "kimi-k2.5",         "provider": "openai"},
-        "llm_crossover_alpha": {"model": "deepseek-v4-flash", "provider": "openai"},
+        "llm_crossover_alpha": {"model": "kimi-k2.5",         "provider": "openai"},
         "r1b_mutate":          {"model": "kimi-k2.6",         "provider": "openai"},
         "r5_alignment_c1":     {"model": "deepseek-v4-flash", "provider": "openai"},
         "r5_alignment_c2":     {"model": "kimi-k2.6",         "provider": "openai"},
