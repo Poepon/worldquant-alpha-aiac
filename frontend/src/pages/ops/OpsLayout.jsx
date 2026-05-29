@@ -27,6 +27,7 @@ import G3v2Monitor from './G3v2Monitor'
 import SubmitBacklogMonitor from './SubmitBacklogMonitor'
 import OptimizationCyclesMonitor from './OptimizationCyclesMonitor'
 import OrchestratorMonitor from './OrchestratorMonitor'
+import LLMRoutingConsole from './LLMRoutingConsole'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -68,6 +69,8 @@ export default function OpsLayout() {
         <Route path="optimization-cycles" element={<OptimizationCyclesMonitor />} />
         {/* Phase 1 — Feature Flag Console */}
         <Route path="feature-flags" element={<FeatureFlagsConsole />} />
+        {/* LLM-Routing PR4 (2026-05-29) — per-function model routing editor */}
+        <Route path="llm-routing" element={<LLMRoutingConsole />} />
         {/* Phase 2 — P1 visualizations */}
         <Route path="overview" element={<OpsOverview />} />
         <Route path="alpha-health" element={<AlphaHealthMonitor />} />

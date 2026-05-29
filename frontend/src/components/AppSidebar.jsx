@@ -65,6 +65,7 @@ const menuItems = [
       { key: '/ops/optimization-cycles', icon: <ThunderboltOutlined />, label: '优化闭环 (Stage A)' },
       { key: '/ops/orchestrator', icon: <ThunderboltOutlined />, label: 'Orchestrator (Phase 1)' },
       { key: '/ops/feature-flags', label: 'Feature Flag' },
+      { key: '/ops/llm-routing', icon: <FunctionOutlined />, label: 'LLM 路由' },
       { key: '/ops/alpha-health', label: 'Alpha 健康度' },
       { key: '/ops/hypothesis-health', label: 'Hypothesis 触发器' },
       { key: '/ops/pillar-balance', label: '五支柱平衡' },
