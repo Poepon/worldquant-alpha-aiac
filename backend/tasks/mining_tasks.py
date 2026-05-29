@@ -1069,18 +1069,6 @@ async def _rebuild_flat_db_session(old_db, task_id, run_id, brain):
     return new_db, task, run, mining_agent
 
 
-def _pick_least_covered_dataset(datasets, coverage):
-    """Diversity steering (option C / MAP-Elites coverage axis = dataset): pick
-    the dataset with the FEWEST candidates generated so far this session. min()
-    returns the first least-covered in list order, so it round-robins through
-    all distinct datasets before repeating any — spreading a session across the
-    breadth axis (data sources) instead of concentrating on the first dataset.
-    """
-    if not datasets:
-        return None
-    return min(datasets, key=lambda d: coverage.get(d, 0))
-
-
 def _pick_diverse_dataset(datasets, dataset_cov, category_cov, category_of):
     """Option C step-3 explore: pick the dataset minimizing (category coverage,
     dataset coverage) — i.e. spread across data-source CATEGORIES first (the v3

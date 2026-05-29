@@ -156,7 +156,7 @@ task A 跑 100 iter → COMPLETED(干净终态) → 烧 400 sim 0 PASS
 
 ### ⚪ Dead code — Phase D 直接删
 
-- `_pick_least_covered_dataset()` (1238-1247):**生产 0 命中**,只被 `test_flat_pipeline_dispatch.py:118-134` 调。早期 Option C step-1 使用,后被 step-3 `_pick_diverse_dataset` 取代但未清理
+- ~~`_pick_least_covered_dataset()`~~:**已删** (2026-05-29 晚,Phase D 提前)。生产 0 命中,只被 test 调,早期 Option C step-1 使用后被 step-3 `_pick_diverse_dataset` 取代
 
 ### 📝 docstring / 注释引用清理 (Phase C 顺手,一次性)
 
