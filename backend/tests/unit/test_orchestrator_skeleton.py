@@ -176,3 +176,134 @@ async def test_evaluate_task_not_finalized(monkeypatch):
     out = await m._evaluate_async(7, source="event")
     assert out["skipped_reason"] == m.SKIP_NOT_FINALIZED
     assert out["task_status"] == "RUNNING"
+
+
+# ---------------------------------------------------------------------------
+# Sub-phase 3: weighted sampling + select_launch_params 规则引擎
+# ---------------------------------------------------------------------------
+
+def test_weighted_sample_one_basic():
+    """全相同权重退化到均匀随机;weight=0 不会被选中。"""
+    import random
+    from backend.tasks.orchestrator import _weighted_sample_one
+    rng = random.Random(42)
+    # 全相同权重 — 大样本应均匀
+    counts = {"a": 0, "b": 0, "c": 0}
+    for _ in range(3000):
+        pick = _weighted_sample_one({"a": 1.0, "b": 1.0, "c": 1.0}, rng)
+        counts[pick] += 1
+    # 每个应在 1000 ± 200(松紧度允许)
+    for k, v in counts.items():
+        assert 800 < v < 1200, f"{k} should be ~1000, got {v}"
+
+
+def test_weighted_sample_one_skew():
+    """权重 10x 大致 10x 被选中。"""
+    import random
+    from backend.tasks.orchestrator import _weighted_sample_one
+    rng = random.Random(42)
+    counts = {"a": 0, "b": 0}
+    for _ in range(3000):
+        pick = _weighted_sample_one({"a": 10.0, "b": 1.0}, rng)
+        counts[pick] += 1
+    # 期望 ~2727:273
+    assert 2500 < counts["a"] < 2900
+    assert 200 < counts["b"] < 500
+
+
+def test_weighted_sample_one_zero_weights():
+    """所有权重 0 → None,不无限循环。"""
+    import random
+    from backend.tasks.orchestrator import _weighted_sample_one
+    assert _weighted_sample_one({"a": 0, "b": 0}, random.Random(1)) is None
+    assert _weighted_sample_one({}, random.Random(1)) is None
+
+
+def test_weighted_sample_top_k_no_dup():
+    """top-K 不重复;k > pool size → 返回 pool size 个。"""
+    import random
+    from backend.tasks.orchestrator import _weighted_sample_top_k
+    rng = random.Random(7)
+    picks = _weighted_sample_top_k(
+        {"a": 5.0, "b": 3.0, "c": 1.0}, k=2, rng=rng,
+    )
+    assert len(picks) == 2
+    assert len(set(picks)) == 2  # 无重复
+    # k > pool
+    picks2 = _weighted_sample_top_k(
+        {"a": 1.0, "b": 1.0}, k=5, rng=rng,
+    )
+    assert len(picks2) == 2
+
+
+@pytest.mark.asyncio
+async def test_select_launch_params_cold_start(monkeypatch):
+    """无历史数据 → fallback 到 finalize 触发 task 的 region/universe + 空 datasets。"""
+    from types import SimpleNamespace
+    from backend.tasks import orchestrator as m
+
+    async def _empty_regions(db, lookback):
+        return {}
+
+    async def _empty_datasets(db, region, lookback):
+        return {}
+
+    monkeypatch.setattr(m, "_compute_region_pass_rates", _empty_regions)
+    monkeypatch.setattr(m, "_compute_dataset_pass_rates", _empty_datasets)
+
+    task = SimpleNamespace(region="USA", universe="TOP3000")
+    params = await m._select_launch_params(db=None, finalized_task=task)
+    assert params["region"] == "USA"
+    assert params["universe"] == "TOP3000"
+    assert params["datasets"] == []
+    assert params["delay"] == 1
+    assert params["_decision_meta"]["region_pool_size"] == 0
+
+
+@pytest.mark.asyncio
+async def test_select_launch_params_warm(monkeypatch):
+    """有历史数据 → 加权采样选 region + top-N dataset。"""
+    from types import SimpleNamespace
+    from backend.tasks import orchestrator as m
+
+    async def _warm_regions(db, lookback):
+        return {
+            "USA": {"passes": 50, "total": 100, "weight": 0.5},
+            "CHN": {"passes": 10, "total": 100, "weight": 0.108},
+        }
+
+    async def _warm_datasets(db, region, lookback):
+        return {
+            "fundamental6": {"passes": 30, "total": 50, "weight": 0.59},
+            "analyst4": {"passes": 5, "total": 50, "weight": 0.115},
+            "pv1": {"passes": 20, "total": 100, "weight": 0.205},
+        }
+
+    monkeypatch.setattr(m, "_compute_region_pass_rates", _warm_regions)
+    monkeypatch.setattr(m, "_compute_dataset_pass_rates", _warm_datasets)
+
+    task = SimpleNamespace(region="USA", universe="TOP3000")
+    params = await m._select_launch_params(db=None, finalized_task=task)
+    assert params["region"] in {"USA", "CHN"}  # 加权采样
+    assert 1 <= len(params["datasets"]) <= 3
+    assert params["_decision_meta"]["region_pool_size"] == 2
+    assert params["_decision_meta"]["dataset_pool_size"] == 3
+
+
+@pytest.mark.asyncio
+async def test_select_launch_params_no_fallback_region(monkeypatch):
+    """finalize task 缺 region/universe → 不报错,返回 None。"""
+    from types import SimpleNamespace
+    from backend.tasks import orchestrator as m
+    task = SimpleNamespace(region=None, universe=None)
+    out = await m._select_launch_params(db=None, finalized_task=task)
+    assert out is None
+
+
+def test_orchestrator_thresholds_includes_sub3():
+    """Sub-phase 3 config 新加 4 项可用。"""
+    from backend.config import settings
+    assert getattr(settings, "ORCHESTRATOR_LOOKBACK_DAYS", None) == 7
+    assert getattr(settings, "ORCHESTRATOR_PRIOR_PASSES", None) == 1
+    assert getattr(settings, "ORCHESTRATOR_PRIOR_FAILS", None) == 1
+    assert getattr(settings, "ORCHESTRATOR_DATASETS_PER_TASK", None) == 3

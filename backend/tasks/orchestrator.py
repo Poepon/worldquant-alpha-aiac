@@ -369,20 +369,159 @@ def _finalize_age_minutes(task) -> Optional[float]:
 # Launch param selection + actual launch
 # ---------------------------------------------------------------------------
 
-async def _select_launch_params(db, finalized_task) -> Optional[Dict[str, Any]]:
-    """选下一个 task 的参数(Sub-phase 2 占位:复用刚 finalize 的 region;
-    Sub-phase 3 改成历史 PASS rate EMA 加权选 region/dataset)。
+async def _compute_region_pass_rates(db, lookback_days: int) -> Dict[str, Dict[str, float]]:
+    """7d 历史 per region (PASS count, total mining-direct alpha) → Beta-Bernoulli
+    后验均值 (passes + α) / (total + α + β),作为 region 的"value"。
+
+    Returns: dict[region, {"passes": N, "total": M, "weight": float}].
+    无数据的 region 不在 dict 内(由 caller 补 prior-only 或 cold-start)。
     """
-    region = getattr(finalized_task, "region", None)
-    universe = getattr(finalized_task, "universe", None)
-    if not region or not universe:
+    from backend.config import settings
+    from backend.models import Alpha
+    from sqlalchemy import case
+
+    α = int(getattr(settings, "ORCHESTRATOR_PRIOR_PASSES", 1))
+    β = int(getattr(settings, "ORCHESTRATOR_PRIOR_FAILS", 1))
+    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+    rows = (await db.execute(
+        select(
+            Alpha.region,
+            func.count(Alpha.id).label("total"),
+            func.sum(case((Alpha.quality_status == "PASS", 1), else_=0)).label("passes"),
+        ).where(
+            Alpha.created_at >= cutoff,
+            Alpha.task_id.isnot(None),
+        ).group_by(Alpha.region)
+    )).all()
+
+    out: Dict[str, Dict[str, float]] = {}
+    for region, total, passes in rows:
+        if not region:
+            continue
+        passes = int(passes or 0)
+        total = int(total or 0)
+        weight = (passes + α) / (total + α + β)
+        out[region] = {"passes": passes, "total": total, "weight": weight}
+    return out
+
+
+async def _compute_dataset_pass_rates(
+    db, region: str, lookback_days: int,
+) -> Dict[str, Dict[str, float]]:
+    """同 region 内 per dataset 7d 历史 → Beta-Bernoulli posterior 加权。"""
+    from backend.config import settings
+    from backend.models import Alpha
+    from sqlalchemy import case
+
+    α = int(getattr(settings, "ORCHESTRATOR_PRIOR_PASSES", 1))
+    β = int(getattr(settings, "ORCHESTRATOR_PRIOR_FAILS", 1))
+    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+
+    rows = (await db.execute(
+        select(
+            Alpha.dataset_id,
+            func.count(Alpha.id).label("total"),
+            func.sum(case((Alpha.quality_status == "PASS", 1), else_=0)).label("passes"),
+        ).where(
+            Alpha.created_at >= cutoff,
+            Alpha.task_id.isnot(None),
+            Alpha.region == region,
+            Alpha.dataset_id.isnot(None),
+        ).group_by(Alpha.dataset_id)
+    )).all()
+
+    out: Dict[str, Dict[str, float]] = {}
+    for did, total, passes in rows:
+        if not did:
+            continue
+        passes = int(passes or 0)
+        total = int(total or 0)
+        weight = (passes + α) / (total + α + β)
+        out[did] = {"passes": passes, "total": total, "weight": weight}
+    return out
+
+
+def _weighted_sample_one(items_with_weights: Dict[str, float], rng) -> Optional[str]:
+    """加权随机采样一个 key。weight ≤ 0 视为 0;全 0 返回 None。"""
+    items = [(k, max(0.0, float(v))) for k, v in items_with_weights.items()]
+    total = sum(w for _, w in items)
+    if total <= 0:
         return None
-    # 默认 AUTO datasets(让 _get_datasets_to_mine 选),delay=1(established)
+    r = rng.random() * total
+    cum = 0.0
+    for k, w in items:
+        cum += w
+        if r <= cum:
+            return k
+    return items[-1][0]  # 浮点漂移兜底
+
+
+def _weighted_sample_top_k(
+    items_with_weights: Dict[str, float], k: int, rng,
+) -> List[str]:
+    """加权抽 k 个不重复 key(无放回:依次抽取后移除)。"""
+    pool = dict(items_with_weights)
+    out: List[str] = []
+    for _ in range(min(k, len(pool))):
+        pick = _weighted_sample_one(pool, rng)
+        if pick is None:
+            break
+        out.append(pick)
+        pool.pop(pick, None)
+    return out
+
+
+async def _select_launch_params(db, finalized_task) -> Optional[Dict[str, Any]]:
+    """Sub-phase 3 规则引擎:7d Beta-Bernoulli posterior 加权 region + dataset 采样。
+
+    Cold-start fallback:无历史数据 → 复用 finalize 触发 task 的 region/universe + AUTO datasets。
+    """
+    import random
+    from backend.config import settings
+    from backend.services.task_service import TaskService
+
+    rng = random
+    lookback = int(getattr(settings, "ORCHESTRATOR_LOOKBACK_DAYS", 7))
+    n_datasets = int(getattr(settings, "ORCHESTRATOR_DATASETS_PER_TASK", 3))
+
+    fallback_region = getattr(finalized_task, "region", None)
+    fallback_universe = getattr(finalized_task, "universe", None)
+    if not fallback_region or not fallback_universe:
+        return None
+
+    # 1. 加权选 region(限制在 SUPPORTED_REGIONS)
+    region_stats = await _compute_region_pass_rates(db, lookback)
+    supported = set(TaskService.SUPPORTED_REGIONS)
+    region_weights = {
+        r: s["weight"] for r, s in region_stats.items() if r in supported
+    }
+    chosen_region = _weighted_sample_one(region_weights, rng) if region_weights else None
+    if chosen_region is None:
+        # Cold start:无历史 → fallback
+        chosen_region = fallback_region
+
+    # 2. 加权选 datasets(top-N,不重复)
+    dataset_stats = await _compute_dataset_pass_rates(db, chosen_region, lookback)
+    dataset_weights = {did: s["weight"] for did, s in dataset_stats.items()}
+    chosen_datasets = (
+        _weighted_sample_top_k(dataset_weights, n_datasets, rng)
+        if dataset_weights else []
+    )
+    # Cold-start datasets:空 list → start_flat_session 走 AUTO
+
+    # 3. universe + delay 继承(orchestrator 不改这俩,Phase 2 可能加 bandit)
     return {
-        "region": region,
-        "universe": universe,
-        "datasets": [],
+        "region": chosen_region,
+        "universe": fallback_universe,
+        "datasets": chosen_datasets,
         "delay": 1,
+        "_decision_meta": {
+            "region_pool_size": len(region_weights),
+            "region_chosen_weight": region_weights.get(chosen_region),
+            "dataset_pool_size": len(dataset_weights),
+            "lookback_days": lookback,
+        },
     }
 
 

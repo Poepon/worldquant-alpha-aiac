@@ -760,6 +760,11 @@ class Settings(BaseSettings):
     ORCHESTRATOR_BACKOFF_HOURS: int = 2          # 同参数 launch 连续失败 N=3 后 backoff 时长
     ORCHESTRATOR_SHORT_LIVED_MIN: int = 5        # task ≤ 此分钟 + 0 alpha 标"短命",不算让位
     ORCHESTRATOR_IDEMPOTENCY_MIN: int = 5        # 防双发窗口
+    # Sub-phase 3: 规则引擎 — 历史 PASS rate Beta-Bernoulli posterior 加权采样
+    ORCHESTRATOR_LOOKBACK_DAYS: int = 7          # 历史窗口
+    ORCHESTRATOR_PRIOR_PASSES: int = 1           # Beta-Bernoulli α 先验
+    ORCHESTRATOR_PRIOR_FAILS: int = 1            # Beta-Bernoulli β 先验
+    ORCHESTRATOR_DATASETS_PER_TASK: int = 3      # 每个 task 选 top-N dataset
     # ----- R1b outcome reconciliation (Break 2 fix, 2026-05-22) -----
     # Max pending r1b_retry_log rows reconcile_r1b_outcomes processes per run.
     R1B_RECONCILE_MAX_ROWS: int = 1000
