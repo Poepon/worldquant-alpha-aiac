@@ -105,15 +105,99 @@ EMA 状态 `task.config[stop_loss_state]` 复用串行同 key(`task_stop_loss_se
 
 ---
 
-## 5. 开工前必决问题(占位)
+## 5. 开工前必决问题 + v0 推荐(2026-05-29 晚)
 
-- Q1: orchestrator 跑在哪里 — celery beat / 独立 daemon / FastAPI 后台 task?
-- Q2: 决策频率 — 事件驱动(task 终态变化触发)还是 cron 定时(每 N 分钟扫一次)?
-- Q3: 是否引入 RL / bandit 选 task 参数(region/dataset/hypothesis)还是规则驱动?(参考已有 `dataset_value_bandit`)
-- Q4: 多账号(USER + CONSULTANT)配额池怎么协调?
-- Q5: 安全阈值 — orchestrator 最多同时开几个 task / 每日 launch 上限是多少?
-- Q6: 用户 override — 手动开的 task 是否豁免 orchestrator 决策?
-- Q7: 与现有 `watchdog_revive_dead_sessions` / `quota_guard_pause_at_threshold` 怎么协作?(谁先 fire)
+> 状态:草稿推荐 / 等用户审批。每个 Q 给推荐 + 理由 + 备选。
+
+### Q1: orchestrator 跑在哪里 — celery beat / 独立 daemon / FastAPI 后台 task?
+
+**推荐:celery beat**(轻量 cron 任务,与现有 maintenance task 同栈)
+- ✅ 已是项目 scheduler 入口,`watchdog_revive_dead_sessions` / `quota_guard_pause_at_threshold` 在此 — 同样的"扫描决策"性质
+- ✅ 不增运维负担(无新进程/端口)
+- ✅ Windows `--pool=solo` 不阻碍(orchestrator 决策 <30s,不抢 mining-worker)
+- ❌ celery beat 单线程 — 但决策本身轻量,不构成瓶颈
+
+**备选**:独立 daemon(更隔离但增加运维) / FastAPI 后台 task(生命周期绑服务不稳)
+
+### Q2: 决策频率 — 事件驱动 vs cron 定时?
+
+**推荐:cron 每 10 分钟**(与 `quota_guard` 同步,但偏移 5 分钟)
+- ✅ mining task 自然时长是小时级,10min 决策延迟可忽略
+- ✅ 事件驱动需要 post-finalize hook + 事件 bus,实现复杂
+- ✅ cron 容易观察(每 tick 一条 log)
+- 偏移 5 min:`quota_guard` 在 :00/:10/:20...,orchestrator 在 :05/:15/:25...,读 quota_guard 最新状态
+
+**备选**:事件驱动(精度高但工程量大,推迟到 Phase 2)
+
+### Q3: RL/bandit 选参数还是规则驱动?
+
+**推荐:Phase 1 规则驱动**(经验阈值 + 历史 PASS rate 加权),**Phase 2 升 bandit**
+- ✅ RL/bandit 冷启动慢(需累积 mining → submit pass-rate 全链路反馈)
+- ✅ 规则可立即落地,可观察
+- ✅ 参考已有 `dataset_value_bandit`(Beta-Bernoulli),Phase 2 复用 sampling 框架
+- Phase 1 规则示例:历史 PASS rate top-3 region/dataset 加权采样,每周 EMA 半衰期
+
+**备选**:直接上 bandit(冷启慢,3-7 天产能损失)
+
+### Q4: 多账号配额池?
+
+**推荐:不管多账号,读 `BrainAdapter._current_sim_slot_limit()` 即可**
+- ✅ 项目当前不是真多账号 — USER (3 slot) vs CONSULTANT (80 slot) 是同账号 role 切换,通过 `ENABLE_BRAIN_CONSULTANT_MODE` flag
+- ✅ `_current_sim_slot_limit()` 实时返回 effective 值(不可缓存,见 §2.4)
+- ✅ Consultant 升级后自动扩容,不需 orchestrator 改逻辑
+- 真多账号需求来时(Phase 3?)再设计 account-aware 池
+
+**备选**:预先建多账号池(过早工程化,YAGNI)
+
+### Q5: 安全阈值(防 orchestrator 自烧)
+
+**推荐保守起步**:
+- `max RUNNING task` = **3**(慢起,Phase B 观察 PASS rate 后调)
+- 每日 launch 上限 = **10**(单 task 400 sim 上限,10 × 400 = 4000 sim,远超 quota_guard 阈值 900 → quota_guard 兜底)
+- 单参数 launch 连续失败 **N=3** → backoff 2h
+- launch 后 task 在 **≤5min** 内 COMPLETED + total_alphas=0 → 标"短命"不算让位(见 §2.5)
+
+**备选**:激进阈值(max 8 / daily 20)— Phase 1 不推荐,无 observ 数据
+
+### Q6: 用户 override?
+
+**推荐:manual_override 标记 + orchestrator 跳过非自己启的 task**
+- ✅ 用户手动 `POST /ops/start-flat-session` 写 `task.config["launched_by"]="manual"`
+- ✅ orchestrator 启的 task 写 `task.config["launched_by"]="orchestrator"`
+- ✅ orchestrator 让位决策只对自己启的 task 生效(自己不动 user 的)
+- ✅ user 仍可手动 PAUSE/STOP/RESUME 任何 task
+- 缺省值 "manual"(向后兼容历史 task)
+
+**备选**:orchestrator 接管全部 task(过度自动化,违反用户主权)
+
+### Q7: 与现有 watchdog/quota_guard 协作?
+
+**推荐 cron schedule 错峰**:
+- `quota_guard_pause_at_threshold` @ :00/:10/:20...(已存在,不改)
+- `watchdog_revive_dead_sessions` @ :00/:05/:10...(已存在,5min 间隔)
+- **orchestrator @ :05/:15/:25...**(新增,10min 间隔,偏移 5min 让 quota_guard 先跑)
+- 协作语义:
+  - `quota_guard` PAUSE 配额超阈值的 task → orchestrator 不会立即重新 launch(读 quota_guard 当日累计)
+  - `watchdog_revive` 复活 RUNNING-stale → orchestrator 不冲突(它启新 task,不动 stale)
+  - orchestrator launch task 后 5min 内挂(配置错)→ 标短命,不让位
+
+**备选**:同时 fire(无意义争锁)/ orchestrator 早于 quota_guard(读不到当日最新累计)
+
+---
+
+## 6. 决策汇总表(供审批)
+
+| Q | 推荐 | 实施工作量 |
+|---|---|---|
+| Q1 | celery beat | 0.2d(新增 beat schedule + task module) |
+| Q2 | cron 10min(:05 偏移) | 包含在 Q1 |
+| Q3 | Phase 1 规则,Phase 2 bandit | Phase 1 = 0.5d 规则 + EMA;Phase 2 单独 plan |
+| Q4 | 读 `_current_sim_slot_limit()` 即可 | 0d(已有 API) |
+| Q5 | max 3 / daily 10 / backoff 2h / 短命 5min | 0.3d 实现 + 配置 |
+| Q6 | `task.config["launched_by"]` | 0.2d(新 field + start_flat_session 默认 manual) |
+| Q7 | :05 偏移 cron + 状态读 | 包含在 Q1 |
+
+**Phase 1 总工作量**:~1.2d(规则驱动 + Q4-Q7 工程接线),前置依赖见 §4。
 
 ---
 
