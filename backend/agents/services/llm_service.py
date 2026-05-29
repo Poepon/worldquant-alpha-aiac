@@ -8,6 +8,7 @@ High cohesion: All LLM-related logic in one place.
 import asyncio
 import json
 import time
+from contextvars import ContextVar
 from typing import Dict, List, Optional, Any, Type, Tuple
 from pydantic import BaseModel
 import httpx
@@ -159,61 +160,97 @@ def _llm_error_is_api_failure(exc: BaseException) -> bool:
 # ---------------------------------------------------------------------------
 _VALID_PROVIDERS = frozenset({"openai", "anthropic"})
 
+# Per-task node→model overrides (from task.config["llm_overrides"]), bound to the
+# current async context (PR5). A ContextVar — NOT instance state — so concurrent
+# mining tasks and the pipeline producer/consumer coroutines never bleed each
+# other's overrides (mirrors PR2's per-call concurrency contract). Child tasks
+# created after the set() inherit a copy of the context.
+_TASK_FN_OVERRIDES: ContextVar = ContextVar("task_llm_function_overrides", default=None)
+
+
+def set_task_function_overrides(overrides):
+    """Bind per-task node→model overrides to the current async context.
+
+    Independent of the global ENABLE_PER_FUNCTION_LLM_ROUTING flag → enables a
+    single-task single-node A/B (Phase C attribution): the global flag can stay
+    OFF while one task routes one node. Non-dict → cleared. Returns the reset Token.
+    """
+    return _TASK_FN_OVERRIDES.set(overrides if isinstance(overrides, dict) else None)
+
+
+def clear_task_function_overrides(token=None):
+    """Clear per-task overrides; resets to the Token returned by set_* when given
+    (preferred — restores the prior context value instead of blanking it)."""
+    if token is not None:
+        try:
+            _TASK_FN_OVERRIDES.reset(token)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    _TASK_FN_OVERRIDES.set(None)
+
+
+def _validate_model_entry(entry) -> Optional[Dict[str, Any]]:
+    """Validate + shallow-copy a ``{model, provider, ...}`` entry. Returns None
+    when malformed (not a dict / missing model / bad provider). The shallow copy
+    prevents callers from mutating a shared cache/override object."""
+    if not isinstance(entry, dict):
+        return None
+    model = entry.get("model")
+    if not model or not isinstance(model, str):
+        return None
+    provider = entry.get("provider") or "openai"
+    if provider not in _VALID_PROVIDERS:
+        return None
+    resolved: Dict[str, Any] = {"model": model, "provider": provider}
+    for k in ("base_url", "api_key_ref", "thinking_effort"):
+        v = entry.get(k)
+        if v:
+            resolved[k] = v
+    return resolved
+
 
 def resolve_model_for(
     node_key: Optional[str], region: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     """Resolve the ``{model, provider, ...}`` a functional block should use.
 
-    Returns ``None`` — meaning "use the caller's default (self.model/self.provider)"
-    — in EVERY non-routing path, so flag-OFF is byte-for-byte legacy:
-      - ENABLE_PER_FUNCTION_LLM_ROUTING OFF
-      - ``node_key`` falsy / not in the map
-      - the matched entry is malformed (not a dict / missing model / bad provider)
+    Priority:
+      1. **task-level override** (``_TASK_FN_OVERRIDES`` contextvar, from
+         task.config["llm_overrides"]) — honoured INDEPENDENT of the global flag,
+         so Phase C can A/B one node on one task while everyone else stays default.
+      2. **global map** — only when ENABLE_PER_FUNCTION_LLM_ROUTING is ON; read
+         directly from ``_flag_override_cache`` (P0-1: the ``__getattribute__``
+         hook only honours ``ENABLE_``-prefixed overrides, so ``settings.X`` would
+         never see the front-end edit), falling back to the startup default cache.
 
-    P0-1: the map BODY is read directly from ``backend.config._flag_override_cache``
-    (the ops console writes the ``LLM_FUNCTION_MODEL_MAP`` json flag there), NOT via
-    ``settings.LLM_FUNCTION_MODEL_MAP`` — the ``__getattribute__`` hook only honours
-    overrides for ``ENABLE_``-prefixed names, so a ``settings.X`` read would never
-    see the front-end edit. Falls back to the startup default cache when no override.
-
-    Per-entry validation is defensive: a single malformed node entry falls back to
-    the caller default (returns ``None``) and NEVER raises — a bad front-end edit
-    must not crash a mining round. ``region`` is reserved for PR5 (per-region
-    overrides); accepted now so the call sites are forward-compatible.
+    Returns ``None`` (→ caller uses self.model/self.provider) in every non-routing
+    path, so flag-OFF + no task override is byte-for-byte legacy. Per-entry
+    validation is defensive and NEVER raises — a bad edit must not crash a round.
+    ``region`` reserved for future per-region overrides.
     """
     try:
         if not node_key:
             return None
+        # 1. task-level override (contextvar) — independent of the global flag.
+        task_ov = _TASK_FN_OVERRIDES.get()
+        if isinstance(task_ov, dict) and node_key in task_ov:
+            resolved = _validate_model_entry(task_ov.get(node_key))
+            if resolved is not None:
+                return resolved
+            # malformed task entry → fall through to the global map (don't break)
+        # 2. global map (flag-gated). An override (even malformed) means the
+        # front-end intends to REPLACE the startup map → honour iff well-formed
+        # dict, else None (NOT the superseded startup map). Startup default is
+        # used only when there is NO override key at all.
         if not getattr(settings, "ENABLE_PER_FUNCTION_LLM_ROUTING", False):
             return None
-        # Direct cache read (see P0-1 above) — override wins, else startup default.
         from backend.config import _flag_override_cache, _LLM_FUNCTION_MODEL_MAP_CACHE
-        # An override (even a malformed one) means the front-end intends to
-        # REPLACE the startup map — so honour it iff it's a well-formed dict;
-        # a malformed override falls through to None (caller default), NOT to
-        # the startup map the front-end was trying to supersede. Startup default
-        # is used only when there is NO override at all.
         override = _flag_override_cache.get("LLM_FUNCTION_MODEL_MAP")
         model_map = override if override is not None else _LLM_FUNCTION_MODEL_MAP_CACHE
         if not isinstance(model_map, dict):
             return None
-        entry = model_map.get(node_key)
-        if not isinstance(entry, dict):
-            return None
-        model = entry.get("model")
-        if not model or not isinstance(model, str):
-            return None
-        provider = entry.get("provider") or "openai"
-        if provider not in _VALID_PROVIDERS:
-            return None
-        # Shallow copy so callers can't mutate the shared cache object.
-        resolved: Dict[str, Any] = {"model": model, "provider": provider}
-        for k in ("base_url", "api_key_ref", "thinking_effort"):
-            v = entry.get(k)
-            if v:
-                resolved[k] = v
-        return resolved
+        return _validate_model_entry(model_map.get(node_key))
     except Exception as e:  # noqa: BLE001 — routing must never break a call
         logger.warning(f"[resolve_model_for] node_key={node_key!r} failed, using default | {e}")
         return None

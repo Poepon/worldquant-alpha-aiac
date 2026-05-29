@@ -628,6 +628,12 @@ class MiningAgent:
         Returns:
             Dict with complete evolution results
         """
+        # PR5: bind this ONESHOT task's per-node model overrides to the async
+        # context. Each celery task has its own asyncio context + this is the
+        # entry point, so entry-set covers per-task isolation (Phase C single-node
+        # A/B works on ONESHOT too). Empty/missing → set(None) → no routing change.
+        from backend.agents.services.llm_service import set_task_function_overrides
+        set_task_function_overrides((task.config or {}).get("llm_overrides"))
         logger.info(
             f"[MiningAgent] Starting Evolution Loop | "
             f"task={task.id} dataset={dataset_id} "
