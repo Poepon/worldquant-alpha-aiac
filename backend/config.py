@@ -754,6 +754,12 @@ class Settings(BaseSettings):
     # Sub-phase 1 骨架阶段 default OFF。Sub-phase 2/3 ship + Phase B soak 通过
     # 后翻转。docs/orchestrator_plan_2026-05-29.md Q1-Q7 DECIDED。
     ENABLE_AUTO_ORCHESTRATOR: bool = False
+    # Q5 DECIDED 保守阈值(防 orchestrator 自烧)
+    ORCHESTRATOR_MAX_RUNNING_TASKS: int = 3      # 同时 RUNNING/PAUSED orchestrator task 上限
+    ORCHESTRATOR_DAILY_LAUNCH_LIMIT: int = 10    # 单日 launch 上限
+    ORCHESTRATOR_BACKOFF_HOURS: int = 2          # 同参数 launch 连续失败 N=3 后 backoff 时长
+    ORCHESTRATOR_SHORT_LIVED_MIN: int = 5        # task ≤ 此分钟 + 0 alpha 标"短命",不算让位
+    ORCHESTRATOR_IDEMPOTENCY_MIN: int = 5        # 防双发窗口
     # ----- R1b outcome reconciliation (Break 2 fix, 2026-05-22) -----
     # Max pending r1b_retry_log rows reconcile_r1b_outcomes processes per run.
     R1B_RECONCILE_MAX_ROWS: int = 1000

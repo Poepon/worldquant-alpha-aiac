@@ -1591,6 +1591,19 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
             except Exception as _fin_ex:  # noqa: BLE001
                 logger.error(f"[flat-pipeline] finalization commit failed: {_fin_ex}")
 
+    # Orchestrator Sub-phase 2 (Q2/Q7 DECIDED 2026-05-29): 事件主路径 — 投递
+    # 评估事件,由 orchestrator_evaluate_after_finalize 决策是否 launch 下一个。
+    # flag OFF default → orchestrator 自身立即 return,本投递是 cheap no-op
+    # (queue 一条 trivial 消息)。投递失败 → cron 1h fallback 兜底,不阻塞 finalize。
+    try:
+        from backend.tasks.orchestrator import orchestrator_evaluate_after_finalize
+        orchestrator_evaluate_after_finalize.delay(task_id)
+    except Exception as _orch_ex:  # noqa: BLE001
+        logger.warning(
+            f"[flat-pipeline] task={task_id} orchestrator event dispatch failed "
+            f"(non-fatal,cron fallback 兜底): {_orch_ex}"
+        )
+
     return {"total_alphas": stats.get("persisted", 0), "pipeline_stats": stats}
 
 
