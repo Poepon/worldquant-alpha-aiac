@@ -345,52 +345,23 @@ class LLMService:
         self._credentials_lock = asyncio.Lock()
         self._credentials_loaded = False
 
-        self.client = openai.AsyncOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            # 2026-05-21: explicit timeout — without it a dead socket hangs the
-            # event loop forever (no timeout fires). max_retries=0: SDK retry off,
-            # the @retry decorator + LLM_API_CIRCUIT own the retry/backoff policy.
-            timeout=httpx.Timeout(settings.LLM_CALL_TIMEOUT_SEC, connect=10.0),
-            max_retries=0,
-        )
+        # Per-(provider, endpoint, key) client cache for per-call model routing
+        # (PR2). Construction-default clients are seeded below; a routed call to
+        # a different endpoint/provider lazily builds + caches its own via
+        # _get_client — so a default-openai instance can still reach anthropic
+        # without the old "anthropic_client is None" hard-crash (P0-2).
+        self._client_cache: Dict[Tuple[str, str, str], Any] = {}
 
-        # Lazy-init anthropic client only when provider=anthropic and SDK
-        # is available; raises clear error if not installed.
+        self.client = self._build_openai_client(self.api_key, self.base_url)
+
+        # Lazy-init anthropic client only when provider=anthropic; per-call
+        # routing to anthropic from a default-openai instance builds it on
+        # demand via _get_client.
         self.anthropic_client = None
         if self.provider == 'anthropic':
-            if not _ANTHROPIC_AVAILABLE:
-                raise RuntimeError(
-                    "LLM_PROVIDER=anthropic but `anthropic` SDK is not installed. "
-                    "Run: pip install anthropic>=0.40"
-                )
-            if not self.anthropic_api_key:
-                raise RuntimeError(
-                    "LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is empty"
-                )
-            # Only pass base_url when explicitly overridden — keeps the SDK
-            # default (https://api.anthropic.com) when ANTHROPIC_BASE_URL="".
-            anthropic_kwargs: Dict[str, Any] = {"api_key": self.anthropic_api_key}
-            if self.anthropic_base_url:
-                anthropic_kwargs["base_url"] = self.anthropic_base_url
-            # 2026-05-21: explicit timeout (thinking streams can run minutes) +
-            # max_retries=0 so the @retry/circuit layer owns retry policy.
-            anthropic_kwargs["timeout"] = settings.LLM_STREAM_TIMEOUT_SEC
-            anthropic_kwargs["max_retries"] = 0
-            # Present requests as the Claude CLI. `default_headers` is merged
-            # last in the SDK's `default_headers` property (anthropic
-            # _base_client.py), so these win over the built-in "User-Agent".
-            # Empty settings → header omitted (keeps SDK default UA).
-            extra_headers: Dict[str, str] = {}
-            ua = (getattr(settings, 'ANTHROPIC_USER_AGENT', '') or '').strip()
-            if ua:
-                extra_headers["User-Agent"] = ua
-            x_app = (getattr(settings, 'ANTHROPIC_X_APP', '') or '').strip()
-            if x_app:
-                extra_headers["x-app"] = x_app
-            if extra_headers:
-                anthropic_kwargs["default_headers"] = extra_headers
-            self.anthropic_client = anthropic.AsyncAnthropic(**anthropic_kwargs)
+            self.anthropic_client = self._build_anthropic_client(
+                self.anthropic_api_key, self.anthropic_base_url
+            )
 
         # Pre-resolve thinking-tier display name for logging only.
         _thinking_tag = (
@@ -404,6 +375,95 @@ class LLMService:
             f"anthropic_base_url={self.anthropic_base_url or '<sdk default>'} "
             f"thinking={_thinking_tag}"
         )
+
+    # ------------------------------------------------------------------
+    # Client factory + per-(provider, endpoint, key) cache (PR2)
+    # ------------------------------------------------------------------
+    def _build_openai_client(self, api_key: str, base_url: str):
+        # 2026-05-21: explicit timeout — without it a dead socket hangs the
+        # event loop forever (no timeout fires). max_retries=0: SDK retry off,
+        # the @retry decorator + LLM_API_CIRCUIT own the retry/backoff policy.
+        return openai.AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=httpx.Timeout(settings.LLM_CALL_TIMEOUT_SEC, connect=10.0),
+            max_retries=0,
+        )
+
+    def _build_anthropic_client(self, api_key: str, base_url: str):
+        """Build an AsyncAnthropic client. Raises on an unreachable target
+        (SDK missing / empty key) — the caller converts that into a runtime
+        fallback to the default model rather than crashing the round (P0-2)."""
+        if not _ANTHROPIC_AVAILABLE:
+            raise RuntimeError(
+                "anthropic provider requested but the `anthropic` SDK is not "
+                "installed. Run: pip install anthropic>=0.40"
+            )
+        if not api_key:
+            raise RuntimeError(
+                "anthropic provider requested but ANTHROPIC_API_KEY is empty"
+            )
+        # Only pass base_url when explicitly overridden — keeps the SDK default
+        # (https://api.anthropic.com) when the override is "".
+        anthropic_kwargs: Dict[str, Any] = {"api_key": api_key}
+        if base_url:
+            anthropic_kwargs["base_url"] = base_url
+        # explicit timeout (thinking streams can run minutes) + max_retries=0
+        # so the @retry/circuit layer owns retry policy.
+        anthropic_kwargs["timeout"] = settings.LLM_STREAM_TIMEOUT_SEC
+        anthropic_kwargs["max_retries"] = 0
+        # Present requests as the Claude CLI. default_headers is merged last in
+        # the SDK so these win over the built-in UA. Empty settings → omitted.
+        extra_headers: Dict[str, str] = {}
+        ua = (getattr(settings, 'ANTHROPIC_USER_AGENT', '') or '').strip()
+        if ua:
+            extra_headers["User-Agent"] = ua
+        x_app = (getattr(settings, 'ANTHROPIC_X_APP', '') or '').strip()
+        if x_app:
+            extra_headers["x-app"] = x_app
+        if extra_headers:
+            anthropic_kwargs["default_headers"] = extra_headers
+        return anthropic.AsyncAnthropic(**anthropic_kwargs)
+
+    @staticmethod
+    def _client_cache_key(provider: str, base_url: str, api_key: str) -> Tuple[str, str, str]:
+        # sha256-prefix the key so the cache key never holds plaintext creds.
+        import hashlib
+        h = hashlib.sha256((api_key or "").encode("utf-8")).hexdigest()[:16]
+        return (provider, base_url or "", h)
+
+    def _get_client(self, provider: str, base_url: Optional[str] = None,
+                    api_key_ref: Optional[str] = None):
+        """Return a cached SDK client for (provider, endpoint, key).
+
+        Call AFTER ``_ensure_credentials_loaded`` so self.api_key/base_url are
+        the resolved (DB-or-env) values. ``api_key_ref`` (per-entry credential
+        override) is reserved for PR5; until then routing reuses the
+        construction-loaded key for that provider.
+        """
+        if provider == "anthropic":
+            api_key = self.anthropic_api_key
+            burl = base_url or self.anthropic_base_url
+            ck = self._client_cache_key("anthropic", burl, api_key)
+            client = self._client_cache.get(ck)
+            if client is None:
+                client = self._build_anthropic_client(api_key, burl)
+                self._client_cache[ck] = client
+            return client
+        # openai-compat
+        api_key = self.api_key
+        burl = base_url or self.base_url
+        ck = self._client_cache_key("openai", burl, api_key)
+        client = self._client_cache.get(ck)
+        if client is None:
+            client = self._build_openai_client(api_key, burl)
+            self._client_cache[ck] = client
+        return client
+
+    def clear_client_cache(self):
+        """Drop cached routed clients — called when credentials change so a new
+        key isn't shadowed by a client built with the old one."""
+        self._client_cache = {}
 
     async def _ensure_credentials_loaded(self):
         if self._credentials_loaded:
@@ -443,6 +503,10 @@ class LLMService:
 
     def invalidate_credentials_cache(self):
         self._credentials_loaded = False
+        # Creds changed → drop routed clients built with the old key (PR2). The
+        # FastAPI router calls this on credential edit; the Celery worker has no
+        # such hook, so routed clients there rely on process recycle / restart.
+        self.clear_client_cache()
 
     def _resolve_effort(
         self,
@@ -505,6 +569,9 @@ class LLMService:
         *,
         node_key: Optional[str] = None,
         thinking_effort: Optional[str] = None,
+        model: Optional[str] = None,
+        provider: Optional[str] = None,
+        _allow_fallback: bool = True,
     ) -> LLMResponse:
         """
         Make an LLM call with automatic retries and logging.
@@ -527,6 +594,23 @@ class LLMService:
         start_time = time.time()
         call_id = f"{int(start_time * 1000) % 100000}"
 
+        # Per-call routing target (PR2). Explicit model/provider args win; else
+        # consult the per-node map (resolve_model_for); else the construction
+        # default. routed=None on the flag-OFF / no-match path → eff == default
+        # → byte-for-byte legacy.
+        routed = resolve_model_for(node_key) if (model is None and provider is None) else None
+        eff_provider = (provider or (routed or {}).get("provider") or self.provider).lower()
+        # Fall back to self.model when the provider-specific attr isn't set (e.g.
+        # a test double built via __new__ that only sets .model / .provider).
+        if eff_provider == "anthropic":
+            eff_model = model or (routed or {}).get("model") or getattr(self, "anthropic_model", None) or self.model
+        else:
+            eff_model = model or (routed or {}).get("model") or getattr(self, "openai_model", None) or self.model
+        eff_base_url = (routed or {}).get("base_url")
+        eff_api_key_ref = (routed or {}).get("api_key_ref")
+        # Entry-level thinking_effort override wins over the thinking_effort arg.
+        eff_thinking = (routed or {}).get("thinking_effort") or thinking_effort
+
         # Phase 4 PR0 (Sprint 0, 2026-05-19): LLM_API_CIRCUIT fast-fail.
         # When the LLM provider has been hammering 5xx/timeout, every caller
         # should fast-fail rather than burn another HTTP round-trip + retry
@@ -540,19 +624,17 @@ class LLMService:
             return LLMResponse(
                 content="",
                 parsed=None,
-                model=self.model,
+                model=eff_model,
                 tokens_used=0,
                 latency_ms=0,
                 success=False,
                 error="llm_api_circuit_open",
             )
 
-        # Resolve per-call effort (three-tier priority):
-        #   1. explicit `thinking_effort` arg
-        #   2. settings.THINKING_EFFORT_OVERRIDES[node_key] (gated by
-        #      ENABLE_PER_NODE_THINKING_EFFORT kill-switch)
-        #   3. self.anthropic_thinking_effort (service instance default)
-        effort_active = self._resolve_effort(node_key, thinking_effort)
+        # Resolve per-call effort. Only the anthropic branch consumes it; for an
+        # openai-routed model it's computed for logging but ignored at request
+        # time (thinking only fires under _anthropic_supports_thinking(eff_model)).
+        effort_active = self._resolve_effort(node_key, eff_thinking)
 
         logger.debug(
             f"[LLMService] Call started | id={call_id} json_mode={json_mode} "
@@ -586,16 +668,26 @@ class LLMService:
         try:
             await self._ensure_credentials_loaded()
 
+            # Select the client for the effective target (after creds load so
+            # self.api_key/base_url are resolved). Construction default (same
+            # provider, no endpoint/key override) reuses self.client /
+            # self.anthropic_client unchanged → byte-for-byte legacy; anything
+            # else builds + caches a dedicated client (P0-2: openai→anthropic).
+            if eff_provider == self.provider and not eff_base_url and not eff_api_key_ref:
+                active_client = self.anthropic_client if eff_provider == "anthropic" else self.client
+            else:
+                active_client = self._get_client(eff_provider, eff_base_url, eff_api_key_ref)
+
             for parse_attempt in range(parse_attempts_max):
                 # W5: Anthropic provider uses messages.create + system prompt with
                 # cache_control. JSON mode is enforced by prompt instructions
                 # (Anthropic doesn't have a response_format flag; the existing
                 # prompts already say "Output Schema: JSON ...").
-                if self.provider == 'anthropic':
+                if eff_provider == 'anthropic':
                     # Reasoning models (opus-4-7 family) reject `temperature`;
                     # only send it when the model still accepts it.
                     anth_kwargs: Dict[str, Any] = {
-                        "model": self.model,
+                        "model": eff_model,
                         "max_tokens": max_tokens,
                         "system": [{
                             "type": "text",
@@ -604,7 +696,7 @@ class LLMService:
                         }],
                         "messages": [{"role": "user", "content": user_prompt}],
                     }
-                    if _anthropic_supports_temperature(self.model):
+                    if _anthropic_supports_temperature(eff_model):
                         anth_kwargs["temperature"] = temperature
 
                     # Extended thinking — opus-4-7 family only; caller's max_tokens
@@ -615,7 +707,7 @@ class LLMService:
                     # branches only need canonical tier names.
                     effort = _ANTHROPIC_EFFORT_ALIASES.get(effort_active, effort_active)
                     if (
-                        _anthropic_supports_thinking(self.model)
+                        _anthropic_supports_thinking(eff_model)
                         and effort
                         and effort != 'disabled'
                     ):
@@ -645,7 +737,7 @@ class LLMService:
                     # context manager and aggregate to the same final Message
                     # shape so the downstream code path stays identical.
                     if thinking_enabled:
-                        async with self.anthropic_client.messages.stream(**anth_kwargs) as stream:
+                        async with active_client.messages.stream(**anth_kwargs) as stream:
                             # Hard deadline: stream aggregation can otherwise hang
                             # forever on a dead socket (no client timeout fires).
                             resp = await asyncio.wait_for(
@@ -654,7 +746,7 @@ class LLMService:
                             )
                     else:
                         resp = await asyncio.wait_for(
-                            self.anthropic_client.messages.create(**anth_kwargs),
+                            active_client.messages.create(**anth_kwargs),
                             timeout=settings.LLM_CALL_TIMEOUT_SEC,
                         )
                     # Extract text from the first content block (TextBlock)
@@ -685,8 +777,8 @@ class LLMService:
                     # client/httpx timeout fails to fire — the 2026-05-21 zombie
                     # had the loop parked in select on this very await.
                     response = await asyncio.wait_for(
-                        self.client.chat.completions.create(
-                            model=self.model,
+                        active_client.chat.completions.create(
+                            model=eff_model,
                             messages=[
                                 {"role": "system", "content": system_prompt},
                                 {"role": "user", "content": user_prompt}
@@ -781,8 +873,8 @@ class LLMService:
             try:
                 from backend.cost_tracker import record_llm_call as _cost_record
                 _cost_record(
-                    model=self.model,
-                    provider=self.provider,
+                    model=eff_model,
+                    provider=eff_provider,
                     effort=effort_active,
                     node_key=node_key,
                     tokens_total=tokens_used,
@@ -797,7 +889,7 @@ class LLMService:
             return LLMResponse(
                 content=content,
                 parsed=parsed,
-                model=self.model,
+                model=eff_model,
                 tokens_used=tokens_used,
                 latency_ms=latency_ms,
                 success=success_final,
@@ -808,16 +900,41 @@ class LLMService:
             latency_ms = int((time.time() - start_time) * 1000)
             logger.error(
                 f"[LLMService] Call failed | id={call_id} "
-                f"node={node_key or '-'} effort={effort_active} error={e}"
+                f"node={node_key or '-'} effort={effort_active} "
+                f"model={eff_provider}/{eff_model} error={e}"
             )
             # Phase 4 PR0: only API-level failures (5xx/timeout/connection)
             # increment the fail counter — JSON parse / ValueError / arg
             # errors are content issues and shouldn't trip the circuit.
+            is_api_failure = False
             try:
-                if _llm_error_is_api_failure(e):
+                is_api_failure = _llm_error_is_api_failure(e)
+                if is_api_failure:
                     _llm_record_fail(error_kind=type(e).__name__)
             except Exception:
                 pass
+
+            # Runtime fallback (P1#6): a ROUTED (non-default) model that fails at
+            # the API level (provider down / model unavailable / endpoint key bad,
+            # incl. an anthropic target whose client build raised) falls back to
+            # the construction default ONCE. The recursive call passes explicit
+            # model/provider=default → routed=None there → no second fallback, so
+            # no infinite recursion. The routed model's failure was already
+            # counted above for circuit/telemetry honesty.
+            routed_was_used = (eff_model != self.model) or (eff_provider != self.provider)
+            if _allow_fallback and routed_was_used and is_api_failure:
+                logger.warning(
+                    f"[LLMService] routed {eff_provider}/{eff_model} failed "
+                    f"({type(e).__name__}); falling back to default "
+                    f"{self.provider}/{self.model} | id={call_id} node={node_key or '-'}"
+                )
+                return await self.call(
+                    system_prompt, user_prompt, temperature=temperature,
+                    json_mode=json_mode, max_tokens=max_tokens, node_key=node_key,
+                    thinking_effort=thinking_effort,
+                    model=self.model, provider=self.provider, _allow_fallback=False,
+                )
+
             self._emit_metrics(node_key, effort_active, 0, latency_ms, success=False)
 
             # G2 Phase A: still record failed calls (0 tokens, success=False,
@@ -827,8 +944,8 @@ class LLMService:
             try:
                 from backend.cost_tracker import record_llm_call as _cost_record
                 _cost_record(
-                    model=self.model,
-                    provider=self.provider,
+                    model=eff_model,
+                    provider=eff_provider,
                     effort=effort_active,
                     node_key=node_key,
                     tokens_total=0,
@@ -842,7 +959,7 @@ class LLMService:
 
             return LLMResponse(
                 content="",
-                model=self.model,
+                model=eff_model,
                 latency_ms=latency_ms,
                 success=False,
                 error=str(e)

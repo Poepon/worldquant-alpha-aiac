@@ -217,19 +217,13 @@ async def llm_mutate_alpha(
         top_k=top_k,
     )
 
-    # M7 fix: honor settings.LLM_MUTATE_MODEL by temporarily swapping
-    # llm_service.model — LLMService.call has no per-call `model` arg, the
-    # provider branch reads `self.model` at request time. Restored in finally.
-    mutate_model = (getattr(settings, "LLM_MUTATE_MODEL", "") or "").strip()
-    original_model = getattr(llm_service, "model", None)
-    model_swapped = False
-    if mutate_model and original_model is not None and mutate_model != original_model:
-        try:
-            llm_service.model = mutate_model
-            model_swapped = True
-        except Exception:
-            model_swapped = False  # SimpleNamespace test doubles etc.
-
+    # PR2 (2026-05-29): the old swap of llm_service.model to LLM_MUTATE_MODEL is
+    # retired. It only swapped the model, NOT the provider — so LLM_MUTATE_MODEL=
+    # claude-* under an openai-provider service issued an invalid (openai-endpoint
+    # + anthropic-model) request — and was not concurrency-safe on the shared
+    # singleton. Model selection for this block now flows through the per-call
+    # routing layer via node_key="llm_mutate_alpha": flag ON picks the routed
+    # model (LLM_FUNCTION_MODEL_MAP), flag OFF uses the service default.
     try:
         resp = await llm_service.call(
             system_prompt=MUTATE_SYSTEM,
@@ -252,12 +246,6 @@ async def llm_mutate_alpha(
             f"[llm_mutate] LLM call failed for seed=`{seed_expression[:60]}...`: {ex}"
         )
         return []
-    finally:
-        if model_swapped:
-            try:
-                llm_service.model = original_model
-            except Exception:
-                pass
 
 
 __all__ = [
