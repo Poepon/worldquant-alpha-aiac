@@ -152,8 +152,18 @@ async def node_code_gen_retry(
     updated_alphas = list(pending)
     cost_delta_usd = 0.0
     log_rows: List[Dict[str, Any]] = []
-    model_name = getattr(llm_service, "model", None) or getattr(
-        settings, "R1B_RETRY_MODEL", "claude-haiku-4-5-20251001"
+    # PR3 per-function routing: prefer the model node_key="r1b_retry" routing
+    # will actually select (when ENABLE_PER_FUNCTION_LLM_ROUTING is on) for the
+    # PRE-call cap estimate + fallback log label. resolve_model_for returns None
+    # when routing is off / node unmapped → fall back to self.model, then the
+    # static R1B_RETRY_MODEL name. The per-call cost below is still re-priced off
+    # resp.model so any runtime fallback is reflected accurately.
+    from backend.agents.services.llm_service import resolve_model_for
+    _routed = resolve_model_for("r1b_retry", region=getattr(state, "region", None))
+    model_name = (
+        (_routed or {}).get("model")
+        or getattr(llm_service, "model", None)
+        or getattr(settings, "R1B_RETRY_MODEL", "claude-haiku-4-5-20251001")
     )
     region = getattr(state, "region", None)
     task_id = getattr(state, "task_id", None)
@@ -194,6 +204,9 @@ async def node_code_gen_retry(
         # accumulator for the per-alpha + per-round state ledger below.
         _call_cost = 0.0
         tokens = 0
+        # PR3: effective model recorded in the log row. Defaults to the
+        # routing-miss fallback label until the call returns resp.model.
+        eff_model = model_name
         try:
             sys_p, user_p = build_r1b_retry_prompt(
                 original_expression=getattr(original, "expression", "") or "",
@@ -212,7 +225,14 @@ async def node_code_gen_retry(
                 node_key="r1b_retry",
             )
             tokens = int(getattr(resp, "tokens_used", 0) or 0)
-            _call_cost = _estimate_cost(model_name, tokens)
+            # PR3 per-function routing: the model that ACTUALLY served this
+            # call is decided inside LLMService.call() via node_key="r1b_retry"
+            # routing, not by self.model. resp.model carries the effective
+            # model (incl. any runtime fallback). Price cost off that so the
+            # telemetry $ matches the model truly billed; model_name stays the
+            # routing-miss fallback label only.
+            eff_model = getattr(resp, "model", None) or model_name
+            _call_cost = _estimate_cost(eff_model, tokens)
             cost_delta_usd += _call_cost
         except Exception as ex:
             logger.warning(
@@ -231,7 +251,7 @@ async def node_code_gen_retry(
         if not getattr(resp, "success", False) or not isinstance(parsed, dict):
             log_rows.append(_make_log_row(
                 original, idx, task_id, round_idx,
-                model_name, original_metrics,
+                eff_model, original_metrics,
                 new_expression=None, llm_changes_made=None,
                 outcome="pending",
                 loop_error="LLM returned non-success / non-dict",
@@ -244,7 +264,7 @@ async def node_code_gen_retry(
             # No-op retry — count it but don't replace
             log_rows.append(_make_log_row(
                 original, idx, task_id, round_idx,
-                model_name, original_metrics,
+                eff_model, original_metrics,
                 new_expression=new_expr or None,
                 llm_changes_made=str(parsed.get("changes_made", "")),
                 outcome="pending",
@@ -289,7 +309,7 @@ async def node_code_gen_retry(
 
         log_rows.append(_make_log_row(
             original, idx, task_id, round_idx,
-            model_name, original_metrics,
+            eff_model, original_metrics,
             new_expression=new_expr,
             llm_changes_made=str(parsed.get("changes_made", "")),
             outcome="pending",  # filled by post-BRAIN reconciliation hook
@@ -428,8 +448,15 @@ async def node_hypothesis_mutate(
     cost_delta_usd = 0.0
     pending_new_hypothesis = None
     log_rows: List[Dict[str, Any]] = []
-    model_name = getattr(llm_service, "model", None) or getattr(
-        settings, "R1B_MUTATE_MODEL", "claude-haiku-4-5-20251001"
+    # PR3 per-function routing: prefer the model node_key="r1b_mutate" routing
+    # will actually select for the fallback log label; per-call cost below is
+    # re-priced off resp.model so runtime fallback is reflected accurately.
+    from backend.agents.services.llm_service import resolve_model_for
+    _routed = resolve_model_for("r1b_mutate", region=getattr(state, "region", None))
+    model_name = (
+        (_routed or {}).get("model")
+        or getattr(llm_service, "model", None)
+        or getattr(settings, "R1B_MUTATE_MODEL", "claude-haiku-4-5-20251001")
     )
     region = getattr(state, "region", None)
     task_id = getattr(state, "task_id", None)
@@ -520,7 +547,11 @@ async def node_hypothesis_mutate(
             node_key="r1b_mutate",
         )
         tokens = int(getattr(resp, "tokens_used", 0) or 0)
-        cost_delta_usd += _estimate_cost(model_name, tokens)
+        # PR3: price off the model that ACTUALLY served the call (resp.model,
+        # incl. runtime fallback), not the routing label. model_name remains
+        # the fallback label for the no-resp except path only.
+        eff_model = getattr(resp, "model", None) or model_name
+        cost_delta_usd += _estimate_cost(eff_model, tokens)
     except Exception as ex:
         logger.warning(f"[r1b_loop mutate] LLM call failed: {ex}")
         log_rows.append(_make_mutate_log_row(
@@ -538,7 +569,7 @@ async def node_hypothesis_mutate(
     parsed = getattr(resp, "parsed", None)
     if not getattr(resp, "success", False) or not isinstance(parsed, dict):
         log_rows.append(_make_mutate_log_row(
-            primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+            primary_alpha, primary_indices[0], task_id, round_idx, eff_model,
             primary_metrics,
             new_hypothesis_statement=None, llm_changes_made=None,
             outcome="pending",
@@ -583,7 +614,7 @@ async def node_hypothesis_mutate(
 
             if pillar_drift_detected:
                 log_rows.append(_make_mutate_log_row(
-                    primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+                    primary_alpha, primary_indices[0], task_id, round_idx, eff_model,
                     primary_metrics,
                     new_hypothesis_statement=new_statement,
                     llm_changes_made=diff,
@@ -604,7 +635,7 @@ async def node_hypothesis_mutate(
                     "diff_from_original": diff,
                 }
                 log_rows.append(_make_mutate_log_row(
-                    primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+                    primary_alpha, primary_indices[0], task_id, round_idx, eff_model,
                     primary_metrics,
                     new_hypothesis_statement=new_statement, llm_changes_made=diff,
                     outcome="pending", loop_error=None,
@@ -612,7 +643,7 @@ async def node_hypothesis_mutate(
                 ))
         else:
             log_rows.append(_make_mutate_log_row(
-                primary_alpha, primary_indices[0], task_id, round_idx, model_name,
+                primary_alpha, primary_indices[0], task_id, round_idx, eff_model,
                 primary_metrics,
                 new_hypothesis_statement=new_statement or None,
                 llm_changes_made=diff,

@@ -425,6 +425,9 @@ class MiningAgent:
 
         # Always write log row — even empty offspring (visibility into LLM
         # rejection rate). Soft-fail on DB issue.
+        from backend.agents.services.llm_service import (
+            resolve_model_for as _g5_resolve_model_for,
+        )
         try:
             log_row = G5CrossoverLog(
                 task_id=task.id,
@@ -439,7 +442,19 @@ class MiningAgent:
                 parent_b_pillar=getattr(hyp_b, "pillar", None) if hyp_b else None,
                 offspring_count=len(offspring),
                 offspring_expressions=offspring if offspring else None,
-                llm_model=getattr(llm_service, "model", None),
+                # PR3 per-function routing: the crossover call routes by
+                # node_key="llm_crossover_alpha", so the model truly used is the
+                # routed one, NOT llm_service.model (the construct default, which
+                # llm_crossover_alpha restores before returning). Record the
+                # routed model when routing is on; resolve_model_for returns None
+                # when off / unmapped → fall back to the default (legacy value).
+                llm_model=(
+                    (
+                        _g5_resolve_model_for("llm_crossover_alpha", region=task.region)
+                        or {}
+                    ).get("model")
+                    or getattr(llm_service, "model", None)
+                ),
                 error_kind=None if offspring else "no_valid_offspring",
             )
             self.db.add(log_row)

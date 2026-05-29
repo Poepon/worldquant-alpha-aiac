@@ -236,6 +236,9 @@ async def _write_g5_log(run_id, region, alpha_a, alpha_b, hyp_a, hyp_b,
     try:
         from backend.database import AsyncSessionLocal
         from backend.models import G5CrossoverLog
+        from backend.agents.services.llm_service import (
+            resolve_model_for as _g5_resolve_model_for,
+        )
 
         async with AsyncSessionLocal() as log_db:
             log_db.add(G5CrossoverLog(
@@ -251,7 +254,17 @@ async def _write_g5_log(run_id, region, alpha_a, alpha_b, hyp_a, hyp_b,
                 parent_b_pillar=getattr(hyp_b, "pillar", None) if hyp_b else None,
                 offspring_count=len(offspring or []),
                 offspring_expressions=offspring if offspring else None,
-                llm_model=getattr(llm_model, "model", None),
+                # PR3 per-function routing: the crossover call routes by
+                # node_key="llm_crossover_alpha"; record the routed model when
+                # routing is on, else fall back to the service default (legacy).
+                # ``llm_model`` here is actually the llm_service object.
+                llm_model=(
+                    (
+                        _g5_resolve_model_for("llm_crossover_alpha", region=region)
+                        or {}
+                    ).get("model")
+                    or getattr(llm_model, "model", None)
+                ),
                 error_kind=None if offspring else "no_valid_offspring",
             ))
             await log_db.commit()

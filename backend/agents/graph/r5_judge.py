@@ -120,7 +120,15 @@ async def _judge_once(
         )
         content = getattr(resp, "content", "") or ""
         tokens = int(getattr(resp, "tokens_used", 0) or 0)
-        model = getattr(llm_service, "model", settings.R5_JUDGE_MODEL)
+        # PR3 per-function routing: the judge call routes by node_key (c1/c2),
+        # so the model that ACTUALLY served the call is resp.model (PR2 sets it
+        # to the effective model, incl. any runtime fallback) — NOT self.model,
+        # which is only the construct-time default. Price off resp.model so the
+        # cost reflects the model truly billed; self.model / R5_JUDGE_MODEL stay
+        # as the routing-miss fallback label.
+        model = getattr(resp, "model", None) or getattr(
+            llm_service, "model", settings.R5_JUDGE_MODEL
+        )
         cost = _estimate_cost(model, tokens)
         return _parse_judge_response(content), cost, None
     except Exception as ex:
