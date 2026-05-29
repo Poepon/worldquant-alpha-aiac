@@ -105,13 +105,13 @@ EMA 状态 `task.config[stop_loss_state]` 复用串行同 key(`task_stop_loss_se
 
 ---
 
-## 5. 开工前必决问题 + v0 推荐(2026-05-29 晚)
+## 5. 开工前必决问题 + 决策(2026-05-29 晚)
 
-> 状态:草稿推荐 / 等用户审批。每个 Q 给推荐 + 理由 + 备选。
+> **状态:Q1-Q7 全部 DECIDED 2026-05-29 晚** — Q1/Q3/Q4/Q5/Q6/Q7 采纳推荐,**Q2 偏离推荐改事件驱动**(post-finalize hook + cron fallback)。
 
 ### Q1: orchestrator 跑在哪里 — celery beat / 独立 daemon / FastAPI 后台 task?
 
-**推荐:celery beat**(轻量 cron 任务,与现有 maintenance task 同栈)
+**[DECIDED] celery beat**(轻量 cron + 接事件 task,与现有 maintenance task 同栈)
 - ✅ 已是项目 scheduler 入口,`watchdog_revive_dead_sessions` / `quota_guard_pause_at_threshold` 在此 — 同样的"扫描决策"性质
 - ✅ 不增运维负担(无新进程/端口)
 - ✅ Windows `--pool=solo` 不阻碍(orchestrator 决策 <30s,不抢 mining-worker)
@@ -121,17 +121,18 @@ EMA 状态 `task.config[stop_loss_state]` 复用串行同 key(`task_stop_loss_se
 
 ### Q2: 决策频率 — 事件驱动 vs cron 定时?
 
-**推荐:cron 每 10 分钟**(与 `quota_guard` 同步,但偏移 5 分钟)
-- ✅ mining task 自然时长是小时级,10min 决策延迟可忽略
-- ✅ 事件驱动需要 post-finalize hook + 事件 bus,实现复杂
-- ✅ cron 容易观察(每 tick 一条 log)
-- 偏移 5 min:`quota_guard` 在 :00/:10/:20...,orchestrator 在 :05/:15/:25...,读 quota_guard 最新状态
+**[DECIDED] 事件驱动 + cron 1h fallback**(用户偏离推荐 cron)
+- ✅ 精度高:task 终态变化立即评估,不等 10min tick
+- ✅ post-finalize hook 接在 `_run_flat_iteration` finalize 末尾,投 celery task `orchestrator_evaluate_after_finalize.delay(task_id)`
+- ✅ idempotency:消费端检查 `task.config["launched_by"]` 防重复触发
+- ✅ cron 1h fallback 兜底防丢事件(投递失败/worker 重启吞事件)
+- ⚠️ 实现成本 +0.5-1d(hook 接线 + 事件投递 + 防重)
 
-**备选**:事件驱动(精度高但工程量大,推迟到 Phase 2)
+**未采纳**(原推荐 cron 10min :05 偏移):工程量小但延迟 10min,被用户判定为产能瓶颈
 
 ### Q3: RL/bandit 选参数还是规则驱动?
 
-**推荐:Phase 1 规则驱动**(经验阈值 + 历史 PASS rate 加权),**Phase 2 升 bandit**
+**[DECIDED] Phase 1 规则驱动**(经验阈值 + 历史 PASS rate 加权),**Phase 2 升 bandit**
 - ✅ RL/bandit 冷启动慢(需累积 mining → submit pass-rate 全链路反馈)
 - ✅ 规则可立即落地,可观察
 - ✅ 参考已有 `dataset_value_bandit`(Beta-Bernoulli),Phase 2 复用 sampling 框架
@@ -141,7 +142,7 @@ EMA 状态 `task.config[stop_loss_state]` 复用串行同 key(`task_stop_loss_se
 
 ### Q4: 多账号配额池?
 
-**推荐:不管多账号,读 `BrainAdapter._current_sim_slot_limit()` 即可**
+**[DECIDED] 不管多账号,读 `BrainAdapter._current_sim_slot_limit()` 即可**
 - ✅ 项目当前不是真多账号 — USER (3 slot) vs CONSULTANT (80 slot) 是同账号 role 切换,通过 `ENABLE_BRAIN_CONSULTANT_MODE` flag
 - ✅ `_current_sim_slot_limit()` 实时返回 effective 值(不可缓存,见 §2.4)
 - ✅ Consultant 升级后自动扩容,不需 orchestrator 改逻辑
@@ -151,7 +152,7 @@ EMA 状态 `task.config[stop_loss_state]` 复用串行同 key(`task_stop_loss_se
 
 ### Q5: 安全阈值(防 orchestrator 自烧)
 
-**推荐保守起步**:
+**[DECIDED] 保守起步**:
 - `max RUNNING task` = **3**(慢起,Phase B 观察 PASS rate 后调)
 - 每日 launch 上限 = **10**(单 task 400 sim 上限,10 × 400 = 4000 sim,远超 quota_guard 阈值 900 → quota_guard 兜底)
 - 单参数 launch 连续失败 **N=3** → backoff 2h
@@ -161,7 +162,7 @@ EMA 状态 `task.config[stop_loss_state]` 复用串行同 key(`task_stop_loss_se
 
 ### Q6: 用户 override?
 
-**推荐:manual_override 标记 + orchestrator 跳过非自己启的 task**
+**[DECIDED] manual_override 标记 + orchestrator 跳过非自己启的 task**
 - ✅ 用户手动 `POST /ops/start-flat-session` 写 `task.config["launched_by"]="manual"`
 - ✅ orchestrator 启的 task 写 `task.config["launched_by"]="orchestrator"`
 - ✅ orchestrator 让位决策只对自己启的 task 生效(自己不动 user 的)
@@ -172,36 +173,48 @@ EMA 状态 `task.config[stop_loss_state]` 复用串行同 key(`task_stop_loss_se
 
 ### Q7: 与现有 watchdog/quota_guard 协作?
 
-**推荐 cron schedule 错峰**:
-- `quota_guard_pause_at_threshold` @ :00/:10/:20...(已存在,不改)
-- `watchdog_revive_dead_sessions` @ :00/:05/:10...(已存在,5min 间隔)
-- **orchestrator @ :05/:15/:25...**(新增,10min 间隔,偏移 5min 让 quota_guard 先跑)
+**[DECIDED] 事件驱动 + cron 1h fallback**(配合 Q2 决策)
+- **主路径(事件)**:`_run_flat_iteration` finalize 末尾 → celery `orchestrator_evaluate_after_finalize.delay(task_id)` → orchestrator task 内读当前 RUNNING/PAUSED pool + 配额状态 + 历史 PASS rate → 决定是否 launch 下一个
+- **fallback cron**:每 1h 全状态扫描 schedule(防丢事件 / worker 重启吞事件 / 边界 case)
+- 已有 cron 保持不变:
+  - `quota_guard_pause_at_threshold` @ :00/:10/...(不动)
+  - `watchdog_revive_dead_sessions` @ :00/:05/...(不动)
 - 协作语义:
-  - `quota_guard` PAUSE 配额超阈值的 task → orchestrator 不会立即重新 launch(读 quota_guard 当日累计)
-  - `watchdog_revive` 复活 RUNNING-stale → orchestrator 不冲突(它启新 task,不动 stale)
-  - orchestrator launch task 后 5min 内挂(配置错)→ 标短命,不让位
+  - `quota_guard` PAUSE → 事件路径读 quota_guard 当日累计,不重 launch
+  - `watchdog_revive` 复活 RUNNING-stale → 触发不了 finalize event,不与 orchestrator 冲突
+  - orchestrator launch task 5min 内挂 → 短命标记,不让位
 
-**备选**:同时 fire(无意义争锁)/ orchestrator 早于 quota_guard(读不到当日最新累计)
+**未采纳**:cron-only 错峰(用户偏离 Q2 推荐,选事件驱动)
 
 ---
 
-## 6. 决策汇总表(供审批)
+## 6. 决策汇总表(2026-05-29 晚 DECIDED)
 
-| Q | 推荐 | 实施工作量 |
+| Q | 决策 | 实施工作量 |
 |---|---|---|
-| Q1 | celery beat | 0.2d(新增 beat schedule + task module) |
-| Q2 | cron 10min(:05 偏移) | 包含在 Q1 |
-| Q3 | Phase 1 规则,Phase 2 bandit | Phase 1 = 0.5d 规则 + EMA;Phase 2 单独 plan |
-| Q4 | 读 `_current_sim_slot_limit()` 即可 | 0d(已有 API) |
+| Q1 | celery beat | 0.2d(`backend/tasks/orchestrator.py` + beat fallback schedule) |
+| Q2 | **事件驱动 + cron 1h fallback**(偏离 cron 推荐) | **+1d**(`_run_flat_iteration` finalize post-hook + `orchestrator_evaluate_after_finalize` celery task + 防重 idempotency) |
+| Q3 | Phase 1 规则,Phase 2 bandit | 0.5d 规则 + EMA;Phase 2 单独 plan |
+| Q4 | 读 `_current_sim_slot_limit()` | 0d(已有 API) |
 | Q5 | max 3 / daily 10 / backoff 2h / 短命 5min | 0.3d 实现 + 配置 |
 | Q6 | `task.config["launched_by"]` | 0.2d(新 field + start_flat_session 默认 manual) |
-| Q7 | :05 偏移 cron + 状态读 | 包含在 Q1 |
+| Q7 | 事件驱动 + cron 1h fallback | 包含在 Q2 |
 
-**Phase 1 总工作量**:~1.2d(规则驱动 + Q4-Q7 工程接线),前置依赖见 §4。
+**Phase 1 总工作量**:**~2.2d**(原 cron 估算 1.2d,Q2 改事件驱动 +1d),前置依赖见 §4。
 
 ---
 
-## 6. 参考
+## 7. Phase 1 实施 sub-phase(依据 Q1-Q7 决策)
+
+1. **Sub-phase 1**(0.4d):骨架 — `backend/tasks/orchestrator.py` celery task module + `task.config["launched_by"]` 标记 + start_flat_session 默认 "manual"
+2. **Sub-phase 2**(1d):事件路径 — `_run_flat_iteration` finalize 末尾 schedule `orchestrator_evaluate_after_finalize.delay(task_id)` + 消费端读 task pool + 配额 + 决策规则
+3. **Sub-phase 3**(0.5d):规则引擎 — 历史 PASS rate EMA(7d window)+ region/dataset 加权采样 + Q5 阈值
+4. **Sub-phase 4**(0.2d):cron 1h fallback + 安全阈值 + 监控 endpoint `/ops/orchestrator/status`
+5. **Sub-phase 5**(0.1d):测试 + plan v3 同步
+
+---
+
+## 8. 参考
 
 - serial→pipeline 迁移 v3 §2.5(R14 推迟决策)
 - 现有自动化清单:`backend/celery_app.py:celery_beat_schedule` (170-269)
