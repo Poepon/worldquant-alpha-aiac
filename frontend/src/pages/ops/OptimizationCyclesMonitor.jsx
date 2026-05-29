@@ -94,10 +94,22 @@ function statusTag(cycle) {
   return <Tag color="default">0 winner</Tag>
 }
 
+// Backend OptimizationRun.cycle_started_at / cycle_finished_at are
+// SQLAlchemy DateTime (naive, server UTC). Pydantic serializes to ISO
+// 8601 WITHOUT a 'Z' suffix or `+00:00` offset — JS Date() would then
+// interpret as local time (in SH = UTC+8, this caused an 8h+ phantom
+// duration on first ship 2026-05-29). Append 'Z' explicitly so JS
+// parses as UTC.
+function parseUTC(ts) {
+  if (!ts) return null
+  const hasTz = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(ts)
+  return new Date(hasTz ? ts : ts + 'Z')
+}
+
 function formatTs(ts) {
   if (!ts) return '—'
   try {
-    const d = new Date(ts)
+    const d = parseUTC(ts)
     return d.toLocaleString('zh-CN', {
       year: '2-digit', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', hour12: false,
@@ -109,8 +121,8 @@ function formatTs(ts) {
 
 function durationSec(start, end) {
   if (!start) return null
-  const a = new Date(start).getTime()
-  const b = end ? new Date(end).getTime() : Date.now()
+  const a = parseUTC(start).getTime()
+  const b = end ? parseUTC(end).getTime() : Date.now()
   return Math.max(0, Math.round((b - a) / 1000))
 }
 
@@ -149,6 +161,8 @@ export default function OptimizationCyclesMonitor() {
 
   // Today's sim spend — proxy for OPT_DAILY_SIM_BUDGET enforcement visibility.
   // Frontend sums sim_budget_used for cycles started after 00:00 SH today.
+  // cycle_started_at is naive-UTC from backend → parseUTC() else JS treats
+  // as local-time and gets the day boundary wrong on SH browsers.
   const todaySpend = useMemo(() => {
     const now = new Date()
     const todaySH = new Date(now.getTime() + 8 * 3600_000)
@@ -156,8 +170,8 @@ export default function OptimizationCyclesMonitor() {
     const startSHMs = new Date(startSHIso).getTime()
     let spent = 0
     for (const c of cycles) {
-      const cycleMs = new Date(c.cycle_started_at).getTime()
-      if (cycleMs >= startSHMs) {
+      const cycleMs = parseUTC(c.cycle_started_at)?.getTime()
+      if (cycleMs && cycleMs >= startSHMs) {
         spent += c.sim_budget_used || 0
       }
     }
