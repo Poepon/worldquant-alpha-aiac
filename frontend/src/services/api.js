@@ -392,6 +392,12 @@ const api = {
     return data
   },
 
+  // Mining Orchestrator (Phase 1 Sub-phase 4 — 2026-05-29)
+  getOrchestratorStatus: async () => {
+    const { data } = await client.get('/ops/orchestrator/status')
+    return data
+  },
+
   // Ops Phase 2 — Alpha Health
   getOpsAlphaHealthLatest: async (date = null) => {
     const params = date ? { date } : {}

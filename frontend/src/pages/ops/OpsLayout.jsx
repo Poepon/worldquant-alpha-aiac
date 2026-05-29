@@ -26,6 +26,7 @@ import G10LogicMonitor from './G10LogicMonitor'
 import G3v2Monitor from './G3v2Monitor'
 import SubmitBacklogMonitor from './SubmitBacklogMonitor'
 import OptimizationCyclesMonitor from './OptimizationCyclesMonitor'
+import OrchestratorMonitor from './OrchestratorMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -102,6 +103,8 @@ export default function OpsLayout() {
         <Route path="r13-factor-lens" element={<R13FactorLensMonitor />} />
         <Route path="g10-logic" element={<G10LogicMonitor />} />
         <Route path="g3v2-monitor" element={<G3v2Monitor />} />
+        {/* Mining Orchestrator Phase 1 (2026-05-29) — auto-launch + 决策监控 */}
+        <Route path="orchestrator" element={<OrchestratorMonitor />} />
       </Routes>
     </div>
   )
