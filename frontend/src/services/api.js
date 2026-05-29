@@ -752,6 +752,16 @@ const api = {
     const { data } = await client.post('/ops/submit-backlog/scan', null, { params: { limit } })
     return data
   },
+
+  // Optimization closure Stage A (2026-05-29) — cycles + 14d conversion rate.
+  // Phase 16-A telemetry for the GO/STOP gate. conversion_rate_14d > 20% →
+  // Stage B; < 10% → STOP. ENABLE_OPTIMIZATION_LOOP=False → empty cycles.
+  getOpsOptimizationCycles: async (days = 14, limit = 50) => {
+    const { data } = await client.get('/ops/optimization/cycles', {
+      params: { days, limit },
+    })
+    return data
+  },
 }
 
 export default api
