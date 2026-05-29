@@ -377,18 +377,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "hypothesis families. Soft-fail: KB write error never blocks round."
         ),
     ),
-    "ENABLE_R1B_TYPED_PIPELINE": FlagSpec(
-        name="ENABLE_R1B_TYPED_PIPELINE",
-        flag_type="bool",
-        group="R1b-CoSTEER",
-        description=(
-            "[stage 4/5 — opt-in per task, coexists with stages 1+2] "
-            "R1b.4 (2026-05-18): activates 3223-line DORMANT "
-            "agents/core/AlphaMiningPipeline for hypothesis_centric_variant=3 "
-            "tasks. Bypasses LangGraph cycle; retry/mutate embedded in "
-            "Experiment2Feedback. Coexists with R1b.1+R1b.2 — opt-in per task."
-        ),
-    ),
     "R1B_MAX_COST_USD_PER_ROUND": FlagSpec(
         name="R1B_MAX_COST_USD_PER_ROUND",
         flag_type="float",

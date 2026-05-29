@@ -750,10 +750,6 @@ class Settings(BaseSettings):
     # weekly Sunday 04:00 SH beat task ``run_failure_tree_pruner`` deletes
     # rows older than this value. Operational tunable — no feature flag.
     R1B_FAILURE_TREE_RETENTION_DAYS: int = 90
-    # ----- R1b.4 — typed AlphaMiningPipeline route -----
-    # hypothesis_centric_variant=3 task opt-in;coexists with R1b.1/R1b.2.
-    ENABLE_R1B_TYPED_PIPELINE: bool = False
-    R1B_TYPED_NUM_ITER_PER_ROUND: int = 3  # how many run_iteration calls per outer round
     # ----- R1b outcome reconciliation (Break 2 fix, 2026-05-22) -----
     # Max pending r1b_retry_log rows reconcile_r1b_outcomes processes per run.
     R1B_RECONCILE_MAX_ROWS: int = 1000

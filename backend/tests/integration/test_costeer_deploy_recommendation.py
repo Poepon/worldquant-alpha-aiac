@@ -62,7 +62,7 @@ def _isolate_flag_state():
         "ENABLE_R1A_HOOK", "ENABLE_LLM_JUDGE",
         "ENABLE_HIERARCHICAL_RAG",
         "ENABLE_R1B_RETRY_LOOP", "ENABLE_R1B_HYPOTHESIS_MUTATE",
-        "ENABLE_R1B_FAILURE_TREE", "ENABLE_R1B_TYPED_PIPELINE",
+        "ENABLE_R1B_FAILURE_TREE",
     ]
     saved = {k: getattr(_stg, k, False) for k in keys}
     yield
@@ -236,7 +236,6 @@ async def test_all_flags_on_returns_hold_verdict(client_factory):
             "ENABLE_R1B_RETRY_LOOP": True,
             "ENABLE_R1B_HYPOTHESIS_MUTATE": True,
             "ENABLE_R1B_FAILURE_TREE": True,
-            "ENABLE_R1B_TYPED_PIPELINE": True,
         },
     )
     async with client as ac:

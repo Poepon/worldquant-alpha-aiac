@@ -5,6 +5,7 @@
 - 目标: 删除 FLAT mining 串行路线 (`_run_flat_iteration` + `_run_one_round_inline`),只保留流水线路线
 - 历史: v1 漏掉 5-27→5-29 共 25 个 pipeline commit / v2 把 R14 当搬运工作低估、缺 soak gate、数字错。v3 修这些
 - **v3 修订 2 (2026-05-29 晚)**: R14 推迟,见 §2.5。当前无 orchestrator 接班,R14 PAUSE 会留死结(配额空转),反自动化目标。R14 与 orchestrator 打包,见 [orchestrator-plan](./orchestrator_plan_2026-05-29.md)
+- **v3 修订 3 (2026-05-29 晚)**: R1b typed 4b 完整 retire(dormant 路径,生产 0 触发):删 `r1b_typed_pipeline.py` 整模块 + `_maybe_run_typed_pipeline_round` wrapper + dispatch + 3 个测试 + `ENABLE_R1B_TYPED_PIPELINE` + `R1B_TYPED_NUM_ITER_PER_ROUND` config + ops/feature_flag_service 引用。Phase C 测试影响清单从 4 降到 2
 - 前置: 0 个 blocking gap (R14 推迟后),2 个低优 gap (auth-circuit park-and-retry / trace iteration_offset)
 
 ---
@@ -111,31 +112,31 @@ task A 跑 100 iter → COMPLETED(干净终态) → 烧 400 sim 0 PASS
 
 ---
 
-## 3. 串行代码三类清单 (mining_tasks.py 2215 行,实测行号)
+## 3. 串行代码三类清单 (mining_tasks.py 2186 行,实测行号 — 已含 stop_reason ship + R1b typed retire)
 
 ### 🔴 串行独有 — Phase C 删 (~590 行)
 
-| 函数 | 行号 (实测) | 备注 |
+| 函数 | 行号 (实测 2026-05-29 晚) | 备注 |
 |---|---|---|
-| `_run_one_round_inline()` | 1060–1233 | 串行单轮主体 |
-| `_run_flat_iteration()` | 1797–**2213** | 串行主循环 + 400 行恢复/cursor/client refresh (v3 修 v2 写错的 2199) |
-| `_refresh_brain_client()` | 57–71 | **保留** — `_run_flat_iteration_pipeline:1690` 也用它作 `BrainClientRefresher.refresh_fn` |
-| `run_mining_task` FLAT dispatch | 1817–1823 | 删 dispatch 分支,直接走 pipeline |
-| `_rebuild_flat_db_session()` | 1279–1303 | **Phase D 删**(串行专属,5 处全在串行 1924/2007/2095/2183 + 注释 1826) — 流水线靠 heartbeat-abort + 重 dispatch fresh pool 替代 |
+| `_run_one_round_inline()` | 1000–1165 | 串行单轮主体 |
+| `_run_flat_iteration()` | 1768–2186 | 串行主循环 + 400 行恢复/cursor/client refresh |
+| `_refresh_brain_client()` | 57–71 | **保留** — 流水线 `_run_flat_iteration_pipeline` 也用它作 `BrainClientRefresher.refresh_fn` |
+| `run_mining_task` FLAT dispatch | mining_tasks.py 顶部 dispatch 块 | 删 dispatch 分支,直接走 pipeline |
+| `_rebuild_flat_db_session()` | 1211–1235 | **Phase D 删**(串行专属,5 处全在串行 + 注释)— 流水线靠 heartbeat-abort + 重 dispatch fresh pool 替代 |
 
 ### 🟢 `_run_flat_iteration_pipeline` 直接调 — 必须保留
 
 | Helper | 行号 | wrapper 内调点 |
 |---|---|---|
-| `_get_datasets_to_mine()` | 701–748 | 1407 |
-| `_get_operators()` | 796–830 | 1416 |
-| `_verify_cascade_ownership()` | 1234–1276 | 1526 |
-| `_pick_dataset()` | 1343–1356 | 1543 (流水线专属 ε-greedy wrapper,串行 0 命中) |
-| `_prepare_round_fields()` | 987–998 | 1555 |
-| `_build_dataset_pool()` | 975–985 | 1570 |
-| `_refresh_brain_client()` | 57–71 | 1690 (via `BrainClientRefresher.refresh_fn`) |
-| `_task_delay()` | 35 | 1447 (bandit cell-stats join) |
-| `_pipeline_op_timeout()` / `_pipeline_heartbeat_timeout()` | 119 / 104 | 1714-1715 |
+| `_get_datasets_to_mine()` | 701–748 | producer 内 dataset fetch |
+| `_get_operators()` | 796–830 | producer 内 ops fetch |
+| `_verify_cascade_ownership()` | 1166–1208 | producer + finalize 内 |
+| `_pick_dataset()` | 1275–1288 | producer 内 ε-greedy(流水线专属 wrapper,串行 0 命中) |
+| `_prepare_round_fields()` | 987–998 | producer 内 |
+| `_build_dataset_pool()` | 975–985 | producer 内 |
+| `_refresh_brain_client()` | 57–71 | `BrainClientRefresher.refresh_fn` 用 |
+| `_task_delay()` | 35 | bandit cell-stats join |
+| `_pipeline_op_timeout()` / `_pipeline_heartbeat_timeout()` | 119 / 104 | runner 超时配置 |
 
 ### 🟢 间接依赖 — 链式被流水线调,保留(v3 实测)
 
@@ -148,24 +149,23 @@ task A 跑 100 iter → COMPLETED(干净终态) → 烧 400 sim 0 PASS
 - `_get_active_level()` ← :978
 - `_get_complementary_datasets()` (750-794) ← :981
 
-`_pick_dataset:1354` 链式调:
-- `_pick_diverse_dataset()` (1318-1333) ← :1354 (**生产唯一调用点**)
-- `_dataset_mean_margin()` ← :1355
+`_pick_dataset:1286` 链式调:
+- `_pick_diverse_dataset()` (1250-1265) ← :1286 (**生产唯一调用点**)
+- `_dataset_mean_margin()` ← :1287
 
 ### ⚪ Dead code — Phase D 直接删
 
-- `_pick_least_covered_dataset()` (1306-1315):**生产 0 命中**,只被 `test_flat_pipeline_dispatch.py:118-134` 调。早期 Option C step-1 使用,后被 step-3 `_pick_diverse_dataset` 取代但未清理
+- `_pick_least_covered_dataset()` (1238-1247):**生产 0 命中**,只被 `test_flat_pipeline_dispatch.py:118-134` 调。早期 Option C step-1 使用,后被 step-3 `_pick_diverse_dataset` 取代但未清理
 
 ### 📝 docstring / 注释引用清理 (Phase C 顺手,一次性)
 
-`grep -rn "_run_one_round_inline\|_run_flat_iteration" backend/ 2>&1 | grep -v mining_tasks.py` 命中 12 处全是注释/docstring,删串行后是 stale 引用:
+`grep -rn "_run_one_round_inline\|_run_flat_iteration" backend/ 2>&1 | grep -v mining_tasks.py` 命中 11 处全是注释/docstring(原 12 处,`r1b_typed_pipeline.py:24` 随模块 retire 已删),删串行后是 stale 引用:
 - `backend/agents/graph/state.py:342,359`
 - `backend/agents/graph/workflow.py:521,542`
 - `backend/agents/graph/nodes/generation.py:459`
 - `backend/agents/graph/nodes/g5_persistence.py:5,80`
 - `backend/agents/graph/nodes/r1b_persistence.py:14,21,23,94`
 - `backend/agents/graph/nodes/persistence.py:1117`
-- `backend/agents/graph/nodes/r1b_typed_pipeline.py:24`
 - `backend/agents/mining_agent.py:278`
 - `backend/adapters/brain_adapter.py:644`
 - `backend/celery_app.py:70`
@@ -257,26 +257,21 @@ R14 推迟到 orchestrator-plan(见 §2.5)。Phase A 没剩工作。
   - `agents/pipeline/__init__.py:8` / `producer.py:13` / `feedback_g5.py:22` / `feedback_r1b.py:6` docstring
 - [ ] mining_tasks.py:1817-1823 dispatch 简化:删 `_pipeline_on` 判断,直接 `return await _run_flat_iteration(...)`
 - [ ] 清理 §3 列的 12 处 docstring/注释 stale 引用 (state.py / workflow.py / generation.py / g5_persistence.py / r1b_persistence.py / persistence.py / r1b_typed_pipeline.py / mining_agent.py / brain_adapter.py / celery_app.py / routers/ops.py / config.py)
-- [ ] 测试影响处理 (2026-05-29 实测):
+- [ ] 测试影响处理 (2026-05-29 晚实测 + R1b typed retire 后更新):
   - 删 `test_flat_round_failure_recovery.py` (串行 `_rebuild_flat_db_session` 专属)
   - 保留 `test_flat_pipeline_dispatch.py` 但简化 dispatch 测试(只剩一条路径)
-  - **4 个测试触串行 `_run_one_round_inline`**(实测,非凭推断):
-    - `test_external_call_deadlines.py:119` — asyncio.wait_for 超时行为
-    - `test_r1b_round_boundary_wire.py:45,141,227` — R1b round 边界
-    - `test_r1b_typed_pipeline_wire.py:177` — R1b 4b typed 接入
-    - `test_r1b_typed_pipeline_e2e.py:116` — R1b 4b e2e
-  - **处理决策**(注意:这 4 个本质上是"串行 round 模型"测试,流水线无 round 概念 → **不是简单 import 替换**):
-    - (a) 行为可映射 → 改用 pipeline consumer / persister 等价接口(`test_external_call_deadlines.py` 候选,只测超时机制)
-    - (b) `@pytest.mark.skip(reason="serial round model deprecated")` 留审计(`test_r1b_round_boundary_wire.py` 候选,round 模型耦合深)
-    - (c) 重写为 pipeline 模型(`test_r1b_typed_pipeline_wire.py` + `test_r1b_typed_pipeline_e2e.py` 必须 — R1b 4b typed 接入是流水线关键覆盖,~0.5-1d 单独 work)
+  - **R1b typed 4b 已 retire**(2026-05-29 晚 ship,见 commit history):dormant 路径 + 流水线 0 接入 + `.env` 永远不会分配 variant=3 → 4 个相关测试 + 整 module + wrapper + config 项 + ops/feature_flag_service 引用全删
+  - **剩余 2 个测试仍触串行 `_run_one_round_inline`**(实测,从 4 降到 2):
+    - `test_external_call_deadlines.py:119` — asyncio.wait_for 超时行为 → 候选 (a) 行为可映射到 pipeline `op_timeout`
+    - `test_r1b_round_boundary_wire.py:45,141,227` — R1b round 边界 → 候选 (b) `@pytest.mark.skip(reason="serial round model deprecated")`,round 模型耦合深
 - [ ] regression baseline 重建,0 漂移
 - [ ] CLAUDE.md / `backend/agents/IMPROVEMENT_ANALYSIS.md` 同步,删串行段落
 - [ ] memory 更新:[[project_flat_session_greenlet_timeout_fix_2026_05_25]] / [[project_split_producer_first_live_freeze_2026_05_28]] 标 deprecated
 
 ### Phase D — cleanup (≥7d 观察后)
 
-- [ ] 删 `_rebuild_flat_db_session()` (1279-1303) — heartbeat-abort 替代已稳
-- [ ] 删 `_pick_least_covered_dataset()` (1306-1315) — dead code
+- [ ] 删 `_rebuild_flat_db_session()` (Phase C 后实测 grep 行号) — heartbeat-abort 替代已稳
+- [ ] 删 `_pick_least_covered_dataset()` (Phase C 后实测 grep 行号) — dead code
 - [ ] 删 `_refresh_brain_client()` (57-71) — 验证 `BrainClientRefresher` 接管后无遗漏
 - [ ] 共享 helpers 集中到 `backend/agents/pipeline/dataset_prep.py` (可选,看代码可读性)
 - [ ] 低优 gap 视需要补:auth-circuit park-and-retry / trace iteration_offset

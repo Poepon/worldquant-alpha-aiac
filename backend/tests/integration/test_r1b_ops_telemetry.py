@@ -169,7 +169,7 @@ async def test_telemetry_exposes_all_4_r1b_flags(client_factory):
     flags = r.json()["flags"]
     expected = {
         "ENABLE_R1B_RETRY_LOOP", "ENABLE_R1B_HYPOTHESIS_MUTATE",
-        "ENABLE_R1B_FAILURE_TREE", "ENABLE_R1B_TYPED_PIPELINE",
+        "ENABLE_R1B_FAILURE_TREE",
     }
     assert set(flags.keys()) == expected
     for v in flags.values():

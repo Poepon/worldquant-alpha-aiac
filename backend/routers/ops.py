@@ -1592,7 +1592,6 @@ async def r1b_telemetry(
         "ENABLE_R1B_RETRY_LOOP": bool(getattr(_stg, "ENABLE_R1B_RETRY_LOOP", False)),
         "ENABLE_R1B_HYPOTHESIS_MUTATE": bool(getattr(_stg, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)),
         "ENABLE_R1B_FAILURE_TREE": bool(getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False)),
-        "ENABLE_R1B_TYPED_PIPELINE": bool(getattr(_stg, "ENABLE_R1B_TYPED_PIPELINE", False)),
     }
 
     # Aggregation 1: per-attempt-type per-outcome counts + cost/token sums.
@@ -2330,7 +2329,6 @@ async def costeer_deploy_recommendation(
         "ENABLE_R1B_RETRY_LOOP": bool(getattr(_stg, "ENABLE_R1B_RETRY_LOOP", False)),
         "ENABLE_R1B_HYPOTHESIS_MUTATE": bool(getattr(_stg, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)),
         "ENABLE_R1B_FAILURE_TREE": bool(getattr(_stg, "ENABLE_R1B_FAILURE_TREE", False)),
-        "ENABLE_R1B_TYPED_PIPELINE": bool(getattr(_stg, "ENABLE_R1B_TYPED_PIPELINE", False)),
     }
 
     # --- 2. R1a non_unknown_pct + total in window ---
