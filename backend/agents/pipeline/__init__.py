@@ -1,12 +1,12 @@
 """Mining pipeline (producer-consumer) — keeps BRAIN sim slots saturated by
 decoupling LLM generation from simulation.
 
-Sub-phase 0 (2026-05-27): concurrent-safe plumbing only. The orchestration in
-``runner.run_pipeline_session`` is pure (injectable produce/simulate/evaluate/
-persist callables) so the queue/slot/persister mechanics are unit-tested in
-isolation, with no DB, BRAIN, or LangGraph dependency. The real node-backed
-wiring + ``_run_flat_iteration`` integration land in later sub-phases, gated by
-``settings.ENABLE_SIM_PIPELINE`` (default OFF — existing round loop unchanged).
+The orchestration in ``runner.run_pipeline_session`` is pure (injectable
+produce/simulate/evaluate/persist callables) so the queue/slot/persister
+mechanics are unit-tested in isolation, with no DB, BRAIN, or LangGraph
+dependency. ``_run_flat_iteration`` (mining_tasks.py) is the node-backed
+integration — the sole FLAT path since the serial round loop was retired
+(2026-05-29).
 
 See docs/sim_pipeline_impl_plan_2026-05-27.md.
 """

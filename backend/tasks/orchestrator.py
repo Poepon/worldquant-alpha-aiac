@@ -535,7 +535,6 @@ async def _launch_next_task(db, params: Dict[str, Any]) -> Dict[str, Any]:
         universe=params["universe"],
         datasets=params.get("datasets") or [],
         delay=int(params.get("delay", 1)),
-        enable_pipeline=True,   # orchestrator 启的 task 默认走流水线
         launched_by="orchestrator",
     )
     return {"task_id": getattr(info, "task_id", None)}

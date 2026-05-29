@@ -1367,11 +1367,11 @@ class Settings(BaseSettings):
     CODE_GEN_MAX_TOKENS_PER_ALPHA: int = 512
     CODE_GEN_MAX_TOKENS_CEILING: int = 8000
 
-    # --- Mining pipeline (producer-consumer) — Sub-phase 0, default OFF ---
+    # --- Mining pipeline (producer-consumer) ---
     # Decouples LLM generation from BRAIN simulation so sim slots stay
-    # saturated. When OFF the existing round loop runs byte-for-byte. See
-    # docs/sim_pipeline_impl_plan_2026-05-27.md.
-    ENABLE_SIM_PIPELINE: bool = False
+    # saturated. The pipeline is the SOLE FLAT path since the serial loop was
+    # retired (2026-05-29); the old ENABLE_SIM_PIPELINE toggle is gone.
+    # See docs/sim_pipeline_impl_plan_2026-05-27.md.
     # work_queue capacity (producer backpressure). 0 = auto = 2× sim-slot limit.
     SIM_PIPELINE_QUEUE_MAXSIZE: int = 0
     # number of producer coroutines. 1 at USER 3 slots (gen >> sim consumption);

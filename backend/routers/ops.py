@@ -1347,12 +1347,6 @@ class StartFlatSessionIn(BaseModel):
         description="BRAIN sim delay (0 or 1). 1 = established path. 0 = native "
         "delay-0 mining (orthogonal axis); requires delay-0 datafield cells synced.",
     )
-    enable_pipeline: bool = Field(
-        default=False,
-        description="Run THIS session on the producer-consumer pipeline "
-        "(ENABLE_SIM_PIPELINE) without flipping the global flag — for an "
-        "isolated shadow; other tasks stay on the legacy serial loop.",
-    )
 
 
 class FlatSessionOut(BaseModel):
@@ -1433,7 +1427,6 @@ async def start_flat_session(
             universe=payload.universe,
             datasets=payload.datasets or None,
             delay=payload.delay,
-            enable_pipeline=payload.enable_pipeline,
         )
     except ValueError as ex:
         raise HTTPException(status_code=400, detail=str(ex)) from ex

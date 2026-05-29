@@ -9,21 +9,20 @@ loop → permanent RUNNING zombie. These tests pin the two in-task deadlines:
       provider returns LLMResponse(success=False) within the deadline, not hangs.
   A1.4 asyncio.wait_for raises builtin TimeoutError → must be classified as an
       API failure so repeated hangs trip LLM_API_CIRCUIT.
-  A2  _run_one_round_inline wraps run_evolution_loop in asyncio.wait_for → a hung
-      round returns the soft-fail dict (caught by the existing except), so the
-      FLAT loop continues and the worker never freezes.
+
+(A2 — the serial _run_one_round_inline round-deadline test — was removed when
+the serial loop was retired 2026-05-29; the pipeline path bounds rounds via
+SIM_PIPELINE_OP_TIMEOUT_SEC + heartbeat-abort.)
 """
 from __future__ import annotations
 
 import asyncio
 import time
-from types import SimpleNamespace
 
 import pytest
 
 from backend.agents.services import llm_service as llm_mod
 from backend.agents.services.llm_service import LLMService, _llm_error_is_api_failure
-from backend.tasks import mining_tasks as mt
 
 
 # --------------------------------------------------------------------------- A1.4
@@ -75,55 +74,3 @@ async def test_llm_call_times_out_to_failure(monkeypatch):
     assert elapsed < 5.0, f"call() did not honor the deadline (took {elapsed:.1f}s)"
 
 
-# --------------------------------------------------------------------------- A2
-class _FakeDB:
-    async def rollback(self):
-        return None
-
-    async def refresh(self, _obj):
-        return None
-
-
-@pytest.mark.skip(reason="serial _run_one_round_inline retired in Phase C 2026-05-29 — flat pipeline round timeout covered by SIM_PIPELINE_OP_TIMEOUT_SEC + heartbeat-abort")
-@pytest.mark.asyncio
-async def test_round_deadline_soft_fails(monkeypatch):
-    """A hung run_evolution_loop is bounded by MINING_ROUND_TIMEOUT_SEC and the
-    existing except converts the TimeoutError into the soft-fail result dict, so
-    the caller (FLAT loop) reads 0 alphas and continues — worker never freezes."""
-    from backend.config import settings
-
-    monkeypatch.setattr(settings, "MINING_ROUND_TIMEOUT_SEC", 0.1, raising=False)
-
-    # Stub the pre-run_evolution_loop setup so the call reaches the wrapped await.
-    async def _no_typed(*_a, **_k):
-        return None
-
-    async def _fields(*_a, **_k):
-        return ["close", "volume"]
-
-    async def _pool(*_a, **_k):
-        return ["pv1"]
-
-    monkeypatch.setattr(mt, "_maybe_run_typed_pipeline_round", _no_typed)
-    monkeypatch.setattr(mt, "_prepare_round_fields", _fields)
-    monkeypatch.setattr(mt, "_build_dataset_pool", _pool)
-    monkeypatch.setattr(mt, "_get_active_level", lambda _task: 0)
-
-    async def _hanging_evolution(**_kwargs):
-        await asyncio.sleep(60)
-
-    mining_agent = SimpleNamespace(run_evolution_loop=_hanging_evolution)
-    task = SimpleNamespace(id=999, config={}, daily_goal=4)
-    run = SimpleNamespace(id=1)
-
-    start = time.monotonic()
-    result = await mt._run_one_round_inline(
-        _FakeDB(), task, run, brain=None, mining_agent=mining_agent, operators=[],
-        dataset_id="pv1",
-    )
-    elapsed = time.monotonic() - start
-
-    assert result.get("all_alphas") == []
-    assert result.get("iterations_completed") == 0
-    assert "error" in result  # soft-fail path stamped the error string
-    assert elapsed < 5.0, f"round did not honor the deadline (took {elapsed:.1f}s)"

@@ -15,7 +15,6 @@ import {
   Form,
   Input,
   Select,
-  Switch,
   InputNumber,
   message,
   Alert,
@@ -164,7 +163,6 @@ export default function TaskManagement() {
       universe: values.universe,
       datasets: datasetsList,
       delay: values.delay ?? 1,
-      enablePipeline: values.enablePipeline ?? false,
     })
   }
 
@@ -411,7 +409,7 @@ export default function TaskManagement() {
           form={flatForm}
           layout="vertical"
           onFinish={handleStartFlatSession}
-          initialValues={{ region: 'USA', universe: 'TOP3000', datasets: '', delay: 1, enablePipeline: false }}
+          initialValues={{ region: 'USA', universe: 'TOP3000', datasets: '', delay: 1 }}
         >
           <Row gutter={16}>
             <Col span={12}>
@@ -465,14 +463,6 @@ export default function TaskManagement() {
               <Option value={1}>delay 1（标准）</Option>
               <Option value={0}>delay 0（当日 / 正交轴）</Option>
             </Select>
-          </Form.Item>
-          <Form.Item
-            name="enablePipeline"
-            label="挖掘流水线"
-            valuePropName="checked"
-            tooltip="开启 = 这个 session 走 producer-consumer 流水线（生成与 BRAIN 模拟重叠，保持 sim 槽饱和）。仅作用于本 session，不影响其它任务；默认关（串行 legacy 路径）。用于 shadow 验证。"
-          >
-            <Switch checkedChildren="流水线" unCheckedChildren="串行" />
           </Form.Item>
           <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
             <Space>

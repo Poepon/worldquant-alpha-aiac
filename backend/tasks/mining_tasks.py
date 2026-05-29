@@ -1110,13 +1110,11 @@ def _pick_dataset(datasets, dataset_cov, category_cov, category_of, reward, expl
 
 
 async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_token):
-    """ENABLE_SIM_PIPELINE FLAT path (Sub-phase 0 / Unit 2c-step2).
+    """FLAT continuous-mining path — the producer-consumer pipeline.
 
-    Producer-consumer pipeline that overlaps LLM generation with BRAIN
-    simulation so the sim slots stay saturated. Fully isolated from the legacy
-    loop — flag OFF means ``_run_flat_iteration`` never calls this, so the
-    established path is byte-identical and a bug here can only affect a
-    deliberately flag-enabled (shadow) session.
+    Sole FLAT path since the serial round loop (``_run_one_round_inline``) was
+    retired 2026-05-29. Overlaps LLM generation with BRAIN simulation so the
+    sim slots stay saturated.
 
     Session model (the F1 concurrency contract): the producer and the persister
     each get their OWN ``AsyncSessionLocal`` session; the N sim consumers are
@@ -1124,9 +1122,8 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
     The injected ``db`` is used only for read-only setup + finalization, never
     during the concurrent run.
 
-    Deferred to Sub-phase 1 (NOT yet replicated from the legacy loop — known
-    gaps when the flag is enabled, acceptable for a bounded shadow but must
-    land before wider rollout):
+    Known gaps not yet ported from the (now-retired) serial loop — must land
+    before these matter at scale:
       - per-round BRAIN client refresh (F4) + consecutive-failure session
         rebuild (generation rounds rarely poison a session — sim, the
         hang-prone step, is now in the DB-free consumers);

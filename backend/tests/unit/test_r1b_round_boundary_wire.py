@@ -208,30 +208,3 @@ async def test_persist_wire_skipped_when_task_id_missing(monkeypatch):
     persist_mock.assert_not_awaited()
 
 
-# ---------------------------------------------------------------------------
-# Sentinel — neither flag triggers module imports (byte-equivalent guarantee)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.skip(reason="serial _run_one_round_inline retired in Phase C 2026-05-29 — byte-equivalence sentinel inspected the serial function source which no longer exists")
-def test_byte_equiv_sentinel_no_r1b_persistence_import_when_flags_off(monkeypatch):
-    """Re-import the wire-affected modules with both flags OFF; verify
-    r1b_persistence is NOT pulled in via the flag-gated branch.
-
-    This is a static-source sentinel: parse mining_tasks._run_one_round_inline +
-    persistence.node_save_results and assert each wire block sits behind the
-    correct flag check.
-    """
-    import inspect
-    from backend.tasks import mining_tasks
-    from backend.agents.graph.nodes import persistence
-
-    src_mining = inspect.getsource(mining_tasks._run_one_round_inline)
-    assert "ENABLE_R1B_HYPOTHESIS_MUTATE" in src_mining
-    assert "consume_pending_hypothesis" in src_mining
-    assert "r1b_wire" in src_mining
-
-    src_persist = inspect.getsource(persistence.node_save_results)
-    assert "ENABLE_R1B_RETRY_LOOP" in src_persist
-    assert "ENABLE_R1B_HYPOTHESIS_MUTATE" in src_persist
-    assert "persist_after_round" in src_persist
-    assert "R1b.2c" in src_persist
