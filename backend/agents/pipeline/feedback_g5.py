@@ -19,7 +19,7 @@ two hard bounds guarantee it regardless: (1) each parent pair is crossed at most
 once (session-local dedupe set), (2) a hard cap on total crossovers per session
 (G5_PIPELINE_MAX_CROSSOVERS).
 
-Wired (by _run_flat_iteration_pipeline) only when ENABLE_G5_CROSSOVER is on.
+Wired (by _run_flat_iteration) only when ENABLE_G5_CROSSOVER is on.
 """
 
 from __future__ import annotations

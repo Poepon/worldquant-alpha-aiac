@@ -339,7 +339,7 @@ class MiningState(BaseModel):
     # All Optional / default-safe per phase15-C serialization-compat (mirror
     # brain_consultant_mode_at_start pattern above).
     # Reset boundary: per LangGraph invocation (one round of mining_tasks
-    # _run_one_round_inline). Across rounds these reset to defaults.
+    # pipeline round). Across rounds these reset to defaults.
     # Cross-round persistence handled via MiningTask.config in persistence
     # node when budget actually fired (R1b.1c wiring).
     r1b_retries_attempted_this_alpha: int = 0
@@ -356,7 +356,7 @@ class MiningState(BaseModel):
     r1b_pending_new_hypothesis: Optional[Dict] = None
 
     # R1b.2-v2 (2026-05-18): consumed-side mirror of r1b_pending_new_hypothesis.
-    # Populated by workflow.run from configurable when _run_one_round_inline's
+    # Populated by workflow.run from configurable when pipeline round's
     # consume_pending_hypothesis returned non-None. node_hypothesis checks this
     # at entry — if set AND ENABLE_R1B_HYPOTHESIS_MUTATE flag ON, skips the
     # exploration LLM call and uses the mutated hypothesis directly so the

@@ -402,7 +402,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "round 末选 2 个 PASS alpha → llm_crossover_alpha 产 ≤"
             "G5_CROSSOVER_TOP_K_OFFSPRING 个 hybrid expression → persist 到 "
             "task.config['g5_pending_offspring'](R1b.2-v2 同模式)→ 下一 round "
-            "_run_one_round_inline consume → state.g5_offspring_candidates → "
+            "pipeline round consume → state.g5_offspring_candidates → "
             "node_code_gen prepend pending_alphas → 真走 validate/simulate/"
             "evaluate/save_results 全 pipeline → offspring alpha.metrics 标 "
             "_g5_crossover_parent_ids=[id_a, id_b] 反向 attribution。"

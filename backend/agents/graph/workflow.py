@@ -518,7 +518,7 @@ class MiningWorkflow:
         _role_snapshot = (task.config or {}).get("brain_role_snapshot") or {} if isinstance(task.config, dict) else {}
 
         # R1b.2-v2 (2026-05-18): consume the one-shot "__r1b_consumed_pending_hypothesis"
-        # slot that _run_one_round_inline stashed on task.config so node_hypothesis
+        # slot that pipeline round stashed on task.config so node_hypothesis
         # can inject it. Clears the slot atomically so it's a single round directive.
         _r1b_consumed: Optional[Dict] = None
         try:
@@ -539,7 +539,7 @@ class MiningWorkflow:
             _r1b_consumed = None
 
         # G5 Phase A (2026-05-19): same one-shot pattern for crossover offspring.
-        # _run_one_round_inline stashed prior-round's offspring on
+        # pipeline round stashed prior-round's offspring on
         # task.config["__g5_consumed_offspring"]; pop + clear here so node_code_gen
         # can read state.g5_offspring_candidates and prepend to pending_alphas.
         _g5_consumed: List[Dict] = []

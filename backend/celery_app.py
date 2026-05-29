@@ -67,7 +67,7 @@ celery_app.conf.update(
     task_time_limit=3600,  # 1 hour max per task
     # NOTE (2026-05-21): task_time_limit does NOT fire on Windows --pool=solo
     # (no signals/subprocess). Real per-call/per-round deadlines live in-task via
-    # asyncio.wait_for (llm_service.call + mining_tasks._run_one_round_inline).
+    # asyncio.wait_for (llm_service.call + mining_tasks.pipeline round).
     worker_prefetch_multiplier=1,  # Fair scheduling
     # 2026-05-21: route the long-running mining task to a dedicated `mining`
     # queue so a separate solo worker can keep draining the default `celery`

@@ -3,7 +3,7 @@
 One UNIFIED classifier (persister-side, sync, DB-free) turns a FAIL SimResult
 into a RETRY or MUTATE FeedbackEvent based on its R1a attribution; one
 dispatching handler (producer-side, owns db+wf) regenerates accordingly. Wired
-(by _run_flat_iteration_pipeline) only for whichever of ENABLE_R1B_RETRY_LOOP /
+(by _run_flat_iteration) only for whichever of ENABLE_R1B_RETRY_LOOP /
 ENABLE_R1B_HYPOTHESIS_MUTATE is on; otherwise the loop stays inactive.
 
 - **RETRY** (FAIL + attribution implementation): rewrite the expression

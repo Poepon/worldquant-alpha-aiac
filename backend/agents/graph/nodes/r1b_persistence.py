@@ -11,16 +11,16 @@ LangGraph invocation. Two pieces of state need to survive across rounds:
      (sum of retries + mutations per task across all rounds)
 
 Both are stored on ``MiningTask.config`` JSONB so they survive the
-``_run_one_round_inline`` boundary in ``mining_tasks.py``.
+``pipeline round`` boundary in ``mining_tasks.py``.
 
 Soft-fail: every helper swallows exceptions + logs warn so a DB hiccup
 NEVER blocks the mining round.
 
 Wiring points (for R1b.2c+):
   - ``persist_after_round(state, task, db)`` — called from persistence
-    node / mining_tasks._run_one_round_inline post-graph-invoke
+    node / mining_tasks.pipeline round post-graph-invoke
   - ``consume_pending_hypothesis(task, db)`` — called from
-    mining_tasks._run_one_round_inline pre-graph-invoke; returns the
+    mining_tasks.pipeline round pre-graph-invoke; returns the
     pending dict and clears the config slot so next round starts fresh
 """
 from __future__ import annotations
@@ -91,7 +91,7 @@ async def consume_pending_hypothesis(task: Any, db: Any) -> Optional[Dict[str, A
     """Pop ``r1b_pending_new_hypothesis`` from MiningTask.config; returns the
     dict or None. Clears the config slot so next round starts fresh.
 
-    Called by ``mining_tasks._run_one_round_inline`` at the top of each
+    Called by ``mining_tasks.pipeline round`` at the top of each
     round; the returned dict is then passed into the initial MiningState
     (or directly to hypothesis_propose) so the mutated hypothesis drives
     the next round's alpha generation.

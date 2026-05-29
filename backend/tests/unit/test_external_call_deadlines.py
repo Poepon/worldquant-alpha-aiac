@@ -84,6 +84,7 @@ class _FakeDB:
         return None
 
 
+@pytest.mark.skip(reason="serial _run_one_round_inline retired in Phase C 2026-05-29 — flat pipeline round timeout covered by SIM_PIPELINE_OP_TIMEOUT_SEC + heartbeat-abort")
 @pytest.mark.asyncio
 async def test_round_deadline_soft_fails(monkeypatch):
     """A hung run_evolution_loop is bounded by MINING_ROUND_TIMEOUT_SEC and the

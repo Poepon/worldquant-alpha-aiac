@@ -275,7 +275,7 @@ class MiningAgent:
             # When ENABLE_G5_CROSSOVER ON, select 2 high-reward PASS alpha
             # from this task's recent pool → call llm_crossover_alpha → log
             # to g5_crossover_log + persist offspring on task.config so the
-            # NEXT round's _run_one_round_inline consumes them and node_code_gen
+            # NEXT round's pipeline round consumes them and node_code_gen
             # prepends to pending_alphas. Soft-fail全链: 任何异常 → 跳过 G5
             # → round 结果不受影响。
             try:

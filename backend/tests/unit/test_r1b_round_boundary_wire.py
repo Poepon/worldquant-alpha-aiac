@@ -212,6 +212,7 @@ async def test_persist_wire_skipped_when_task_id_missing(monkeypatch):
 # Sentinel — neither flag triggers module imports (byte-equivalent guarantee)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(reason="serial _run_one_round_inline retired in Phase C 2026-05-29 — byte-equivalence sentinel inspected the serial function source which no longer exists")
 def test_byte_equiv_sentinel_no_r1b_persistence_import_when_flags_off(monkeypatch):
     """Re-import the wire-affected modules with both flags OFF; verify
     r1b_persistence is NOT pulled in via the flag-gated branch.

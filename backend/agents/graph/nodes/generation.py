@@ -456,7 +456,7 @@ async def node_hypothesis(
     # ------------------------------------------------------------------
     # R1b.2-v2 (2026-05-18): inject path — when the prior round's
     # hypothesis_mutate emitted a pending hypothesis (consumed by
-    # _run_one_round_inline + plumbed via workflow.run), use it directly
+    # pipeline round + plumbed via workflow.run), use it directly
     # as the round's primary hypothesis and SKIP the exploration LLM call.
     # Flag-gated by ENABLE_R1B_HYPOTHESIS_MUTATE so consumed-but-flag-OFF is
     # a no-op (legacy LLM-driven path runs).

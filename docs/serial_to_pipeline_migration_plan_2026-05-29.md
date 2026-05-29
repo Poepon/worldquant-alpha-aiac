@@ -5,7 +5,8 @@
 - 目标: 删除 FLAT mining 串行路线 (`_run_flat_iteration` + `_run_one_round_inline`),只保留流水线路线
 - 历史: v1 漏掉 5-27→5-29 共 25 个 pipeline commit / v2 把 R14 当搬运工作低估、缺 soak gate、数字错。v3 修这些
 - **v3 修订 2 (2026-05-29 晚)**: R14 推迟,见 §2.5。当前无 orchestrator 接班,R14 PAUSE 会留死结(配额空转),反自动化目标。R14 与 orchestrator 打包,见 [orchestrator-plan](./orchestrator_plan_2026-05-29.md)
-- **v3 修订 3 (2026-05-29 晚)**: R1b typed 4b 完整 retire(dormant 路径,生产 0 触发):删 `r1b_typed_pipeline.py` 整模块 + `_maybe_run_typed_pipeline_round` wrapper + dispatch + 3 个测试 + `ENABLE_R1B_TYPED_PIPELINE` + `R1B_TYPED_NUM_ITER_PER_ROUND` config + ops/feature_flag_service 引用。Phase C 测试影响清单从 4 降到 2
+- **v3 修订 3 (2026-05-29 晚)**: R1b typed 4b 完整 retire(dormant 路径,生产 0 触发):删 `r1b_typed_pipeline.py` 整模块 + `_maybe_run_typed_pipeline_round` wrapper + dispatch + 3 个测试 + `ENABLE_R1B_TYPED_PIPELINE` + `R1B_TYPED_NUM_ITER_PER_ROUND` config + ops/feature_flag_service 引用。Phase C 测试影响清单从 4 降到 2(commit `e98dd89`)
+- **v3 修订 4 (2026-05-29 晚) — Phase C 主体已 ship**: 删 `_run_one_round_inline`(166 行)+ 串行 `_run_flat_iteration`(419 行),rename `_run_flat_iteration_pipeline` → `_run_flat_iteration`,mining_tasks.py 2186 → 1601 行(-585)。bulk rename 14 处 `_run_one_round_inline` 注释 → `pipeline round`,2 处 `_run_flat_iteration_pipeline` docstring + 6 处测试 patch 改新名。删 `test_flat_round_failure_recovery.py`,skip `test_external_call_deadlines.py:test_round_deadline_soft_fails` + `test_r1b_round_boundary_wire.py:test_byte_equiv_sentinel_...`。Phase C 验证:1020 unit tests + frontend build PASS,Phase C 相关 33/33 PASS。Phase D 还剩:删 `_pick_least_covered_dataset` dead code + `_rebuild_flat_db_session`(≥7d 观察后)+ `_refresh_brain_client`(若 `BrainClientRefresher` 接管验证无遗漏)
 - 前置: 0 个 blocking gap (R14 推迟后),2 个低优 gap (auth-circuit park-and-retry / trace iteration_offset)
 
 ---

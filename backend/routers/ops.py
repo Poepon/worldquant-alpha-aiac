@@ -1011,7 +1011,7 @@ async def brain_deactivate_consultant(
 # A+ BRAIN auth circuit breaker (2026-05-19)
 # =============================================================================
 # Inspect + manually clear the BRAIN_AUTH_CIRCUIT used by simulate_alpha /
-# mining_tasks._run_one_round_inline. OPEN state means callers are
+# mining_tasks.pipeline round. OPEN state means callers are
 # fast-failing — no mining LLM cost burnt until ops clears or the 300s TTL
 # auto-HALF_OPENs and the next call probes.
 

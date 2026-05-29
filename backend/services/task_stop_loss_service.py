@@ -14,7 +14,7 @@ Spike-calibrated (2026-05-19, scripts/sprint0_baseline_spike.py):
     EMA floor=0.005 acts as a slow-degeneration backstop.
 
 Race fix (Round S0-A finding):
-  flat loop _run_one_round_inline returns skipped=True with
+  flat loop pipeline round returns skipped=True with
   skipped_reason='brain_auth_circuit_open' when BRAIN auth is mid-storm;
   flat loop already `continue`s before calling stop_loss_service, so
   CB-skipped rounds are naturally excluded from counters. The service

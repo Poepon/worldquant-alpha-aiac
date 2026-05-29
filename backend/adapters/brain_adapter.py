@@ -641,7 +641,7 @@ class BrainAdapter:
         # known-bad state. Saves us from burning a sim slot acquire + 3 retry
         # attempts + a 401 response just to discover what the LAST sim already
         # told us. Caller's `retryable=True` path holds the alpha at PENDING
-        # (V-27.61) and the round-entry check in mining_tasks._run_one_round_inline
+        # (V-27.61) and the round-entry check in mining_tasks.pipeline round
         # short-circuits the whole LangGraph workflow so no LLM cost is burnt.
         if BRAIN_AUTH_CIRCUIT.is_open():
             status = BRAIN_AUTH_CIRCUIT.status()

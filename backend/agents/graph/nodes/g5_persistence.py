@@ -2,7 +2,7 @@
 
 Mirrors r1b_persistence.py mechanism: offspring expression(s) produced by
 ``llm_crossover_alpha`` at round end are stashed on ``MiningTask.config`` so
-the NEXT round's _run_one_round_inline can consume + inject them as
+the NEXT round's pipeline round can consume + inject them as
 ``g5_offspring_candidates`` into MiningState. node_code_gen then prepends
 them to ``pending_alphas`` so they walk the full validate → simulate →
 evaluate → save_results pipeline alongside fresh LLM-generated alphas.
@@ -77,7 +77,7 @@ async def consume_pending_offspring(
     """Pop ``g5_pending_offspring`` from MiningTask.config. Returns the list
     or None. Clears the config slot atomically so next round starts fresh.
 
-    Called by ``mining_tasks._run_one_round_inline`` at the top of each round;
+    Called by ``mining_tasks.pipeline round`` at the top of each round;
     the returned list is then passed into the initial MiningState as
     ``g5_offspring_candidates`` so node_code_gen can prepend them.
 
