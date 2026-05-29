@@ -36,12 +36,16 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # ---------------------------------------------------------------------------
-# Candidate models (mirror benchmark_llm_alpha_quality.py; override via --models)
+# Candidate models — the exact 9 that produced the 2026-05-29 FINAL decision
+# (docs/llm_per_node_benchmark_2026-05-29_FINAL.json + config.py defaults).
+# Keep this list == the benchmarked population so a bare re-run reproduces the
+# committed per-node picks; override a subset via --models. (All 9 verified
+# available on Aliyun DashScope, zero fail → plan 放行条件 #1.)
 # ---------------------------------------------------------------------------
 MODELS = [
-    "qwen3.6-plus", "qwen3.5-plus", "qwen3-max-2026-01-23",
-    "qwen3-coder-next", "qwen3-coder-plus",
-    "glm-5", "glm-4.7", "kimi-k2.5", "MiniMax-M2.5",
+    "qwen3.7-max", "qwen3.6-plus", "qwen3.6-flash",
+    "deepseek-v4-pro", "deepseek-v4-flash",
+    "kimi-k2.6", "kimi-k2.5", "glm-5.1", "glm-5",
 ]
 RUNS_DEFAULT = 3
 TEMPERATURE = 0.8
@@ -491,8 +495,14 @@ async def _run_node_for_model(svc, model: str, bench: NodeBench) -> Dict[str, An
     for system, user in calls:
         t = time.time()
         try:
+            # Pass model/provider EXPLICITLY so call()'s per-node router is
+            # bypassed (resolve_model_for only kicks in when both are None). Else
+            # if ENABLE_PER_FUNCTION_LLM_ROUTING is ON in this process, every
+            # candidate would be silently benchmarked as the map's fixed model.
+            eff_provider = getattr(svc, "provider", "openai")
             r = await svc.call(system, user, temperature=bench.temperature,
-                               json_mode=True, max_tokens=bench.max_tokens, node_key=bench.node_key)
+                               json_mode=True, max_tokens=bench.max_tokens,
+                               node_key=bench.node_key, model=model, provider=eff_provider)
         except Exception as e:  # noqa: BLE001
             call_fail += 1; last_err = f"{type(e).__name__}: {e}"[:120]; parsed.append(None); continue
         latencies.append(time.time() - t)
