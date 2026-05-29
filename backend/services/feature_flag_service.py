@@ -990,6 +990,33 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "创建时把此值钉进 config[hypothesis_centric_variant] 免疫 worker 漂移。"
         ),
     ),
+    # --- LLM-Routing (PR1, 2026-05-29): per-functional-block model routing ---
+    "ENABLE_PER_FUNCTION_LLM_ROUTING": FlagSpec(
+        name="ENABLE_PER_FUNCTION_LLM_ROUTING",
+        flag_type="bool",
+        group="LLM-Routing",
+        description=(
+            "按功能块(node_key)路由到不同 LLM 模型的总开关。OFF=所有 node 走全局默认"
+            "模型(byte-for-byte legacy)。ON=resolve_model_for 按 LLM_FUNCTION_MODEL_MAP "
+            "为每个 node 选模型(热路径 hypothesis/code_gen 用质量优,辅助路径用便宜快)。"
+        ),
+    ),
+    "LLM_FUNCTION_MODEL_MAP": FlagSpec(
+        name="LLM_FUNCTION_MODEL_MAP",
+        flag_type="json",
+        group="LLM-Routing",
+        description=(
+            "node_key → {model, provider, base_url?, api_key_ref?, thinking_effort?} "
+            "路由映射。前端编辑此 json;resolve_model_for 直读 _flag_override_cache。"
+            "畸形 entry(非 dict/缺 model/provider 非法)自动回退该 node 默认,不影响其它。"
+        ),
+    ),
+    "LLM_AVAILABLE_MODELS": FlagSpec(
+        name="LLM_AVAILABLE_MODELS",
+        flag_type="json",
+        group="LLM-Routing",
+        description="前端下拉的可选模型清单(JSON 数组)。仅 UI 用,不影响路由决策。",
+    ),
 }
 
 

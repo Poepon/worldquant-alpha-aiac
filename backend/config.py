@@ -56,6 +56,69 @@ def _load_thinking_overrides() -> Dict[str, str]:
 _THINKING_EFFORT_OVERRIDES_CACHE: Dict[str, str] = _load_thinking_overrides()
 
 
+def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
+    """Load the per-functional-block (node_key) → {model, provider, ...} routing map.
+
+    Default is the per-node benchmark recommendation (runs=1, 2026-05-29 —
+    docs/llm_per_node_benchmark_2026-05-29_FINAL.json; pending runs=3 finalize).
+    This is only the STARTUP default — the ops console writes overrides into
+    ``_flag_override_cache["LLM_FUNCTION_MODEL_MAP"]`` (a json feature-flag) which
+    ``resolve_model_for`` consults FIRST. The whole map is consulted only when
+    ENABLE_PER_FUNCTION_LLM_ROUTING is ON (default OFF → byte-for-byte legacy).
+
+    Mirrors _load_thinking_overrides: module-level + fault-tolerant so a malformed
+    LLM_FUNCTION_MODEL_MAP env never crashes Settings() construction. env keys
+    merge OVER the defaults (partial-override).
+    """
+    defaults: Dict[str, Dict[str, str]] = {
+        "hypothesis":          {"model": "deepseek-v4-pro",   "provider": "openai"},
+        "code_gen":            {"model": "deepseek-v4-flash", "provider": "openai"},
+        "self_correct":        {"model": "qwen3.7-max",       "provider": "openai"},
+        "r1b_retry":           {"model": "glm-5",             "provider": "openai"},
+        "llm_mutate_alpha":    {"model": "kimi-k2.5",         "provider": "openai"},
+        "llm_crossover_alpha": {"model": "deepseek-v4-flash", "provider": "openai"},
+        "r1b_mutate":          {"model": "kimi-k2.6",         "provider": "openai"},
+        "r5_alignment_c1":     {"model": "deepseek-v4-flash", "provider": "openai"},
+        "r5_alignment_c2":     {"model": "kimi-k2.6",         "provider": "openai"},
+        "attribution":         {"model": "kimi-k2.5",         "provider": "openai"},
+    }
+    env_val = os.getenv("LLM_FUNCTION_MODEL_MAP")
+    if not env_val:
+        return defaults
+    try:
+        parsed = json.loads(env_val)
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM_FUNCTION_MODEL_MAP must be a JSON object")
+        return {**defaults, **parsed}
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        _config_logger.warning(
+            "[config] LLM_FUNCTION_MODEL_MAP parse failed, using defaults | error=%s", e,
+        )
+        return defaults
+
+
+def _load_llm_available_models() -> list:
+    """Candidate model list for the ops-console dropdown (PR4). Override via
+    LLM_AVAILABLE_MODELS env (JSON array). Fault-tolerant; never crashes."""
+    defaults = [
+        "deepseek-v4-pro", "deepseek-v4-flash", "kimi-k2.6", "kimi-k2.5",
+        "qwen3.7-max", "qwen3.6-plus", "qwen3.6-flash", "glm-5.1", "glm-5",
+    ]
+    env_val = os.getenv("LLM_AVAILABLE_MODELS")
+    if not env_val:
+        return defaults
+    try:
+        parsed = json.loads(env_val)
+        return [str(m) for m in parsed] if isinstance(parsed, list) else defaults
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return defaults
+
+
+# Module-level caches — same Pydantic-bypass rationale as the thinking table.
+_LLM_FUNCTION_MODEL_MAP_CACHE: Dict[str, Dict[str, str]] = _load_llm_function_model_map()
+_LLM_AVAILABLE_MODELS_CACHE: list = _load_llm_available_models()
+
+
 # Marginal-contribution scorecard calibration (consumed by
 # backend/marginal_analysis.py via Settings.MARGINAL_* / marginal_scales()).
 # Module-level so they're a single editable source and dodge Pydantic env-JSON
@@ -191,6 +254,26 @@ class Settings(BaseSettings):
     @property
     def THINKING_EFFORT_OVERRIDES(self) -> Dict[str, str]:
         return _THINKING_EFFORT_OVERRIDES_CACHE
+
+    # Per-functional-block LLM model routing (PR1, 2026-05-29). ENABLE_ prefix
+    # so the __getattribute__ hook honours a runtime override (the map body
+    # itself is NOT read via settings.X — resolve_model_for reads
+    # _flag_override_cache directly, since non-ENABLE_ names bypass the hook).
+    ENABLE_PER_FUNCTION_LLM_ROUTING: bool = (
+        os.getenv("ENABLE_PER_FUNCTION_LLM_ROUTING", "false").strip().lower()
+        in ("1", "true", "yes")
+    )
+
+    # Startup defaults for the routing map + dropdown roster (module-level,
+    # Pydantic-bypassed). Runtime overrides live in _flag_override_cache via the
+    # LLM_FUNCTION_MODEL_MAP / LLM_AVAILABLE_MODELS json feature-flags.
+    @property
+    def LLM_FUNCTION_MODEL_MAP(self) -> Dict[str, Dict[str, str]]:
+        return _LLM_FUNCTION_MODEL_MAP_CACHE
+
+    @property
+    def LLM_AVAILABLE_MODELS(self) -> list:
+        return _LLM_AVAILABLE_MODELS_CACHE
 
     # Mining Configuration
     DEFAULT_REGION: str = "USA"

@@ -154,6 +154,71 @@ def _llm_error_is_api_failure(exc: BaseException) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Per-functional-block model routing (PR1, 2026-05-29)
+# ---------------------------------------------------------------------------
+_VALID_PROVIDERS = frozenset({"openai", "anthropic"})
+
+
+def resolve_model_for(
+    node_key: Optional[str], region: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Resolve the ``{model, provider, ...}`` a functional block should use.
+
+    Returns ``None`` — meaning "use the caller's default (self.model/self.provider)"
+    — in EVERY non-routing path, so flag-OFF is byte-for-byte legacy:
+      - ENABLE_PER_FUNCTION_LLM_ROUTING OFF
+      - ``node_key`` falsy / not in the map
+      - the matched entry is malformed (not a dict / missing model / bad provider)
+
+    P0-1: the map BODY is read directly from ``backend.config._flag_override_cache``
+    (the ops console writes the ``LLM_FUNCTION_MODEL_MAP`` json flag there), NOT via
+    ``settings.LLM_FUNCTION_MODEL_MAP`` — the ``__getattribute__`` hook only honours
+    overrides for ``ENABLE_``-prefixed names, so a ``settings.X`` read would never
+    see the front-end edit. Falls back to the startup default cache when no override.
+
+    Per-entry validation is defensive: a single malformed node entry falls back to
+    the caller default (returns ``None``) and NEVER raises — a bad front-end edit
+    must not crash a mining round. ``region`` is reserved for PR5 (per-region
+    overrides); accepted now so the call sites are forward-compatible.
+    """
+    try:
+        if not node_key:
+            return None
+        if not getattr(settings, "ENABLE_PER_FUNCTION_LLM_ROUTING", False):
+            return None
+        # Direct cache read (see P0-1 above) — override wins, else startup default.
+        from backend.config import _flag_override_cache, _LLM_FUNCTION_MODEL_MAP_CACHE
+        # An override (even a malformed one) means the front-end intends to
+        # REPLACE the startup map — so honour it iff it's a well-formed dict;
+        # a malformed override falls through to None (caller default), NOT to
+        # the startup map the front-end was trying to supersede. Startup default
+        # is used only when there is NO override at all.
+        override = _flag_override_cache.get("LLM_FUNCTION_MODEL_MAP")
+        model_map = override if override is not None else _LLM_FUNCTION_MODEL_MAP_CACHE
+        if not isinstance(model_map, dict):
+            return None
+        entry = model_map.get(node_key)
+        if not isinstance(entry, dict):
+            return None
+        model = entry.get("model")
+        if not model or not isinstance(model, str):
+            return None
+        provider = entry.get("provider") or "openai"
+        if provider not in _VALID_PROVIDERS:
+            return None
+        # Shallow copy so callers can't mutate the shared cache object.
+        resolved: Dict[str, Any] = {"model": model, "provider": provider}
+        for k in ("base_url", "api_key_ref", "thinking_effort"):
+            v = entry.get(k)
+            if v:
+                resolved[k] = v
+        return resolved
+    except Exception as e:  # noqa: BLE001 — routing must never break a call
+        logger.warning(f"[resolve_model_for] node_key={node_key!r} failed, using default | {e}")
+        return None
+
+
 # Anthropic reasoning models that reject `temperature` at the API layer.
 # Same pattern as OpenAI's o-series — reasoning is opaque, so the param is
 # deprecated and a 400 is returned if passed. Match by prefix so dated /
