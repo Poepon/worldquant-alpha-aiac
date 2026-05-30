@@ -42,6 +42,8 @@ v1 §1.4 称 "`Settings.__getattribute__` 让任意属性读 override"。**错**
 
 ## 0.5 Verification round 结论 (v2→v2.1) — GO-with-conditions
 
+> **2026-05-31 状态更新**: PR1–PR5 + benchmark 选型已全部 ship(master `2d829e2`→`6bf2f14`)。三轮 code-review follow-up 已 ship:`d334e5e`(benchmark 可复现性:默认 MODELS 对齐定稿 + 显式传 model 绕路由)、`de53a42`(退役 crossover swap hack 完成 P1#2 + 路由文案订正 + PR5 contextvar try/finally)。**6 条放行条件 + P4 base_url 核查全部消化**:条件 #1(头牌可用性)经 e186ab4 实测解除;**P4 端点一致性 2026-05-31 实测解除**(见 §2 #1/#2 —— 生产 == benchmark 端点,路由 id 全 200)。**开工前仅剩 Phase C 本体**(开 flag 单 node 单变量 A/B,烧真实 BRAIN sim,需授权)。
+
 2-agent verification 亲读源码:**2 P0 + 核心 P1(#2/#3/#6/#7/#9/#12/#13)全闭环、代码核验成立**。P0-1 三点实证无隐患(`load_overrides_into_cache` 用 `.clear()+.update()` 原地 mutate → import 引用永远有效, feature_flag_service.py:1229-1230;worker `worker_process_init`→`start_sync_refresher` warm-cache, celery_app.py:41 + feature_flag_runtime.py:152;先例 feature_flag_service.py:1042 真实)。判定 **GO-with-conditions**,下列 6 条开工前/PR 内消化:
 
 ### 放行条件
@@ -80,18 +82,17 @@ PR2 按 4d 计(lazy client+双 LRU+熔断 per-provider+降级+并发测试,BRAIN
 
 ## 2. 开工前必决 (blocking)
 
-### #1 接入 = 阿里云百炼为主 + 原厂端点兜底 (已定)
-百炼 OpenAI-compat 端点 `https://dashscope.aliyuncs.com/compatible-mode/v1`,集成部分第三方(DeepSeek/Kimi)+ 自家 Qwen;没有的走原厂。value schema `{model, provider, base_url?, api_key_ref?}` 天然支持: 百炼覆盖的省略后两项(走默认 `OPENAI_*`),没有的显式补端点+`api_key_ref`(`CredentialsService` 加 key)。
+### #1 接入 = 阿里云 MaaS 单端点(已定 + 2026-05-31 实测订正)
+~~百炼 `https://dashscope.aliyuncs.com/compatible-mode/v1`~~ —— **实际生产端点是阿里云 MaaS `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`**(2026-05-31 复刻 `LLMService._ensure_credentials_loaded()` 实测:DB `SystemConfig` 凭证与 env 一致都指这里,无别处覆盖;`OPENAI_MODEL=kimi-k2.6` 为启动默认)。该端点单点聚合 deepseek/qwen/kimi/glm 各厂,map 里所有 id 都在此端点直接可用 → **无需 `base_url?`/`api_key_ref?` 分流**,value schema 暂时只用 `{model, provider}`。原厂兜底是后备能力,当前未启用。
 
-### #2 benchmark 代号 → 真实 model id + 接入途径对照表 (待填,可边跑边填)
-有了前端编辑页,此表从"开工阻塞"降级为运维动作: 先上空映射(flag OFF),前端逐 node 试填、保存、观察。
+### #2 benchmark 代号 = 真实 model id(2026-05-31 实测解除,表作废)
+**P4 核查结论(我方 review 提出)**: benchmark 跑的端点 == 生产解析端点(同一个 MaaS 端点,同一套 `_ensure_credentials_loaded` 解析);"代号"本身就是该端点的真实 model id,无需翻译表。端点接受性实测(显式传 model 绕开路由,三厂代表各 1 次极小调用):`deepseek-v4-pro` / `qwen3.6-plus` / `kimi-k2.5` 全 `success=True` 且 `model_echo` 精确回显 → **flag 一开,map 里路由 id 运行时都解析得到,不只默认 model**。原先担心的"生产指 DeepSeek 原厂 → qwen/kimi/glm 会 400"的雷**确认不存在**。下表保留仅作历史:
 
-| 选中模型 (代号) | 百炼 model id | 百炼有? | 否则原厂 |
-|---|---|---|---|
-| deepseek-v4-pro (hypothesis, pipeline) | ? | ? | DeepSeek 官方 |
-| kimi-k2.6 (code_gen, hypothesis-serial) | ? | ? | Moonshot 官方 |
-| qwen3-coder-plus (self_correct/r1b/distill) | ? | 大概率有 | — |
-| deepseek-v4-flash (strategy/feedback) | ? | ? | DeepSeek 官方 |
+| 选中模型 (代号 = 真实 id) | 生产端点可用? |
+|---|---|
+| deepseek-v4-pro / deepseek-v4-flash | ✅ 实测 |
+| qwen3.6-plus / qwen3.6-flash | ✅ 实测(qwen 厂) |
+| kimi-k2.6 / kimi-k2.5 | ✅ 实测(kimi 厂) |
 
 ### #3 per-model 成本价目表 ($口径)
 `_estimate_cost` + cost/metrics(llm_service.py:720/723)+ `MAX_TOKENS_PER_DAY`→成本预算,全部按 effective model + 是否开 thinking 取价。
