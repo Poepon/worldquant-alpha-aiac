@@ -60,10 +60,12 @@ python scripts/phase_c_llm_routing_ab.py \
 
 | decision | 含义 | 动作 |
 |---|---|---|
-| **INVALID** | treatment 的 code_gen 模型 == control(override 没生效)或该 node 没调用 | 重启 treatment arm,确认 payload 带 `llm_overrides`;别下结论 |
-| **GO** | PASS-per-sim 效应 >0 且 bootstrap CI 下界 > floor(默认 −0.10pct-pts),cost 未显著恶化 | 把该 node 写进 `LLM_FUNCTION_MODEL_MAP`(经前端 LLMRoutingConsole),再推下一 node |
-| **NO-GO** | 效应 < floor 或 CI 上界 <0 | 保留默认模型,不切 |
-| **PARTIAL** | 不显著 / 样本不足且 sharpe 也不显著 / 质量升但 `cost_per_pass` 涨 >20%(cost flag=WORSE 把 GO 降级) | 继续观察或权衡成本;cost-WORSE 的 GO 是运维取舍(质量 vs $) |
+| **INVALID** | `validity=INVALID_SAME_MODEL`(treatment 的 node 只跑了 control 同款模型=override 没生效)或 `NO_NODE_CALLS`(该 node 没调用)或 **`CONTAMINATED`**(routed_share < 0.90,即 routed 模型只在 <90% 的 node 调用上跑、其余被全局熔断 fallback 回默认——见 §注意第 4 条) | INVALID/NO_NODE_CALLS→重启 arm 确认 payload 带 `llm_overrides`;CONTAMINATED→等 provider 稳定或换稳的端点重跑;一律别下结论 |
+| **GO** | PASS-per-sim 效应 >0 **且 bootstrap 80% CI 下界严格 > 0**(显著优于 control),cost 未显著恶化,且 A/B valid | 把该 node 写进 `LLM_FUNCTION_MODEL_MAP`(经前端 LLMRoutingConsole),再推下一 node |
+| **NO-GO** | 效应 ≤ floor(默认 raw −0.002=0.2pp)或 CI 上界 < floor;或样本不足时 in-sample-sharpe 显著为负 | 保留默认模型,不切 |
+| **PARTIAL** | 正效应但 CI 跨 0(不显著)/ 样本不足且 sharpe 不显著 / **样本不足但 sharpe 正显著(thin n 的正 sharpe 不当硬 GO,封顶 PARTIAL)** / 质量升但 `cost_per_pass` 涨 >20%(cost flag=WORSE 把 GO 降级) | 继续观察或权衡成本;cost-WORSE 的 GO 是运维取舍(质量 vs $) |
+
+> **统计口径**:`effect`/CI 在 JSON 里是**原始比率差**(fraction,非 ×100);CLI 打印时 ×100 显示为 pp。`--effect-floor` 默认 `-0.002`(raw,=0.2pp 容忍),**不是** −0.10。`cost_flag` 仅在两臂都有定价成本且**样本充足**时才判 WORSE(noisy $/PASS + 未定价新模型不会误判)。
 
 - **样本不足**(任一臂 `real_sims < 100`):evaluator 自动退到**高功效的 in-sample-sharpe**信号(Welch t + Cohen's d)出决策,并标 `insufficient_sample=true`。
 - **cost guardrail**:`cost_per_pass` treatment 比 control 涨超 `--cost-tolerance`(默认 20%)→ flag `WORSE` → 即便质量 GO 也降级 PARTIAL,交人判。

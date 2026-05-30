@@ -100,9 +100,15 @@ def assemble_arm(raw: Dict[str, Any]) -> Dict[str, Any]:
     passes = int(raw.get("passes", 0) or 0)
     real_sims = int(raw.get("den_alphas", 0) or 0) + int(raw.get("den_fail", 0) or 0)
     pass_rate = (passes / real_sims) if real_sims else None
-    node_cost = float(raw.get("node_cost_usd") or 0.0)
-    total_cost = float(raw.get("total_cost_usd") or 0.0)
-    cost_per_pass = (total_cost / passes) if passes else None
+    # Preserve None for cost: a brand-new model under A/B is the COMMON case
+    # for an unpriced model (derive_cost_usd → NULL), and coercing None→0.0
+    # would make an expensive routed model look free → cost guardrail defeated.
+    # Keep None all the way to decide_ab so cost_flag stays "unknown".
+    _raw_total = raw.get("total_cost_usd")
+    total_cost = float(_raw_total) if _raw_total is not None else None
+    _raw_node = raw.get("node_cost_usd")
+    node_cost = float(_raw_node) if _raw_node is not None else None
+    cost_per_pass = (total_cost / passes) if (passes and total_cost is not None) else None
     return {
         "passes": passes,
         "real_sims": real_sims,
@@ -117,12 +123,15 @@ def assemble_arm(raw: Dict[str, Any]) -> Dict[str, Any]:
         "node_models": list(raw.get("node_models") or []),
         "node_calls": int(raw.get("node_calls", 0) or 0),
         "node_tokens": int(raw.get("node_tokens", 0) or 0),
-        "node_cost_usd": round(node_cost, 4),
+        "node_cost_usd": round(node_cost, 4) if node_cost is not None else None,
         "node_avg_latency_ms": (round(float(raw["node_latency_ms"]), 1)
                                 if raw.get("node_latency_ms") is not None else None),
-        "total_cost_usd": round(total_cost, 4),
+        "total_cost_usd": round(total_cost, 4) if total_cost is not None else None,
         "total_tokens": int(raw.get("total_tokens", 0) or 0),
         "cost_per_pass_usd": round(cost_per_pass, 4) if cost_per_pass is not None else None,
+        # per-model call counts on the routed node — drives the routed_share
+        # contamination check (treatment that fell back to default on some calls).
+        "node_model_counts": dict(raw.get("node_model_counts") or {}),
     }
 
 
@@ -131,8 +140,9 @@ def decide_ab(
     treatment: Dict[str, Any],
     *,
     node: str,
-    effect_floor_pct_pts: float = -0.10,
+    effect_floor: float = -0.002,
     cost_tolerance: float = 0.20,
+    routed_share_min: float = 0.90,
     seed: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Combine the binary PASS-rate gate + continuous sharpe + cost + validity.
@@ -140,6 +150,17 @@ def decide_ab(
     Primary gate = PASS-per-real-sim effect CI (treatment - control), via the
     shared bootstrap. Cost is a guardrail; sharpe is the higher-power fallback
     when the binary is sample-starved.
+
+    ``effect_floor`` is a **RAW rate difference** (NOT ×100 percentage points):
+    -0.002 means "treatment may be up to 0.2pp worse before NO-GO". Note the
+    upstream ``bootstrap_diff_ci`` returns ``effect_pct_pts`` as a raw fraction
+    despite the name — at a ~1.5% PASS base rate the shared module's -0.10
+    default would mean -10pp and never fire, so we use a base-rate-appropriate
+    raw floor here.
+    ``routed_share_min``: the treatment node must have run the routed model on at
+    least this fraction of its calls, else the arm is CONTAMINATED (a provider
+    brown-out fell back to the default model on too many calls — see the runbook
+    caveat on the global circuit breaker).
     """
     c_sims, t_sims = control["real_sims"], treatment["real_sims"]
     insufficient = (c_sims < _MIN_DENOM) or (t_sims < _MIN_DENOM)
@@ -147,16 +168,18 @@ def decide_ab(
     ci = bootstrap_diff_ci(
         c_sims, control["passes"], t_sims, treatment["passes"], seed=seed,
     )
-    effect = ci["effect_pct_pts"]            # (treat_rate - control_rate) * 100
+    effect = ci["effect_pct_pts"]            # RAW rate diff (treat_rate - control_rate)
     lo, hi = ci["ci_lower"], ci["ci_upper"]
 
-    # Binary gate (same rules as evaluate_go_gate, treatment=assistant).
+    # Binary gate — mirrors evaluate_go_gate EXACTLY (the reviewed shared gate):
+    # GO requires the 80% CI lower bound strictly > 0 (significant improvement),
+    # NOT merely lo > floor — else a CI straddling 0 would be declared GO on noise.
     if ci.get("insufficient_samples"):
         binary = "INSUFFICIENT"
-    elif effect > 0 and lo > effect_floor_pct_pts:
-        binary = "GO"
-    elif effect < effect_floor_pct_pts or hi < 0:
+    elif effect <= effect_floor or hi < effect_floor:
         binary = "NO-GO"
+    elif effect > effect_floor and lo > 0:
+        binary = "GO"
     else:
         binary = "PARTIAL"
 
@@ -173,22 +196,37 @@ def decide_ab(
                   "cohens_d": round(d, 3), "required_n_per_arm": _required_n_per_arm(d)}
 
     # Cost guardrail — cost-per-PASS delta (the routing payoff is quality/$).
+    # Only meaningful when BOTH arms have a real (priced) cost AND the binary is
+    # not sample-starved (cost/PASS on a noisy PASS count is itself noise, and an
+    # unpriced routed model collapses cost→None → never falsely "OK").
     cpp_c, cpp_t = control["cost_per_pass_usd"], treatment["cost_per_pass_usd"]
     cost_flag = "unknown"
     cost_delta_pct = None
-    if cpp_c is not None and cpp_t is not None and cpp_c > 0:
+    if cpp_c is not None and cpp_t is not None and cpp_c > 0 and not insufficient:
         cost_delta_pct = round((cpp_t - cpp_c) / cpp_c * 100.0, 1)
         cost_flag = "WORSE" if cost_delta_pct > cost_tolerance * 100 else "OK"
 
-    # A/B validity — did the override actually take on the treatment arm? If the
-    # treatment node ran the SAME model(s) as control, the arms are identical and
-    # the comparison is meaningless (e.g. launch payload dropped the override).
+    # A/B validity — did the override actually take on the treatment arm?
+    #   NO_NODE_CALLS     : the routed node never ran (nothing to compare)
+    #   INVALID_SAME_MODEL: treatment ran ONLY control's model(s) → override dropped
+    #   CONTAMINATED      : override took, but a provider brown-out fell back to the
+    #                       default model on >(1-routed_share_min) of treatment's
+    #                       calls (set equality alone misses this — t={routed,default}
+    #                       ≠ c={default} reads as OK while half the calls were default)
+    #   OK                : routed model dominates treatment's node calls
     c_models = set(m for m in control["node_models"] if m)
     t_models = set(m for m in treatment["node_models"] if m)
+    t_counts = treatment.get("node_model_counts") or {}
+    t_total = sum(t_counts.values())
+    routed_models = t_models - c_models          # models only treatment ran = the override
+    routed_calls = sum(n for m, n in t_counts.items() if m in routed_models)
+    routed_share = (routed_calls / t_total) if t_total else 0.0
     if not t_models:
         validity = "NO_NODE_CALLS"
-    elif t_models == c_models:
+    elif not routed_models:
         validity = "INVALID_SAME_MODEL"
+    elif t_total and routed_share < routed_share_min:
+        validity = "CONTAMINATED"
     else:
         validity = "OK"
 
@@ -202,9 +240,12 @@ def decide_ab(
         if decision == "GO" and cost_flag == "WORSE":
             decision = "PARTIAL"  # quality up but pays a lot more $/PASS — operator call
     elif sharpe["cohens_d"] is not None and sharpe["p_value"] is not None and sharpe["p_value"] < 0.05:
-        decision = "GO" if sharpe["cohens_d"] > 0 else "NO-GO"
-        if decision == "GO" and cost_flag == "WORSE":
-            decision = "PARTIAL"
+        # Sample-starved binary → defer to the higher-power in-sample sharpe. But
+        # in-sample sharpe of generated alphas is a weak, survivorship-laden proxy
+        # (project lesson: ground-truth 不可信), and the fallback only fires at
+        # small n. So a significant NEGATIVE effect is trusted as protective NO-GO,
+        # but a positive one is capped at PARTIAL — never a hard GO off thin sharpe.
+        decision = "PARTIAL" if sharpe["cohens_d"] > 0 else "NO-GO"
     else:
         decision = "PARTIAL"
 
@@ -219,8 +260,10 @@ def decide_ab(
         "cost": {"control_per_pass": cpp_c, "treatment_per_pass": cpp_t,
                  "delta_pct": cost_delta_pct, "flag": cost_flag},
         "validity": validity,
-        "thresholds": {"effect_floor_pct_pts": effect_floor_pct_pts,
+        "routed_share": round(routed_share, 3),
+        "thresholds": {"effect_floor": effect_floor,
                        "cost_tolerance_pct": cost_tolerance * 100,
+                       "routed_share_min": routed_share_min,
                        "min_denom": _MIN_DENOM},
     }
 
@@ -262,10 +305,12 @@ async def _query_arm(db, task_id: int, node: str, win: str) -> Dict[str, Any]:
         WHERE task_id = :tid AND node_key = :node {win}
     """), {"tid": task_id, "node": node})).first()
 
-    # distinct models for the routed node (A/B-validity check)
+    # per-model call counts on the routed node — distinct models (validity:
+    # did override take?) + counts (validity: routed_share contamination check).
     mrows = (await db.execute(text(f"""
-        SELECT DISTINCT model FROM llm_call_log
+        SELECT model, count(*) n FROM llm_call_log
         WHERE task_id = :tid AND node_key = :node {win}
+        GROUP BY model
     """), {"tid": task_id, "node": node})).all()
 
     trow = (await db.execute(text(f"""
@@ -286,6 +331,7 @@ async def _query_arm(db, task_id: int, node: str, win: str) -> Dict[str, Any]:
         "node_cost_usd": (nrow[2] if nrow else None),
         "node_latency_ms": (nrow[3] if nrow else None),
         "node_models": [r[0] for r in mrows],
+        "node_model_counts": {r[0]: int(r[1]) for r in mrows},
         "total_cost_usd": (trow[0] if trow else None),
         "total_tokens": (trow[1] if trow else 0),
     }
@@ -303,7 +349,7 @@ async def _report(control_task: int, treatment_task: int, node: str, *,
     control = assemble_arm(c_raw)
     treatment = assemble_arm(t_raw)
     verdict = decide_ab(control, treatment, node=node,
-                        effect_floor_pct_pts=effect_floor, cost_tolerance=cost_tol, seed=seed)
+                        effect_floor=effect_floor, cost_tolerance=cost_tol, seed=seed)
     return {
         "node": node,
         "control_task": control_task,
@@ -321,8 +367,9 @@ def main() -> int:
     ap.add_argument("--treatment-task", type=int, required=True, help="treatment FLAT task_id (routed node)")
     ap.add_argument("--node", type=str, default="code_gen", help="routed node_key (default code_gen)")
     ap.add_argument("--days", type=int, default=0, help="created_at lookback (0 = full task lifetime)")
-    ap.add_argument("--effect-floor", type=float, default=-0.10,
-                    help="PASS-rate effect floor in pct-pts (default -0.10)")
+    ap.add_argument("--effect-floor", type=float, default=-0.002,
+                    help="PASS-rate effect floor as a RAW rate diff (default -0.002 = "
+                         "treatment may be up to 0.2pp worse before NO-GO; NOT ×100)")
     ap.add_argument("--cost-tolerance", type=float, default=0.20,
                     help="cost-per-PASS increase tolerated before flagging WORSE (default 0.20 = +20%%)")
     ap.add_argument("--seed", type=int, default=42, help="bootstrap RNG seed (reproducible CI)")
@@ -343,16 +390,22 @@ def main() -> int:
         for k, val in r[label].items():
             print(f"  {k}: {val}")
     print(f"\n--- verdict: {v['decision']} ---")
-    print(f"  binary_gate={v['binary_gate']} effect={v['effect_pct_pts']}pct-pts "
-          f"CI=({v['ci']['ci_lower']},{v['ci']['ci_upper']}) "
+    # effect/CI are RAW rate diffs (fractions); ×100 for the pp display only.
+    print(f"  binary_gate={v['binary_gate']} effect={round(v['effect_pct_pts'] * 100, 3)}pp "
+          f"CI=({round(v['ci']['ci_lower'] * 100, 3)}, {round(v['ci']['ci_upper'] * 100, 3)})pp "
           f"insufficient_sample={v['insufficient_sample']}")
     print(f"  sharpe: Welch_t={v['sharpe']['welch_t']} p={v['sharpe']['p_value']} "
           f"d={v['sharpe']['cohens_d']} required_n/arm={v['sharpe']['required_n_per_arm']}")
     print(f"  cost: ctrl/pass={v['cost']['control_per_pass']} treat/pass={v['cost']['treatment_per_pass']} "
           f"delta={v['cost']['delta_pct']}% flag={v['cost']['flag']}")
-    print(f"  validity: {v['validity']}  "
+    print(f"  validity: {v['validity']} (routed_share={v['routed_share']})  "
           f"(control node models={r['control']['node_models']} / treatment={r['treatment']['node_models']})")
-    if v["validity"] != "OK":
+    if v["validity"] == "CONTAMINATED":
+        print(f"  ⚠️ A/B CONTAMINATED — treatment ran the routed model on only "
+              f"{v['routed_share']:.0%} of {r['node']} calls (rest fell back to default, "
+              "likely a provider brown-out via the global circuit). Re-run after the "
+              "provider stabilizes, or route to a steadier endpoint.")
+    elif v["validity"] != "OK":
         print("  ⚠️ A/B INVALID — treatment override did not take (or node never ran). "
               "Re-launch the treatment arm with task.config['llm_overrides'].")
     elif v["insufficient_sample"] and v["binary_gate"] == "INSUFFICIENT":
