@@ -55,6 +55,12 @@ def _fake_redis():
             self.set_at.pop(key, None)
             return 1
 
+        def keys(self, pattern="*"):
+            import fnmatch
+            # str keys (consistent with this fake's str-keyed store); status_all
+            # / clear_all handle both str and bytes.
+            return [k for k in list(self.store.keys()) if fnmatch.fnmatch(k, pattern)]
+
     return _R()
 
 
@@ -71,13 +77,13 @@ async def client_factory(_fake_redis):
 
 @pytest_asyncio.fixture(autouse=True)
 async def _reset_llm_circuit(_fake_redis):
-    """Ensure each test starts with a fresh CLOSED circuit."""
-    from backend.agents.services.llm_service import LLM_API_CIRCUIT
+    """Ensure each test starts with all per-scope LLM circuits CLOSED."""
+    from backend.agents.services.llm_service import llm_circuits_clear_all
     with patch(
         "backend.tasks.redis_pool.get_redis_client",
         return_value=_fake_redis,
     ):
-        LLM_API_CIRCUIT.clear(reason="test_setup")
+        llm_circuits_clear_all(reason="test_setup")
     yield
 
 
@@ -102,13 +108,14 @@ async def test_llm_circuit_status_closed_by_default(client_factory, _fake_redis)
 
 @pytest.mark.asyncio
 async def test_llm_circuit_status_open_after_trip(client_factory, _fake_redis):
-    """Trip the live LLM_API_CIRCUIT → status shows OPEN + reason."""
-    from backend.agents.services.llm_service import LLM_API_CIRCUIT
+    """Trip ONE per-scope LLM circuit → aggregate status shows OPEN + the scope."""
+    from backend.agents.services.llm_service import _get_llm_circuit, _llm_circuit_scope
+    scope = _llm_circuit_scope("openai", None, "deepseek-v4-pro")
     with patch(
         "backend.tasks.redis_pool.get_redis_client",
         return_value=_fake_redis,
     ):
-        LLM_API_CIRCUIT.trip(reason="deepseek_5xx_storm", ttl_sec=60)
+        _get_llm_circuit(scope).trip(reason="deepseek_5xx_storm", ttl_sec=60)
         client = await client_factory()
         async with client as ac:
             r = await ac.get("/api/v1/ops/llm/api-circuit-status")
@@ -118,18 +125,21 @@ async def test_llm_circuit_status_open_after_trip(client_factory, _fake_redis):
     assert body["trip_count"] == 1
     assert body["until_ts"] is not None
     assert 50 <= body["seconds_until_half_open"] <= 61
+    assert body["open_scopes"] == [scope]
 
 
 @pytest.mark.asyncio
 async def test_llm_circuit_clear_via_endpoint(client_factory, _fake_redis):
-    """POST /clear → trip cleared, state back to CLOSED."""
-    from backend.agents.services.llm_service import LLM_API_CIRCUIT
+    """POST /clear → all per-scope circuits cleared, state back to CLOSED."""
+    from backend.agents.services.llm_service import _get_llm_circuit, _llm_circuit_scope
+    scope = _llm_circuit_scope("openai", None, "kimi-k2.6")
     with patch(
         "backend.tasks.redis_pool.get_redis_client",
         return_value=_fake_redis,
     ):
-        LLM_API_CIRCUIT.trip(reason="x", ttl_sec=60)
-        assert LLM_API_CIRCUIT.is_open() is True
+        cb = _get_llm_circuit(scope)
+        cb.trip(reason="x", ttl_sec=60)
+        assert cb.is_open() is True
 
         client = await client_factory()
         async with client as ac:
@@ -141,6 +151,7 @@ async def test_llm_circuit_clear_via_endpoint(client_factory, _fake_redis):
     body = r.json()
     assert body["cleared"] is True
     assert body["actor"] == "ops_console_test"
+    assert body["cleared_count"] >= 1
 
     # Confirm status now CLOSED
     with patch(

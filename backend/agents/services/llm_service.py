@@ -37,11 +37,54 @@ except ImportError:
 # but with N-consecutive-fail trip threshold rather than immediate trip on
 # single auth-error. Rationale: BRAIN 401 is hard fail; LLM 5xx is often
 # transient blip (rate limit, network), shouldn't trip on single error.
+# Per-(provider, endpoint, model) circuit registry (2026-05-31, gap-1 fix).
+# ---------------------------------------------------------------------------
+# The original design was a SINGLE module-level circuit for ALL LLM traffic. On
+# the production single-gateway deployment (one Aliyun-MaaS endpoint serving
+# deepseek/qwen/kimi behind provider="openai"), a 5xx storm on ONE model tripped
+# the ONE circuit and fast-failed EVERY node's calls (cross-model brown-out),
+# AND gated the P1#6 runtime fallback (routed model down → fall back to default
+# model → same circuit OPEN → fallback suppressed). Fix: one circuit per
+# (provider, endpoint, model) SCOPE, so a model's outage only fast-fails that
+# model and the default-model fallback rides its OWN (closed) circuit. Endpoint
+# marker is "default" when the routed entry carries no base_url override (stable
+# regardless of cred-resolution order); an explicit override gets an 8-char sha
+# so distinct endpoints isolate.
+#
+# LLM_API_CIRCUIT is retained as a LEGACY handle (import back-compat) but is no
+# longer consulted on the hot path — production trips per-scope circuits below.
 LLM_API_CIRCUIT = CircuitBreaker("llm_api", default_ttl_sec=300)
 
-# Redis key for the consecutive-fail counter. INCR on each fail with TTL=window;
-# when count >= threshold within window, trip the circuit + reset counter.
-_LLM_API_FAIL_COUNTER_KEY = "llm_api:fail_counter"
+_LLM_CIRCUIT_NAME_PREFIX = "llm_api"
+_LLM_CIRCUIT_REGISTRY: Dict[str, CircuitBreaker] = {}
+
+
+def _llm_circuit_scope(provider: Optional[str], base_url: Optional[str],
+                       model: Optional[str]) -> str:
+    """Stable per-(provider, endpoint, model) scope string. base_url falsy → the
+    construction-default endpoint (marker 'default'), so the scope does NOT
+    depend on whether creds have resolved self.base_url yet. On the single-
+    gateway deployment every entry uses the default endpoint → scopes differ
+    ONLY by model, which is the real isolation axis there."""
+    import hashlib
+    ep = "default"
+    if base_url:
+        ep = hashlib.sha256(base_url.encode("utf-8")).hexdigest()[:8]
+    return f"{(provider or 'openai').lower()}:{ep}:{model or '_default'}"
+
+
+def _get_llm_circuit(scope: str) -> CircuitBreaker:
+    """Lazily build + cache the CircuitBreaker for a scope (construction is cheap
+    — it only stores the name; the cache just avoids re-alloc per call)."""
+    cb = _LLM_CIRCUIT_REGISTRY.get(scope)
+    if cb is None:
+        cb = CircuitBreaker(f"{_LLM_CIRCUIT_NAME_PREFIX}:{scope}", default_ttl_sec=300)
+        _LLM_CIRCUIT_REGISTRY[scope] = cb
+    return cb
+
+
+def _llm_fail_counter_key(scope: str) -> str:
+    return f"{_LLM_CIRCUIT_NAME_PREFIX}:fail_counter:{scope}"
 
 
 def _llm_get_redis():
@@ -53,13 +96,13 @@ def _llm_get_redis():
         return None
 
 
-def _llm_record_fail(error_kind: str = "unknown") -> None:
-    """Increment the consecutive-fail counter; trip the circuit if it reaches
-    LLM_API_CIRCUIT_FAIL_THRESHOLD within LLM_API_CIRCUIT_FAIL_WINDOW_SEC.
+def _llm_record_fail(scope: str, error_kind: str = "unknown") -> None:
+    """Increment the per-SCOPE consecutive-fail counter; trip THAT scope's
+    circuit when it reaches LLM_API_CIRCUIT_FAIL_THRESHOLD within
+    LLM_API_CIRCUIT_FAIL_WINDOW_SEC.
 
     Called from the LLMService.call() exception path. Soft-fail Redis blip →
-    no-op (a Redis outage MUST NEVER cause global brown-out by spuriously
-    tripping circuits).
+    no-op (a Redis outage MUST NEVER cause brown-out by spuriously tripping).
     """
     from backend.config import settings as _stg
     if not getattr(_stg, "ENABLE_LLM_API_CIRCUIT", True):
@@ -70,28 +113,27 @@ def _llm_record_fail(error_kind: str = "unknown") -> None:
     r = _llm_get_redis()
     if r is None:
         return
+    counter_key = _llm_fail_counter_key(scope)
     try:
-        new_count = r.incr(_LLM_API_FAIL_COUNTER_KEY)
+        new_count = r.incr(counter_key)
         if new_count == 1:
-            # First failure in window — set TTL so counter naturally expires.
-            r.expire(_LLM_API_FAIL_COUNTER_KEY, window)
+            # First failure in window — set TTL so the counter naturally expires.
+            r.expire(counter_key, window)
         if int(new_count) >= threshold:
-            LLM_API_CIRCUIT.trip(
-                reason=f"llm_consec_fail_{int(new_count)}_{error_kind[:60]}",
+            _get_llm_circuit(scope).trip(
+                reason=f"llm_consec_fail_{int(new_count)}_{error_kind[:40]}_{scope[:48]}",
                 ttl_sec=cooldown,
             )
             # Reset so the next `threshold` post-clear failures can re-trip.
-            r.delete(_LLM_API_FAIL_COUNTER_KEY)
+            r.delete(counter_key)
     except Exception:
         pass
 
 
-def _llm_record_success() -> None:
-    """Reset the consecutive-fail counter AND clear the circuit on any success.
-
-    Called from the LLMService.call() success path. The clear() is a no-op
-    when the circuit is already CLOSED; only trips when we recovered from
-    an OPEN/HALF_OPEN probe.
+def _llm_record_success(scope: str) -> None:
+    """Reset the per-SCOPE fail counter AND clear THAT scope's circuit on any
+    success. The clear() is a no-op when already CLOSED; only matters when we
+    recovered from an OPEN/HALF_OPEN probe for this scope.
     """
     from backend.config import settings as _stg
     if not getattr(_stg, "ENABLE_LLM_API_CIRCUIT", True):
@@ -99,14 +141,68 @@ def _llm_record_success() -> None:
     r = _llm_get_redis()
     if r is not None:
         try:
-            r.delete(_LLM_API_FAIL_COUNTER_KEY)
+            r.delete(_llm_fail_counter_key(scope))
         except Exception:
             pass
     try:
-        if LLM_API_CIRCUIT.is_open():
-            LLM_API_CIRCUIT.clear(reason="llm_api_success_probe")
+        cb = _get_llm_circuit(scope)
+        if cb.is_open():
+            cb.clear(reason="llm_api_success_probe")
     except Exception:
         pass
+
+
+def llm_circuits_status_all() -> Dict[str, Any]:
+    """Aggregate snapshot over all per-scope LLM circuits (for ops). Enumerates
+    Redis ``circuit:llm_api:*`` keys (tiny keyspace; ops-only, infrequent) and
+    folds them into a single aggregate (back-compat with the old single-circuit
+    endpoint) plus the list of currently-open scopes."""
+    r = _llm_get_redis()
+    scopes: List[Dict[str, Any]] = []
+    if r is not None:
+        try:
+            prefix = f"{CircuitBreaker.KEY_PREFIX}:{_LLM_CIRCUIT_NAME_PREFIX}:"
+            for k in (r.keys(f"{prefix}*") or []):
+                key = k.decode("utf-8") if isinstance(k, (bytes, bytearray)) else k
+                name = key[len(CircuitBreaker.KEY_PREFIX) + 1:]   # strip "circuit:"
+                st = CircuitBreaker(name).status().to_dict()
+                st["scope"] = name[len(_LLM_CIRCUIT_NAME_PREFIX) + 1:]  # strip "llm_api:"
+                scopes.append(st)
+        except Exception:
+            pass
+    open_scopes = [s for s in scopes if s.get("state") == "open"]
+    half = [s for s in scopes if s.get("state") == "half_open"]
+    state = "open" if open_scopes else ("half_open" if half else "closed")
+    newest = max(scopes, key=lambda s: (s.get("last_failure_at") or 0), default=None)
+    return {
+        "state": state,
+        "until_ts": max((s.get("until_ts") or 0) for s in open_scopes) if open_scopes else None,
+        "last_failure_at": (newest or {}).get("last_failure_at"),
+        "last_failure_reason": (newest or {}).get("last_failure_reason"),
+        "trip_count": sum(int(s.get("trip_count") or 0) for s in scopes),
+        "seconds_until_half_open": max((s.get("seconds_until_half_open") or 0) for s in open_scopes) if open_scopes else 0,
+        "open_scopes": [s["scope"] for s in open_scopes],
+        "scopes": scopes,
+    }
+
+
+def llm_circuits_clear_all(reason: str = "clear_all") -> int:
+    """Clear every per-scope LLM circuit + its fail counter. Returns the number
+    of circuits cleared. Used by ops /clear and the per-node benchmark."""
+    r = _llm_get_redis()
+    n = 0
+    if r is not None:
+        try:
+            cprefix = f"{CircuitBreaker.KEY_PREFIX}:{_LLM_CIRCUIT_NAME_PREFIX}:"
+            for k in (r.keys(f"{cprefix}*") or []):
+                r.delete(k)
+                n += 1
+            for k in (r.keys(f"{_LLM_CIRCUIT_NAME_PREFIX}:fail_counter:*") or []):
+                r.delete(k)
+        except Exception:
+            pass
+    _LLM_CIRCUIT_REGISTRY.clear()
+    return n
 
 
 def _llm_error_is_api_failure(exc: BaseException) -> bool:
@@ -648,15 +744,37 @@ class LLMService:
         # Entry-level thinking_effort override wins over the thinking_effort arg.
         eff_thinking = (routed or {}).get("thinking_effort") or thinking_effort
 
-        # Phase 4 PR0 (Sprint 0, 2026-05-19): LLM_API_CIRCUIT fast-fail.
-        # When the LLM provider has been hammering 5xx/timeout, every caller
-        # should fast-fail rather than burn another HTTP round-trip + retry
-        # budget. Soft-fail: Redis blip → is_open()=False → traffic flows
-        # (CircuitBreaker.status fails-open by design).
-        if getattr(settings, "ENABLE_LLM_API_CIRCUIT", True) and LLM_API_CIRCUIT.is_open():
+        # Per-scope circuit (2026-05-31 gap-1): keyed by (provider, endpoint,
+        # model), so a 5xx storm on ONE model only fast-fails THAT model — other
+        # nodes' models keep flowing (no cross-model brown-out).
+        eff_scope = _llm_circuit_scope(eff_provider, eff_base_url, eff_model)
+        routed_was_used = (eff_model != self.model) or (eff_provider != self.provider)
+
+        # Phase 4 PR0 (Sprint 0, 2026-05-19): fast-fail when THIS target's circuit
+        # is OPEN (provider hammering 5xx/timeout → don't burn another round-trip).
+        # Soft-fail: Redis blip → is_open()=False → traffic flows.
+        # gap-1: a ROUTED (non-default) target whose circuit is open does NOT
+        # hard-fail — it falls back to the construction default ONCE (the default
+        # rides its OWN, independent scope circuit), so the P1#6 fallback is no
+        # longer gated by the routed model's outage. The fallback re-enters with
+        # _allow_fallback=False → a default-target circuit-open is a genuine
+        # fast-fail (no infinite recursion).
+        if getattr(settings, "ENABLE_LLM_API_CIRCUIT", True) and _get_llm_circuit(eff_scope).is_open():
+            if _allow_fallback and routed_was_used:
+                logger.warning(
+                    f"[LLMService] routed circuit OPEN scope={eff_scope} — falling "
+                    f"back to default {self.provider}/{self.model} | id={call_id} "
+                    f"node={node_key or '-'}"
+                )
+                return await self.call(
+                    system_prompt, user_prompt, temperature=temperature,
+                    json_mode=json_mode, max_tokens=max_tokens, node_key=node_key,
+                    thinking_effort=thinking_effort,
+                    model=self.model, provider=self.provider, _allow_fallback=False,
+                )
             logger.warning(
-                f"[LLMService] LLM_API_CIRCUIT OPEN — fast-fail | id={call_id} "
-                f"node={node_key or '-'} (callers should treat as transient)"
+                f"[LLMService] LLM circuit OPEN scope={eff_scope} — fast-fail | "
+                f"id={call_id} node={node_key or '-'} (callers should treat as transient)"
             )
             return LLMResponse(
                 content="",
@@ -885,7 +1003,7 @@ class LLMService:
             # not content quality. JSON parse failure stays a soft-failure
             # on the LLMResponse, but the circuit goes back to CLOSED.
             try:
-                _llm_record_success()
+                _llm_record_success(eff_scope)
             except Exception:
                 pass
             # json_mode + parse_error = soft failure (content returned but
@@ -947,7 +1065,7 @@ class LLMService:
             try:
                 is_api_failure = _llm_error_is_api_failure(e)
                 if is_api_failure:
-                    _llm_record_fail(error_kind=type(e).__name__)
+                    _llm_record_fail(eff_scope, error_kind=type(e).__name__)
             except Exception:
                 pass
 
@@ -957,8 +1075,8 @@ class LLMService:
             # the construction default ONCE. The recursive call passes explicit
             # model/provider=default → routed=None there → no second fallback, so
             # no infinite recursion. The routed model's failure was already
-            # counted above for circuit/telemetry honesty.
-            routed_was_used = (eff_model != self.model) or (eff_provider != self.provider)
+            # counted above for circuit/telemetry honesty. (`routed_was_used` was
+            # computed once near the circuit check above.)
             if _allow_fallback and routed_was_used and is_api_failure:
                 logger.warning(
                     f"[LLMService] routed {eff_provider}/{eff_model} failed "

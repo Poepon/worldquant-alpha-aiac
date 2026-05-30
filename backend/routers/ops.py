@@ -1084,28 +1084,36 @@ class LLMApiCircuitOut(BaseModel):
     last_failure_reason: Optional[str] = None
     trip_count: int = 0
     seconds_until_half_open: int = 0
+    # 2026-05-31 gap-1: the circuit is now per-(provider,endpoint,model). The
+    # fields above are the AGGREGATE (state=open if ANY scope open); these list
+    # which scopes are open + the full per-scope detail.
+    open_scopes: List[str] = []
+    scopes: List[dict] = []
 
 
 class LLMApiCircuitClearOut(BaseModel):
     cleared: bool
     actor: Optional[str] = None
+    cleared_count: int = 0
 
 
 @router.get("/llm/api-circuit-status", response_model=LLMApiCircuitOut)
 async def llm_api_circuit_status(
     _token: str = Depends(_require_ops_token),
 ) -> LLMApiCircuitOut:
-    """Current LLM provider (DeepSeek/Anthropic) API circuit state.
-    CLOSED = normal; OPEN = LLM callers fast-failing (no LLM cost burnt during
-    a provider outage); HALF_OPEN = TTL elapsed, next real LLM call will
-    probe + flip CLOSED/OPEN based on outcome.
+    """Aggregate LLM provider API circuit state across all per-(provider,
+    endpoint,model) scopes (2026-05-31 gap-1). CLOSED = normal; OPEN = at least
+    one model is fast-failing (see ``open_scopes``); HALF_OPEN = a scope's TTL
+    elapsed, next real call probes it.
 
-    Trip trigger: ``LLM_API_CIRCUIT_FAIL_THRESHOLD`` consecutive 5xx/timeout/
-    connection-error within ``LLM_API_CIRCUIT_FAIL_WINDOW_SEC`` seconds.
-    JSON parse / ValueError do NOT trip — only API-transport failures.
+    Trip trigger (per scope): ``LLM_API_CIRCUIT_FAIL_THRESHOLD`` consecutive
+    5xx/timeout/connection-errors on THAT model within
+    ``LLM_API_CIRCUIT_FAIL_WINDOW_SEC`` seconds. JSON parse / ValueError do NOT
+    trip — only API-transport failures. A single model's outage no longer browns
+    out the others.
     """
-    from backend.agents.services.llm_service import LLM_API_CIRCUIT
-    return LLMApiCircuitOut(**LLM_API_CIRCUIT.status().to_dict())
+    from backend.agents.services.llm_service import llm_circuits_status_all
+    return LLMApiCircuitOut(**llm_circuits_status_all())
 
 
 @router.post("/llm/api-circuit-clear", response_model=LLMApiCircuitClearOut)
@@ -1113,17 +1121,16 @@ async def llm_api_circuit_clear(
     _token: str = Depends(_require_ops_token),
     actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
 ) -> LLMApiCircuitClearOut:
-    """Force-close the LLM API circuit. Use after manual confirmation that
-    the LLM provider has recovered (e.g. DeepSeek/Anthropic status page back
-    to green) and ops wants to skip the 300s TTL wait.
+    """Force-close ALL per-scope LLM API circuits. Use after manual confirmation
+    that the provider has recovered and ops wants to skip the 300s TTL wait.
 
-    Note: any successful LLMService.call() inside the worker process ALSO
-    clears the circuit on probe (HALF_OPEN → CLOSED). This endpoint is for
-    immediate manual recovery.
+    Note: any successful LLMService.call() for a scope inside the worker process
+    ALSO clears that scope's circuit on probe (HALF_OPEN → CLOSED). This endpoint
+    is for immediate manual recovery across all scopes at once.
     """
-    from backend.agents.services.llm_service import LLM_API_CIRCUIT
-    LLM_API_CIRCUIT.clear(reason=f"ops_manual_by_{actor or 'unknown'}")
-    return LLMApiCircuitClearOut(cleared=True, actor=actor)
+    from backend.agents.services.llm_service import llm_circuits_clear_all
+    n = llm_circuits_clear_all(reason=f"ops_manual_by_{actor or 'unknown'}")
+    return LLMApiCircuitClearOut(cleared=True, actor=actor, cleared_count=n)
 
 
 # ---------------------------------------------------------------------------

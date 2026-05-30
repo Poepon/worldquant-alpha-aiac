@@ -536,14 +536,16 @@ def _agg(vals):
 async def main(runs: int = RUNS_DEFAULT, models: Optional[List[str]] = None,
                nodes: Optional[List[str]] = None) -> int:
     global _OPERATORS_CACHE
-    from backend.agents.services.llm_service import LLMService, LLM_API_CIRCUIT
+    from backend.agents.services.llm_service import LLMService, llm_circuits_clear_all
     from backend.alpha_semantic_validator import load_operators_from_db
     from backend.database import AsyncSessionLocal
     from backend.tasks.mining_tasks import _get_operators
 
     try:
-        LLM_API_CIRCUIT.clear(reason="per_node_bench_start")
-        print("[bench] LLM_API_CIRCUIT cleared", flush=True)
+        # Clear ALL per-scope LLM circuits (2026-05-31): a candidate model's
+        # scope circuit left OPEN from a prior run would fast-fail it here.
+        n = llm_circuits_clear_all(reason="per_node_bench_start")
+        print(f"[bench] LLM circuits cleared ({n})", flush=True)
     except Exception as e:  # noqa: BLE001
         print(f"[bench] circuit clear failed: {e}", flush=True)
 

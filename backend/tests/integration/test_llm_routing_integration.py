@@ -330,21 +330,31 @@ async def test_runtime_degradation_circuit_closed(session_maker, monkeypatch):
 
 
 # =========================================================================
-# Test 7b (review-gap PIN #1) — global circuit OPEN suppresses BOTH the routed
-# call and its fallback. This documents the CURRENT global-circuit limitation
-# (plan 放行条件 3③ asked for per-(provider,endpoint); not yet done). When that
-# fix lands, this assertion must FLIP — making the change a conscious one.
+# Test 7b (gap-1 FIX, was test_circuit_open_suppresses_fallback_known_limitation)
+# — per-(provider,endpoint,model) circuits (2026-05-31). A ROUTED model whose
+# scope circuit is OPEN no longer browns out the fleet: the call falls back to
+# the default model (its OWN scope circuit is CLOSED) and succeeds. The routed
+# model itself is never hit on the wire (circuit open → skip).
 # =========================================================================
 @pytest.mark.asyncio
-async def test_circuit_open_suppresses_fallback_known_limitation(
-    session_maker, monkeypatch
-):
+async def test_routed_circuit_open_falls_back_to_default(session_maker, monkeypatch):
     monkeypatch.setattr(settings, "ENABLE_LLM_API_CIRCUIT", True, raising=False)
-    monkeypatch.setattr(llm_mod.LLM_API_CIRCUIT, "is_open", lambda: True)
+
+    # Only the ROUTED model's scope circuit is OPEN; the default model's is CLOSED.
+    class _StubCB:
+        def __init__(self, is_open):
+            self._open = is_open
+
+        def is_open(self):
+            return self._open
+
+    monkeypatch.setattr(
+        llm_mod, "_get_llm_circuit", lambda scope: _StubCB("ROUTED-Y" in scope)
+    )
 
     s = LLMService(provider="openai")
     s._credentials_loaded = True
-    s.client = _FakeOpenAIClient()  # transport is healthy; the circuit isn't
+    s.client = _FakeOpenAIClient()  # transport is healthy; only the circuit isn't
 
     await _seed_and_load(session_maker, routing_on=True, model_map={
         "code_gen": {"model": "ROUTED-Y", "provider": "openai"},
@@ -352,11 +362,48 @@ async def test_circuit_open_suppresses_fallback_known_limitation(
 
     resp = await s.call("sys", "user json", node_key="code_gen")
 
-    # Fast-fail: no HTTP attempt at all, and the default-model fallback is also
-    # suppressed (a single bad routed provider browns out the whole fleet).
-    assert resp.success is False
-    assert resp.error == "llm_api_circuit_open"
-    assert s.client.chat.completions.models_seen == []  # default never tried
+    # gap-1 fix: fallback to the default model succeeds (different scope = closed).
+    assert resp.success is True
+    assert resp.model == s.model
+    seen = s.client.chat.completions.models_seen
+    assert "ROUTED-Y" not in seen      # routed never hit the wire (its circuit open)
+    assert seen == [s.model]           # only the default model was tried
+
+
+# =========================================================================
+# Test 7c (gap-1) — per-scope isolation: model A's OPEN circuit must NOT fast-
+# fail a call routed to model B (different scope = independent circuit).
+# =========================================================================
+@pytest.mark.asyncio
+async def test_other_models_unaffected_by_one_open_scope(session_maker, monkeypatch):
+    monkeypatch.setattr(settings, "ENABLE_LLM_API_CIRCUIT", True, raising=False)
+
+    class _StubCB:
+        def __init__(self, is_open):
+            self._open = is_open
+
+        def is_open(self):
+            return self._open
+
+    # Only "MODEL-A" scope is open; "MODEL-B" (and the default) are closed.
+    monkeypatch.setattr(
+        llm_mod, "_get_llm_circuit", lambda scope: _StubCB("MODEL-A" in scope)
+    )
+
+    s = LLMService(provider="openai")
+    s._credentials_loaded = True
+    s.client = _FakeOpenAIClient()
+
+    await _seed_and_load(session_maker, routing_on=True, model_map={
+        "code_gen": {"model": "MODEL-B", "provider": "openai"},
+    })
+
+    resp = await s.call("sys", "user json", node_key="code_gen")
+
+    # MODEL-B flows normally — A's outage doesn't brown it out.
+    assert resp.success is True
+    assert resp.model == "MODEL-B"
+    assert s.client.chat.completions.models_seen == ["MODEL-B"]
 
 
 # =========================================================================
