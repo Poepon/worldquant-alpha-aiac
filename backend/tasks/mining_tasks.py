@@ -1511,11 +1511,12 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
                 "slot_timeouts": 0, "persist_failures": 0,
                 "heartbeat_aborted": True,
             }
-
-    # PR5: session done — drop the per-task overrides binding. (An exception that
-    # escapes the try above skips this, but each celery task runs in its own
-    # asyncio context, so a stray binding never leaks across tasks.)
-    clear_task_function_overrides(_llm_ov_token)
+        finally:
+            # PR5: session done — drop the per-task overrides binding. finally so
+            # it runs on success, on heartbeat-abort, AND if any other exception
+            # escapes run_flat_pipeline_session (belt-and-suspenders on top of the
+            # per-celery-task asyncio-context isolation).
+            clear_task_function_overrides(_llm_ov_token)
 
     logger.info(
         f"[flat-pipeline] task={task_id} pipeline finished: "

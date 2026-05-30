@@ -278,7 +278,7 @@ export default function LLMRoutingConsole() {
       // Re-hydrate from the authoritative stored value.
       setRows(mapToRows(updated?.effective_value ?? payload))
       message.success(
-        `路由映射已保存（${Object.keys(payload).length} 个 node_key）。点『立即生效』让本进程与其它后台进程立刻读取。`,
+        `路由映射已保存（${Object.keys(payload).length} 个 node_key）。点『立即生效』让本 API 进程立刻读取；跑挖掘的 worker 进程走自身 60s 后台刷新（≤60s 生效）。`,
       )
     } catch (e) {
       message.error(`保存失败：${e?.response?.data?.detail || e.message}`)
@@ -293,7 +293,7 @@ export default function LLMRoutingConsole() {
     try {
       const { refreshed, flags: names } = await api.refreshAllFlags()
       message.success(
-        `已强制刷新本进程缓存（共 ${refreshed} 条覆盖：${(names || []).join('、') || '无'}）`,
+        `已强制刷新本 API 进程缓存（共 ${refreshed} 条覆盖：${(names || []).join('、') || '无'}）。worker 进程不受此影响，走自身 60s 后台刷新。`,
       )
       await fetchAll()
     } catch (e) {

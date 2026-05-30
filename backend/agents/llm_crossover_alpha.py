@@ -25,7 +25,6 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
-from backend.config import settings
 from backend.agents.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
@@ -245,18 +244,16 @@ async def llm_crossover_alpha(
         top_k=top_k,
     )
 
-    # Mirror llm_mutate_alpha.M7 fix: honor settings.LLM_CROSSOVER_MODEL by
-    # temporarily swapping llm_service.model — restored in finally.
-    crossover_model = (getattr(settings, "LLM_CROSSOVER_MODEL", "") or "").strip()
-    original_model = getattr(llm_service, "model", None)
-    model_swapped = False
-    if crossover_model and original_model is not None and crossover_model != original_model:
-        try:
-            llm_service.model = crossover_model
-            model_swapped = True
-        except Exception:
-            model_swapped = False
-
+    # PR3 review (2026-05-31): the old swap of llm_service.model to
+    # LLM_CROSSOVER_MODEL is retired — same as llm_mutate_alpha (PR2). It mutated
+    # the shared process singleton (not concurrency-safe → a concurrent coroutine
+    # reads the swapped model) and, once per-call routing is ON, was dead anyway
+    # (call() prefers the node_key-routed eff_model over self.model → two
+    # conflicting selection mechanisms on one node). Model selection for this
+    # block now flows SOLELY through node_key="llm_crossover_alpha": flag ON picks
+    # the routed model (LLM_FUNCTION_MODEL_MAP), flag OFF uses the service default
+    # (legacy LLM_CROSSOVER_MODEL is no longer honored — set the routing map
+    # instead). resp.model carries the effective model for the G5 log label.
     try:
         resp = await llm_service.call(
             system_prompt=CROSSOVER_SYSTEM,
@@ -277,12 +274,6 @@ async def llm_crossover_alpha(
     except Exception as ex:
         logger.warning(f"[llm_crossover] LLM call failed (non-fatal): {ex}")
         return []
-    finally:
-        if model_swapped:
-            try:
-                llm_service.model = original_model
-            except Exception:
-                pass
 
 
 __all__ = [
