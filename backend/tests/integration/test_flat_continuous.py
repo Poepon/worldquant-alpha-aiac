@@ -128,6 +128,40 @@ async def test_start_flat_session_creates_flat_task(pg_session):
 
 
 # ---------------------------------------------------------------------------
+# Test 1b: Phase C A/B — llm_overrides flows into task.config (2026-05-30)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_start_flat_session_stores_llm_overrides(pg_session):
+    """Phase C single-node A/B: llm_overrides lands in task.config so the PR5
+    binding (set_task_function_overrides) routes one node for THIS task only."""
+    _flag_override_cache["ENABLE_FLAT_CONTINUOUS"] = True
+    svc = TaskService(pg_session)
+
+    ov = {"code_gen": {"model": "qwen3.6-plus", "provider": "openai"}}
+    info = await svc.start_flat_session(region="USA", datasets=["pv1"], llm_overrides=ov)
+    task = await svc.task_repo.get_by_id(info.task_id)
+    task.task_name = f"{_TAG}_{task.task_name}"
+    await pg_session.commit()
+
+    assert (task.config or {}).get("llm_overrides") == ov
+
+
+@pytest.mark.asyncio
+async def test_start_flat_session_no_overrides_key_absent(pg_session):
+    """Control arm / default: no llm_overrides → key absent → byte-for-byte legacy."""
+    _flag_override_cache["ENABLE_FLAT_CONTINUOUS"] = True
+    svc = TaskService(pg_session)
+
+    info = await svc.start_flat_session(region="USA", datasets=["pv1"])
+    task = await svc.task_repo.get_by_id(info.task_id)
+    task.task_name = f"{_TAG}_{task.task_name}"
+    await pg_session.commit()
+
+    assert "llm_overrides" not in (task.config or {})
+
+
+# ---------------------------------------------------------------------------
 # Test 2: Q1 V2 — flat_cursor preserved across resume
 # ---------------------------------------------------------------------------
 

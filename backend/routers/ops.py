@@ -1347,6 +1347,15 @@ class StartFlatSessionIn(BaseModel):
         description="BRAIN sim delay (0 or 1). 1 = established path. 0 = native "
         "delay-0 mining (orthogonal axis); requires delay-0 datafield cells synced.",
     )
+    llm_overrides: Optional[Dict[str, Dict[str, Any]]] = Field(
+        default=None,
+        description=(
+            "Phase C single-node A/B: per-node model override for THIS task only, "
+            "{node_key: {model, provider, base_url?, api_key_ref?, thinking_effort?}}. "
+            "Honoured independent of the global ENABLE_PER_FUNCTION_LLM_ROUTING flag. "
+            "None/absent = default models (byte-for-byte legacy)."
+        ),
+    )
 
 
 class FlatSessionOut(BaseModel):
@@ -1427,6 +1436,7 @@ async def start_flat_session(
             universe=payload.universe,
             datasets=payload.datasets or None,
             delay=payload.delay,
+            llm_overrides=payload.llm_overrides,
         )
     except ValueError as ex:
         raise HTTPException(status_code=400, detail=str(ex)) from ex

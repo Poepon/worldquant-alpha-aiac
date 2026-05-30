@@ -593,6 +593,7 @@ class TaskService(BaseService):
         datasets: Optional[List[str]] = None,
         delay: int = 1,
         launched_by: str = "manual",
+        llm_overrides: Optional[Dict[str, Any]] = None,
     ) -> "MiningSessionInfo":
         """Create a new FLAT_CONTINUOUS task and dispatch its worker.
 
@@ -637,6 +638,13 @@ class TaskService(BaseService):
         # 启的还是 orchestrator 启的。orchestrator 让位决策只动自己启的 task,
         # user 手动启的 task 不被自动化干预。default "manual" 保留向后兼容。
         _config["launched_by"] = launched_by
+        # Phase C single-node A/B (2026-05-30): stash this task's per-node model
+        # override into config. mining_tasks binds it via set_task_function_overrides
+        # at run entry; resolve_model_for honours it independent of the global
+        # ENABLE_PER_FUNCTION_LLM_ROUTING flag. None/empty → key absent → default
+        # models (byte-for-byte legacy).
+        if isinstance(llm_overrides, dict) and llm_overrides:
+            _config["llm_overrides"] = llm_overrides
 
         task = MiningTask(
             task_name=f"flat-session-{region}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
