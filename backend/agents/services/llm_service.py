@@ -478,6 +478,12 @@ class LLMService:
         self._credentials_lock = asyncio.Lock()
         self._credentials_loaded = False
 
+        # Per-entry api_key_ref → resolved key cache (PR5 gap-2). A routing map
+        # entry may carry api_key_ref="moonshot_api_key" to use a credential
+        # OTHER than the default OPENAI_API_KEY (multi-endpoint). Resolved via
+        # CredentialsService (DB) + env, cached here, cleared on credential edit.
+        self._api_key_ref_cache: Dict[str, Optional[str]] = {}
+
         # Per-(provider, endpoint, key) client cache for per-call model routing
         # (PR2). Construction-default clients are seeded below; a routed call to
         # a different endpoint/provider lazily builds + caches its own via
@@ -566,32 +572,58 @@ class LLMService:
         return (provider, base_url or "", h)
 
     def _get_client(self, provider: str, base_url: Optional[str] = None,
-                    api_key_ref: Optional[str] = None):
+                    api_key: Optional[str] = None):
         """Return a cached SDK client for (provider, endpoint, key).
 
         Call AFTER ``_ensure_credentials_loaded`` so self.api_key/base_url are
-        the resolved (DB-or-env) values. ``api_key_ref`` (per-entry credential
-        override) is reserved for PR5; until then routing reuses the
-        construction-loaded key for that provider.
+        the resolved (DB-or-env) values. ``api_key`` is the per-entry credential
+        override already resolved from ``api_key_ref`` (PR5 gap-2); falsy → reuse
+        the construction-loaded key for that provider. The cache key folds the
+        key sha so a different api_key gets its own client.
         """
         if provider == "anthropic":
-            api_key = self.anthropic_api_key
+            key = api_key or self.anthropic_api_key
             burl = base_url or self.anthropic_base_url
-            ck = self._client_cache_key("anthropic", burl, api_key)
+            ck = self._client_cache_key("anthropic", burl, key)
             client = self._client_cache.get(ck)
             if client is None:
-                client = self._build_anthropic_client(api_key, burl)
+                client = self._build_anthropic_client(key, burl)
                 self._client_cache[ck] = client
             return client
         # openai-compat
-        api_key = self.api_key
+        key = api_key or self.api_key
         burl = base_url or self.base_url
-        ck = self._client_cache_key("openai", burl, api_key)
+        ck = self._client_cache_key("openai", burl, key)
         client = self._client_cache.get(ck)
         if client is None:
-            client = self._build_openai_client(api_key, burl)
+            client = self._build_openai_client(key, burl)
             self._client_cache[ck] = client
         return client
+
+    async def _resolve_api_key_ref(self, ref: str) -> Optional[str]:
+        """Resolve a routing-entry ``api_key_ref`` → the actual API key (PR5
+        gap-2). Source: ``CredentialsService.get_credential`` (encrypted DB
+        SystemConfig) with env fallback, then a plain env-var read. Cached per
+        service instance (cleared on ``invalidate_credentials_cache``). Returns
+        None when unresolvable — the caller then falls back to the default key
+        (and any resulting 401 trips that scope's circuit → P1#6 fallback)."""
+        if ref in self._api_key_ref_cache:
+            return self._api_key_ref_cache[ref]
+        val: Optional[str] = None
+        try:
+            from backend.database import AsyncSessionLocal
+            from backend.services.credentials_service import CredentialsService
+            async with AsyncSessionLocal() as db:
+                val = await CredentialsService(db).get_credential(
+                    ref, fallback_env=ref.upper()
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"[LLMService] api_key_ref DB resolve failed ref={ref!r} | {e}")
+        if not val:
+            import os
+            val = os.getenv(ref) or os.getenv(ref.upper())
+        self._api_key_ref_cache[ref] = val
+        return val
 
     def clear_client_cache(self):
         """Drop cached routed clients — called when credentials change so a new
@@ -636,9 +668,12 @@ class LLMService:
 
     def invalidate_credentials_cache(self):
         self._credentials_loaded = False
-        # Creds changed → drop routed clients built with the old key (PR2). The
-        # FastAPI router calls this on credential edit; the Celery worker has no
-        # such hook, so routed clients there rely on process recycle / restart.
+        # Creds changed → drop routed clients built with the old key (PR2) AND
+        # the resolved api_key_ref cache (PR5 gap-2), else a rotated third-party
+        # key stays shadowed. The FastAPI router calls this on credential edit;
+        # the Celery worker has no such hook, so routed clients there rely on
+        # process recycle / restart.
+        self._api_key_ref_cache = {}
         self.clear_client_cache()
 
     def _resolve_effort(
@@ -831,7 +866,20 @@ class LLMService:
             if eff_provider == self.provider and not eff_base_url and not eff_api_key_ref:
                 active_client = self.anthropic_client if eff_provider == "anthropic" else self.client
             else:
-                active_client = self._get_client(eff_provider, eff_base_url, eff_api_key_ref)
+                # PR5 gap-2: resolve the per-entry api_key_ref → actual key here
+                # (async). None → _get_client reuses the construction key; an
+                # unresolvable ref logs a warning and also falls back to default.
+                eff_api_key = (
+                    await self._resolve_api_key_ref(eff_api_key_ref)
+                    if eff_api_key_ref else None
+                )
+                if eff_api_key_ref and not eff_api_key:
+                    logger.warning(
+                        f"[LLMService] api_key_ref={eff_api_key_ref!r} unresolved — "
+                        f"using default key (may 401 → circuit/fallback) | "
+                        f"id={call_id} node={node_key or '-'}"
+                    )
+                active_client = self._get_client(eff_provider, eff_base_url, api_key=eff_api_key)
 
             for parse_attempt in range(parse_attempts_max):
                 # W5: Anthropic provider uses messages.create + system prompt with

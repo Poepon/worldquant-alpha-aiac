@@ -407,14 +407,56 @@ async def test_other_models_unaffected_by_one_open_scope(session_maker, monkeypa
 
 
 # =========================================================================
-# Test 8 (review-gap PIN #2) — api_key_ref is accepted but NOT yet wired into
-# client construction (_get_client reuses self.api_key). Documents the PR5
-# follow-up so a real per-key path is a conscious change later.
+# Test 8 (gap-2 FIX, was test_api_key_ref_currently_ignored) — api_key_ref is now
+# resolved (CredentialsService/env) and threaded into client construction: a
+# routed entry naming a different credential builds a client keyed by THAT key.
 # =========================================================================
-def test_api_key_ref_currently_ignored(svc):
-    # A routed entry naming a different credential key still builds a client
-    # keyed by the DEFAULT openai key — i.e. api_key_ref had no effect.
-    svc._get_client("openai", None, "MOONSHOT_API_KEY")
-    expected_key = LLMService._client_cache_key("openai", svc.base_url, svc.api_key)
-    assert expected_key in svc._client_cache, \
-        "api_key_ref is currently ignored — client uses the default openai key"
+def test_get_client_honors_explicit_api_key(svc):
+    # _get_client now takes a RESOLVED key; an override keys its OWN client,
+    # distinct from the default-openai-key client.
+    svc._get_client("openai", None, api_key="THIRD-PARTY-KEY")
+    override_ck = LLMService._client_cache_key("openai", svc.base_url, "THIRD-PARTY-KEY")
+    default_ck = LLMService._client_cache_key("openai", svc.base_url, svc.api_key)
+    assert override_ck in svc._client_cache       # built under the override key
+    assert override_ck != default_ck              # NOT the default-key client
+
+
+@pytest.mark.asyncio
+async def test_call_with_api_key_ref_builds_client_with_resolved_key(
+    session_maker, monkeypatch
+):
+    monkeypatch.setattr(settings, "ENABLE_LLM_API_CIRCUIT", False, raising=False)
+    monkeypatch.setenv("THIRDPARTY_KEY", "sk-3p-abc")
+    # Force the DB credential path to fail so the env fallback is what's tested
+    # (no live Postgres needed); the resolver swallows the error and reads env.
+    from backend.services import credentials_service as _cs
+
+    async def _boom(self, key, fallback_env=None):
+        raise RuntimeError("no db in test")
+
+    monkeypatch.setattr(_cs.CredentialsService, "get_credential", _boom)
+
+    s = LLMService(provider="openai")
+    s._credentials_loaded = True
+    built = {}
+
+    def _fake_build_openai(api_key, base_url):
+        c = _FakeOpenAIClient()
+        built[(base_url, api_key)] = c
+        return c
+
+    monkeypatch.setattr(s, "_build_openai_client", _fake_build_openai)
+    s.client = _FakeOpenAIClient()
+
+    await _seed_and_load(session_maker, routing_on=True, model_map={
+        "code_gen": {"model": "X", "provider": "openai",
+                     "base_url": "http://thirdparty/v1",
+                     "api_key_ref": "thirdparty_key"},
+    })
+
+    resp = await s.call("sys", "user json", node_key="code_gen")
+
+    assert resp.success is True
+    # the routed call built a client against the third-party endpoint using the
+    # RESOLVED key (env THIRDPARTY_KEY), NOT the default openai key.
+    assert ("http://thirdparty/v1", "sk-3p-abc") in built
