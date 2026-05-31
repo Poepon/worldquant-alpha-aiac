@@ -774,6 +774,17 @@ const api = {
     const { data } = await client.post('/ops/optimization/abort-batch')
     return data
   },
+  // Unified Stage A toggle (2026-05-31). /stop = flag OFF + abort batch +
+  // Redis flag (3-step no-auto-restart guarantee). /start = flag ON.
+  // Both are audit-noted via FeatureFlagService.set with actor + note.
+  startOpsOptimization: async () => {
+    const { data } = await client.post('/ops/optimization/start')
+    return data
+  },
+  stopOpsOptimization: async () => {
+    const { data } = await client.post('/ops/optimization/stop')
+    return data
+  },
 }
 
 export default api

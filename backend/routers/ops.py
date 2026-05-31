@@ -4722,6 +4722,13 @@ class OptimizationCyclesOut(BaseModel):
     total_submitted_14d: int
     total_cycles_14d: int
     window_days: int
+    # 2026-05-31: surfaced so the unified Start/Stop toggle on the frontend
+    # always reflects DB truth (not stale per-process override cache).
+    flag_enabled: bool
+    flag_source: str                  # "env" / "runtime-override" / "default"
+    flag_updated_at: Optional[datetime] = None
+    flag_updated_by: Optional[str] = None
+    flag_note: Optional[str] = None
 
 
 @router.get(
@@ -4797,6 +4804,14 @@ async def optimization_cycles(
         )
         for r in rows
     ]
+    # Read ENABLE_OPTIMIZATION_LOOP flag DIRECTLY from DB (not per-process
+    # cache) so the FE toggle always shows the true authoritative state.
+    # FeatureFlagService.get_one returns FlagState with effective_value,
+    # source, updated_at/by, note.
+    flag_svc = FeatureFlagService(db)
+    flag_state = await flag_svc.get_one("ENABLE_OPTIMIZATION_LOOP")
+    flag_enabled = bool(flag_state.effective_value) if flag_state else False
+
     return OptimizationCyclesOut(
         cycles=cycles,
         conversion_rate_14d=conv,
@@ -4805,6 +4820,11 @@ async def optimization_cycles(
         total_submitted_14d=total_submitted,
         total_cycles_14d=total_cycles,
         window_days=int(days),
+        flag_enabled=flag_enabled,
+        flag_source=(flag_state.source if flag_state else "default"),
+        flag_updated_at=(getattr(flag_state, "updated_at", None) if flag_state else None),
+        flag_updated_by=(getattr(flag_state, "updated_by", None) if flag_state else None),
+        flag_note=(getattr(flag_state, "note", None) if flag_state else None),
     )
 
 
@@ -4885,6 +4905,145 @@ async def optimization_abort_batch(
             f"Redis abort flag={'set' if flag_set else 'failed'}。"
             "当前在跑 cycle 的 sim 会自然完成(BRAIN 不可撤),"
             "下个 candidate 不再启动。下次 6h beat 仍会正常 fire — 永久暂停请同时翻 ENABLE_OPTIMIZATION_LOOP=false。"
+        ),
+    )
+
+
+class OptControlOut(BaseModel):
+    """Response for /ops/optimization/start and /ops/optimization/stop."""
+
+    new_state: str                # "enabled" / "disabled"
+    aborted_cycles: int           # only set by /stop
+    flag_source_before: Optional[str] = None
+    actor: str
+    message: str
+
+
+@router.post(
+    "/optimization/start",
+    response_model=OptControlOut,
+)
+async def optimization_start(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> OptControlOut:
+    """Flip ENABLE_OPTIMIZATION_LOOP=True. Future 6h beats will fire normally.
+
+    Audit-noted as a manual start (vs an env-default ON), so a later
+    inspection of feature_flag_audit shows who flipped it on.
+    """
+    from loguru import logger as _start_logger
+    flag_svc = FeatureFlagService(db)
+    before = await flag_svc.get_one("ENABLE_OPTIMIZATION_LOOP")
+    source_before = before.source if before else None
+
+    actor_str = actor or "ops_console"
+    await flag_svc.set(
+        name="ENABLE_OPTIMIZATION_LOOP",
+        value=True,
+        actor=actor_str,
+        note=(
+            f"manual_start_by={actor_str} at {datetime.utcnow().isoformat()}Z "
+            "via /ops/optimization/start (unified toggle)"
+        ),
+    )
+    await db.commit()
+
+    _start_logger.info("[opt-start] flag→True by actor={} (was source={})", actor_str, source_before)
+    return OptControlOut(
+        new_state="enabled",
+        aborted_cycles=0,
+        flag_source_before=source_before,
+        actor=actor_str,
+        message=(
+            "Stage A 已启动 — ENABLE_OPTIMIZATION_LOOP=True 持久化到 DB。"
+            "下个 6h beat(北京 02:15 / 08:15 / 14:15 / 20:15)将自然 fire。"
+            "Worker 通过 15s refresher 读到新 flag,无需重启。"
+        ),
+    )
+
+
+@router.post(
+    "/optimization/stop",
+    response_model=OptControlOut,
+)
+async def optimization_stop(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
+) -> OptControlOut:
+    """Stop Stage A unconditionally — flip flag OFF + abort in-flight batch.
+
+    Three-step guarantee no auto-restart:
+      1. DB override ENABLE_OPTIMIZATION_LOOP=False (persists across worker
+         restart; flag_override_cache refresher loop honours it within 15s).
+      2. Set Redis ``aiac:opt:abort_requested`` so the currently-running
+         ``optimization_tasks._run`` loop exits after the current cycle.
+      3. UPDATE optimization_runs error='aborted_by_user:stop' for every
+         RUNNING row so /ops/optimization/cycles reflects the stop in audit.
+
+    User-explicit stop is honored permanently — only an explicit /start
+    POST or a manual /ops/flags PATCH can re-enable the loop. No code path
+    auto-flips this back to True.
+    """
+    from sqlalchemy import text as _text
+    from backend.adapters.brain_adapter import BrainAdapter
+    from loguru import logger as _stop_logger
+
+    actor_str = actor or "ops_console"
+
+    # Step 1: flip flag OFF + audit.
+    flag_svc = FeatureFlagService(db)
+    before = await flag_svc.get_one("ENABLE_OPTIMIZATION_LOOP")
+    source_before = before.source if before else None
+    await flag_svc.set(
+        name="ENABLE_OPTIMIZATION_LOOP",
+        value=False,
+        actor=actor_str,
+        note=(
+            f"manual_stop_by={actor_str} at {datetime.utcnow().isoformat()}Z "
+            "via /ops/optimization/stop — 不会自动再启动,需显式 start"
+        ),
+    )
+
+    # Step 2: Redis abort flag for the in-flight beat task.
+    redis_set = False
+    try:
+        r = await BrainAdapter._get_slot_redis()
+        await r.set("aiac:opt:abort_requested", "1", ex=24 * 3600)
+        redis_set = True
+    except Exception as ex:  # noqa: BLE001
+        _stop_logger.warning("[opt-stop] redis flag set failed: {}", ex)
+
+    # Step 3: stamp in-flight rows.
+    result = await db.execute(_text(
+        """
+        UPDATE optimization_runs
+        SET cycle_finished_at = NOW(),
+            error = 'aborted_by_user:stop'
+        WHERE cycle_finished_at IS NULL
+        """
+    ))
+    await db.commit()
+    n_aborted = int(result.rowcount or 0)
+
+    _stop_logger.warning(
+        "[opt-stop] full stop by actor={} — flag→False (was {}), redis_set={}, n_aborted={}",
+        actor_str, source_before, redis_set, n_aborted,
+    )
+
+    return OptControlOut(
+        new_state="disabled",
+        aborted_cycles=n_aborted,
+        flag_source_before=source_before,
+        actor=actor_str,
+        message=(
+            f"Stage A 已停止(actor={actor_str})— flag OFF + 标记 {n_aborted} "
+            f"个在跑 cycle 中止 + Redis abort {'set' if redis_set else 'failed'}。"
+            "**手动停止不会自动再启动**,要恢复需显式调 /ops/optimization/start "
+            "或 PATCH /ops/flags/ENABLE_OPTIMIZATION_LOOP=true。"
+            "当前在跑 cycle 的 sim 自然完成,下个 candidate 不再启动。"
         ),
     )
 

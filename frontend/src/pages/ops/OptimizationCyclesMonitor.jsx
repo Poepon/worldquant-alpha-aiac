@@ -25,6 +25,8 @@ import {
   QuestionCircleTwoTone,
   ClockCircleTwoTone,
   StopOutlined,
+  PlayCircleOutlined,
+  PoweroffOutlined,
 } from '@ant-design/icons'
 
 import api from '../../services/api'
@@ -146,14 +148,29 @@ export default function OptimizationCyclesMonitor() {
     staleTime: 10_000,
   })
 
-  const abortMutation = useMutation({
-    mutationFn: () => api.abortOpsOptimizationBatch(),
+  // Unified Start/Stop (2026-05-31). Stop = flag OFF + abort batch + Redis
+  // flag (3-step no-auto-restart guarantee). Start = flag ON.
+  // The legacy `abortMutation` is RETIRED in favor of stopMutation — abort
+  // alone was always a partial action (flag stayed True so next beat fired);
+  // user feedback explicitly required "stop must not auto-restart", which
+  // only stop endpoint guarantees.
+  const stopMutation = useMutation({
+    mutationFn: () => api.stopOpsOptimization(),
     onSuccess: (res) => {
-      message.warning(res?.message || `已中止本批次,标记 ${res?.aborted_cycles ?? 0} 个 cycle`)
+      message.warning({ content: res?.message || 'Stage A 已停止', duration: 6 })
       qc.invalidateQueries({ queryKey: ['ops/optimization-cycles'] })
     },
     onError: (e) =>
-      message.error(e?.response?.data?.detail || e?.message || '中止失败'),
+      message.error(e?.response?.data?.detail || e?.message || '停止失败'),
+  })
+  const startMutation = useMutation({
+    mutationFn: () => api.startOpsOptimization(),
+    onSuccess: (res) => {
+      message.success({ content: res?.message || 'Stage A 已启动', duration: 6 })
+      qc.invalidateQueries({ queryKey: ['ops/optimization-cycles'] })
+    },
+    onError: (e) =>
+      message.error(e?.response?.data?.detail || e?.message || '启动失败'),
   })
 
   const cycles = data?.cycles || []
@@ -162,6 +179,10 @@ export default function OptimizationCyclesMonitor() {
   const totalVariants = data?.total_variants_14d ?? 0
   const totalWinners = data?.total_winners_14d ?? 0
   const totalSubmitted = data?.total_submitted_14d ?? 0
+  const flagEnabled = data?.flag_enabled ?? false
+  const flagSource = data?.flag_source || 'default'
+  const flagNote = data?.flag_note || null
+  const togglePending = stopMutation.isPending || startMutation.isPending
 
   const decision = useMemo(
     () => classifyDecision(conv, totalCycles),
@@ -310,16 +331,105 @@ export default function OptimizationCyclesMonitor() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
-      <div>
-        <Title level={4} style={{ marginBottom: 4 }}>
-          <ThunderboltOutlined /> 优化闭环 Stage A — 14d 观测
-          {isFetching && <Spin size="small" style={{ marginLeft: 12 }} />}
-        </Title>
-        <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-          SettingsSweepGenerator 对 1230 个 delay-1 近门 alpha(sharpe ∈ [1.0, 1.5))做 10 变异 sweep。
-          6h beat × 10 候选 = 40 cycle/天。14d GO/STOP 决策门见下卡。
-          NEVER auto-submit:winner 落 alpha 表 → 进 <Link to="/ops/submit-backlog">/ops/submit-backlog</Link> 人工 review。
-        </Paragraph>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'flex-start',
+          gap: 16,
+        }}
+      >
+        <div style={{ flex: 1 }}>
+          <Title level={4} style={{ marginBottom: 4 }}>
+            <ThunderboltOutlined /> 优化闭环 Stage A — 14d 观测
+            {isFetching && <Spin size="small" style={{ marginLeft: 12 }} />}
+          </Title>
+          <Paragraph type="secondary" style={{ marginBottom: 0 }}>
+            SettingsSweepGenerator 对 1230 个 delay-1 近门 alpha(sharpe ∈ [1.0, 1.5))做 10 变异 sweep。
+            6h beat × 10 候选 = 40 cycle/天。14d GO/STOP 决策门见下卡。
+            NEVER auto-submit:winner 落 alpha 表 → 进 <Link to="/ops/submit-backlog">/ops/submit-backlog</Link> 人工 review。
+          </Paragraph>
+        </div>
+        {/* Unified Start/Stop toggle (2026-05-31). State from
+            data.flag_enabled (DB authoritative, not stale per-process cache).
+            Stop = flag OFF + abort batch + Redis flag (3-step
+            no-auto-restart guarantee). Start = flag ON. */}
+        <Space direction="vertical" align="end" size={4} style={{ minWidth: 220 }}>
+          <Space>
+            <Tag
+              color={flagEnabled ? 'success' : 'default'}
+              icon={flagEnabled ? <PlayCircleOutlined /> : <PoweroffOutlined />}
+              style={{ fontSize: 13, padding: '2px 8px' }}
+            >
+              {flagEnabled ? '运行中' : '已停止'}
+            </Tag>
+            {flagEnabled ? (
+              <Popconfirm
+                title="停止 Stage A?"
+                description={
+                  <div style={{ maxWidth: 360 }}>
+                    <Text>3 步停止保证<strong>不会自动再启动</strong>:</Text>
+                    <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
+                      <li>翻 <code>ENABLE_OPTIMIZATION_LOOP=false</code>(DB 持久化,worker 15s 内读到)</li>
+                      <li>设 Redis abort 标志(worker 当前 cycle 跑完即跳出 for-loop)</li>
+                      <li>标记所有进行中 cycle 为 <Tag color="error" style={{margin:0}}>aborted_by_user:stop</Tag></li>
+                    </ul>
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      已 dispatch 到 BRAIN 的 sim 自然完成(BRAIN 无 recall API)。
+                      恢复需显式点【启动 Stage A】。
+                    </Text>
+                  </div>
+                }
+                okText="停止"
+                okType="danger"
+                cancelText="取消"
+                onConfirm={() => stopMutation.mutate()}
+                disabled={togglePending}
+              >
+                <Button
+                  danger
+                  icon={<StopOutlined />}
+                  loading={stopMutation.isPending}
+                >
+                  停止 Stage A
+                </Button>
+              </Popconfirm>
+            ) : (
+              <Popconfirm
+                title="启动 Stage A?"
+                description={
+                  <div style={{ maxWidth: 320 }}>
+                    <Text>翻 <code>ENABLE_OPTIMIZATION_LOOP=true</code>,下个 6h beat(北京 02:15 / 08:15 / 14:15 / 20:15)将自然 fire。</Text>
+                    <br />
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      预算 OPT_DAILY_SIM_BUDGET=400 sim/天。决策门 14d 转化率 &gt;20% GO / &lt;10% STOP。
+                    </Text>
+                  </div>
+                }
+                okText="启动"
+                okType="primary"
+                cancelText="取消"
+                onConfirm={() => startMutation.mutate()}
+                disabled={togglePending}
+              >
+                <Button
+                  type="primary"
+                  icon={<PlayCircleOutlined />}
+                  loading={startMutation.isPending}
+                >
+                  启动 Stage A
+                </Button>
+              </Popconfirm>
+            )}
+          </Space>
+          {flagNote && (
+            <Tooltip title={flagNote} placement="bottomRight">
+              <Text type="secondary" style={{ fontSize: 11, maxWidth: 320, display: 'block', textAlign: 'right', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {flagSource}: {flagNote}
+              </Text>
+            </Tooltip>
+          )}
+        </Space>
       </div>
 
       {/* Decision banner */}
@@ -414,41 +524,6 @@ export default function OptimizationCyclesMonitor() {
           <Card
             title={`当前进行中 cycle (${runningCycles.length})`}
             size="small"
-            extra={
-              runningCycles.length > 0 && (
-                <Popconfirm
-                  title="中止本次 Stage A beat 运行?"
-                  description={
-                    <div style={{ maxWidth: 320 }}>
-                      <Text>会做 3 件事:</Text>
-                      <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
-                        <li>设 Redis abort 标志(worker 跑完当前 cycle 后跳出 for-loop)</li>
-                        <li>把所有进行中 cycle 行标 <Tag color="error" style={{margin:0}}>aborted_by_user:batch</Tag></li>
-                        <li>已 dispatch 到 BRAIN 的 sim 自然完成(不可撤)</li>
-                      </ul>
-                      <Text type="secondary" style={{ fontSize: 12 }}>
-                        下次 6h beat 仍会正常 fire。永久暂停 → 同时翻
-                        ENABLE_OPTIMIZATION_LOOP=false。
-                      </Text>
-                    </div>
-                  }
-                  okText="中止"
-                  okType="danger"
-                  cancelText="取消"
-                  onConfirm={() => abortMutation.mutate()}
-                  disabled={abortMutation.isPending}
-                >
-                  <Button
-                    size="small"
-                    danger
-                    icon={<StopOutlined />}
-                    loading={abortMutation.isPending}
-                  >
-                    中止本批次
-                  </Button>
-                </Popconfirm>
-              )
-            }
           >
             {runningCycles.length === 0 ? (
               <Text type="secondary">
