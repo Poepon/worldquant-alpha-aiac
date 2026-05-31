@@ -110,6 +110,62 @@ async def test_acquire_sim_slot_user_mode_blocks_after_three():
 
 
 @pytest.mark.asyncio
+async def test_release_sim_slot_sync_fallback_when_async_fails():
+    """2026-05-31 leak fix: when the async Redis decr fails (per-task event loop
+    tearing down during a round-timeout cancel), _release_sim_slot must fall back
+    to a SYNC decr so the slot is still freed — else the counter pins at the limit
+    and wedges the pool. Verifies the sync path runs and decrements."""
+    sync_calls = {"decr": 0, "set": None}
+
+    class _SyncRedis:
+        def decr(self, _key):
+            sync_calls["decr"] += 1
+            return 2  # 3 -> 2 (one slot freed)
+
+        def set(self, _key, value):
+            sync_calls["set"] = value
+            return True
+
+    # async _get_slot_redis blows up (simulates loop teardown); sync client works.
+    with (
+        patch.object(
+            BrainAdapter, "_get_slot_redis",
+            new=AsyncMock(side_effect=RuntimeError("Event loop is closed")),
+        ),
+        patch("backend.tasks.redis_pool.get_redis_client", return_value=_SyncRedis()),
+    ):
+        await BrainAdapter._release_sim_slot()  # must NOT raise
+
+    assert sync_calls["decr"] == 1, "sync fallback decr must run when async fails"
+    assert sync_calls["set"] is None, "n>=0 → no reset needed"
+
+
+@pytest.mark.asyncio
+async def test_release_sim_slot_sync_fallback_resets_on_negative():
+    """Sync fallback also recovers a negative counter (over-release) to 0."""
+    sync_calls = {"set": None}
+
+    class _SyncRedis:
+        def decr(self, _key):
+            return -1  # over-released
+
+        def set(self, _key, value):
+            sync_calls["set"] = value
+            return True
+
+    with (
+        patch.object(
+            BrainAdapter, "_get_slot_redis",
+            new=AsyncMock(side_effect=RuntimeError("boom")),
+        ),
+        patch("backend.tasks.redis_pool.get_redis_client", return_value=_SyncRedis()),
+    ):
+        await BrainAdapter._release_sim_slot()
+
+    assert sync_calls["set"] == 0, "negative counter must be reset to 0 via sync"
+
+
+@pytest.mark.asyncio
 async def test_acquire_sim_slot_consultant_mode_allows_eighty():
     """CONSULTANT mode: 80 acquires succeed, the 81st hits over-capacity."""
     _flag_override_cache["ENABLE_BRAIN_CONSULTANT_MODE"] = True

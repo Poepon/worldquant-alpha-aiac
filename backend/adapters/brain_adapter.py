@@ -226,7 +226,27 @@ class BrainAdapter:
                 # Recover from bad state (e.g. counter manually cleared)
                 await r.set(cls._SLOT_COUNTER_KEY, 0)
         except Exception as e:
-            logger.warning(f"[BrainAdapter] release sim slot failed (non-fatal): {e}")
+            # 2026-05-31: the async path can fail during a round-timeout cancel —
+            # the per-task event loop (run_async) is tearing down, so the loop-
+            # bound async Redis client raises ("Event loop is closed" / connection
+            # reset). Swallowing it here is what LEAKED the slot → counter pinned
+            # at the limit → every future sim blocked (the cascade that wedged the
+            # pool). Fall back to a SYNC redis decr so the slot is still freed.
+            try:
+                from backend.tasks.redis_pool import get_redis_client
+                sr = get_redis_client()
+                n = sr.decr(cls._SLOT_COUNTER_KEY)
+                if n < 0:
+                    sr.set(cls._SLOT_COUNTER_KEY, 0)
+                logger.warning(
+                    f"[BrainAdapter] release sim slot: async failed ({e}); "
+                    f"sync fallback freed slot (counter={n})"
+                )
+            except Exception as e2:
+                logger.error(
+                    f"[BrainAdapter] release sim slot FAILED async+sync — slot may "
+                    f"leak until worker restart / TTL | async={e} sync={e2}"
+                )
 
     # ---- Cross-process rate-limit cooldown -----------------------------------
     # Each endpoint shares a Redis-backed cooldown so that when one caller is
@@ -788,7 +808,24 @@ class BrainAdapter:
                 logger.error(f"Simulate error: {e}")
                 return {"success": False, "error": str(e)}
         finally:
-            await BrainAdapter._release_sim_slot()
+            # Cancellation-safe slot release (2026-05-31). The round-level
+            # asyncio.wait_for(MINING_ROUND_TIMEOUT_SEC) in mining_tasks cancels
+            # run_evolution_loop mid-sim; a bare `await _release_sim_slot()` here
+            # can be torn down before the Redis decr lands → the slot leaks → the
+            # counter sticks at the limit and EVERY future sim blocks on
+            # _acquire_sim_slot (the 2026-05-31 cascade that wedged the pool).
+            # shield() lets the decr finish even as this coroutine is cancelled.
+            try:
+                await asyncio.shield(BrainAdapter._release_sim_slot())
+            except asyncio.CancelledError:
+                # We were cancelled awaiting the (shielded, still-running)
+                # release. Best-effort second attempt so the slot is freed even
+                # if the shield was itself interrupted, then propagate cancel.
+                try:
+                    await BrainAdapter._release_sim_slot()
+                except Exception:
+                    pass
+                raise
 
     async def simulate_batch(self, expressions: List[str], region: str = "USA", universe: str = "TOP3000", delay: int = 1, decay: int = 4, neutralization: str = "SUBINDUSTRY", truncation: float = 0.08, test_period: str = "P2Y0M") -> List[Dict]:
         """

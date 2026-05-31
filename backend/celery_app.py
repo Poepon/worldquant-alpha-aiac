@@ -48,6 +48,28 @@ def _start_feature_flag_refresher(**_kwargs):  # pragma: no cover - signal hook
         logger.error(f"[celery_app] feature-flag refresher start failed: {e}")
 
 
+@worker_process_init.connect
+def _reset_brain_sim_slot_counter(**_kwargs):  # pragma: no cover - signal hook
+    """Clear the cross-process BRAIN sim slot counter on worker startup.
+
+    A prior worker force-kill / round-timeout cancellation that leaked slots
+    (orphaned sim never reached _release_sim_slot) would otherwise leave
+    ``brain:concurrent_sims`` pinned at the limit, blocking EVERY sim on
+    _acquire_sim_slot until the 10-min TTL expires (the 2026-05-31 cascade that
+    wedged the pool and survived manual resets). Safe to clear here: no sim is
+    in-flight at process init. Belt-and-suspenders with the cancellation-safe
+    release in BrainAdapter.simulate_alpha (which prevents the leak going fwd).
+    """
+    try:
+        from backend.tasks.redis_pool import get_redis_client
+        # Literal key mirrors BrainAdapter._SLOT_COUNTER_KEY (avoid importing the
+        # adapter — heavy — at signal time).
+        get_redis_client().delete("brain:concurrent_sims")
+    except Exception as e:
+        from loguru import logger
+        logger.warning(f"[celery_app] BRAIN sim slot counter reset failed: {e}")
+
+
 @worker_process_shutdown.connect
 def _stop_feature_flag_refresher(**_kwargs):  # pragma: no cover - signal hook
     try:
