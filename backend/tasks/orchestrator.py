@@ -259,10 +259,13 @@ async def _scan_async() -> Dict[str, Any]:
     results: List[Dict[str, Any]] = []
 
     async with AsyncSessionLocal() as db:
+        # MiningTask 模型字段是 `updated_at`(server_default=now()+onupdate=now()),
+        # 没有 `modified_at` — 后者会触发 AttributeError(2026-05-31 fix,与
+        # routers/ops.py:5104 同源)。
         rows = (await db.execute(
             select(MiningTask.id).where(
                 MiningTask.status.in_(("COMPLETED", "STOPPED", "PAUSED", "EARLY_STOPPED")),
-                or_(MiningTask.modified_at >= cutoff, MiningTask.created_at >= cutoff),
+                or_(MiningTask.updated_at >= cutoff, MiningTask.created_at >= cutoff),
             ).limit(100)
         )).scalars().all()
 

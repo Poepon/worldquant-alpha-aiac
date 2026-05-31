@@ -5099,9 +5099,11 @@ async def get_orchestrator_status(
     quota_state = await _read_quota_state()
     region_rates = await _compute_region_pass_rates(db, th["lookback_days"])
 
-    # 最近 20 个有 orchestrator_processed_at 标的 task(按 modified_at 排)
+    # 最近 20 个有 orchestrator_processed_at 标的 task(按 updated_at 排)。
+    # MiningTask 模型字段是 `updated_at`(server_default=now()+onupdate=now()),
+    # 没有 `modified_at` — 后者会触发 AttributeError → 500(2026-05-31 fix)。
     rows = (await db.execute(
-        _select(MiningTask).order_by(desc(MiningTask.modified_at)).limit(200)
+        _select(MiningTask).order_by(desc(MiningTask.updated_at)).limit(200)
     )).scalars().all()
     decisions: List[OrchestratorRecentDecision] = []
     for t in rows:
