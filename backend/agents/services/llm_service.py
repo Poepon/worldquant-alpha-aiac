@@ -979,19 +979,44 @@ class LLMService:
                     # Hard deadline (asyncio.wait_for): ultimate backstop when the
                     # client/httpx timeout fails to fire — the 2026-05-21 zombie
                     # had the loop parked in select on this very await.
-                    response = await asyncio.wait_for(
-                        active_client.chat.completions.create(
-                            model=eff_model,
-                            messages=[
-                                {"role": "system", "content": system_prompt},
-                                {"role": "user", "content": user_prompt}
-                            ],
-                            temperature=temperature,
-                            max_tokens=max_tokens,
-                            response_format={"type": "json_object"} if json_mode else None
-                        ),
-                        timeout=settings.LLM_CALL_TIMEOUT_SEC,
-                    )
+                    #
+                    # Stale-connection retry (2026-06-01): the worker's idle
+                    # keep-alive socket goes stale (the server closes it between
+                    # rounds — a task's sim phase has no LLM calls for minutes), so
+                    # the FIRST call after idle (distill_context) fails INSTANTLY
+                    # with APIConnectionError. httpx evicts the dead conn on
+                    # failure → one retry opens a fresh one and succeeds. Scoped to
+                    # APIConnectionError ONLY, EXCLUDING its APITimeoutError
+                    # subclass (and the asyncio.wait_for TimeoutError is a separate
+                    # builtin, not caught here) → max_retries=0 timeout policy is
+                    # untouched → zombie-safe.
+                    for _conn_try in range(2):
+                        try:
+                            response = await asyncio.wait_for(
+                                active_client.chat.completions.create(
+                                    model=eff_model,
+                                    messages=[
+                                        {"role": "system", "content": system_prompt},
+                                        {"role": "user", "content": user_prompt}
+                                    ],
+                                    temperature=temperature,
+                                    max_tokens=max_tokens,
+                                    response_format={"type": "json_object"} if json_mode else None
+                                ),
+                                timeout=settings.LLM_CALL_TIMEOUT_SEC,
+                            )
+                            break
+                        except openai.APIConnectionError as _ce:
+                            # APITimeoutError subclasses APIConnectionError — never
+                            # retry it here (timeout = zombie risk); only retry a
+                            # genuine connection failure, once.
+                            if isinstance(_ce, openai.APITimeoutError) or _conn_try >= 1:
+                                raise
+                            logger.warning(
+                                f"[LLMService] stale-connection retry (fresh conn) | "
+                                f"id={call_id} node={node_key or '-'} eff={eff_model} | "
+                                f"{type(_ce).__name__}"
+                            )
 
                     # Defensive: handle empty/malformed responses
                     choices = getattr(response, "choices", None)

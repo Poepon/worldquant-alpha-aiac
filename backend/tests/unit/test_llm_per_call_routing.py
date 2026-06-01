@@ -158,3 +158,63 @@ async def test_no_fallback_loop_when_default_also_fails(svc, monkeypatch):
     assert resp.success is False
     # exactly two create attempts: routed + one fallback
     assert svc.client.chat.completions.models_seen == ["BAD-routed", svc.model]
+
+
+# --------------------------------------------------------------------------- stale-connection retry
+class _ConnFlakeCompletions:
+    """First ``fail_first`` create()s raise ``raise_cls``, then succeed. Counts calls."""
+
+    def __init__(self, fail_first=1, raise_cls=None):
+        import openai
+        self.calls = 0
+        self.fail_first = fail_first
+        self.raise_cls = raise_cls or openai.APIConnectionError
+
+    async def create(self, **kw):
+        import httpx
+        self.calls += 1
+        if self.calls <= self.fail_first:
+            req = httpx.Request("POST", "http://test")
+            try:  # APITimeoutError takes only request=; APIConnectionError takes message+request
+                raise self.raise_cls(request=req)
+            except TypeError:
+                raise self.raise_cls(message="stale conn", request=req)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content=json.dumps({"ok": True}), reasoning_content=None),
+                finish_reason="stop")],
+            usage=SimpleNamespace(total_tokens=5))
+
+
+class _ConnFlakeClient:
+    def __init__(self, **kw):
+        self.comp = _ConnFlakeCompletions(**kw)
+        self.chat = SimpleNamespace(completions=self.comp)
+
+
+@pytest.mark.asyncio
+async def test_stale_connection_error_retried_once(monkeypatch):
+    """APIConnectionError (stale keep-alive socket — distill_context after idle):
+    retried ONCE with a fresh connection → success."""
+    import openai
+    monkeypatch.setattr(settings, "ENABLE_LLM_API_CIRCUIT", False, raising=False)
+    s = LLMService(provider="openai")
+    s._credentials_loaded = True
+    s.client = _ConnFlakeClient(fail_first=1, raise_cls=openai.APIConnectionError)
+    resp = await s.call("sys", "user json", node_key="distill_context")
+    assert resp.success is True
+    assert s.client.comp.calls == 2  # failed once → retried → succeeded
+
+
+@pytest.mark.asyncio
+async def test_api_timeout_not_retried_zombie_safe(monkeypatch):
+    """APITimeoutError subclasses APIConnectionError but MUST NOT be retried here
+    (timeout = zombie risk; max_retries=0 policy untouched). Single attempt → fail."""
+    import openai
+    monkeypatch.setattr(settings, "ENABLE_LLM_API_CIRCUIT", False, raising=False)
+    s = LLMService(provider="openai")
+    s._credentials_loaded = True
+    s.client = _ConnFlakeClient(fail_first=99, raise_cls=openai.APITimeoutError)
+    resp = await s.call("sys", "user json", node_key="distill_context")
+    assert resp.success is False
+    assert s.client.comp.calls == 1  # NOT retried (timeout)
