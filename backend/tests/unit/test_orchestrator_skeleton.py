@@ -238,9 +238,10 @@ def test_weighted_sample_top_k_no_dup():
 
 @pytest.mark.asyncio
 async def test_select_launch_params_cold_start(monkeypatch):
-    """无历史数据 → fallback 到 finalize 触发 task 的 region/universe + 空 datasets。"""
+    """无历史数据 → 5 SUPPORTED_REGIONS 全 prior weight 0.5 均匀采样。"""
     from types import SimpleNamespace
     from backend.tasks import orchestrator as m
+    from backend.services.task_service import TaskService
 
     async def _empty_regions(db, lookback):
         return {}
@@ -253,18 +254,22 @@ async def test_select_launch_params_cold_start(monkeypatch):
 
     task = SimpleNamespace(region="USA", universe="TOP3000")
     params = await m._select_launch_params(db=None, finalized_task=task)
-    assert params["region"] == "USA"
+    assert params["region"] in set(TaskService.SUPPORTED_REGIONS)
     assert params["universe"] == "TOP3000"
-    assert params["datasets"] == []
+    assert params["datasets"] == []   # dataset 仍 cold-start → AUTO
     assert params["delay"] == 1
-    assert params["_decision_meta"]["region_pool_size"] == 0
+    # SUPPORTED 全 5,有数据 0
+    assert params["_decision_meta"]["region_pool_size"] == len(TaskService.SUPPORTED_REGIONS)
+    assert params["_decision_meta"]["region_with_data"] == 0
+    assert params["_decision_meta"]["prior_weight"] == 0.5
 
 
 @pytest.mark.asyncio
 async def test_select_launch_params_warm(monkeypatch):
-    """有历史数据 → 加权采样选 region + top-N dataset。"""
+    """有部分数据 → SUPPORTED 全集进 pool,缺失补 prior。"""
     from types import SimpleNamespace
     from backend.tasks import orchestrator as m
+    from backend.services.task_service import TaskService
 
     async def _warm_regions(db, lookback):
         return {
@@ -284,10 +289,49 @@ async def test_select_launch_params_warm(monkeypatch):
 
     task = SimpleNamespace(region="USA", universe="TOP3000")
     params = await m._select_launch_params(db=None, finalized_task=task)
-    assert params["region"] in {"USA", "CHN"}  # 加权采样
+    assert params["region"] in set(TaskService.SUPPORTED_REGIONS)
     assert 1 <= len(params["datasets"]) <= 3
-    assert params["_decision_meta"]["region_pool_size"] == 2
+    assert params["_decision_meta"]["region_pool_size"] == len(TaskService.SUPPORTED_REGIONS)
+    assert params["_decision_meta"]["region_with_data"] == 2  # USA + CHN
     assert params["_decision_meta"]["dataset_pool_size"] == 3
+
+
+@pytest.mark.asyncio
+async def test_select_launch_params_fairness_under_zero_pass_data(monkeypatch):
+    """生产实证 bug fix:USA 0/441(weight 0.002)+ 其他 region 0-data → 旧逻辑
+    永远锁 USA。新逻辑 supported 全集补 prior=0.5,USA 反成弱选项,5000 样本
+    USA 占比应远低于均匀 1/5,exploration regions 主导。"""
+    import random
+    from types import SimpleNamespace
+    from backend.tasks import orchestrator as m
+    from backend.services.task_service import TaskService
+
+    async def _real_data(db, lookback):
+        return {
+            "USA": {"passes": 0, "total": 441, "weight": 1 / 443},  # ~0.00226
+        }
+
+    async def _empty_datasets(db, region, lookback):
+        return {}
+
+    monkeypatch.setattr(m, "_compute_region_pass_rates", _real_data)
+    monkeypatch.setattr(m, "_compute_dataset_pass_rates", _empty_datasets)
+
+    task = SimpleNamespace(region="USA", universe="TOP3000")
+    rng = random.Random(42)
+    monkeypatch.setattr("random.random", rng.random)
+
+    chosen = {r: 0 for r in TaskService.SUPPORTED_REGIONS}
+    for _ in range(5000):
+        p = await m._select_launch_params(db=None, finalized_task=task)
+        chosen[p["region"]] += 1
+
+    # USA weight 0.00226;每个 cold region 0.5。总权重 = 4*0.5 + 0.00226 = 2.002
+    # USA 期望 ≈ 0.00226/2.002 ≈ 0.001 → 5000 中 ~5 次
+    # 每个 cold region 期望 ≈ 0.5/2.002 ≈ 0.25 → 5000 中 ~1250 次
+    assert chosen["USA"] < 50, f"USA over-selected: {chosen['USA']}/5000"
+    for r in ("CHN", "EUR", "ASI", "GLB"):
+        assert chosen[r] > 1000, f"{r} under-explored: {chosen[r]}/5000"
 
 
 @pytest.mark.asyncio

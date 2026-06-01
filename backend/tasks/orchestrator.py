@@ -493,15 +493,27 @@ async def _select_launch_params(db, finalized_task) -> Optional[Dict[str, Any]]:
     if not fallback_region or not fallback_universe:
         return None
 
-    # 1. 加权选 region(限制在 SUPPORTED_REGIONS)
+    # 1. 加权选 region(限制在 SUPPORTED_REGIONS,缺失项补 prior-only weight)
+    # FAIRNESS FIX (2026-06-01,生产实证 USA 0/441 weight 0.002 反被惩罚):
+    # `_compute_region_pass_rates` GROUP BY 只返回有数据 region。直接构造
+    # region_weights 会让 0-data region 不出现 → 永远不被采样;而 0-PASS-真挖
+    # region weight 远低于 prior(0.5),被反向锁定。修:把 SUPPORTED_REGIONS
+    # 全集放进 pool,缺失项填 prior-only weight α/(α+β)=0.5(uniform Beta(1,1)),
+    # 让 cold-start region 真有探索机会。
+    α = int(getattr(settings, "ORCHESTRATOR_PRIOR_PASSES", 1))
+    β = int(getattr(settings, "ORCHESTRATOR_PRIOR_FAILS", 1))
+    prior_weight = α / (α + β)
     region_stats = await _compute_region_pass_rates(db, lookback)
     supported = set(TaskService.SUPPORTED_REGIONS)
-    region_weights = {
-        r: s["weight"] for r, s in region_stats.items() if r in supported
-    }
+    region_weights: Dict[str, float] = {}
+    for r in supported:
+        if r in region_stats:
+            region_weights[r] = region_stats[r]["weight"]
+        else:
+            region_weights[r] = prior_weight
     chosen_region = _weighted_sample_one(region_weights, rng) if region_weights else None
     if chosen_region is None:
-        # Cold start:无历史 → fallback
+        # Cold start:无历史 + 无 SUPPORTED → fallback
         chosen_region = fallback_region
 
     # 2. 加权选 datasets(top-N,不重复)
@@ -520,10 +532,12 @@ async def _select_launch_params(db, finalized_task) -> Optional[Dict[str, Any]]:
         "datasets": chosen_datasets,
         "delay": 1,
         "_decision_meta": {
-            "region_pool_size": len(region_weights),
+            "region_pool_size": len(region_weights),             # = SUPPORTED 全集大小
+            "region_with_data": len(region_stats),                # 有 7d 数据的 region 数
             "region_chosen_weight": region_weights.get(chosen_region),
             "dataset_pool_size": len(dataset_weights),
             "lookback_days": lookback,
+            "prior_weight": prior_weight,
         },
     }
 
