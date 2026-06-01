@@ -1249,8 +1249,21 @@ class LLMService:
             content = content[:-3]
         content = content.strip()
 
-        if not content or content[0] not in ('{', '['):
+        if not content:
             return content
+        # Locate the JSON opener. Some models prepend junk BEFORE the JSON even
+        # in response_format=json_object — kimi-k2.6 sometimes emits a leading
+        # ">\n" (markdown blockquote artifact); others add prose. _clean_json
+        # used to give up (return as-is) whenever content[0] wasn't '{'/'[',
+        # which turned EVERY such response into a parse_error → broke ALL kimi
+        # mining (2026-06-02: hypothesis/code_gen/distill all parse_error). Strip
+        # the preamble to the first opener and let the brace-matcher below extract
+        # the complete object/array.
+        if content[0] not in ('{', '['):
+            _candidates = [i for i in (content.find('{'), content.find('[')) if i >= 0]
+            if not _candidates:
+                return content
+            content = content[min(_candidates):]
 
         opener = content[0]
         closer = '}' if opener == '{' else ']'
