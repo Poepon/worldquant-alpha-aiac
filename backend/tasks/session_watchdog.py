@@ -52,6 +52,24 @@ def watchdog_revive_dead_sessions():
     return run_async(_watchdog_revive_async())
 
 
+def _discrete_task_is_dead(latest_trace, worker_alive: bool, dead_cutoff) -> bool:
+    """Decide whether a RUNNING discrete/FLAT task should be re-dispatched.
+
+    - own trace fresh (latest_trace > dead_cutoff)            → alive, NOT dead
+    - NO trace ever + a worker is progressing (worker_alive)  → QUEUED on a busy
+      (solo) worker, hasn't started → NOT dead (2026-06-01 batch-ONESHOT
+      false-revive fix: don't spam phantom Runs for tasks waiting their turn)
+    - NO trace ever + worker looks dead (no trace anywhere)   → stuck / lost
+      dispatch → DEAD (preserves recovery)
+    - trace stale (<= dead_cutoff)                            → stalled → DEAD
+    """
+    if latest_trace is not None and latest_trace > dead_cutoff:
+        return False
+    if latest_trace is None and worker_alive:
+        return False
+    return True
+
+
 async def _watchdog_revive_async() -> dict:
     dead_threshold_min = getattr(settings, "CASCADE_WATCHDOG_DEAD_MIN", 15)
     grace_min = getattr(settings, "CASCADE_WATCHDOG_GRACE_MIN", 15)
@@ -70,6 +88,20 @@ async def _watchdog_revive_async() -> dict:
         # round; use the latest trace_step as the liveness signal instead.
         stmt = select(MiningTask).where(MiningTask.status == "RUNNING")
         discrete_rows = (await db.execute(stmt)).scalars().all()
+
+        # 2026-06-01: global liveness signal. A RUNNING task with NO trace step
+        # ever hasn't STARTED executing — it's QUEUED (e.g. batch-dispatched
+        # behind others on the solo worker), not a stalled session. Reviving it
+        # just adds a redundant queue entry while a worker is alive. Only revive
+        # such never-started tasks when the worker looks DEAD globally (no trace
+        # ANYWHERE within the dead window — then a queued task is genuinely stuck
+        # / its dispatch was lost). If some task IS progressing, queued no-trace
+        # tasks will run when their turn comes → don't spam phantom revives.
+        global_latest_trace = (
+            await db.execute(select(func.max(TraceStep.created_at)))
+        ).scalar()
+        worker_alive = bool(global_latest_trace and global_latest_trace > dead_cutoff)
+
         for task in discrete_rows:
             if _is_cascade_schedule(task):
                 # cascade is retired — skip (cascade loop above is no-op anyway)
@@ -82,8 +114,8 @@ async def _watchdog_revive_async() -> dict:
                 .where(TraceStep.task_id == task.id)
             )
             latest_trace = (await db.execute(latest_trace_stmt)).scalar()
-            if latest_trace and latest_trace > dead_cutoff:
-                continue  # liveness fresh
+            if not _discrete_task_is_dead(latest_trace, worker_alive, dead_cutoff):
+                continue  # fresh / queued-not-started → not dead
             # V-27.2: skip if already revived within the dead-threshold
             # window — discrete revive holds no lock, so this is the only
             # guard against the watchdog double-dispatching the task.
