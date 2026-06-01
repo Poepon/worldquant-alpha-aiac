@@ -1093,6 +1093,9 @@ async def node_hypothesis(
             temperature=temperature,
             json_mode=True,
             node_key="hypothesis",
+            # 2026-05-31: explicit budget (was the call() default 4096) so verbose
+            # routed models (deepseek-v4-pro) aren't truncated mid-JSON → 0 hyps.
+            max_tokens=_gen_settings.HYPOTHESIS_MAX_TOKENS,
         )
     except Exception as llm_err:
         logger.error(f"[{node_name}] LLM call exception: {llm_err}")

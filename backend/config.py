@@ -1455,6 +1455,13 @@ class Settings(BaseSettings):
     # (deepseek-chat = 8192). See node_code_gen.
     CODE_GEN_MAX_TOKENS_PER_ALPHA: int = 512
     CODE_GEN_MAX_TOKENS_CEILING: int = 8000
+    # node_hypothesis completion budget. Default was the call()'s 4096, which
+    # TRUNCATED verbose models (deepseek-v4-pro ~6000 completion under the rich
+    # production prompt) → incomplete JSON → 0 hypotheses → 0 alphas (2026-05-31
+    # global-routing rollout). Bumped to 6000 so per-function routing can use the
+    # benchmark's hypothesis pick (deepseek-v4-pro, pillar_div 0.80 leading)
+    # without truncation. Concise models (kimi-k2.6 ~2800) are unaffected.
+    HYPOTHESIS_MAX_TOKENS: int = 6000
 
     # --- Mining pipeline (producer-consumer) ---
     # Decouples LLM generation from BRAIN simulation so sim slots stay
