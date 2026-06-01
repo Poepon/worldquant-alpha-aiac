@@ -1141,7 +1141,14 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
     task_id = task.id
     run_id = run.id if run is not None else None
     max_iters = int(getattr(settings, "FLAT_CONTINUOUS_MAX_ITERATIONS", 100) or 100)
-    daily_goal = int(getattr(settings, "FLAT_CONTINUOUS_DAILY_GOAL", 20) or 20)
+    # Per-session override (2026-06-02): task.config["flat_daily_goal"] wins over
+    # the global settings.FLAT_CONTINUOUS_DAILY_GOAL when present (start_flat_session
+    # validates it >0 → truthy). Absent → global default.
+    daily_goal = int(
+        (task.config or {}).get("flat_daily_goal")
+        or getattr(settings, "FLAT_CONTINUOUS_DAILY_GOAL", 20)
+        or 20
+    )
     # Option C diversity steering: the pipeline uses a SMALL per-dataset batch
     # (not the legacy ALPHAS_PER_ROUND=10) so coverage-greedy selection spreads
     # the session across many distinct datasets. gen/sim overlap keeps slots

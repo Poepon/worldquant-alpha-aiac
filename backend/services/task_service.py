@@ -594,6 +594,7 @@ class TaskService(BaseService):
         delay: int = 1,
         launched_by: str = "manual",
         llm_overrides: Optional[Dict[str, Any]] = None,
+        daily_goal: Optional[int] = None,
     ) -> "MiningSessionInfo":
         """Create a new FLAT_CONTINUOUS task and dispatch its worker.
 
@@ -645,6 +646,13 @@ class TaskService(BaseService):
         # models (byte-for-byte legacy).
         if isinstance(llm_overrides, dict) and llm_overrides:
             _config["llm_overrides"] = llm_overrides
+        # Per-session FLAT iteration alpha cap (2026-06-02). Absent → the worker
+        # falls back to the global settings.FLAT_CONTINUOUS_DAILY_GOAL (20). Lets
+        # ops size individual sessions without changing the global tunable.
+        if daily_goal is not None:
+            if int(daily_goal) <= 0:
+                raise ValueError(f"daily_goal={daily_goal!r} must be a positive int")
+            _config["flat_daily_goal"] = int(daily_goal)
 
         task = MiningTask(
             task_name=f"flat-session-{region}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",

@@ -1363,6 +1363,15 @@ class StartFlatSessionIn(BaseModel):
             "None/absent = default models (byte-for-byte legacy)."
         ),
     )
+    daily_goal: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Per-session FLAT iteration alpha cap (how many alphas this session "
+            "produces per dispatch before COMPLETED/daily_goal_reached). Absent = "
+            "global settings.FLAT_CONTINUOUS_DAILY_GOAL (20)."
+        ),
+    )
 
 
 class FlatSessionOut(BaseModel):
@@ -1444,6 +1453,7 @@ async def start_flat_session(
             datasets=payload.datasets or None,
             delay=payload.delay,
             llm_overrides=payload.llm_overrides,
+            daily_goal=payload.daily_goal,
         )
     except ValueError as ex:
         raise HTTPException(status_code=400, detail=str(ex)) from ex

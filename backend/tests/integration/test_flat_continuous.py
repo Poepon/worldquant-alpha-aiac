@@ -148,6 +148,45 @@ async def test_start_flat_session_stores_llm_overrides(pg_session):
 
 
 @pytest.mark.asyncio
+async def test_start_flat_session_stores_daily_goal(pg_session):
+    """Per-session FLAT daily_goal (2026-06-02) lands in config['flat_daily_goal']
+    so _run_flat_iteration uses it over the global FLAT_CONTINUOUS_DAILY_GOAL."""
+    _flag_override_cache["ENABLE_FLAT_CONTINUOUS"] = True
+    svc = TaskService(pg_session)
+
+    info = await svc.start_flat_session(region="USA", datasets=["pv1"], daily_goal=30)
+    task = await svc.task_repo.get_by_id(info.task_id)
+    task.task_name = f"{_TAG}_{task.task_name}"
+    await pg_session.commit()
+
+    assert (task.config or {}).get("flat_daily_goal") == 30
+
+
+@pytest.mark.asyncio
+async def test_start_flat_session_no_daily_goal_key_absent(pg_session):
+    """No daily_goal → key absent → worker falls back to the global default."""
+    _flag_override_cache["ENABLE_FLAT_CONTINUOUS"] = True
+    svc = TaskService(pg_session)
+
+    info = await svc.start_flat_session(region="USA", datasets=["pv1"])
+    task = await svc.task_repo.get_by_id(info.task_id)
+    task.task_name = f"{_TAG}_{task.task_name}"
+    await pg_session.commit()
+
+    assert "flat_daily_goal" not in (task.config or {})
+
+
+@pytest.mark.asyncio
+async def test_start_flat_session_rejects_nonpositive_daily_goal(pg_session):
+    """daily_goal <= 0 is rejected (a 0 cap would stop the session immediately)."""
+    _flag_override_cache["ENABLE_FLAT_CONTINUOUS"] = True
+    svc = TaskService(pg_session)
+
+    with pytest.raises(ValueError):
+        await svc.start_flat_session(region="USA", datasets=["pv1"], daily_goal=0)
+
+
+@pytest.mark.asyncio
 async def test_start_flat_session_no_overrides_key_absent(pg_session):
     """Control arm / default: no llm_overrides → key absent → byte-for-byte legacy."""
     _flag_override_cache["ENABLE_FLAT_CONTINUOUS"] = True
