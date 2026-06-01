@@ -71,14 +71,17 @@ def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
     LLM_FUNCTION_MODEL_MAP env never crashes Settings() construction. env keys
     merge OVER the defaults (partial-override).
     """
-    # Per-node benchmark FINAL (2026-05-29): code_gen/self_correct/r1b_retry =
-    # runs=3 means (runs=1 was unreliable — dsv4-flash code_gen std 0.32);
-    # others = runs=1 (Phase C A/B re-validates). code_gen=qwen3.6-plus is the
-    # quality pick (0.735) accepting ~137s/call. docs/llm_per_node_benchmark_
-    # 2026-05-29_FINAL.json.
+    # Per-node benchmark FINAL (2026-05-29, runs=3 for expr nodes). NOTE: the
+    # hypothesis/code_gen picks were REVERTED to kimi-k2.6 on 2026-06-01 after a
+    # live single-node A/B (Phase C) showed the benchmark-preferred reasoning
+    # models (dsv4-pro hypothesis / qwen3.6-plus code_gen) DON'T beat kimi online
+    # (Welch t=1.67 ns; kimi numerically better) yet cost ~48% more tokens — they
+    # burn ~2-7k reasoning tokens per call that llm_service discards. See
+    # reference_routing_reasoning_models_no_online_edge_2026_06_01. Offline
+    # benchmark != online value for reasoning models.
     defaults: Dict[str, Dict[str, str]] = {
-        "hypothesis":          {"model": "deepseek-v4-pro",   "provider": "openai"},
-        "code_gen":            {"model": "qwen3.6-plus",      "provider": "openai"},
+        "hypothesis":          {"model": "kimi-k2.6",        "provider": "openai"},  # was dsv4-pro (A/B reverted 06-01)
+        "code_gen":            {"model": "kimi-k2.6",        "provider": "openai"},  # was qwen3.6-plus (A/B reverted 06-01)
         "self_correct":        {"model": "deepseek-v4-flash", "provider": "openai"},
         "r1b_retry":           {"model": "qwen3.6-flash",     "provider": "openai"},
         "llm_mutate_alpha":    {"model": "kimi-k2.5",         "provider": "openai"},

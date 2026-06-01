@@ -95,7 +95,9 @@ def test_override_wins_over_startup_default(routing_on, monkeypatch):
 def test_startup_default_used_when_no_override(routing_on, monkeypatch):
     monkeypatch.delitem(cfg._flag_override_cache, "LLM_FUNCTION_MODEL_MAP", raising=False)
     r = resolve_model_for("hypothesis")
-    assert r is not None and r["model"] == "deepseek-v4-pro"  # runs=1 startup default
+    # hypothesis startup default reverted to kimi-k2.6 on 2026-06-01 after the
+    # live A/B (dsv4-pro had no online edge + cost ~48% more — reasoning tokens).
+    assert r is not None and r["model"] == "kimi-k2.6"
 
 
 # --------------------------------------------------------------- shallow copy
