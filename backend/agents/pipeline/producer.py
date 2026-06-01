@@ -23,8 +23,37 @@ from backend.agents.pipeline.consumer import build_consumer_stages
 from backend.agents.pipeline.persister import build_persister
 from backend.agents.pipeline.runner import _with_timeout, run_pipeline_session
 from backend.agents.pipeline.types import Candidate
+from backend.cost_tracker import begin_round as _cost_begin_round
 
 logger = logging.getLogger(__name__)
+
+
+async def _flush_cost_round_safe(session_factory, token) -> None:
+    """A4 (2026-06-01): flush this producer round's accumulated per-call LLM cost
+    telemetry (node_key/model/tokens) to LLMCallLog, then restore the prior cost
+    round context.
+
+    The FLAT pipeline previously never called ``begin_round`` → ``record_llm_call``
+    no-op'd (no active round ctx) → LLMCallLog stayed empty for FLAT sessions, so
+    per-node routing/cost was invisible on the main production path (only ONESHOT
+    flushed). Uses an EPHEMERAL session (NOT the producer's shared session / the
+    DB-free code-producers) so a telemetry write can never poison or serialize
+    against mining I/O. Best-effort: never raises into the producer loop.
+    """
+    try:
+        from backend.config import settings as _s
+        if getattr(_s, "ENABLE_COST_TELEMETRY", False):
+            from backend.cost_tracker import flush_round_async as _flush
+            async with session_factory() as _cdb:
+                await _flush(_cdb)
+    except Exception:  # noqa: BLE001
+        logger.debug("[pipeline] cost telemetry flush failed (non-fatal)", exc_info=True)
+    finally:
+        try:
+            from backend.cost_tracker import end_round as _end
+            _end(token)
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _sim_ready_payload(gen_state: Any, alpha_candidate: Any) -> Any:
@@ -167,6 +196,10 @@ def build_producer(
                         if not inputs:
                             break
                         st["rounds"] += 1
+                        # A4: capture the hypothesis call's per-node cost telemetry.
+                        _ctok = _cost_begin_round(
+                            task_id=getattr(inputs.get("task"), "id", None),
+                            round_idx=st["rounds"], dataset_id=inputs["dataset_id"])
                         try:
                             result = await _with_timeout(wf.run(
                                 task=inputs["task"],
@@ -187,7 +220,9 @@ def build_producer(
                             logger.exception(
                                 "[pipeline] hyp round failed/timed out; ending "
                                 "stage 1 (shared session integrity uncertain)")
+                            await _flush_cost_round_safe(session_factory, _ctok)
                             break
+                        await _flush_cost_round_safe(session_factory, _ctok)
                         hyp_state = result.get("state") if isinstance(result, dict) else None
                         if hyp_state is not None:
                             await hyp_q.put((hyp_state, inputs["dataset_id"]))
@@ -205,11 +240,17 @@ def build_producer(
                     if should_stop() or _at_target():
                         continue  # drain remaining sentinels; produce nothing more
                     hyp_state, dataset_id = item
+                    # A4: capture code_gen/self_correct per-node cost telemetry.
+                    _ctok = _cost_begin_round(
+                        task_id=getattr(hyp_state, "task_id", None),
+                        round_idx=st["rounds"], dataset_id=dataset_id)
                     try:
                         final = await _with_timeout(wf.run_codegen(hyp_state), op_timeout)
                     except Exception:  # noqa: BLE001 — one bad/slow hypothesis ≠ dead producer
                         logger.exception("[pipeline] code-producer failed/timed out a hypothesis (skipped)")
+                        await _flush_cost_round_safe(session_factory, _ctok)
                         continue
+                    await _flush_cost_round_safe(session_factory, _ctok)
                     pending = _pattr(final, "pending_alphas", []) or []
                     gen_trace = _pattr(final, "trace_steps", []) or []
                     for ac in pending:
