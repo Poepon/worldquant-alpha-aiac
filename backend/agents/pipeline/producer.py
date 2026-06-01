@@ -225,7 +225,12 @@ def build_producer(
                         await _flush_cost_round_safe(session_factory, _ctok)
                         hyp_state = result.get("state") if isinstance(result, dict) else None
                         if hyp_state is not None:
-                            await hyp_q.put((hyp_state, inputs["dataset_id"]))
+                            # Carry task_id too (A4): the post-hypothesis state
+                            # doesn't reliably propagate task_id, so the code-
+                            # producer's cost telemetry would land task_id=None.
+                            await hyp_q.put(
+                                (hyp_state, inputs["dataset_id"],
+                                 getattr(inputs.get("task"), "id", None)))
                 except Exception:  # noqa: BLE001 — a stage-1 crash must still drain stage 2
                     logger.exception("[pipeline] hyp-producer crashed; draining code-producers")
                 finally:
@@ -239,10 +244,11 @@ def build_producer(
                         return
                     if should_stop() or _at_target():
                         continue  # drain remaining sentinels; produce nothing more
-                    hyp_state, dataset_id = item
+                    hyp_state, dataset_id, _task_id = item
                     # A4: capture code_gen/self_correct per-node cost telemetry.
                     _ctok = _cost_begin_round(
-                        task_id=getattr(hyp_state, "task_id", None),
+                        task_id=_task_id if _task_id is not None
+                        else getattr(hyp_state, "task_id", None),
                         round_idx=st["rounds"], dataset_id=dataset_id)
                     try:
                         final = await _with_timeout(wf.run_codegen(hyp_state), op_timeout)
