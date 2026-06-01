@@ -372,10 +372,18 @@ def test_orchestrator_status_endpoint_imports():
         pool={"orchestrator_running": 0, "today_orchestrator_launches": 0},
         quota={"over_threshold": False},
         region_pass_rates_7d={},
+        supported_regions=["USA", "CHN", "EUR", "ASI", "GLB"],
+        prior_weight=0.5,
+        effective_region_weights={
+            "USA": 0.5, "CHN": 0.5, "EUR": 0.5, "ASI": 0.5, "GLB": 0.5,
+        },
         recent_decisions=[],
     )
     assert out.enabled is False
     assert out.thresholds["max_running"] == 3
+    assert out.prior_weight == 0.5
+    assert set(out.supported_regions) == {"USA", "CHN", "EUR", "ASI", "GLB"}
+    assert all(w == 0.5 for w in out.effective_region_weights.values())
 
 
 def test_orchestrator_status_recent_decision_model():

@@ -98,13 +98,31 @@ export default function OrchestratorMonitor() {
   const th = data.thresholds || {}
   const pool = data.pool || {}
   const regionRates = data.region_pass_rates_7d || {}
+  const effectiveWeights = data.effective_region_weights || {}
+  const supportedRegions = data.supported_regions || []
+  const priorWeight = data.prior_weight ?? 0.5
   const decisions = data.recent_decisions || []
-  const regionRows = Object.entries(regionRates).map(([region, s]) => ({
-    region,
-    passes: s.passes,
-    total: s.total,
-    weight: s.weight,
-  }))
+  // 合并 SUPPORTED 全集 + data weights:DATA region 显示 passes/total/真实 weight,
+  // PRIOR region 显示 "-" + prior_weight。让 operator 看到完整采样空间。
+  const regionRows = supportedRegions.map((region) => {
+    const r = regionRates[region]
+    if (r) {
+      return {
+        region,
+        passes: r.passes,
+        total: r.total,
+        weight: r.weight,
+        source: 'DATA',
+      }
+    }
+    return {
+      region,
+      passes: null,
+      total: null,
+      weight: effectiveWeights[region] ?? priorWeight,
+      source: 'PRIOR',
+    }
+  })
 
   return (
     <div>
@@ -209,40 +227,62 @@ export default function OrchestratorMonitor() {
         </Col>
         <Col span={12}>
           <Card
-            title={`7d region PASS rate(Beta-Bernoulli posterior)`}
+            title={`Region 采样空间(prior=${priorWeight.toFixed(2)} 兜底)`}
             size="small"
+            extra={
+              <Tooltip
+                title={
+                  <span>
+                    Beta-Bernoulli posterior (passes+α)/(total+α+β)。<br />
+                    DATA = 7d 有 mining-direct alpha,真实 weight。<br />
+                    PRIOR = 0 数据,用 α/(α+β)={priorWeight.toFixed(2)} 兜底,
+                    防 0-data region 永远不被探索。<br />
+                    2026-06-01 fairness fix:USA 0/441 实证后修复。
+                  </span>
+                }
+              >
+                <Tag color="processing">prior fairness</Tag>
+              </Tooltip>
+            }
           >
-            {regionRows.length === 0 ? (
-              <Empty description="7d 无 mining-direct alpha — cold-start 走 finalize 触发 task 的 region" />
-            ) : (
-              <Table
-                size="small"
-                pagination={false}
-                rowKey="region"
-                dataSource={regionRows.sort((a, b) => b.weight - a.weight)}
-                columns={[
-                  { title: 'Region', dataIndex: 'region', width: 80 },
-                  {
-                    title: 'PASS / 总',
-                    width: 100,
-                    render: (_, r) => `${r.passes} / ${r.total}`,
-                  },
-                  {
-                    title: 'weight',
-                    render: (_, r) => (
-                      <Space>
-                        <Progress
-                          percent={Math.round(r.weight * 100)}
-                          size="small"
-                          style={{ width: 100 }}
-                        />
-                        <Text type="secondary">{r.weight.toFixed(3)}</Text>
-                      </Space>
+            <Table
+              size="small"
+              pagination={false}
+              rowKey="region"
+              dataSource={regionRows.sort((a, b) => b.weight - a.weight)}
+              columns={[
+                { title: 'Region', dataIndex: 'region', width: 80 },
+                {
+                  title: '来源',
+                  width: 70,
+                  render: (_, r) =>
+                    r.source === 'DATA' ? (
+                      <Tag color="success">DATA</Tag>
+                    ) : (
+                      <Tag color="default">PRIOR</Tag>
                     ),
-                  },
-                ]}
-              />
-            )}
+                },
+                {
+                  title: 'PASS / 总',
+                  width: 90,
+                  render: (_, r) =>
+                    r.source === 'DATA' ? `${r.passes} / ${r.total}` : '-',
+                },
+                {
+                  title: 'weight',
+                  render: (_, r) => (
+                    <Space>
+                      <Progress
+                        percent={Math.round(r.weight * 100)}
+                        size="small"
+                        style={{ width: 100 }}
+                      />
+                      <Text type="secondary">{r.weight.toFixed(3)}</Text>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
           </Card>
         </Col>
       </Row>

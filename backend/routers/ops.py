@@ -5066,7 +5066,10 @@ class OrchestratorStatusOut(BaseModel):
     thresholds: Dict[str, int]
     pool: Dict[str, int]
     quota: Dict[str, Any]
-    region_pass_rates_7d: Dict[str, Dict[str, float]]
+    region_pass_rates_7d: Dict[str, Dict[str, float]]    # 只含有 7d 数据的 region
+    supported_regions: List[str]                          # SUPPORTED 全集
+    prior_weight: float                                   # α/(α+β),缺失项 fallback
+    effective_region_weights: Dict[str, float]            # 全 pool merged (data 或 prior)
     recent_decisions: List[OrchestratorRecentDecision]
 
 
@@ -5098,6 +5101,21 @@ async def get_orchestrator_status(
     today_launches = await _count_today_orchestrator_launches(db)
     quota_state = await _read_quota_state()
     region_rates = await _compute_region_pass_rates(db, th["lookback_days"])
+
+    # Fairness-fix 同步显示(2026-06-01):endpoint 也补 prior pool 让 operator
+    # 看到 orchestrator 实际采样空间,不是只显示有数据 region(否则会误以为
+    # 0-data region 不参与 — 实际上它们靠 prior 权重 0.5 主导探索)。
+    from backend.services.task_service import TaskService
+    α = int(getattr(settings, "ORCHESTRATOR_PRIOR_PASSES", 1))
+    β = int(getattr(settings, "ORCHESTRATOR_PRIOR_FAILS", 1))
+    prior_weight = α / (α + β)
+    supported = list(TaskService.SUPPORTED_REGIONS)
+    effective_weights: Dict[str, float] = {}
+    for r in supported:
+        if r in region_rates:
+            effective_weights[r] = float(region_rates[r]["weight"])
+        else:
+            effective_weights[r] = prior_weight
 
     # 最近 20 个有 orchestrator_processed_at 标的 task(按 updated_at 排)。
     # MiningTask 模型字段是 `updated_at`(server_default=now()+onupdate=now()),
@@ -5131,5 +5149,8 @@ async def get_orchestrator_status(
         },
         quota=quota_state,
         region_pass_rates_7d=region_rates,
+        supported_regions=supported,
+        prior_weight=prior_weight,
+        effective_region_weights=effective_weights,
         recent_decisions=decisions,
     )
