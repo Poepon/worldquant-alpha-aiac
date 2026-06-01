@@ -163,6 +163,7 @@ export default function TaskManagement() {
       universe: values.universe,
       datasets: datasetsList,
       delay: values.delay ?? 1,
+      dailyGoal: values.dailyGoal ?? null,
     })
   }
 
@@ -463,6 +464,17 @@ export default function TaskManagement() {
               <Option value={1}>delay 1（标准）</Option>
               <Option value={0}>delay 0（当日 / 正交轴）</Option>
             </Select>
+          </Form.Item>
+          <Form.Item
+            name="dailyGoal"
+            label="每轮 alpha 数（可选）"
+            tooltip="本会话每次 dispatch 产多少 alpha 后 COMPLETED（可 resume 续跑）。留空 = 全局默认 FLAT_CONTINUOUS_DAILY_GOAL（20）。"
+          >
+            <InputNumber
+              min={1}
+              style={{ width: '100%' }}
+              placeholder="留空 = 全局默认（20）"
+            />
           </Form.Item>
           <Form.Item style={{ marginBottom: 0, textAlign: 'right' }}>
             <Space>
