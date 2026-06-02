@@ -973,10 +973,16 @@ class Settings(BaseSettings):
     EVAL_SUBUNIV_MIN: float = 0.2
     EVAL_SELF_CORR_MAX: float = 0.7
 
-    EVAL_PROVISIONAL_SHARPE_MIN: float = 1.25
-    EVAL_PROVISIONAL_FITNESS_MIN: float = 1.0
-    EVAL_PROVISIONAL_TURNOVER_MAX: float = 0.55
-    EVAL_PROVISIONAL_SUBUNIV_MIN: float = 0.15
+    # PROVISIONAL = "近 pass 中间档"(2026-06-02 实证回退,见 commit 注释)。
+    # 旧 T1 PROVISIONAL (5-15→5-19 active) 是 0.8/0.6/0.85/0.0;`8e92905`
+    # tier 退役 big-bang 把这 4 个值全设成"旧某 tier PASS"等价 (1.25/1.0/
+    # 0.55/0.15),导致 prov_*_min 跟 PASS sharpe_min/fitness_min 完全一样,
+    # `evaluation.py:near_pass` 路径死路,产能从 89% 崩到 1%。回退到旧 T1
+    # PROVISIONAL 等价值 — 用户当时只选 PASS strictest band,没说 PROV 要跟齐。
+    EVAL_PROVISIONAL_SHARPE_MIN: float = 0.8     # was 1.25 (8e92905 oversight)
+    EVAL_PROVISIONAL_FITNESS_MIN: float = 0.6    # was 1.0
+    EVAL_PROVISIONAL_TURNOVER_MAX: float = 0.85  # was 0.55
+    EVAL_PROVISIONAL_SUBUNIV_MIN: float = 0.0    # was 0.15
 
     # Delay-0 PASS band — matches BRAIN's stricter delay-0 checks (15621
     # empirical). Set above the BRAIN limits so a locally-PASS alpha actually
