@@ -24,6 +24,7 @@ import {
   SafetyCertificateOutlined,
   TrophyOutlined,
   ClearOutlined,
+  ExperimentOutlined,
 } from '@ant-design/icons'
 import api from '../services/api'
 import { formatRelative } from '../utils/time'
@@ -123,6 +124,24 @@ export default function AlphaList() {
     onError: (err) => {
       const detail = err?.response?.data?.detail || err.message
       message.error(`批量校验失败: ${detail}`)
+    },
+  })
+
+  // Blueprint optimization — run a settings-sweep cycle using a chosen row's
+  // alpha as the template (trigger_source='manual'). Fire-and-forget; winners
+  // land in the submit-backlog. mutate(alphaId) — variables tracks which row.
+  const optimizeMutation = useMutation({
+    mutationFn: (alphaId) => api.optimizeAlphaFromBlueprint(alphaId),
+    onSuccess: (data) => {
+      message.success(
+        `已启动优化 #${data.alpha_id}：${data.n_variants ?? '?'} 个变体` +
+          `（预算 ${data.budget}）。胜出变体进入「提交积压」队列。`,
+        6,
+      )
+    },
+    onError: (err) => {
+      const detail = err?.response?.data?.detail || err.message
+      message.error(`启动优化失败: ${detail}`)
     },
   })
 
@@ -315,16 +334,33 @@ export default function AlphaList() {
     },
     {
       title: '操作',
-      width: 70,
+      width: 150,
       fixed: 'right',
       render: (_, row) => (
-        <Button
-          size="small"
-          icon={<EyeOutlined />}
-          onClick={() => navigate(`/alphas/${row.id}`)}
-        >
-          详情
-        </Button>
+        <Space size={4}>
+          <Button
+            size="small"
+            icon={<EyeOutlined />}
+            onClick={() => navigate(`/alphas/${row.id}`)}
+          >
+            详情
+          </Button>
+          <Popconfirm
+            title="以此 alpha 为蓝本优化"
+            description="对 decay/窗口/中性化 做设置扫描（最多 10 变体），消耗 BRAIN 配额；胜出变体进「提交积压」队列。确认?"
+            okText="优化"
+            cancelText="取消"
+            onConfirm={() => optimizeMutation.mutate(row.id)}
+          >
+            <AntdTooltip title="以此 alpha 为蓝本做设置扫描优化">
+              <Button
+                size="small"
+                icon={<ExperimentOutlined />}
+                loading={optimizeMutation.isPending && optimizeMutation.variables === row.id}
+              />
+            </AntdTooltip>
+          </Popconfirm>
+        </Space>
       ),
     },
   ]
@@ -620,7 +656,7 @@ export default function AlphaList() {
             showTotal: (t) => `共 ${t} 条`,
             onChange: (p, ps) => { setPage(p); setPageSize(ps) },
           }}
-          scroll={{ x: 1500 }}
+          scroll={{ x: 1580 }}
         />
       </Card>
     </div>

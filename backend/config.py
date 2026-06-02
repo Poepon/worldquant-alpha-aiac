@@ -1019,6 +1019,14 @@ class Settings(BaseSettings):
     OPT_DAILY_SIM_BUDGET: int = 400         # 10 × 10 × 4 = 400 sim/day; <= 40% of BRAIN cap
     OPT_NEAR_GATE_BAND: float = 0.5         # sharpe distance from hard_gate to qualify
     OPT_SIM_TIMEOUT_SECONDS: int = 600      # per-sim hard timeout (BRAIN p95 ≈ 90-120s)
+    # Manual blueprint-optimization (2026-06-03): user-triggered single-alpha
+    # cycle via POST /alphas/{id}/optimize → trigger_source="manual". Runs
+    # INDEPENDENTLY of ENABLE_OPTIMIZATION_LOOP (that flag only gates the 6h
+    # beat). Default budget covers the full ~10-variant SettingsSweepGenerator
+    # grid; a caller override is clamped to [1, MAX].
+    OPT_MANUAL_SIM_BUDGET: int = 16         # default sims per manual cycle
+    OPT_MANUAL_SIM_BUDGET_MAX: int = 30     # clamp ceiling for caller override
+    OPT_MANUAL_INFLIGHT_MINUTES: int = 40   # per-alpha concurrency-guard window
 
     # ── Marginal-contribution submit recommendation (backend/marginal_analysis.py)
     # Calibration for the multi-dimensional before-and-after scorecard. Scalar

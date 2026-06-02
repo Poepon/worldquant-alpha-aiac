@@ -787,6 +787,19 @@ const api = {
     const { data } = await client.post('/ops/optimization/stop')
     return data
   },
+
+  // Blueprint optimization (2026-06-03) — use a chosen alpha as a blueprint and
+  // run ONE settings-sweep optimization cycle (trigger_source='manual'). Runs
+  // INDEPENDENTLY of the 6h beat (ENABLE_OPTIMIZATION_LOOP). Dispatches a Celery
+  // cycle; winners land in the submit-backlog (never auto-submitted). Returns a
+  // preview { n_variants, variant_tags, budget } + the dispatched task_id.
+  // 409 if a cycle for this alpha is already in flight; 404 unknown alpha.
+  optimizeAlphaFromBlueprint: async (alphaId, { budget = null } = {}) => {
+    const body = {}
+    if (budget != null) body.budget = budget
+    const { data } = await client.post(`/alphas/${alphaId}/optimize`, body)
+    return data
+  },
 }
 
 export default api

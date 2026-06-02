@@ -92,7 +92,12 @@ from backend.tasks.datafield_prune import prune_invalid_datafields  # noqa: F401
 # Phase 16-A optimization closure Stage A (2026-05-28) — 6h beat task
 # that scans near-gate alphas and runs SettingsSweepGenerator cycles.
 # Gated by ENABLE_OPTIMIZATION_LOOP (default OFF).
-from backend.tasks.optimization_tasks import run_optimization_cycle  # noqa: F401
+from backend.tasks.optimization_tasks import (  # noqa: F401
+    run_optimization_cycle,
+    # Manual blueprint-optimization (2026-06-03): user picks an alpha in the
+    # UI → POST /alphas/{id}/optimize dispatches this single-alpha cycle.
+    run_manual_optimization_cycle,
+)
 
 __all__ = [
     # Utilities

@@ -100,6 +100,25 @@ function statusTag(cycle) {
   return <Tag color="default">0 winner</Tag>
 }
 
+// trigger_source → distinguishable colored tag. 'manual' (user clicked
+// 「以此为蓝本优化」on an alpha) vs 'beat' (6h auto scan) vs 'pipeline_hook'
+// (Stage C near-miss push). Unknown sources fall back to the raw string.
+const TRIGGER_META = {
+  beat: { color: 'blue', label: '定时 beat', tip: '6h 自动 beat 扫描近门 alpha 触发' },
+  manual: { color: 'purple', label: '手动', tip: '用户在前端以某 alpha 为蓝本手动触发（POST /alphas/{id}/optimize）' },
+  pipeline_hook: { color: 'cyan', label: '管线', tip: 'Stage C pipeline-hook 推送 near-miss 触发' },
+}
+
+function triggerTag(source) {
+  const meta = TRIGGER_META[source]
+  if (!meta) return <Tag>{source || '—'}</Tag>
+  return (
+    <Tooltip title={meta.tip}>
+      <Tag color={meta.color}>{meta.label}</Tag>
+    </Tooltip>
+  )
+}
+
 // Backend OptimizationRun.cycle_started_at / cycle_finished_at are
 // SQLAlchemy DateTime (naive, server UTC). Pydantic serializes to ISO
 // 8601 WITHOUT a 'Z' suffix or `+00:00` offset — JS Date() would then
@@ -264,7 +283,14 @@ export default function OptimizationCyclesMonitor() {
       title: 'Trigger',
       dataIndex: 'trigger_source',
       key: 'trigger_source',
-      width: 90,
+      width: 100,
+      filters: [
+        { text: '手动', value: 'manual' },
+        { text: '定时 beat', value: 'beat' },
+        { text: '管线', value: 'pipeline_hook' },
+      ],
+      onFilter: (value, c) => c.trigger_source === value,
+      render: (v) => triggerTag(v),
     },
     {
       title: 'Variants',
@@ -535,6 +561,7 @@ export default function OptimizationCyclesMonitor() {
                   <div key={c.id}>
                     <Text>
                       <Tag color="processing">run #{c.id}</Tag>
+                      {triggerTag(c.trigger_source)}
                       parent=<Link to={`/alphas/${c.parent_alpha_id}`} target="_blank">#{c.parent_alpha_id}</Link>
                       &nbsp;已 {formatDuration(durationSec(c.cycle_started_at, null))}
                       ({c.sim_budget_used}/{c.sim_budget_granted} sims)

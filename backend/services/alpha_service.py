@@ -10,7 +10,7 @@ Provides methods for:
 
 import logging
 from typing import List, Optional, Dict, Any
-from datetime import datetime
+from datetime import datetime, timedelta
 from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func, and_
@@ -1194,3 +1194,111 @@ class AlphaService(BaseService):
             {"trade_date": r[0], "pnl": r[1], "cumulative_pnl": r[2]}
             for r in rows
         ]
+
+    # =========================================================================
+    # Blueprint optimization (manual, 2026-06-03)
+    # =========================================================================
+
+    async def prepare_blueprint_optimization(
+        self, alpha_id: int, *, budget_override: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Validate + preview a manual "optimize-from-blueprint" for one alpha.
+
+        The HTTP layer (``POST /alphas/{id}/optimize``) calls this to decide
+        whether to dispatch the Celery cycle. It is a pure read/validate — it
+        does NOT enqueue Celery (the router owns ``.delay()``, mirroring
+        ``sync_alphas``).
+
+        Returns on success::
+
+            {"ok": True, "budget": int, "n_variants": int,
+             "variant_tags": [...], "message": str}
+
+        or on rejection::
+
+            {"ok": False, "code": "not_found"|"no_expression"|"in_flight",
+             "message": str, ...}
+
+        The actual cycle reuses the Stage A pipeline with
+        ``trigger_source="manual"`` and runs INDEPENDENTLY of
+        ``ENABLE_OPTIMIZATION_LOOP`` (the 6h-beat kill switch).
+        """
+        from backend.config import settings as _cfg
+        from backend.models import OptimizationRun
+
+        alpha = await self.get_by_id(Alpha, alpha_id)
+        if alpha is None:
+            return {
+                "ok": False, "code": "not_found",
+                "message": f"Alpha #{alpha_id} 不存在",
+            }
+        if not (alpha.expression or "").strip():
+            return {
+                "ok": False, "code": "no_expression",
+                "message": f"Alpha #{alpha_id} 无表达式，无法优化",
+            }
+
+        # Concurrency guard (UX fast-path; the Celery task also holds a Redis
+        # NX lock for the race-proof guarantee). Block only a RECENT still-open
+        # cycle so a crashed-worker orphan row can't wedge re-triggers forever.
+        # cycle_started_at is DB-clock naive-UTC (server_default func.now();
+        # the PG session runs UTC per the repo convention), so comparing it to
+        # datetime.utcnow() is consistent. Failure direction is safe: a clock
+        # skew would only OVER-block (false 409), never let a live cycle slip.
+        guard_minutes = int(getattr(_cfg, "OPT_MANUAL_INFLIGHT_MINUTES", 40))
+        cutoff = datetime.utcnow() - timedelta(minutes=guard_minutes)
+        inflight = (await self.db.execute(
+            select(OptimizationRun.id)
+            .where(
+                OptimizationRun.parent_alpha_id == alpha_id,
+                OptimizationRun.cycle_finished_at.is_(None),
+                OptimizationRun.error.is_(None),
+                OptimizationRun.cycle_started_at > cutoff,
+            )
+            .order_by(OptimizationRun.id.desc())
+            .limit(1)
+        )).scalar_one_or_none()
+        if inflight is not None:
+            return {
+                "ok": False, "code": "in_flight", "opt_run_id": int(inflight),
+                "message": (
+                    f"Alpha #{alpha_id} 已有进行中的优化周期 (#{inflight})，"
+                    f"请等待完成后再试"
+                ),
+            }
+
+        # Resolve budget: clamp caller override into [1, MAX]; default covers
+        # the full ~10-variant grid.
+        default_budget = int(getattr(_cfg, "OPT_MANUAL_SIM_BUDGET", 16))
+        max_budget = int(getattr(_cfg, "OPT_MANUAL_SIM_BUDGET_MAX", 30))
+        budget = default_budget if budget_override is None else int(budget_override)
+        budget = max(1, min(budget, max_budget))
+
+        # Variant preview — call the Stage A generator on the (still-uncommitted)
+        # ORM row. Pure / in-memory; no BRAIN/DB. Guarded so a generator hiccup
+        # degrades to a generic count rather than failing the whole request.
+        variant_tags: List[str] = []
+        try:
+            from backend.services.optimization.generators.settings_sweep import (
+                SettingsSweepGenerator,
+            )
+            variants = await SettingsSweepGenerator().generate(alpha)
+            variant_tags = [v.tag for v in variants]
+        except Exception as ex:  # noqa: BLE001
+            logger.warning(
+                "blueprint-opt preview generate failed for alpha %s: %s",
+                alpha_id, ex,
+            )
+        n_variants = len(variant_tags)
+
+        return {
+            "ok": True,
+            "budget": budget,
+            "n_variants": n_variants,
+            "variant_tags": variant_tags,
+            "message": (
+                f"将对 Alpha #{alpha_id} 做 {n_variants or '最多 10'} 个设置变体"
+                f"扫描（decay/窗口/中性化），消耗最多 {budget} 次 BRAIN 模拟；"
+                f"胜出变体进入提交积压队列（不自动提交）。"
+            ),
+        }

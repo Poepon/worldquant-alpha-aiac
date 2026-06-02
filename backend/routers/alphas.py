@@ -330,6 +330,65 @@ async def submit_alpha_to_brain(
     )
 
 
+class OptimizeBlueprintRequest(BaseModel):
+    # Optional sim-budget override; clamped server-side to
+    # [1, OPT_MANUAL_SIM_BUDGET_MAX]. None → OPT_MANUAL_SIM_BUDGET default.
+    budget: Optional[int] = None
+
+
+class OptimizeBlueprintResponse(BaseModel):
+    started: bool
+    alpha_id: int
+    budget: Optional[int] = None
+    n_variants: Optional[int] = None
+    variant_tags: List[str] = []
+    task_id: Optional[str] = None
+    message: str
+
+
+@router.post("/{alpha_id}/optimize", response_model=OptimizeBlueprintResponse)
+async def optimize_alpha_from_blueprint(
+    alpha_id: int,
+    request: Optional[OptimizeBlueprintRequest] = None,
+    service: AlphaService = Depends(get_alpha_service),
+):
+    """以该 alpha 为蓝本启动一次「设置扫描」优化周期 (trigger_source='manual')。
+
+    复用优化闭环 Stage A 管线：对 decay / 时间窗口 / 中性化 做最多 10 个设置变体
+    扫描，在 BRAIN 上模拟，胜出变体落本地 alphas 表并进入 ops/submit-backlog
+    队列（Stage A SubmitPolicy 永不自动提交）。
+
+    与 6h beat (ENABLE_OPTIMIZATION_LOOP) 独立——用户显式触发无需打开整个 beat。
+    本操作消耗 BRAIN 模拟配额。周期在后台 Celery 异步运行；本接口立即返回预览
+    （变体标签 + 预算）与已派发的 task id，完成情况见 /ops/optimization/cycles。
+
+    错误：404 alpha 不存在 · 400 alpha 无表达式 · 409 该 alpha 已有进行中的周期。
+    """
+    prep = await service.prepare_blueprint_optimization(
+        alpha_id, budget_override=(request.budget if request else None),
+    )
+    if not prep.get("ok"):
+        code = prep.get("code")
+        status = {
+            "not_found": 404, "no_expression": 400, "in_flight": 409,
+        }.get(code, 400)
+        raise HTTPException(status_code=status, detail=prep.get("message", "无法启动优化"))
+
+    # Dispatch the cycle (fire-and-forget; mirrors sync_alphas / refresh-iqc).
+    from backend.tasks.optimization_tasks import run_manual_optimization_cycle
+    task = run_manual_optimization_cycle.delay(alpha_id, prep["budget"], "ui")
+
+    return OptimizeBlueprintResponse(
+        started=True,
+        alpha_id=alpha_id,
+        budget=prep["budget"],
+        n_variants=prep.get("n_variants"),
+        variant_tags=prep.get("variant_tags", []),
+        task_id=str(task.id),
+        message=prep.get("message", "优化已启动"),
+    )
+
+
 class MarginalContributionDelta(BaseModel):
     sharpe: Optional[float] = None
     fitness: Optional[float] = None

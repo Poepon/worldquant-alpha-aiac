@@ -14,6 +14,8 @@ import {
   Spin,
   Empty,
   Input,
+  InputNumber,
+  Modal,
   message,
   Divider,
   Alert,
@@ -31,6 +33,7 @@ import {
   TrophyOutlined,
   LineChartOutlined,
   CloudUploadOutlined,
+  ExperimentOutlined,
 } from '@ant-design/icons'
 import {
   LineChart,
@@ -326,6 +329,26 @@ export default function AlphaDetail() {
       message.error(`提交失败：${e?.response?.data?.detail || e?.message || e}`),
   })
 
+  // Blueprint optimization — run a settings-sweep cycle using THIS alpha as
+  // the template (trigger_source='manual'). Winners land in submit-backlog.
+  const [optimizeOpen, setOptimizeOpen] = useState(false)
+  const [optimizeBudget, setOptimizeBudget] = useState(null)
+  const optimizeMutation = useMutation({
+    mutationFn: () => api.optimizeAlphaFromBlueprint(id, { budget: optimizeBudget }),
+    onSuccess: (data) => {
+      setOptimizeOpen(false)
+      message.success(
+        `已启动优化：生成 ${data.n_variants ?? '?'} 个变体（预算 ${data.budget}）。` +
+          `胜出变体将进入「提交积压」队列；进度见 Ops → 优化周期。`,
+        8,
+      )
+    },
+    onError: (e) => {
+      const detail = e?.response?.data?.detail || e?.message || e
+      message.error(`启动优化失败：${detail}`)
+    },
+  })
+
   const handleFeedback = (rating) => feedbackMutation.mutate({ rating })
 
   const copyExpression = () => {
@@ -455,17 +478,28 @@ export default function AlphaDetail() {
             </Space>
           </Col>
           <Col xs={24} md={10} style={{ textAlign: 'right' }}>
-            <AntTooltip title={submitDisabledReason || '提交至 BRAIN（不可逆，消耗配额）'}>
-              <Button
-                type="primary"
-                icon={<CloudUploadOutlined />}
-                disabled={submitDisabled}
-                loading={submitMutation.isPending}
-                onClick={() => submitMutation.mutate()}
-              >
-                提交至 BRAIN
-              </Button>
-            </AntTooltip>
+            <Space wrap>
+              <AntTooltip title="以该 alpha 为蓝本，对 decay/窗口/中性化 做设置扫描优化（消耗 BRAIN 配额）">
+                <Button
+                  icon={<ExperimentOutlined />}
+                  loading={optimizeMutation.isPending}
+                  onClick={() => setOptimizeOpen(true)}
+                >
+                  以此为蓝本优化
+                </Button>
+              </AntTooltip>
+              <AntTooltip title={submitDisabledReason || '提交至 BRAIN（不可逆，消耗配额）'}>
+                <Button
+                  type="primary"
+                  icon={<CloudUploadOutlined />}
+                  disabled={submitDisabled}
+                  loading={submitMutation.isPending}
+                  onClick={() => submitMutation.mutate()}
+                >
+                  提交至 BRAIN
+                </Button>
+              </AntTooltip>
+            </Space>
           </Col>
         </Row>
 
@@ -768,6 +802,47 @@ export default function AlphaDetail() {
           </>
         )}
       </Card>
+
+      {/* Blueprint-optimization modal — one-click settings sweep on this alpha */}
+      <Modal
+        title={
+          <Space>
+            <ExperimentOutlined />
+            <span>以此 alpha 为蓝本优化</span>
+          </Space>
+        }
+        open={optimizeOpen}
+        onOk={() => optimizeMutation.mutate()}
+        onCancel={() => setOptimizeOpen(false)}
+        okText="开始优化"
+        cancelText="取消"
+        confirmLoading={optimizeMutation.isPending}
+      >
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <Alert
+            type="info"
+            showIcon
+            message="设置扫描优化（Stage A）"
+            description="以该 alpha 表达式为蓝本，对 decay / 时间窗口 / 中性化 做最多 10 个设置变体，在 BRAIN 上模拟。胜出变体落库并进入「提交积压」队列等待人工提交——不会自动提交。与 6h 自动 beat 独立。"
+          />
+          <div>
+            <Text type="secondary">BRAIN 模拟预算（可选，留空 = 默认覆盖全部变体）:</Text>
+            <br />
+            <InputNumber
+              min={1}
+              max={30}
+              step={1}
+              placeholder="默认 16"
+              value={optimizeBudget}
+              onChange={setOptimizeBudget}
+              style={{ width: 160, marginTop: 6 }}
+            />
+          </div>
+          <Text type="warning" style={{ fontSize: 12 }}>
+            ⚠ 本操作消耗 BRAIN 模拟配额；周期在后台运行，完成情况见 Ops → 优化周期。
+          </Text>
+        </Space>
+      </Modal>
     </div>
   )
 }

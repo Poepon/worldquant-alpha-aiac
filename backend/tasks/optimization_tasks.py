@@ -38,6 +38,39 @@ from backend.tasks import run_async
 
 logger = logging.getLogger("optimization.tasks")
 
+# Manual-cycle concurrency lock (set NX by _run_manual, auto-expires after
+# OPT_MANUAL_INFLIGHT_MINUTES so a crashed worker can't wedge re-triggers).
+_MANUAL_LOCK_KEY_FMT = "aiac:opt:manual_lock:{alpha_id}"
+
+
+class _Cand:
+    """Duck-typed parent-alpha row for the optimization pipeline.
+
+    The generator / persister read attribute access (.expression, .region,
+    .universe, .delay, .truncation, .id) — a bare Row tuple won't fit. We
+    deliberately use a plain object (NOT the ORM Alpha row) so the
+    ``open_cycle`` commit inside ``OptimizationService.run_one_cycle`` can't
+    trip SQLAlchemy's expire-on-commit lazy-refresh on a now-detached
+    attribute (which would raise ``greenlet_spawn has not been called`` under
+    the async session).
+
+    Column order is shared by both producers (``_select_near_gate_candidates``
+    SQL and ``_load_candidate`` SQL) — keep the two SELECTs aligned with the
+    ``__slots__`` order below.
+    """
+    __slots__ = (
+        "id", "alpha_id", "expression", "region", "universe",
+        "dataset_id", "delay", "decay", "neutralization", "truncation",
+        "is_sharpe",
+    )
+
+    def __init__(self, *args):
+        (
+            self.id, self.alpha_id, self.expression, self.region,
+            self.universe, self.dataset_id, self.delay, self.decay,
+            self.neutralization, self.truncation, self.is_sharpe,
+        ) = args
+
 
 @celery_app.task(name="backend.tasks.run_optimization_cycle")
 def run_optimization_cycle() -> Dict[str, Any]:
@@ -178,62 +211,129 @@ async def _select_near_gate_candidates(db, *, limit: int) -> List:
         """
     ), {"lo": hard_gate - band, "hi": hard_gate, "limit": int(limit)})).all()
 
-    # Bare row tuples won't fit our protocol (need attribute access). Wrap in
-    # a tiny duck-typed object — generator/persister read .expression,
-    # .region, .universe, .delay, .truncation, .id.
-    class _Cand:
-        __slots__ = (
-            "id", "alpha_id", "expression", "region", "universe",
-            "dataset_id", "delay", "decay", "neutralization", "truncation",
-            "is_sharpe",
-        )
-
-        def __init__(self, *args):
-            (
-                self.id, self.alpha_id, self.expression, self.region,
-                self.universe, self.dataset_id, self.delay, self.decay,
-                self.neutralization, self.truncation, self.is_sharpe,
-            ) = args
-
     return [_Cand(*r) for r in rows]
 
 
-async def _run_one(candidate, budget: int) -> Dict[str, Any]:
+async def _load_candidate(db, alpha_id: int):
+    """Load one alpha as a ``_Cand`` for a manual cycle.
+
+    Mirrors the column projection of ``_select_near_gate_candidates`` so the
+    same duck-typed object feeds the pipeline. Returns ``None`` when the
+    alpha id doesn't exist.
+    """
+    rows = (await db.execute(text(
+        """
+        SELECT id, alpha_id, expression, region, universe, dataset_id,
+               delay, decay, neutralization, truncation, is_sharpe
+        FROM alphas
+        WHERE id = :id
+        """
+    ), {"id": int(alpha_id)})).all()
+    if not rows:
+        return None
+    return _Cand(*rows[0])
+
+
+async def _run_one(
+    candidate, budget: int, *, trigger_source: str = "beat",
+) -> Dict[str, Any]:
     """Open all the per-cycle collaborators + invoke OptimizationService."""
     # Lazy imports inside the function so the beat module stays importable
     # even when optional deps (BrainAdapter / Redis) are missing in test.
     from backend.adapters.brain_adapter import BrainAdapter
-    from backend.services.correlation_service import CorrelationService
-    from backend.services.optimization import (
-        NoOpKnowledgeFeedback,
-        OptimizationService,
-    )
-    from backend.services.optimization.generators.settings_sweep import (
-        SettingsSweepGenerator,
-    )
-    from backend.services.optimization.persister import Persister
-    from backend.services.optimization.repository import (
-        OptimizationRunRepositoryImpl,
-    )
-    from backend.services.optimization.simulator import BrainSimulator
-    from backend.services.optimization.submit_policy import StageASubmitPolicy
-    from backend.services.optimization.winner_selector import WinnerSelector
+    from backend.services.optimization.factory import build_optimization_service
 
     async with AsyncSessionLocal() as db:
         async with BrainAdapter() as brain:
-            corr = CorrelationService(brain)
-            repo = OptimizationRunRepositoryImpl(db)
-            svc = OptimizationService(
-                generator=SettingsSweepGenerator(),
-                simulator=BrainSimulator(brain),
-                winner_selector=WinnerSelector(),
-                persister=Persister(db, corr_service=corr, repository=repo),
-                submit_policy=StageASubmitPolicy(),
-                repository=repo,
-                feedback=NoOpKnowledgeFeedback(),
-            )
+            svc = build_optimization_service(db, brain)
             summary = await svc.run_one_cycle(
-                candidate, trigger_source="beat", budget=int(budget),
+                candidate, trigger_source=trigger_source, budget=int(budget),
             )
             await db.commit()
             return summary
+
+
+@celery_app.task(name="backend.tasks.run_manual_optimization_cycle")
+def run_manual_optimization_cycle(
+    alpha_id: int, budget: int, actor: str = "ui",
+) -> Dict[str, Any]:
+    """User-triggered single-alpha optimization cycle (trigger_source='manual').
+
+    Dispatched by ``POST /alphas/{id}/optimize``. Runs ONE
+    SettingsSweepGenerator cycle against the chosen alpha, INDEPENDENT of
+    ``ENABLE_OPTIMIZATION_LOOP`` (that flag only gates the 6h beat). Winners
+    land in the submit-backlog (Stage A SubmitPolicy never auto-submits).
+    """
+    return run_async(_run_manual(int(alpha_id), int(budget), str(actor)))
+
+
+async def _run_manual(alpha_id: int, budget: int, actor: str) -> Dict[str, Any]:
+    """Acquire a per-alpha Redis NX lock, load the alpha, run one cycle.
+
+    The lock is the race-proof concurrency guard (the router's DB in-flight
+    check is just fast UX feedback). It auto-expires after
+    ``OPT_MANUAL_INFLIGHT_MINUTES`` so a crashed worker can't wedge future
+    re-triggers. Redis unavailable → fail-open (proceed without the lock;
+    the DB guard still applies).
+    """
+    from backend.adapters.brain_adapter import BrainAdapter
+
+    lock_key = _MANUAL_LOCK_KEY_FMT.format(alpha_id=alpha_id)
+    ttl = max(60, int(getattr(settings, "OPT_MANUAL_INFLIGHT_MINUTES", 40)) * 60)
+    redis = None
+    have_lock = False
+    try:
+        try:
+            redis = await BrainAdapter._get_slot_redis()
+        except Exception as ex:  # noqa: BLE001
+            logger.warning(
+                "[optimization_tasks] manual lock redis unavailable "
+                "(proceeding without lock): %s", ex,
+            )
+            redis = None
+        if redis is not None:
+            try:
+                have_lock = bool(
+                    await redis.set(lock_key, str(actor), nx=True, ex=ttl)
+                )
+            except Exception as ex:  # noqa: BLE001
+                logger.warning(
+                    "[optimization_tasks] manual lock set failed (proceeding "
+                    "without lock): %s", ex,
+                )
+                have_lock = False
+                redis = None  # don't try to release a lock we didn't take
+            if redis is not None and not have_lock:
+                logger.info(
+                    "[optimization_tasks] manual cycle for alpha_id=%s already "
+                    "in flight — skipping", alpha_id,
+                )
+                return {"skipped": "in_flight", "alpha_id": int(alpha_id)}
+
+        # Short session to fetch the candidate before the long sim loop —
+        # don't hold a DB connection idle during BRAIN sims.
+        async with AsyncSessionLocal() as db:
+            candidate = await _load_candidate(db, alpha_id)
+        if candidate is None:
+            logger.warning(
+                "[optimization_tasks] manual cycle alpha_id=%s not found",
+                alpha_id,
+            )
+            return {"skipped": "not_found", "alpha_id": int(alpha_id)}
+
+        logger.info(
+            "[optimization_tasks] manual cycle start alpha_id=%s budget=%s "
+            "actor=%s", alpha_id, budget, actor,
+        )
+        summary = await _run_one(candidate, budget, trigger_source="manual")
+        summary["actor"] = actor
+        return summary
+    finally:
+        if redis is not None and have_lock:
+            try:
+                await redis.delete(lock_key)
+            except Exception as ex:  # noqa: BLE001
+                logger.warning(
+                    "[optimization_tasks] manual lock release failed "
+                    "(TTL will clear it): %s", ex,
+                )
