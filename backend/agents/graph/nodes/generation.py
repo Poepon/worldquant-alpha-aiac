@@ -1743,11 +1743,18 @@ async def node_code_gen(
             _assistant_compose = None
 
         for alpha_data in raw_alphas:
-            # Handle both old format (hypothesis) and new format (hypothesis_tested)
-            hypothesis_text = alpha_data.get("hypothesis_tested", alpha_data.get("hypothesis", ""))
+            # Slim schema (2026-06): economic_hypothesis is the single canonical
+            # reasoning slot. Older payloads may still carry hypothesis_tested /
+            # explanation, so fall back through them before economic_hypothesis.
+            economic_hypothesis = alpha_data.get("economic_hypothesis", "")
+            hypothesis_text = (
+                alpha_data.get("hypothesis_tested")
+                or alpha_data.get("hypothesis")
+                or economic_hypothesis
+            )
 
             # Handle both old format (string) and new format (dict) for explanation
-            explanation_raw = alpha_data.get("explanation", "")
+            explanation_raw = alpha_data.get("explanation") or economic_hypothesis
             if isinstance(explanation_raw, dict):
                 explanation = f"{explanation_raw.get('approach', '')} - {explanation_raw.get('market_logic', '')}"
             else:

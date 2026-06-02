@@ -236,41 +236,28 @@ These are historical observations. Context matters - what failed in one setting 
 
 ## Task
 
-Generate {ctx.num_alphas} distinct alpha expressions.
+Generate {ctx.num_alphas} distinct alpha expressions. Reason inside the 5 slots
+below — do NOT add prose outside the schema.
 
-For each expression:
-1. State the specific hypothesis being tested
-2. Explain the implementation approach
-3. Describe what market behavior this might capture
-4. Note any assumptions or limitations
-
-**Output Schema** (JSON — ALL fields including the 5 reasoning slots are REQUIRED for every alpha):
+**Output Schema** (JSON — output EXACTLY these fields per alpha, ALL 5 slots
+required):
 ```json
 {{
-  "implementation_notes": "Brief notes on the overall approach taken",
+  "implementation_notes": "1 sentence on the overall approach",
   "alphas": [
     {{
       "economic_hypothesis": "≥30 chars, contains a domain term (e.g. 应计/accrual/cashflow/momentum/reversal/quality/factor_composite)",
       "signal_velocity": "FUNDAMENTAL_SLOW | FACTOR_COMPOSITE | MEDIUM | FAST",
       "predicted_turnover": 0.18,
-      "math_sanity_check": "Show the computation: returns/max(turnover,0.125) >= 0.44. If FAST, note expected fitness-gate failure",
-      "expression": "Valid FASTEXPR using only provided fields and operators",
-      "hypothesis_tested": "The specific hypothesis this expression tests (can echo economic_hypothesis)",
-      "explanation": {{
-        "approach": "How the hypothesis is translated into code",
-        "market_logic": "What market inefficiency or behavior this captures",
-        "assumptions": "Key assumptions this relies on"
-      }},
-      "fields_used": ["field1", "field2"],
-      "complexity": "simple | moderate | complex",
-      "novelty_level": "established | variation | experimental"
-    }}
-  ],
-  "alternatives_considered": [
-    {{
-      "expression": "Alternative implementation not used",
-      "reason_not_chosen": "Why this wasn't the primary choice"
+      "math_sanity_check": "Show: returns/max(turnover,0.125) >= 0.44",
+      "expression": "Valid FASTEXPR using only provided fields and operators"
     }}
   ]
 }}
-```"""
+```
+
+**OUTPUT DISCIPLINE (token budget is finite — overflow truncates the JSON and the
+whole batch is lost):** Emit ONLY the fields above. Do NOT add `explanation`,
+`hypothesis_tested`, `fields_used`, `complexity`, `novelty_level`,
+`alternatives_considered`, markdown, or any commentary — extra fields are
+discarded and only push the real alphas past the budget."""
