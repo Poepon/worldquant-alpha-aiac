@@ -89,9 +89,10 @@
 
 ## 6. 分层交付
 
-### Band-aid(0.2 人日,立即,纯配置 + 1 行)
-- **B-A** `.env` `SIM_PIPELINE_HEARTBEAT_TIMEOUT_SEC 900→1320`(= cap 上界)→ LLM 14min(840s)<1320s 不再误杀。**纯止血,不解决根因**(更长多-round 静默仍误杀),零代码风险,当晚生效
-- **B-C** celery worker `--max-tasks-per-child=50` + 确认 `task_acks_late=True`(MEMORY worker_zombie 教训)→ 三层全失效的"单线程被僵尸独占"最终保险
+### Band-aid(已被根本修复取代)
+- **B-A** `.env` `SIM_PIPELINE_HEARTBEAT_TIMEOUT_SEC 900→1320`:**已 moot** — Sub-phase 1 根本修复(per-coroutine liveness)直接替换了进度 heartbeat,不再需要调大窗口止血。
+- **B-C** celery `--max-tasks-per-child=50`:**实测不适用(2026-06-03 核查)**。`--max-tasks-per-child` 是 **prefork pool 特性**(回收子进程);本项目 celery 用 `--pool=solo`(run.bat:184-185),无子进程可回收 → 该选项在 solo 下是 **no-op**。综合方案此处事实错误。`task_acks_late` 当前也未设(默认 False)。
+  - **solo 下"单线程被僵尸独占"的真实缓解** = 分层 in-task 超时本身:op_timeout 现包住所有热路径 await(A4 补上了最后一个裸 persist),liveness watchdog 捕获 bare-await park 并 cancel。只有 cancel 自身不穿透坏 socket(真最坏)才需进程重启(运维 `run.bat --restart`),这在 solo 单进程模型下无法在 Celery 内自动化。
 
 ### 根本修复(2.0 人日)
 - **Sub-phase 1(1.4d)**:A1+A4(persist 纳入 `_with_timeout`,独立纯增益)+ A2/A3/A5/A6 + B/C + 测试
