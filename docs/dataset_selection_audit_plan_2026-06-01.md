@@ -1,7 +1,8 @@
 # Dataset 选择产能崩 audit plan
 
 - 日期: 2026-06-01
-- 状态: **调研 plan(未开工)** — 写假设清单 + 验证方法,不动代码
+- 状态: ⚰️ **作废 2026-06-02** — H1-H6(dataset 算法假设)全翻案,真因不是 dataset 选择;真因 = `8e92905` tier 退役 oversight 把 EVAL_PROVISIONAL 阈值写错(near_pass 路径死路)。完整调研见 memory [[project_audit_eval_provisional_root_cause_2026_06_02]],修复 commit `9d79696`(4 行 config 回退)
+- 历史归档:本文档下面所有 H1-H6 假设全已实证翻案,仅作教训留档(`[[feedback_verify_root_cause_before_fix]]` 又中,8 假设全错,单 alpha 实测才发现真因)
 - 起源: 2026-06-01 orchestrator endpoint live 返回 USA 7d 0 PASS / weight 0.002,深挖发现 mining 自身真产能崩
 - 优先级: 翻 `ENABLE_AUTO_ORCHESTRATOR=True` 之前必须修(orchestrator 会反复 launch USA → 反复产 1.1% 有价值 alpha)
 
