@@ -102,18 +102,29 @@ _TASK_SKIP_STATES = ("COMPLETED", "FAILED", "STOPPED", "EARLY_STOPPED", "PAUSED"
 
 
 def _pipeline_heartbeat_timeout():
-    """Session-level heartbeat-abort window for the pipeline. Catches the freeze
-    CLASS (poisoned asyncpg pool / queue deadlock / any unwrapped await) that
-    per-op `op_timeout` cannot — see tasks 3737/3738/3739. Hard-capped below the
+    """Per-coroutine LIVENESS window for the pipeline watchdog (2026-06-03
+    redesign — docs/heartbeat_liveness_redesign_2026-06-03.md). The supervisor
+    aborts only when a monitored coroutine's last-return stamp goes stale beyond
+    this window AND it is not IDLE — i.e. it parked on a bare await with no timer
+    (single-conn cleanup hang under NullPool / queue deadlock), the freeze CLASS
+    per-op `op_timeout` cannot catch (tasks 3737/3738/3739).
+
+    L1_DEAD = max(base, op_timeout + grace): a coroutine still inside a bounded
+    op (≤ op_timeout) plus grace must NOT trip the watchdog — only a
+    never-returning bare await does. This is the fix for the task-3930 misfire
+    (a producer busy with legitimate LLM retries kept returning from its bounded
+    wf.run ops, so it keeps stamping and never goes stale). Hard-capped below the
     watchdog dead-threshold so the abort always fires BEFORE watchdog dup-revives
     a wedged session. None / 0 = disabled."""
-    hb = int(getattr(settings, "SIM_PIPELINE_HEARTBEAT_TIMEOUT_SEC", 900) or 0)
-    if hb <= 0:
+    base = int(getattr(settings, "SIM_PIPELINE_HEARTBEAT_TIMEOUT_SEC", 900) or 0)
+    if base <= 0:
         return None
+    op = int(_pipeline_op_timeout() or 0)
+    grace = int(getattr(settings, "SIM_PIPELINE_LIVENESS_GRACE_SEC", 120) or 0)
     wd_sec = int(getattr(settings, "CASCADE_WATCHDOG_DEAD_MIN", 25) or 25) * 60
-    # Cap at watchdog-180s so even a tight watchdog override leaves headroom
-    # for the abort cleanup before revive fires.
-    return float(min(hb, max(60, wd_sec - 180)))
+    # L1_DEAD = op_timeout + grace, but never below the configured base floor,
+    # and capped at watchdog-180s so the abort cleanup finishes before revive.
+    return float(min(max(base, op + grace), max(60, wd_sec - 180)))
 
 
 def _pipeline_op_timeout():

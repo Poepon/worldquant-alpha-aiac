@@ -1537,18 +1537,25 @@ class Settings(BaseSettings):
     # code_gen (only useful once generation is the bottleneck — i.e. CONSULTANT
     # 80-slot; at USER the sim wall dominates and 1 suffices).
     SIM_PIPELINE_CODE_PRODUCER_COUNT: int = 1
-    # Session-level heartbeat-abort for the pipeline. Tracks `last progress`
-    # across push/persist/feedback-drain; if no progress for N seconds the
-    # supervisor cancels the entire pipeline session and raises
-    # PipelineHeartbeatExpired. Catches the freeze CLASS that per-op
-    # `SIM_PIPELINE_OP_TIMEOUT_SEC` cannot — validated 2026-05-28 across tasks
-    # 3737/3738/3739 (3 different unwrapped DB-op points each caused permanent
-    # freeze when wait_for cancel poisoned a shared asyncpg connection).
-    # Must be > the longest single sim/eval (op_timeout 600s + safety) and
-    # < watchdog CASCADE_WATCHDOG_DEAD_MIN*60 (the supervisor must fire BEFORE
-    # the watchdog dup-revives a wedged session). 900s = 15min sits cleanly in
-    # the 600-1500s band. Set 0 to disable.
+    # Session-level liveness watchdog for the pipeline (2026-06-03 redesign,
+    # docs/heartbeat_liveness_redesign_2026-06-03.md). REPLACES the old
+    # progress-signal heartbeat: instead of "no alpha produced for N seconds"
+    # (which mis-fired on legitimate 0-output rounds — task 3930, a producer
+    # busy with LLM retries got killed), the watchdog now tracks PER-COROUTINE
+    # liveness — each monitored coroutine stamps a timestamp every time it
+    # RETURNS from a `_with_timeout` await (= it yielded and re-entered = alive).
+    # A coroutine PARKED on a bare await (single-conn cleanup hang under NullPool
+    # / queue deadlock) stops stamping → stale → abort. IDLE (blocked on an
+    # empty/full queue) is a SEPARATE exempt state. The effective abort window is
+    # derived as op_timeout + LIVENESS_GRACE (see _pipeline_heartbeat_timeout),
+    # so a coroutine still inside a bounded op never trips it; only a bare-await
+    # park does. Hard-capped < watchdog CASCADE_WATCHDOG_DEAD_MIN*60. Set 0 to
+    # disable. This base value is the floor; the derived window is max(base, op+grace).
     SIM_PIPELINE_HEARTBEAT_TIMEOUT_SEC: int = 900
+    # L1_DEAD = op_timeout + this grace. A coroutine inside a bounded op (≤600s)
+    # plus grace must NOT trip the liveness watchdog; only a never-returning bare
+    # await does. 120s grace covers op-boundary scheduling jitter.
+    SIM_PIPELINE_LIVENESS_GRACE_SEC: int = 120
 
     # Optimization Chain Settings
     MAX_OPTIMIZATION_VARIANTS: int = 10

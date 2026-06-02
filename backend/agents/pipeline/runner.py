@@ -19,6 +19,7 @@ Concurrency contract (the whole point — see design doc F1):
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import time
 from typing import Any, Awaitable, Callable, List, Optional
@@ -30,6 +31,28 @@ logger = logging.getLogger(__name__)
 # Sentinel signalling "no more work" through a queue. A distinct object per
 # run avoids any chance of a real payload comparing equal to it.
 _SENTINEL = object()
+
+# Liveness bridge to the out-of-module producer (producer.py). The consumers +
+# persister are defined inside run_pipeline_session and close over the registry
+# directly; only the producer lives in another module, so run_pipeline_session
+# publishes the per-coroutine liveness callbacks here and the producer reads
+# them. asyncio copies the active context at task creation, so the value set in
+# run_pipeline_session is inherited by the producer task and its hyp/code
+# sub-tasks. None when no session is active / liveness disabled (legacy path).
+class _Liveness:
+    """Per-coroutine liveness callbacks handed to the producer (2026-06-03)."""
+    __slots__ = ("touch", "enter_idle", "exit_idle", "done")
+
+    def __init__(self, touch, enter_idle, exit_idle, done):
+        self.touch = touch            # touch(owner): stamp = alive (returned from await)
+        self.enter_idle = enter_idle  # enter_idle(owner): blocked on a queue = exempt
+        self.exit_idle = exit_idle    # exit_idle(owner): left the queue wait
+        self.done = done              # done(owner): coroutine finished — deregister
+
+
+_LIVENESS: "contextvars.ContextVar[Optional[_Liveness]]" = contextvars.ContextVar(
+    "pipeline_liveness", default=None
+)
 
 
 class PipelineHeartbeatExpired(RuntimeError):
@@ -44,13 +67,23 @@ class PipelineHeartbeatExpired(RuntimeError):
     pass
 
 
-async def _with_timeout(coro, timeout):
+async def _with_timeout(coro, timeout, *, on_return=None):
     """await ``coro`` under an optional per-operation hard deadline. timeout
     falsy/<=0 → no bound (await directly). A hung network call then raises
-    asyncio.TimeoutError (cancelling coro) instead of parking forever."""
-    if timeout and timeout > 0:
-        return await asyncio.wait_for(coro, timeout)
-    return await coro
+    asyncio.TimeoutError (cancelling coro) instead of parking forever.
+
+    ``on_return`` (sync, no-arg) fires in ``finally`` on ANY exit — success,
+    TimeoutError, or any exception. This is the layer-2 liveness tick: it proves
+    the owning coroutine RETURNED from this await and re-entered (= alive). A
+    coroutine parked on a bare await never reaches the finally, so its stamp goes
+    stale and the liveness watchdog can detect the freeze (2026-06-03 redesign)."""
+    try:
+        if timeout and timeout > 0:
+            return await asyncio.wait_for(coro, timeout)
+        return await coro
+    finally:
+        if on_return is not None:
+            on_return()
 
 # Type aliases for the injected stages.
 PushFn = Callable[[Candidate], Awaitable[None]]
@@ -197,19 +230,59 @@ async def run_pipeline_session(
     # the terminating sentinel) is outstanding == 0 after primary gen finished.
     wstate = {"outstanding": 0, "primary_done": False, "done_signalled": False}
 
-    # --- Session-level heartbeat supervisor (catches the freeze CLASS) -------
-    # `beat()` updates the last-progress timestamp; the supervisor task below
-    # cancels the main pipeline if no beat for `heartbeat_timeout_sec` (covers
-    # any unwrapped await / poisoned asyncpg pool / queue deadlock, not just
-    # network ops `op_timeout` can bound). When disabled → no-op.
+    # --- Per-coroutine liveness watchdog (catches the freeze CLASS) ----------
+    # 2026-06-03 redesign (docs/heartbeat_liveness_redesign_2026-06-03.md):
+    # the OLD progress heartbeat updated one `_last_progress` stamp on push /
+    # persist / drain and aborted if it went stale. That conflated PROGRESS
+    # (alphas flowing) with LIVENESS (coroutines executing) — task 3930 killed a
+    # producer that was busy with legitimate LLM retries (0 output → no push →
+    # stale stamp → false abort).
+    #
+    # Now each monitored coroutine has its OWN stamp in `_liveness[owner]`,
+    # refreshed via _touch(owner) every time it RETURNS from a `_with_timeout`
+    # await (= it yielded and re-entered = alive). A coroutine PARKED on a bare
+    # await with no timer (single-conn cleanup hang under NullPool / queue
+    # deadlock) stops touching → its stamp goes stale → the supervisor aborts.
+    # `_idle` is a SEPARATE exempt set: a coroutine blocked on an empty/full
+    # queue is legitimately waiting, NOT frozen. Liveness is thus decoupled from
+    # productivity — the root fix for the task-3930 misfire.
     _heartbeat_active = heartbeat_timeout_sec is not None and heartbeat_timeout_sec > 0
-    _last_progress = [time.monotonic()]
+    _now = time.monotonic
+    _liveness: dict = {}     # owner -> last-return monotonic stamp
+    _idle: set = set()       # owners currently blocked on a queue (exempt)
+
+    def _touch(owner: str) -> None:
+        if _heartbeat_active:
+            _liveness[owner] = _now()
+
+    def _enter_idle(owner: str) -> None:
+        if _heartbeat_active:
+            _idle.add(owner)
+            _liveness[owner] = _now()
+
+    def _exit_idle(owner: str) -> None:
+        if _heartbeat_active:
+            _idle.discard(owner)
+            _liveness[owner] = _now()
+
+    def _register(owner: str) -> None:
+        if _heartbeat_active:
+            _liveness[owner] = _now()
+
+    def _done(owner: str) -> None:
+        # Coroutine finished its work loop — deregister so its now-frozen stamp
+        # can't trip the supervisor while OTHER coroutines (or the persister
+        # drain tail) are still legitimately running.
+        if _heartbeat_active:
+            _liveness.pop(owner, None)
+            _idle.discard(owner)
+
+    # Publish the liveness callbacks for the out-of-module producer (producer.py
+    # reads _LIVENESS via contextvar; consumers/persister below close over the
+    # callbacks directly). Set BEFORE any task is created so the producer task +
+    # its hyp/code sub-tasks inherit it via asyncio context copy.
     if _heartbeat_active:
-        def beat() -> None:
-            _last_progress[0] = time.monotonic()
-    else:
-        def beat() -> None:
-            pass
+        _LIVENESS.set(_Liveness(_touch, _enter_idle, _exit_idle, _done))
 
     def _maybe_signal_done() -> None:
         if (
@@ -227,9 +300,11 @@ async def run_pipeline_session(
     async def _push(candidate: Candidate) -> None:
         if _feedback_active:
             wstate["outstanding"] += 1  # before the (maybe-blocking) put
+        # work_q.put may BLOCK on backpressure (consumers saturated). That is a
+        # legitimate wait, NOT a freeze — the producer wraps its push with
+        # enter_idle/exit_idle (producer.py) so the liveness watchdog exempts it.
         await work_q.put(candidate)
         stats["produced"] += 1
-        beat()  # progress signal for the heartbeat supervisor
 
     async def _next_feedback() -> Optional[FeedbackEvent]:
         # Block for the next event, but wake every few seconds to re-check the
@@ -260,7 +335,6 @@ async def run_pipeline_session(
     def _event_done() -> None:
         wstate["outstanding"] -= 1
         _maybe_signal_done()
-        beat()  # progress: drain processed an event (success OR timeout-skipped)
 
     _feedback_ctx = (
         _FeedbackCtx(_next_feedback, _mark_primary_done, _event_done)
@@ -285,10 +359,15 @@ async def run_pipeline_session(
                 await work_q.put(_SENTINEL)
 
     async def _consumer(cid: int) -> None:
+        owner = f"consumer-{cid}"
+        _register(owner)
         while True:
+            _enter_idle(owner)            # blocked on work_q.get() = legitimate wait
             item = await work_q.get()
+            _exit_idle(owner)
             try:
                 if item is _SENTINEL:
+                    _done(owner)          # consumer finished — deregister liveness
                     return
                 if _should_stop():
                     # Drop remaining queued work fast on stop. Counted (not
@@ -298,7 +377,11 @@ async def run_pipeline_session(
                     continue
                 acquired = False
                 try:
-                    acquired = await acquire_slot()
+                    # acquire_slot may block on the Redis slot counter (role-aware
+                    # ceiling). Bound + tick: a hung acquire shouldn't look frozen
+                    # if it returns, and shouldn't park forever if the counter wedges.
+                    acquired = await _with_timeout(
+                        acquire_slot(), op_timeout, on_return=lambda: _touch(owner))
                     if not acquired:
                         stats["slot_timeouts"] += 1
                         await persist_q.put(
@@ -308,7 +391,9 @@ async def run_pipeline_session(
                     # Per-op deadline: a hung BRAIN sim raises TimeoutError
                     # (→ the except below records a failed SimResult) instead of
                     # parking the loop forever. The slot is freed in the finally.
-                    sim_outcome = await _with_timeout(simulate(item), op_timeout)
+                    # on_return ticks consumer liveness (alive even on a slow sim).
+                    sim_outcome = await _with_timeout(
+                        simulate(item), op_timeout, on_return=lambda: _touch(owner))
                     # Count the sim the moment it returns — BRAIN quota is spent
                     # here, regardless of whether evaluate/persist later fail.
                     stats["simulated"] += 1
@@ -319,8 +404,11 @@ async def run_pipeline_session(
                 # hold the slot during pure compute. Bounded too: evaluate's
                 # self_corr can hit a BRAIN /correlations call (no slot) that
                 # could otherwise hang.
-                result = await _with_timeout(evaluate(item, sim_outcome), op_timeout)
+                result = await _with_timeout(
+                    evaluate(item, sim_outcome), op_timeout, on_return=lambda: _touch(owner))
+                _enter_idle(owner)        # blocked on persist_q.put() backpressure = wait
                 await persist_q.put(result)
+                _exit_idle(owner)
             except Exception as exc:  # noqa: BLE001 — one bad candidate ≠ dead consumer
                 stats["errors"] += 1
                 logger.exception("[pipeline] consumer %s failed a candidate", cid)
@@ -335,6 +423,8 @@ async def run_pipeline_session(
                 work_q.task_done()
 
     async def _persister() -> None:
+        owner = "persister"
+        _register(owner)
         batch: List[SimResult] = []
 
         async def _flush() -> None:
@@ -342,9 +432,15 @@ async def run_pipeline_session(
                 return
             try:
                 async with session_factory() as session:
-                    n = await persist(session, list(batch))
+                    # A4 (2026-06-03): the persist batch await was the ONE long
+                    # unprotected bare await in the pipeline (runner.py — a hung
+                    # _incremental_save / asyncpg cleanup parked it with no timer).
+                    # Bound it under op_timeout + tick liveness so a wedged flush
+                    # fails cleanly AND the watchdog can see the persister froze.
+                    n = await _with_timeout(
+                        persist(session, list(batch)), op_timeout,
+                        on_return=lambda: _touch(owner))
                 stats["persisted"] += int(n or 0)
-                beat()  # progress: persister flushed a batch
             except Exception:  # noqa: BLE001 — never let a persist error kill the loop
                 # The batch is dropped (results already simulated → wasted BRAIN
                 # quota), so make the loss observable rather than silent. A
@@ -355,12 +451,15 @@ async def run_pipeline_session(
                 batch.clear()
 
         while True:
+            _enter_idle(owner)            # blocked on persist_q.get() = legitimate wait
             item = await persist_q.get()
+            _exit_idle(owner)
             try:
                 if item is _SENTINEL:
                     # Flush the partial trailing batch before exiting so nothing
                     # already-simulated is dropped (would be wasted BRAIN quota).
                     await _flush()
+                    _done(owner)          # persister finished — deregister liveness
                     return
                 batch.append(item)
                 if len(batch) >= persist_every:
@@ -409,31 +508,48 @@ async def run_pipeline_session(
 
     main_task = asyncio.create_task(_main_chain(), name="pipeline-main")
     heartbeat_fired = [False]
+    frozen_owner = [None]
     sup_task: Optional[asyncio.Task] = None
     if _heartbeat_active:
         async def _supervisor() -> None:
-            # Poll at most a quarter of the timeout so a missed beat is caught
-            # quickly relative to the bound, but never poll faster than 30s
-            # (cheap timer; nothing else to do).
-            check_interval = min(30.0, max(5.0, heartbeat_timeout_sec / 4))
+            # Poll at a quarter of the window, capped at 15s (cheap timer), with
+            # a 0.5s floor so a small (test) window is still caught promptly.
+            # Production hb≈720s → 15s interval; debounce adds one interval, both
+            # negligible vs the window. Tiny test windows get sub-second polling.
+            check_interval = max(0.5, min(15.0, heartbeat_timeout_sec / 4))
+            # Debounce: require the SAME stale stamp across 2 consecutive scans
+            # (the coroutine truly never re-entered) before aborting, so a
+            # borderline op that finishes between scans clears itself.
+            prev_stale: dict = {}
             try:
                 while not main_task.done():
                     await asyncio.sleep(check_interval)
                     if main_task.done():
                         return
-                    if time.monotonic() - _last_progress[0] > heartbeat_timeout_sec:
-                        heartbeat_fired[0] = True
-                        logger.warning(
-                            "[pipeline] heartbeat expired (no progress for >%ds) — "
-                            "aborting session (produced=%d persisted=%d errors=%d)",
-                            int(heartbeat_timeout_sec),
-                            stats["produced"], stats["persisted"], stats["errors"],
-                        )
-                        main_task.cancel(msg="pipeline heartbeat expired")
-                        return
+                    now = _now()
+                    for owner, ts in list(_liveness.items()):
+                        if owner in _idle:
+                            prev_stale.pop(owner, None)
+                            continue
+                        if now - ts <= heartbeat_timeout_sec:
+                            prev_stale.pop(owner, None)
+                            continue
+                        # Stale: confirm it's the SAME frozen stamp as last scan.
+                        if prev_stale.get(owner) == ts:
+                            frozen_owner[0] = owner
+                            heartbeat_fired[0] = True
+                            logger.warning(
+                                "[pipeline] LIVENESS-FREEZE owner=%s stale=%.0fs > %ds "
+                                "(produced=%d persisted=%d errors=%d) — aborting session",
+                                owner, now - ts, int(heartbeat_timeout_sec),
+                                stats["produced"], stats["persisted"], stats["errors"],
+                            )
+                            main_task.cancel(msg=f"pipeline liveness freeze: {owner}")
+                            return
+                        prev_stale[owner] = ts
             except asyncio.CancelledError:
                 pass  # supervisor cancelled by the outer finally — normal shutdown
-        sup_task = asyncio.create_task(_supervisor(), name="pipeline-heartbeat")
+        sup_task = asyncio.create_task(_supervisor(), name="pipeline-liveness")
 
     try:
         try:
@@ -441,8 +557,9 @@ async def run_pipeline_session(
         except asyncio.CancelledError:
             if heartbeat_fired[0]:
                 raise PipelineHeartbeatExpired(
-                    f"no pipeline progress for >{int(heartbeat_timeout_sec)}s; "
-                    f"aborted (produced={stats['produced']}, "
+                    f"pipeline liveness freeze: owner={frozen_owner[0]} stalled "
+                    f">{int(heartbeat_timeout_sec)}s; aborted "
+                    f"(produced={stats['produced']}, "
                     f"persisted={stats['persisted']}, errors={stats['errors']})"
                 ) from None
             raise

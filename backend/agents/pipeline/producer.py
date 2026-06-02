@@ -21,7 +21,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 from backend.agents.pipeline.consumer import build_consumer_stages
 from backend.agents.pipeline.persister import build_persister
-from backend.agents.pipeline.runner import _with_timeout, run_pipeline_session
+from backend.agents.pipeline.runner import _LIVENESS, _with_timeout, run_pipeline_session
 from backend.agents.pipeline.types import Candidate
 from backend.cost_tracker import begin_round as _cost_begin_round
 
@@ -100,32 +100,45 @@ async def _drain_feedback(feedback_ctx, handle_feedback, push, db, wf, should_st
     + BRAIN I/O that must not hang the drain)."""
     if feedback_ctx is None or handle_feedback is None:
         return 0
+    _lv = _LIVENESS.get()
     handled = 0
     feedback_ctx.mark_primary_done()
-    while not should_stop():
-        event = await feedback_ctx.next_event()
-        if event is None:
-            break  # quiescence sentinel (or stop)
-        try:
-            await _with_timeout(handle_feedback(event, push, db, wf), op_timeout)
-            handled += 1
-        except Exception:  # noqa: BLE001
-            # END the drain (DO NOT `continue` — the previous "log + skip"
-            # caused a permanent freeze on task 3738, 2026-05-28): a timed-
-            # out/failed handler may have wait_for-cancelled mid asyncpg
-            # query and poisoned the producer's SHARED `db` session
-            # (dc7c8e5 class). The next iteration's handler/next_event would
-            # then hang on that same session with no timer → loop parks in
-            # select forever (same root as the next_round_inputs gap
-            # `be1d287` closed). Mirrors the gen-op break-on-timeout at L166.
-            # event_done() in finally → outstanding decrements → quiescence
-            # for any remaining events when produce() returns cleanly.
-            logger.exception(
-                "[pipeline] feedback handler failed/timed out; ending drain "
-                "(shared session integrity uncertain)")
-            break
-        finally:
-            feedback_ctx.event_done()
+    try:
+        while not should_stop():
+            # next_event blocks waiting for the next feedback event = legitimate
+            # IDLE wait (not a freeze); exempt it from the liveness watchdog.
+            if _lv is not None:
+                _lv.enter_idle("drain")
+            event = await feedback_ctx.next_event()
+            if _lv is not None:
+                _lv.exit_idle("drain")
+            if event is None:
+                break  # quiescence sentinel (or stop)
+            try:
+                await _with_timeout(
+                    handle_feedback(event, push, db, wf), op_timeout,
+                    on_return=(lambda: _lv.touch("drain")) if _lv is not None else None)
+                handled += 1
+            except Exception:  # noqa: BLE001
+                # END the drain (DO NOT `continue` — the previous "log + skip"
+                # caused a permanent freeze on task 3738, 2026-05-28): a timed-
+                # out/failed handler may have wait_for-cancelled mid asyncpg
+                # query and poisoned the producer's SHARED `db` session
+                # (dc7c8e5 class). The next iteration's handler/next_event would
+                # then hang on that same session with no timer → loop parks in
+                # select forever (same root as the next_round_inputs gap
+                # `be1d287` closed). Mirrors the gen-op break-on-timeout at L166.
+                # event_done() in finally → outstanding decrements → quiescence
+                # for any remaining events when produce() returns cleanly.
+                logger.exception(
+                    "[pipeline] feedback handler failed/timed out; ending drain "
+                    "(shared session integrity uncertain)")
+                break
+            finally:
+                feedback_ctx.event_done()
+    finally:
+        if _lv is not None:
+            _lv.done("drain")
     return handled
 
 
@@ -166,6 +179,27 @@ def build_producer(
         hyp_q: asyncio.Queue = asyncio.Queue(maxsize=hq_max)
         st = {"produced": 0, "rounds": 0}
 
+        # Per-coroutine liveness (2026-06-03): read the runner's callbacks from
+        # the contextvar (inherited via asyncio context copy). None when liveness
+        # is disabled → all the local helpers below are no-ops (legacy path).
+        _lv = _LIVENESS.get()
+
+        def _touch(owner):
+            if _lv is not None:
+                _lv.touch(owner)
+
+        def _enter_idle(owner):
+            if _lv is not None:
+                _lv.enter_idle(owner)
+
+        def _exit_idle(owner):
+            if _lv is not None:
+                _lv.exit_idle(owner)
+
+        def _done(owner):
+            if _lv is not None:
+                _lv.done(owner)
+
         async with session_factory() as db:
             wf = workflow_factory(db)
             # Pre-build both sub-graphs so concurrent code-producers don't race
@@ -179,6 +213,7 @@ def build_producer(
                 return target_candidates is not None and st["produced"] >= target_candidates
 
             async def _hyp_producer() -> None:
+                _touch("hyp")             # baseline liveness stamp at start
                 try:
                     while not should_stop() and not _at_target():
                         # next_round_inputs runs DB-heavy cursor/bandit/ownership
@@ -192,7 +227,9 @@ def build_producer(
                         # TOTAL permanent freeze (observed task 3737, 2026-05-28).
                         # On timeout the outer `except` below drains stage 2
                         # cleanly (cursor already persisted → re-dispatch resumes).
-                        inputs = await _with_timeout(next_round_inputs(db), op_timeout)
+                        inputs = await _with_timeout(
+                            next_round_inputs(db), op_timeout,
+                            on_return=lambda: _touch("hyp"))
                         if not inputs:
                             break
                         st["rounds"] += 1
@@ -210,7 +247,7 @@ def build_producer(
                                 config=inputs.get("config"),
                                 generate_only=True,
                                 stop_after_hypothesis=True,
-                            ), op_timeout)
+                            ), op_timeout, on_return=lambda: _touch("hyp"))
                         except Exception:  # noqa: BLE001
                             # END stage 1 (don't `continue`): a timed-out/failed
                             # round may have poisoned the producer's SHARED
@@ -228,52 +265,69 @@ def build_producer(
                             # Carry task_id too (A4): the post-hypothesis state
                             # doesn't reliably propagate task_id, so the code-
                             # producer's cost telemetry would land task_id=None.
+                            # hyp_q.put may block on backpressure (code-producers
+                            # slow) = legitimate IDLE wait, not a freeze.
+                            _enter_idle("hyp")
                             await hyp_q.put(
                                 (hyp_state, inputs["dataset_id"],
                                  getattr(inputs.get("task"), "id", None)))
+                            _exit_idle("hyp")
                 except Exception:  # noqa: BLE001 — a stage-1 crash must still drain stage 2
                     logger.exception("[pipeline] hyp-producer crashed; draining code-producers")
                 finally:
                     for _ in range(cpc):
                         await hyp_q.put(_HYP_SENTINEL)
+                    _done("hyp")          # hyp-producer finished — deregister liveness
 
-            async def _code_producer() -> None:
-                while True:
-                    item = await hyp_q.get()
-                    if item is _HYP_SENTINEL:
-                        return
-                    if should_stop() or _at_target():
-                        continue  # drain remaining sentinels; produce nothing more
-                    hyp_state, dataset_id, _task_id = item
-                    # A4: capture code_gen/self_correct per-node cost telemetry.
-                    _ctok = _cost_begin_round(
-                        task_id=_task_id if _task_id is not None
-                        else getattr(hyp_state, "task_id", None),
-                        round_idx=st["rounds"], dataset_id=dataset_id)
-                    try:
-                        final = await _with_timeout(wf.run_codegen(hyp_state), op_timeout)
-                    except Exception:  # noqa: BLE001 — one bad/slow hypothesis ≠ dead producer
-                        logger.exception("[pipeline] code-producer failed/timed out a hypothesis (skipped)")
-                        await _flush_cost_round_safe(session_factory, _ctok)
-                        continue
-                    await _flush_cost_round_safe(session_factory, _ctok)
-                    pending = _pattr(final, "pending_alphas", []) or []
-                    gen_trace = _pattr(final, "trace_steps", []) or []
-                    for ac in pending:
-                        if not getattr(ac, "is_valid", None):
+            async def _code_producer(idx: int) -> None:
+                owner = f"code-{idx}"
+                _touch(owner)             # baseline liveness stamp at start
+                try:
+                    while True:
+                        _enter_idle(owner)    # blocked on hyp_q.get() = legitimate wait
+                        item = await hyp_q.get()
+                        _exit_idle(owner)
+                        if item is _HYP_SENTINEL:
+                            return
+                        if should_stop() or _at_target():
+                            continue  # drain remaining sentinels; produce nothing more
+                        hyp_state, dataset_id, _task_id = item
+                        # A4: capture code_gen/self_correct per-node cost telemetry.
+                        _ctok = _cost_begin_round(
+                            task_id=_task_id if _task_id is not None
+                            else getattr(hyp_state, "task_id", None),
+                            round_idx=st["rounds"], dataset_id=dataset_id)
+                        try:
+                            final = await _with_timeout(
+                                wf.run_codegen(hyp_state), op_timeout,
+                                on_return=lambda: _touch(owner))
+                        except Exception:  # noqa: BLE001 — one bad/slow hypothesis ≠ dead producer
+                            logger.exception("[pipeline] code-producer failed/timed out a hypothesis (skipped)")
+                            await _flush_cost_round_safe(session_factory, _ctok)
                             continue
-                        cand = Candidate(
-                            expression=getattr(ac, "expression", "") or "",
-                            context={"dataset_id": dataset_id},
-                            trace_records=list(gen_trace),
-                            payload=_sim_ready_payload(final, ac),
-                        )
-                        await push(cand)
-                        st["produced"] += 1
+                        await _flush_cost_round_safe(session_factory, _ctok)
+                        pending = _pattr(final, "pending_alphas", []) or []
+                        gen_trace = _pattr(final, "trace_steps", []) or []
+                        for ac in pending:
+                            if not getattr(ac, "is_valid", None):
+                                continue
+                            cand = Candidate(
+                                expression=getattr(ac, "expression", "") or "",
+                                context={"dataset_id": dataset_id},
+                                trace_records=list(gen_trace),
+                                payload=_sim_ready_payload(final, ac),
+                            )
+                            # push → work_q.put may block on backpressure = IDLE wait.
+                            _enter_idle(owner)
+                            await push(cand)
+                            _exit_idle(owner)
+                            st["produced"] += 1
+                finally:
+                    _done(owner)          # code-producer finished — deregister liveness
 
             hyp_task = asyncio.create_task(_hyp_producer(), name="hyp-producer")
             code_tasks = [
-                asyncio.create_task(_code_producer(), name=f"code-producer-{i}")
+                asyncio.create_task(_code_producer(i), name=f"code-producer-{i}")
                 for i in range(cpc)
             ]
             try:
