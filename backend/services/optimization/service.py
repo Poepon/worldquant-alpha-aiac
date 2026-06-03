@@ -25,7 +25,7 @@ Source: ``docs/optimization_closure_plan_v1_2026-05-28.md`` §3 + §6.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from backend.services.optimization.protocols import (
     KnowledgeFeedback,
@@ -66,6 +66,7 @@ class OptimizationService:
         submit_policy: SubmitPolicy,
         repository: OptimizationRunRepository,
         feedback: Optional[KnowledgeFeedback] = None,
+        robustness: Optional[Any] = None,
     ):
         self.generator = generator
         self.simulator = simulator
@@ -74,6 +75,11 @@ class OptimizationService:
         self.submit_policy = submit_policy
         self.repository = repository
         self.feedback = feedback or NoOpKnowledgeFeedback()
+        # Optional RobustnessFilter (2026-06-03 止血). When injected, deflates
+        # WinnerSelector output against multiple-testing (SR0) + lone-peak
+        # overfitting (plateau) BEFORE persistence. None = no filtering (keeps
+        # the pre-existing behaviour for tests that don't wire it).
+        self.robustness = robustness
 
     async def run_one_cycle(
         self,
@@ -125,6 +131,16 @@ class OptimizationService:
             sim_spent = len(sim_results)
 
             winners = self.winner_selector.pick(sim_results, delay=delay)
+            # 止血 (2026-06-03): deflate winners against multiple-testing (SR0)
+            # + lone-peak overfitting (plateau). A settings sweep crowning the
+            # best of N variants is textbook backtest overfitting; reject
+            # winners that don't beat the luckiest-of-N-noise expectation or
+            # that sit on a lone spike. No-op when robustness isn't injected.
+            robustness_rejected: List[Dict[str, Any]] = []
+            if self.robustness is not None:
+                winners, robustness_rejected = self.robustness.apply(
+                    winners, sim_results, delay
+                )
             n_winners = len(winners)
 
             persisted_pks = await self.persister.save(
@@ -158,7 +174,16 @@ class OptimizationService:
                         "(non-fatal): %s", ex,
                     )
 
-            await self.repository.finish_cycle(opt_run_id=opt_run_id)
+            cycle_meta = (
+                {
+                    "robustness_rejected": robustness_rejected,
+                    "n_robustness_rejected": len(robustness_rejected),
+                }
+                if robustness_rejected else None
+            )
+            await self.repository.finish_cycle(
+                opt_run_id=opt_run_id, metadata=cycle_meta
+            )
             return {
                 "opt_run_id": opt_run_id,
                 "parent_alpha_id": parent_id,
@@ -166,6 +191,7 @@ class OptimizationService:
                 "n_variants": n_variants_total,
                 "n_winners": n_winners,
                 "n_submitted": n_submitted,
+                "n_robustness_rejected": len(robustness_rejected),
                 "sim_budget_used": sim_spent,
                 "sim_budget_granted": int(budget),
                 "persisted_pks": [pk for pk in persisted_pks if pk is not None],

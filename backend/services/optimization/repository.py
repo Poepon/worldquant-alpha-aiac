@@ -12,7 +12,7 @@ cycle in a fresh session.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,12 +62,22 @@ class OptimizationRunRepositoryImpl:
         await self.db.flush()
 
     async def finish_cycle(
-        self, opt_run_id: int, error: Optional[str] = None
+        self,
+        opt_run_id: int,
+        error: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         row = await self._load(opt_run_id)
         row.cycle_finished_at = datetime.utcnow()
         if error:
             row.error = str(error)
+        if metadata:
+            # Merge into cycle_metadata (JSONB). Reassign a NEW dict so
+            # SQLAlchemy sees the mutation (in-place dict edits on JSONB don't
+            # always flag dirty without a MutableDict type).
+            merged = dict(row.cycle_metadata or {})
+            merged.update(metadata)
+            row.cycle_metadata = merged
         await self.db.flush()
 
     async def _load(self, opt_run_id: int) -> OptimizationRun:

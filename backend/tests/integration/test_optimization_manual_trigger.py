@@ -30,6 +30,7 @@ from backend.services.optimization.protocols import Variant, VariantSimResult
 from backend.services.optimization.repository import (
     OptimizationRunRepositoryImpl,
 )
+from backend.services.optimization.robustness import RobustnessFilter
 from backend.services.optimization.submit_policy import StageASubmitPolicy
 from backend.services.optimization.winner_selector import WinnerSelector
 
@@ -114,6 +115,52 @@ async def test_manual_trigger_source_stamped(db_session):
 # ---------------------------------------------------------------------------
 # AlphaService.prepare_blueprint_optimization
 # ---------------------------------------------------------------------------
+
+
+class _SpikeSimulator:
+    """variant 0 is a lone spike (sharpe 2.5, all siblings 0.3) → clears the
+    band but fails the plateau gate."""
+
+    async def run_batch(self, variants, budget):
+        out = []
+        for i, v in enumerate(variants[:budget]):
+            sh = 2.5 if i == 0 else 0.3
+            out.append(VariantSimResult(
+                variant=v, sim_response={"is": {"sharpe": sh}},
+                sharpe=sh, fitness=2.0, turnover=0.25, margin=0.001, subuniv=0.9,
+                brain_alpha_id=f"spike-{i}", checks_passed=True,
+            ))
+        return out
+
+
+@pytest.mark.asyncio
+async def test_robustness_filter_rejects_spike_and_stamps_cycle_metadata(db_session):
+    """止血: a lone-spike winner is rejected by the RobustnessFilter and the
+    rejection is persisted to optimization_runs.cycle_metadata."""
+    from backend.models import OptimizationRun
+
+    parent = await _seed_parent(db_session)  # delay=1
+    repo = OptimizationRunRepositoryImpl(db_session)
+    svc = OptimizationService(
+        generator=SettingsSweepGenerator(),
+        simulator=_SpikeSimulator(),
+        winner_selector=WinnerSelector(),
+        persister=Persister(db_session, corr_service=None, repository=repo),
+        submit_policy=StageASubmitPolicy(),
+        repository=repo,
+        robustness=RobustnessFilter(),
+    )
+    summary = await svc.run_one_cycle(parent, trigger_source="manual", budget=16)
+
+    # The single band-clearing winner (the spike) was deflated away.
+    assert summary["n_winners"] == 0
+    assert summary["n_robustness_rejected"] >= 1
+    assert summary["persisted_pks"] == []
+
+    run = await db_session.get(OptimizationRun, summary["opt_run_id"])
+    assert run.n_winners == 0
+    rejected = (run.cycle_metadata or {}).get("robustness_rejected")
+    assert rejected and any("lone_spike" in r["reason"] for r in rejected)
 
 
 @pytest.mark.asyncio

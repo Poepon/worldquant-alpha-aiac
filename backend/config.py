@@ -1027,6 +1027,13 @@ class Settings(BaseSettings):
     OPT_MANUAL_SIM_BUDGET: int = 16         # default sims per manual cycle
     OPT_MANUAL_SIM_BUDGET_MAX: int = 30     # clamp ceiling for caller override
     OPT_MANUAL_INFLIGHT_MINUTES: int = 40   # per-alpha concurrency-guard window
+    # Robustness止血 (2026-06-03 methodology review / industry survey L3): deflate
+    # sweep winners against multiple-testing (SR0 expected-max-Sharpe) + lone-peak
+    # overfitting (plateau gate) BEFORE persisting. A settings sweep crowning the
+    # best of N variants is textbook backtest overfitting; this rejects winners
+    # that don't beat the luckiest-of-N-noise expectation or sit on a lone spike.
+    OPT_ROBUSTNESS_FILTER: bool = True      # apply RobustnessFilter post-WinnerSelector
+    OPT_PLATEAU_BAND: float = 0.15          # same-neut sibling must reach sharpe_min - this
 
     # ── Marginal-contribution submit recommendation (backend/marginal_analysis.py)
     # Calibration for the multi-dimensional before-and-after scorecard. Scalar

@@ -4651,6 +4651,158 @@ async def submit_backlog(
     )
 
 
+class DrainOrderItem(BaseModel):
+    alpha_pk: int
+    brain_id: Optional[str] = None
+    region: Optional[str] = None
+    rank: Optional[int] = None                 # 1-based submit order (selected only)
+    max_corr_to_selected: Optional[float] = None  # corr that gated the pick
+    self_corr: Optional[float] = None          # stored corr to the submitted pool
+    sharpe: Optional[float] = None
+    margin_bps: Optional[float] = None
+    composite: Optional[float] = None
+    verdict: Optional[str] = None
+    pnl_covered: bool = False                   # had local PnL for among-set corr
+
+
+class DrainOrderOut(BaseModel):
+    region: Optional[str] = None
+    threshold: float
+    n_candidates: int
+    n_with_pnl: int
+    n_selected: int
+    n_blocked: int
+    selected: List[DrainOrderItem]
+    blocked: List[DrainOrderItem]
+    note: Optional[str] = None
+
+
+@router.get("/submit-backlog/drain-order", response_model=DrainOrderOut)
+async def submit_backlog_drain_order(
+    region: Optional[str] = None,
+    margin_bps_min: float = Query(5.0, ge=0),
+    threshold: float = Query(0.7, gt=0, le=1),
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> DrainOrderOut:
+    """Set-level ORTHOGONAL drain order for the clean backlog (P0-1, 2026-06-03).
+
+    Among the genuinely-submittable backlog (can_submit=True, unsubmitted,
+    self_corr < threshold or unknown, margin ≥ margin_bps_min), greedily orders
+    submissions so each adds the most INCREMENTAL breadth — lowest max-corr to
+    the already-selected ∪ already-submitted set. Pairwise correlation comes
+    from the LOCAL alpha_pnl table (zero BRAIN cost); the corr-to-submitted seed
+    reuses the stored ``metrics._self_corr``. Returns the submit-this-order list
+    plus the correlation-blocked remainder.
+
+    Reframes the backlog from a per-alpha verdict queue (GET /submit-backlog)
+    into a breadth-maximising submission SEQUENCE — the L3 fix from the industry
+    survey (Grinold-Kahn: effective breadth ≤ 1/ρ → submit the most orthogonal
+    first; submitting near-duplicates wastes the limited submission budget).
+    """
+    from sqlalchemy import text as _text, bindparam
+    from backend.marginal_drain import (
+        pairwise_corr_from_pnl, greedy_orthogonal_order,
+    )
+
+    region = (region or "").strip() or None
+    margin_min = float(margin_bps_min) / 10000.0  # bps → ratio (5bps = 0.0005)
+    _where = (
+        "can_submit IS TRUE AND date_submitted IS NULL "
+        "AND (is_margin IS NULL OR is_margin >= :mmin) "
+        "AND ((metrics->>'_self_corr')::float IS NULL "
+        "     OR (metrics->>'_self_corr')::float < :thr)"
+    )
+    _params: Dict[str, Any] = {"mmin": margin_min, "thr": float(threshold)}
+    if region:
+        _where += " AND region = :region"
+        _params["region"] = region
+
+    rows = (await db.execute(_text(
+        f"""
+        SELECT id, alpha_id, region, is_sharpe, is_margin,
+               (metrics->>'_self_corr')::float AS self_corr,
+               metrics->'_iqc_marginal'->>'recommendation' AS verdict,
+               (metrics->'_iqc_marginal'->>'composite_score')::float AS composite
+        FROM alphas
+        WHERE {_where}
+        """
+    ), _params)).all()
+
+    ids = [int(r[0]) for r in rows]
+    pnl_ids: set = set()
+    pnl_rows: List[Any] = []
+    if ids:
+        pnl_q = _text(
+            "SELECT alpha_id, trade_date, pnl FROM alpha_pnl "
+            "WHERE alpha_id IN :ids AND pnl IS NOT NULL"
+        ).bindparams(bindparam("ids", expanding=True))
+        pnl_res = (await db.execute(pnl_q, {"ids": ids})).all()
+        pnl_rows = [(int(r[0]), r[1], float(r[2])) for r in pnl_res if r[2] is not None]
+        pnl_ids = {r[0] for r in pnl_rows}
+
+    corr = pairwise_corr_from_pnl(pnl_rows)
+
+    candidates: List[Dict[str, Any]] = []
+    for r in rows:
+        aid = int(r[0])
+        sharpe = float(r[3]) if r[3] is not None else None
+        composite = float(r[7]) if r[7] is not None else None
+        candidates.append({
+            "id": aid,
+            "self_corr": float(r[5]) if r[5] is not None else None,
+            # Tiebreak score: marginal composite if audited, else raw sharpe.
+            "score": composite if composite is not None else (sharpe or 0.0),
+            "_brain_id": r[1],
+            "_region": r[2],
+            "_sharpe": sharpe,
+            "_margin_bps": (float(r[4]) * 10000.0) if r[4] is not None else None,
+            "_composite": composite,
+            "_verdict": r[6],
+            "_pnl_covered": aid in pnl_ids,
+        })
+
+    ordered, blocked = greedy_orthogonal_order(
+        candidates, corr, threshold=float(threshold)
+    )
+
+    def _item(c: Dict[str, Any]) -> DrainOrderItem:
+        return DrainOrderItem(
+            alpha_pk=int(c["id"]),
+            brain_id=c.get("_brain_id"),
+            region=c.get("_region"),
+            rank=c.get("rank"),
+            max_corr_to_selected=c.get("max_corr_to_selected"),
+            self_corr=c.get("self_corr"),
+            sharpe=c.get("_sharpe"),
+            margin_bps=c.get("_margin_bps"),
+            composite=c.get("_composite"),
+            verdict=c.get("_verdict"),
+            pnl_covered=bool(c.get("_pnl_covered")),
+        )
+
+    n_cand = len(candidates)
+    n_pnl = len(pnl_ids)
+    note = None
+    if n_cand and n_pnl < n_cand:
+        note = (
+            f"{n_cand - n_pnl}/{n_cand} 候选缺本地 PnL — 它们的「与已选集相关性」"
+            f"无法度量(按 0 处理),排序退化为 self_corr 优先。刷新 alpha_pnl 可提升精度。"
+        )
+
+    return DrainOrderOut(
+        region=region,
+        threshold=float(threshold),
+        n_candidates=n_cand,
+        n_with_pnl=n_pnl,
+        n_selected=len(ordered),
+        n_blocked=len(blocked),
+        selected=[_item(c) for c in ordered],
+        blocked=[_item(c) for c in blocked],
+        note=note,
+    )
+
+
 @router.post("/submit-backlog/scan", response_model=BacklogScanOut)
 async def submit_backlog_scan(
     limit: int = Query(200, ge=1, le=500),

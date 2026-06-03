@@ -39,8 +39,17 @@ def build_optimization_service(db: Any, brain: Any) -> "Any":
     from backend.services.optimization.submit_policy import StageASubmitPolicy
     from backend.services.optimization.winner_selector import WinnerSelector
 
+    from backend.config import settings as _cfg
+
     corr = CorrelationService(brain)
     repo = OptimizationRunRepositoryImpl(db)
+    # 止血 (2026-06-03): wire the RobustnessFilter when the flag is ON (default).
+    # Deflates sweep winners against multiple-testing + lone-peak overfitting
+    # before they reach the submit-backlog.
+    robustness = None
+    if bool(getattr(_cfg, "OPT_ROBUSTNESS_FILTER", True)):
+        from backend.services.optimization.robustness import RobustnessFilter
+        robustness = RobustnessFilter()
     return OptimizationService(
         generator=SettingsSweepGenerator(),
         simulator=BrainSimulator(brain),
@@ -49,4 +58,5 @@ def build_optimization_service(db: Any, brain: Any) -> "Any":
         submit_policy=StageASubmitPolicy(),
         repository=repo,
         feedback=NoOpKnowledgeFeedback(),
+        robustness=robustness,
     )

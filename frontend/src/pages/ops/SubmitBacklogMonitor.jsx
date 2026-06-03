@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Alert,
@@ -24,6 +24,7 @@ import {
   ReloadOutlined,
   ThunderboltOutlined,
   InfoCircleOutlined,
+  OrderedListOutlined,
 } from '@ant-design/icons'
 
 import api from '../../services/api'
@@ -85,17 +86,58 @@ function selfCorrTag(v) {
   return <Tag color="success">{v.toFixed(3)}</Tag>
 }
 
+// Max-corr to the already-selected ∪ submitted set (lower = more breadth added).
+function maxCorrTag(v) {
+  if (v === null || v === undefined) return <Tag>—</Tag>
+  const color = v < 0.3 ? 'success' : v < 0.5 ? 'gold' : v < 0.7 ? 'orange' : 'error'
+  return <Tag color={color}>{v.toFixed(3)}</Tag>
+}
+
+// Self-corr 状态分桶:与 KPI 卡(撞门/近门槛/安全/未算)同口径,客户端过滤复用。
+const SELF_CORR_BUCKETS = {
+  breach: { label: '撞门(≥0.7)', test: (v) => v !== null && v !== undefined && v >= 0.7 },
+  near: { label: '近门槛(0.5-0.7)', test: (v) => v !== null && v !== undefined && v >= 0.5 && v < 0.7 },
+  safe: { label: '安全(<0.5)', test: (v) => v !== null && v !== undefined && v < 0.5 },
+  unknown: { label: '未算', test: (v) => v === null || v === undefined },
+}
+
+// verdict 桶包含 pending(待扫描)— pending 行没 verdict,单独成档。
+const VERDICT_BUCKETS = ['SUBMIT', 'NEUTRAL', 'SKIP', 'UNKNOWN', 'PENDING']
+const VERDICT_BUCKET_LABEL = {
+  SUBMIT: '建议提交',
+  NEUTRAL: '中性',
+  SKIP: '不建议',
+  UNKNOWN: '数据不足',
+  PENDING: '待扫描',
+}
+
 export default function SubmitBacklogMonitor() {
   const qc = useQueryClient()
   const [region, setRegion] = useState(null)
   const [selectedRowKeys, setSelectedRowKeys] = useState([])
   const [submitting, setSubmitting] = useState(false)
+  const [verdictFilter, setVerdictFilter] = useState([])
+  const [selfCorrFilter, setSelfCorrFilter] = useState([])
+  const [universeFilter, setUniverseFilter] = useState([])
+  // P0-1 (2026-06-03): set-level orthogonal drain-order panel.
+  const [showDrain, setShowDrain] = useState(false)
+  const [drainSelectedKeys, setDrainSelectedKeys] = useState([])
 
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['ops/submit-backlog', region],
     queryFn: () => api.getOpsSubmitBacklog(region),
     refetchInterval: 30_000,
     staleTime: 10_000,
+  })
+
+  // Orthogonal drain order — lazy (only when the panel is opened). Greedy
+  // breadth-maximising submit sequence; zero BRAIN cost (local PnL + stored
+  // self_corr). See GET /ops/submit-backlog/drain-order.
+  const { data: drainData, isFetching: drainFetching } = useQuery({
+    queryKey: ['ops/submit-backlog/drain-order', region],
+    queryFn: () => api.getOpsSubmitBacklogDrainOrder({ region }),
+    enabled: showDrain,
+    staleTime: 30_000,
   })
 
   const scanMutation = useMutation({
@@ -107,6 +149,38 @@ export default function SubmitBacklogMonitor() {
     onError: (e) =>
       message.error(e?.response?.data?.detail || e?.message || '扫描触发失败'),
   })
+
+  // Hooks must run unconditionally — derive items + memos BEFORE any early
+  // return below, otherwise loading→loaded re-render changes hook count and
+  // trips Rules of Hooks.
+  const items = data?.items || []
+
+  const universeOptions = useMemo(() => {
+    const seen = new Set()
+    for (const it of items) {
+      if (it.universe) seen.add(it.universe)
+    }
+    return Array.from(seen).sort().map((u) => ({ value: u, label: u }))
+  }, [items])
+
+  const filteredItems = useMemo(() => {
+    return items.filter((it) => {
+      if (verdictFilter.length > 0) {
+        const bucket = it.pending ? 'PENDING' : (it.verdict || 'UNKNOWN')
+        if (!verdictFilter.includes(bucket)) return false
+      }
+      if (selfCorrFilter.length > 0) {
+        const matched = selfCorrFilter.some((key) =>
+          SELF_CORR_BUCKETS[key]?.test(it.self_corr),
+        )
+        if (!matched) return false
+      }
+      if (universeFilter.length > 0) {
+        if (!it.universe || !universeFilter.includes(it.universe)) return false
+      }
+      return true
+    })
+  }, [items, verdictFilter, selfCorrFilter, universeFilter])
 
   if (isLoading) {
     return (
@@ -127,41 +201,58 @@ export default function SubmitBacklogMonitor() {
   }
 
   const summary = data?.summary || {}
-  const items = data?.items || []
   const total = summary.total ?? 0
   const audited = summary.audited ?? 0
   const pending = summary.pending ?? 0
   const progressPct = total > 0 ? Math.round((audited / total) * 100) : 0
 
-  // Batch submit — only allow selecting non-submitted rows; recommend SUBMIT.
-  const onBatchSubmit = async () => {
-    const picked = items.filter((it) => selectedRowKeys.includes(it.alpha_pk))
-    if (picked.length === 0) return
+  const anyFilterActive =
+    verdictFilter.length > 0 || selfCorrFilter.length > 0 || universeFilter.length > 0
+
+  // 切筛选时清空选中(避免对已隐藏行的 stale selection 误提交)。
+  const resetFilter = (next) => {
+    next()
+    setSelectedRowKeys([])
+  }
+
+  // Submit a list of alpha PKs IN ORDER (one at a time, BRAIN-irreversible).
+  // Shared by the verdict-table batch submit and the orthogonal drain panel.
+  const submitPks = async (pks) => {
+    if (!pks || pks.length === 0) return
     setSubmitting(true)
     let ok = 0
     let fail = 0
     const reasons = []
-    for (const it of picked) {
+    for (const pk of pks) {
       try {
-        const res = await api.submitAlpha(it.alpha_pk)
+        const res = await api.submitAlpha(pk)
         if (res?.submitted) {
           ok += 1
         } else {
           fail += 1
-          reasons.push(`#${it.alpha_pk}: ${res?.reason || '被拒'}`)
+          reasons.push(`#${pk}: ${res?.reason || '被拒'}`)
         }
       } catch (e) {
         fail += 1
-        reasons.push(`#${it.alpha_pk}: ${e?.response?.data?.detail || e?.message || '错误'}`)
+        reasons.push(`#${pk}: ${e?.response?.data?.detail || e?.message || '错误'}`)
       }
     }
     setSubmitting(false)
-    setSelectedRowKeys([])
     if (ok > 0) message.success(`成功提交 ${ok} 个`)
     if (fail > 0) {
       message.warning(`${fail} 个未提交：${reasons.slice(0, 3).join('；')}${reasons.length > 3 ? ' …' : ''}`)
     }
     qc.invalidateQueries({ queryKey: ['ops/submit-backlog'] })
+    qc.invalidateQueries({ queryKey: ['ops/submit-backlog/drain-order'] })
+  }
+
+  // Batch submit — only allow selecting non-submitted rows; recommend SUBMIT.
+  const onBatchSubmit = async () => {
+    const picked = items
+      .filter((it) => selectedRowKeys.includes(it.alpha_pk))
+      .map((it) => it.alpha_pk)
+    await submitPks(picked)
+    setSelectedRowKeys([])
   }
 
   const pickedSubmitCount = items.filter(
@@ -271,6 +362,80 @@ export default function SubmitBacklogMonitor() {
       render: (v) => (v ? String(v).replace('T', ' ').slice(0, 19) : <Text type="secondary">未审计</Text>),
     },
   ]
+
+  // Drain-order tables (orthogonal submit sequence + correlation-blocked tail).
+  const drainAlphaCol = {
+    title: 'Alpha',
+    dataIndex: 'alpha_pk',
+    key: 'alpha_pk',
+    width: 150,
+    render: (pk, r) => (
+      <Space direction="vertical" size={0}>
+        <Link to={`/alphas/${pk}`}>
+          <Text code style={{ fontSize: 12 }}>{r.brain_id || pk}</Text>
+        </Link>
+        <Text type="secondary" style={{ fontSize: 11 }}>
+          {r.region || '—'}{r.pnl_covered ? '' : ' · 无PnL'}
+        </Text>
+      </Space>
+    ),
+  }
+  const drainMetricCols = [
+    {
+      title: (
+        <Tooltip title="与「已选 ∪ 已提交」集的最大相关性 — 越低这次提交加的独立广度越多">
+          <Space size={4}>Δ广度(max-corr) <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
+      dataIndex: 'max_corr_to_selected',
+      key: 'max_corr_to_selected',
+      width: 130,
+      align: 'right',
+      render: (v) => maxCorrTag(v),
+    },
+    {
+      title: 'self-corr',
+      dataIndex: 'self_corr',
+      key: 'self_corr',
+      width: 110,
+      render: (v) => selfCorrTag(v),
+    },
+    {
+      title: 'Margin',
+      dataIndex: 'margin_bps',
+      key: 'margin_bps',
+      width: 90,
+      align: 'right',
+      render: (v) => (v !== null && v !== undefined ? <Text type={v < 5 ? 'warning' : undefined}>{v.toFixed(1)} bps</Text> : '—'),
+    },
+    {
+      title: 'Sharpe',
+      dataIndex: 'sharpe',
+      key: 'sharpe',
+      width: 80,
+      align: 'right',
+      render: (v) => (v !== null && v !== undefined ? v.toFixed(2) : '—'),
+    },
+    {
+      title: '推荐',
+      dataIndex: 'verdict',
+      key: 'verdict',
+      width: 90,
+      render: (v) => verdictTag(v, false, null),
+    },
+  ]
+  const drainColumns = [
+    {
+      title: '序',
+      dataIndex: 'rank',
+      key: 'rank',
+      width: 56,
+      render: (v) => <Tag color="blue">{v}</Tag>,
+    },
+    drainAlphaCol,
+    ...drainMetricCols,
+  ]
+  const drainBlockedColumns = [drainAlphaCol, ...drainMetricCols]
 
   const rowSelection = {
     selectedRowKeys,
@@ -495,6 +660,15 @@ export default function SubmitBacklogMonitor() {
         >
           刷新
         </Button>
+        <Tooltip title="把积压重排成「广度最大化」的提交顺序：每步挑与已选∪已提交集最不相关的 alpha 先提交（零 BRAIN 成本）">
+          <Button
+            icon={<OrderedListOutlined />}
+            type={showDrain ? 'primary' : 'default'}
+            onClick={() => setShowDrain((s) => !s)}
+          >
+            {showDrain ? '隐藏正交抽干顺序' : '正交抽干顺序'}
+          </Button>
+        </Tooltip>
         {selectedRowKeys.length > 0 && (
           <Text type="secondary">
             其中「建议提交」档 {pickedSubmitCount} 个
@@ -502,15 +676,168 @@ export default function SubmitBacklogMonitor() {
         )}
       </Space>
 
+      {/* P0-1: set-level orthogonal drain order — breadth-maximising submit
+          sequence (Grinold-Kahn: effective breadth ≤ 1/ρ). Lazy-loaded. */}
+      {showDrain && (
+        <Card
+          className="glass-card"
+          size="small"
+          style={{ marginBottom: 12, borderColor: '#9c88ff55' }}
+          title={
+            <Space>
+              <OrderedListOutlined />
+              <span>正交抽干顺序（最大化组合广度）</span>
+              {drainFetching && <Spin size="small" />}
+            </Space>
+          }
+        >
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+            message="按此顺序提交，每个都最大化增量正交性"
+            description={
+              <Text style={{ fontSize: 12 }}>
+                贪心选择：每步挑「与已选 ∪ 已提交集 最大相关性最低」的 alpha 先提交
+                （Grinold-Kahn：有效广度 ≤ 1/ρ，先提交最正交的才真正增加独立下注）。相关性来自
+                本地 PnL（零 BRAIN 成本）+ 已存 self_corr；阻塞项=与已选集 max-corr ≥ 阈值，提交价值低。
+                {drainData?.note ? (<><br /><Text type="warning">{drainData.note}</Text></>) : null}
+              </Text>
+            }
+          />
+          <Space wrap style={{ marginBottom: 8 }}>
+            <Tag color="cyan">候选 {drainData?.n_candidates ?? 0}</Tag>
+            <Tag color="success">可正交提交 {drainData?.n_selected ?? 0}</Tag>
+            <Tag color="error">相关性阻塞 {drainData?.n_blocked ?? 0}</Tag>
+            <Tag>有本地 PnL {drainData?.n_with_pnl ?? 0}/{drainData?.n_candidates ?? 0}</Tag>
+            <Popconfirm
+              title={`按正交顺序提交选中的 ${drainSelectedKeys.length} 个`}
+              description="逐个调 /alphas/{id}/submit 提交到 BRAIN（不可逆，消耗配额）。"
+              okText="确认提交"
+              cancelText="取消"
+              disabled={drainSelectedKeys.length === 0 || submitting}
+              onConfirm={async () => {
+                // submit in the DRAIN (orthogonal) order, not click order
+                const order = (drainData?.selected || []).map((d) => d.alpha_pk)
+                const pks = order.filter((pk) => drainSelectedKeys.includes(pk))
+                await submitPks(pks)
+                setDrainSelectedKeys([])
+              }}
+            >
+              <Button
+                type="primary"
+                size="small"
+                icon={<SendOutlined />}
+                disabled={drainSelectedKeys.length === 0}
+                loading={submitting}
+              >
+                按顺序提交选中（{drainSelectedKeys.length}）
+              </Button>
+            </Popconfirm>
+            <Button
+              size="small"
+              disabled={(drainData?.selected?.length ?? 0) === 0}
+              onClick={() => setDrainSelectedKeys((drainData?.selected || []).map((d) => d.alpha_pk))}
+            >
+              全选可提交 {drainData?.n_selected ?? 0}
+            </Button>
+          </Space>
+          <Table
+            size="small"
+            rowKey="alpha_pk"
+            rowSelection={{ selectedRowKeys: drainSelectedKeys, onChange: setDrainSelectedKeys }}
+            dataSource={drainData?.selected || []}
+            columns={drainColumns}
+            pagination={{ pageSize: 20 }}
+            locale={{ emptyText: drainFetching ? '计算中…' : '无可正交提交的干净 alpha' }}
+          />
+          {(drainData?.blocked?.length ?? 0) > 0 && (
+            <details style={{ marginTop: 8 }}>
+              <summary style={{ cursor: 'pointer', color: '#888', fontSize: 12 }}>
+                相关性阻塞 {drainData.blocked.length} 个（与已选集 max-corr ≥ {drainData?.threshold ?? 0.7}，提交近重复、价值低）
+              </summary>
+              <Table
+                size="small"
+                rowKey="alpha_pk"
+                dataSource={drainData.blocked}
+                columns={drainBlockedColumns}
+                pagination={{ pageSize: 10 }}
+                style={{ marginTop: 8 }}
+              />
+            </details>
+          )}
+        </Card>
+      )}
+
+      {/* Conditional query — client-side filter on the loaded backlog. KPI 卡
+          和进度条仍显示全量(综合视图),只有下方表格收窄到筛选子集。 */}
+      <Card className="glass-card" size="small" style={{ marginBottom: 12 }}>
+        <Space wrap align="center" style={{ width: '100%' }}>
+          <Text type="secondary" style={{ fontSize: 12 }}>条件查询：</Text>
+          <Select
+            mode="multiple"
+            allowClear
+            value={verdictFilter}
+            onChange={(v) => resetFilter(() => setVerdictFilter(v))}
+            placeholder="推荐"
+            style={{ minWidth: 200 }}
+            maxTagCount="responsive"
+            options={VERDICT_BUCKETS.map((k) => ({ value: k, label: VERDICT_BUCKET_LABEL[k] }))}
+          />
+          <Select
+            mode="multiple"
+            allowClear
+            value={selfCorrFilter}
+            onChange={(v) => resetFilter(() => setSelfCorrFilter(v))}
+            placeholder="Self-corr 状态"
+            style={{ minWidth: 220 }}
+            maxTagCount="responsive"
+            options={Object.entries(SELF_CORR_BUCKETS).map(([k, m]) => ({ value: k, label: m.label }))}
+          />
+          <Select
+            mode="multiple"
+            allowClear
+            value={universeFilter}
+            onChange={(v) => resetFilter(() => setUniverseFilter(v))}
+            placeholder={universeOptions.length ? 'Universe' : '当前无 universe 数据'}
+            style={{ minWidth: 200 }}
+            maxTagCount="responsive"
+            disabled={universeOptions.length === 0}
+            options={universeOptions}
+          />
+          {anyFilterActive && (
+            <>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                筛选后 {filteredItems.length} / {items.length}
+              </Text>
+              <Button
+                size="small"
+                onClick={() => resetFilter(() => {
+                  setVerdictFilter([])
+                  setSelfCorrFilter([])
+                  setUniverseFilter([])
+                })}
+              >
+                清空筛选
+              </Button>
+            </>
+          )}
+        </Space>
+      </Card>
+
       <Card className="glass-card" size="small">
         <Table
           size="small"
           rowKey="alpha_pk"
           rowSelection={rowSelection}
-          dataSource={items}
+          dataSource={filteredItems}
           columns={columns}
           pagination={{ pageSize: 20, showSizeChanger: true }}
-          locale={{ emptyText: '无积压 alpha（can_submit 且未提交为空）' }}
+          locale={{
+            emptyText: anyFilterActive
+              ? '当前筛选条件下无 alpha — 试着放宽或清空筛选'
+              : '无积压 alpha（can_submit 且未提交为空）',
+          }}
         />
       </Card>
     </div>

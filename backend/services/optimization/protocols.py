@@ -199,9 +199,17 @@ class OptimizationRunRepository(Protocol):
         ...
 
     async def finish_cycle(
-        self, opt_run_id: int, error: Optional[str] = None
+        self,
+        opt_run_id: int,
+        error: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Stamp cycle_finished_at; non-None error marks abnormal exit."""
+        """Stamp cycle_finished_at; non-None error marks abnormal exit.
+
+        ``metadata`` (optional) is merged into ``optimization_runs.cycle_metadata``
+        — used to record the RobustnessFilter's per-cycle rejections + SR0 so the
+        monitor can show how many "winners" were deflated as overfit noise.
+        """
         ...
 
 

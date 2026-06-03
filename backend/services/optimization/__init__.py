@@ -29,6 +29,11 @@ from backend.services.optimization.service import (
 # Factory keeps all its (heavy) collaborator imports deferred inside the
 # function, so re-exporting it here adds no import-time cost.
 from backend.services.optimization.factory import build_optimization_service
+# RobustnessFilter (止血) — robustness.py imports only protocols + stdlib, cheap.
+from backend.services.optimization.robustness import (
+    RobustnessFilter,
+    expected_max_sharpe,
+)
 
 __all__ = [
     "Variant",
@@ -43,4 +48,6 @@ __all__ = [
     "NoOpKnowledgeFeedback",
     "OptimizationService",
     "build_optimization_service",
+    "RobustnessFilter",
+    "expected_max_sharpe",
 ]

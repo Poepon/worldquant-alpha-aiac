@@ -759,6 +759,17 @@ const api = {
     const { data } = await client.post('/ops/submit-backlog/scan', null, { params: { limit } })
     return data
   },
+  // Set-level ORTHOGONAL drain order (P0-1, 2026-06-03) — among the clean
+  // backlog (can_submit, unsubmitted, self_corr<threshold, margin≥min), greedily
+  // orders submissions to maximise incremental breadth (lowest max-corr to the
+  // already-selected ∪ submitted set). Zero BRAIN cost (local PnL + stored
+  // self_corr). Returns { selected[], blocked[], n_* counts, note }.
+  getOpsSubmitBacklogDrainOrder: async ({ region = null, marginBpsMin = 5, threshold = 0.7 } = {}) => {
+    const params = { margin_bps_min: marginBpsMin, threshold }
+    if (region) params.region = region
+    const { data } = await client.get('/ops/submit-backlog/drain-order', { params })
+    return data
+  },
 
   // Optimization closure Stage A (2026-05-29) — cycles + 14d conversion rate.
   // Phase 16-A telemetry for the GO/STOP gate. conversion_rate_14d > 20% →
