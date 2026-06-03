@@ -771,6 +771,27 @@ const api = {
     return data
   },
 
+  // Marginal-value reconciliation (methodology-audit kill-switch, 2026-06-03) —
+  // does our OFFLINE marginal ΔSharpe agree (sign+rank) with BRAIN's
+  // AUTHORITATIVE before-and-after Δsharpe? verdict ∈ supported|weak|FALSIFIED|
+  // insufficient_sample; sign-agreement ≤ 60% ⇒ stop routing on the offline proxy.
+  getOpsMarginalReconciliation: async ({ region = 'USA', limit = 300 } = {}) => {
+    const params = { limit }
+    if (region) params.region = region
+    const { data } = await client.get('/ops/marginal-reconciliation', { params })
+    return data
+  },
+
+  // Forward-test reconciliation (2026-06-03) — predictions FROZEN at submit time
+  // (metrics._recon_predicted_delta_sharpe). predicted↔BRAIN computable now;
+  // predicted↔realized structurally blocked (no live post-submission PnL).
+  getOpsMarginalReconciliationForward: async ({ region = null, limit = 300 } = {}) => {
+    const params = { limit }
+    if (region) params.region = region
+    const { data } = await client.get('/ops/marginal-reconciliation/forward', { params })
+    return data
+  },
+
   // Dataset breadth coverage (P1, 2026-06-03) — per-dataset available/in-rotation/
   // untapped/new at a (region,universe,delay) cell. Surfaces fresh & starved
   // orthogonal data surfaces (e.g. a new 375-field dataset) to force-mine.

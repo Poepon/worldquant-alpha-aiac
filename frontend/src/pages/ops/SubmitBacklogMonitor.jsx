@@ -95,8 +95,17 @@ function maxCorrTag(v) {
 
 // Marginal ΔSharpe to the submitted-pool combined portfolio (>0 = adding this
 // alpha improves combined Sharpe; <0 = dilutes; — = no local PnL / no base pool).
-function deltaSharpeTag(v) {
+// significant=false → |ΔSharpe| within its block-bootstrap noise floor (k·SE):
+// statistically indistinguishable from 0, NOT used to rank (rendered greyed).
+function deltaSharpeTag(v, significant = true, se = null) {
   if (v === null || v === undefined) return <Tag>—</Tag>
+  if (!significant) {
+    return (
+      <Tooltip title={`|ΔSharpe| 未超噪声地板(1.64·SE${se != null ? `, SE=${se.toFixed(3)}` : ''}) → 与 0 不可区分,未用于排序`}>
+        <Tag color="default" style={{ opacity: 0.5 }}>{v > 0 ? '+' : ''}{v.toFixed(3)} ·噪声</Tag>
+      </Tooltip>
+    )
+  }
   const color = v > 0.02 ? 'success' : v >= 0 ? 'gold' : 'error'
   return <Tag color={color}>{v > 0 ? '+' : ''}{v.toFixed(3)}</Tag>
 }
@@ -146,6 +155,20 @@ export default function SubmitBacklogMonitor() {
     queryFn: () => api.getOpsSubmitBacklogDrainOrder({ region }),
     enabled: showDrain,
     staleTime: 30_000,
+  })
+
+  // Methodology-audit kill-switch is now computed INSIDE the drain endpoint over
+  // this backlog's offline↔BRAIN pairs (drainData.recon_verdict) and actually
+  // gates the sign-routing — so no separate /marginal-reconciliation call here.
+
+  // Forward-test: predictions frozen at submit time (accumulates as new alphas
+  // are submitted). predicted↔realized is structurally blocked today (no live
+  // post-submission PnL) — the tag surfaces the accumulation + blocked status.
+  const { data: forwardReconData } = useQuery({
+    queryKey: ['ops/marginal-reconciliation/forward', region],
+    queryFn: () => api.getOpsMarginalReconciliationForward({ region }),
+    enabled: showDrain,
+    staleTime: 60_000,
   })
 
   const scanMutation = useMutation({
@@ -409,9 +432,9 @@ export default function SubmitBacklogMonitor() {
       ),
       dataIndex: 'delta_sharpe',
       key: 'delta_sharpe',
-      width: 120,
+      width: 130,
       align: 'right',
-      render: (v) => deltaSharpeTag(v),
+      render: (v, r) => deltaSharpeTag(v, r.delta_sharpe_significant, r.delta_sharpe_se),
     },
     {
       title: 'self-corr',
@@ -749,6 +772,54 @@ export default function SubmitBacklogMonitor() {
             <Tag color="success">可提交 {drainData?.n_selected ?? 0}</Tag>
             <Tag color="error">相关性阻塞 {drainData?.n_blocked ?? 0}</Tag>
             <Tag>有本地 PnL {drainData?.n_with_pnl ?? 0}/{drainData?.n_candidates ?? 0}</Tag>
+            {drainData?.objective === 'value' && (
+              <Tooltip title={`ΔSharpe 超出自身噪声地板(|Δ|>1.64·SE)的数量;越 deflated 期望最大值(${drainData?.deflated_threshold ?? '—'})的数量。0 显著 = ΔSharpe 幅度统计上全是噪声 → 不作精排,改用经对账验证的方向(sign)分层。`}>
+                <Tag color={(drainData?.n_significant ?? 0) > 0 ? 'purple' : 'warning'}>
+                  ΔSh 幅度显著 {drainData?.n_significant ?? 0}/{drainData?.n_with_pnl ?? 0} · 越deflated {drainData?.n_survives_deflation ?? 0}
+                </Tag>
+              </Tooltip>
+            )}
+            {drainData?.recon_verdict && (
+              <Tooltip
+                title={
+                  `方法论 kill-switch（在 drain 端点内对本积压实时计算,真正 gating 排序）:` +
+                  `离线 ΔSharpe 与 BRAIN 权威 before-and-after 边际的符号一致率 ` +
+                  `${drainData.recon_sign_rate != null ? (drainData.recon_sign_rate * 100).toFixed(0) + '%' : '—'} ` +
+                  `(n=${drainData.recon_n_compared})。verdict=${drainData.recon_verdict}。` +
+                  `≤60%(FALSIFIED) ⇒ 离线代理失效,自动停用 sign 排序退纯广度。` +
+                  `注意:这是 predicted↔BRAIN(两者都是回测-merge 估计),非 live realized。`
+                }
+              >
+                <Tag
+                  color={
+                    drainData.recon_verdict === 'supported' ? 'green'
+                    : drainData.recon_verdict === 'weak' ? 'gold'
+                    : drainData.recon_verdict === 'FALSIFIED' ? 'red'
+                    : 'default'
+                  }
+                >
+                  对账 {drainData.recon_verdict === 'supported' ? '✓' : drainData.recon_verdict === 'FALSIFIED' ? '✗ 退广度' : '·'}{' '}
+                  {drainData.recon_sign_rate != null ? (drainData.recon_sign_rate * 100).toFixed(0) + '%同号' : drainData.recon_verdict}
+                </Tag>
+              </Tooltip>
+            )}
+            {forwardReconData && (
+              <Tooltip
+                title={
+                  `Forward-test:提交时冻结的预测(metrics._recon_predicted_delta_sharpe),不随池增长漂移。` +
+                  `已冻结 ${forwardReconData.n_frozen} 个(可度量 ${forwardReconData.n_measurable})。` +
+                  `当前仅核验 predicted↔BRAIN-before-and-after(两者都是回测-merge 估计,非 live realized);` +
+                  `predicted↔realized 尚无任何数据:${forwardReconData.realized_blocked_reason || ''}`
+                }
+              >
+                <Tag color={forwardReconData.n_frozen > 0 ? 'geekblue' : 'default'}>
+                  forward 冻结 {forwardReconData.n_frozen ?? 0}
+                  {forwardReconData.n_with_realized > 0
+                    ? ` · realized ${forwardReconData.n_with_realized}`
+                    : ' · realized 结构性不可得'}
+                </Tag>
+              </Tooltip>
+            )}
             <Popconfirm
               title={`按正交顺序提交选中的 ${drainSelectedKeys.length} 个`}
               description="逐个调 /alphas/{id}/submit 提交到 BRAIN（不可逆，消耗配额）。"

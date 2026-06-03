@@ -32,6 +32,11 @@ try:  # pandas is a hard dep elsewhere; guard only so import never crashes tooli
 except Exception:  # pragma: no cover
     pd = None  # type: ignore
 
+try:
+    import numpy as np
+except Exception:  # pragma: no cover
+    np = None  # type: ignore
+
 
 # Minimum overlapping observations for a meaningful pairwise correlation —
 # mirrors CorrelationService.MIN_OVERLAP_DAYS so the among-set corr is on the
@@ -40,6 +45,16 @@ MIN_OVERLAP_DAYS = 60
 
 # Trading days/yr for Sharpe annualisation (repo convention — qlib_prescreen.py:294).
 _TRADING_DAYS = 252
+
+# Methodology-audit hardening (2026-06-03): the marginal-selection ΔSharpe is a
+# noisy, in-sample, multiply-tested signal — the audit measured SE(ΔSharpe)≈0.08,
+# LARGER than the ±0.01–0.025 values it was routed on. So before using ΔSharpe as
+# a ranking signal we (a) block-bootstrap its SE and require |ΔSharpe| > k·SE
+# (one-sided 1.64 ≈ 90%) — else treat it as indistinguishable from 0; and (b)
+# deflate it for the candidate-set size N (expected-max-ΔSharpe under the null,
+# Bailey-López de Prado), exactly as settings-sweep Sharpe is deflated.
+_SIGNIFICANCE_K = 1.64        # one-sided; |ΔSharpe| must exceed k·bootstrap-SE
+_BOOT_BLOCK_DAYS = 20         # circular-block-bootstrap block length (≈1 trade-month)
 
 
 def _key(a: int, b: int) -> Tuple[int, int]:
@@ -184,6 +199,89 @@ def marginal_delta_sharpe(
     return round(combined - base, 4)
 
 
+def _ann_sharpe_np(arr) -> float:
+    """Annualised Sharpe on a numpy array (NaN if degenerate). Used by the
+    bootstrap inner loop — avoids pandas overhead per resample."""
+    sd = float(arr.std(ddof=0))
+    if sd <= 0 or arr.size == 0:
+        return float("nan")
+    return float(arr.mean() / sd * math.sqrt(_TRADING_DAYS))
+
+
+def bootstrap_delta_sharpe_se(
+    pool_returns: Optional["pd.Series"],
+    candidate_daily: Optional["pd.Series"],
+    *,
+    equal_vol: bool = True,
+    n_boot: int = 200,
+    block: int = _BOOT_BLOCK_DAYS,
+    min_overlap: int = MIN_OVERLAP_DAYS,
+    seed: int = 12345,
+) -> Optional[float]:
+    """Circular-block-bootstrap standard error of the marginal ΔSharpe.
+
+    The audit's core finding: ΔSharpe on a 12-alpha ~4yr OS window has SE ≈ 0.08,
+    bigger than the values it routed on — so a point ΔSharpe is meaningless without
+    its noise floor. Block bootstrap (block ≈ 1 trading-month) preserves the daily
+    autocorrelation; returns the SD of the resampled ΔSharpe distribution. None on
+    thin overlap / missing numpy.
+    """
+    if pd is None or np is None or pool_returns is None or candidate_daily is None:
+        return None
+    cand = candidate_daily.dropna()
+    if equal_vol:
+        csd = float(cand.std(ddof=0)) if len(cand) else 0.0
+        if csd <= 0:
+            return None
+        cand = cand / csd
+    aligned = pd.concat(
+        [pool_returns.rename("pool"), cand.rename("cand")], axis=1
+    ).dropna()
+    n = len(aligned)
+    if n < min_overlap:
+        return None
+    p = aligned["pool"].to_numpy()
+    c = aligned["cand"].to_numpy()
+    rng = np.random.default_rng(seed)
+    n_blocks = int(math.ceil(n / block))
+    deltas = []
+    for _ in range(int(n_boot)):
+        starts = rng.integers(0, n, size=n_blocks)
+        idx = (starts[:, None] + np.arange(block)[None, :]).ravel()[:n] % n
+        pb = p[idx]
+        sb = _ann_sharpe_np(pb)
+        sc = _ann_sharpe_np(pb + c[idx])
+        if not (math.isnan(sb) or math.isnan(sc)):
+            deltas.append(sc - sb)
+    if len(deltas) < 10:
+        return None
+    return float(np.std(np.asarray(deltas), ddof=1))
+
+
+def deflated_delta_sharpe_threshold(deltas: List[Optional[float]]) -> float:
+    """Expected-max ΔSharpe under the null across N candidates (the selection
+    deflation the audit said was missing). Reuses the same SR0 formula the
+    RobustnessFilter applies to settings-sweep winners — a candidate must beat the
+    ΔSharpe the LUCKIEST of N zero-skill candidates would post given their spread.
+    Returns 0.0 for N<2 / zero variance. (Lazy import to avoid module coupling.)"""
+    try:
+        from backend.services.optimization.robustness import expected_max_sharpe
+    except Exception:  # pragma: no cover
+        return 0.0
+    return expected_max_sharpe([d for d in deltas if d is not None])
+
+
+def is_delta_sharpe_significant(
+    delta: Optional[float], se: Optional[float], *, k: float = _SIGNIFICANCE_K
+) -> bool:
+    """True only when |ΔSharpe| exceeds k·SE (distinguishable from noise) AND the
+    SE was measurable. An insignificant ΔSharpe must NOT be used as a hard routing
+    signal — it degrades to a soft prior (the candidate ranks by breadth instead)."""
+    if delta is None or se is None or se <= 0:
+        return False
+    return abs(float(delta)) > k * float(se)
+
+
 def greedy_orthogonal_order(
     candidates: List[Dict[str, Any]],
     pairwise_corr: Dict[Tuple[int, int], float],
@@ -248,10 +346,22 @@ def greedy_orthogonal_order(
                 break  # everything left is correlation-blocked
             def _vkey(t):
                 c, mc = t
+                # SIGN-based tiering: the offline ΔSharpe per-candidate MAGNITUDE
+                # is within its bootstrap noise floor, but its SIGN is reconciled
+                # against BRAIN's authoritative marginal by the caller (the drain
+                # endpoint measures the live sign-agreement each call and only
+                # supplies value_tier while that verdict != FALSIFIED). So rank by
+                # the validated SIGN tier (additive > neutral > dilutive >
+                # unmeasurable), then by breadth; never on the noisy magnitude.
+                # Falls back to the legacy significant-magnitude ordering when
+                # value_tier isn't supplied.
+                if "value_tier" in c:
+                    return (int(c["value_tier"]), mc, int(c["id"]))
                 sv = c.get("score")
                 has = sv is not None
-                # has-value first (by ΔSharpe desc), then no-value by breadth.
-                return (0 if has else 1, -(float(sv) if has else 0.0), mc, int(c["id"]))
+                measurable = bool(c.get("measurable", True))
+                tier = 0 if has else (1 if measurable else 2)
+                return (tier, -(float(sv) if has else 0.0), mc, int(c["id"]))
             admissible.sort(key=_vkey)
             best, best_mc = admissible[0]
         else:

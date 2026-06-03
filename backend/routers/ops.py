@@ -4665,8 +4665,18 @@ class DrainOrderItem(BaseModel):
     # adding this alpha improves the combined Sharpe (worth submitting for
     # breadth); <0 = dilutes; None = no local PnL / no base pool.
     delta_sharpe: Optional[float] = None
+    # Audit hardening: block-bootstrap SE of ΔSharpe + whether |ΔSharpe| clears
+    # its own noise floor (k·SE) + whether it beats the deflated expected-max
+    # across the candidate set. An INSIGNIFICANT ΔSharpe was NOT used to rank.
+    delta_sharpe_se: Optional[float] = None
+    delta_sharpe_significant: bool = False
+    survives_deflation: bool = False
     verdict: Optional[str] = None
     pnl_covered: bool = False                   # had local PnL for among-set corr
+    # Sign-based routing tier (value mode): 0 additive / 1 neutral / 2 dilutive /
+    # 3 no-PnL. None when breadth mode. Makes the dilutive (drain-last) tail
+    # visible to the operator instead of opaque rank order.
+    value_tier: Optional[int] = None
 
 
 class DrainOrderOut(BaseModel):
@@ -4676,6 +4686,14 @@ class DrainOrderOut(BaseModel):
     n_candidates: int
     n_with_pnl: int
     n_base_pool: int                            # # submitted alphas in the base portfolio
+    n_significant: int = 0                       # ΔSharpe clears its noise floor
+    n_survives_deflation: int = 0                # ΔSharpe beats deflated expected-max
+    deflated_threshold: Optional[float] = None   # expected-max-ΔSharpe under the null
+    # Live kill-switch: offline↔BRAIN sign agreement measured over THIS backlog.
+    # verdict==FALSIFIED ⇒ sign-routing disabled (objective forced to breadth).
+    recon_verdict: Optional[str] = None
+    recon_sign_rate: Optional[float] = None
+    recon_n_compared: int = 0
     n_selected: int
     n_blocked: int
     selected: List[DrainOrderItem]
@@ -4710,7 +4728,10 @@ async def submit_backlog_drain_order(
     from backend.marginal_drain import (
         pairwise_corr_from_pnl, greedy_orthogonal_order,
         build_pool_returns, marginal_delta_sharpe,
+        bootstrap_delta_sharpe_se, deflated_delta_sharpe_threshold,
+        is_delta_sharpe_significant,
     )
+    from backend.marginal_recon import sign_agreement_stats
 
     region = (region or "").strip() or None
     margin_min = float(margin_bps_min) / 10000.0  # bps → ratio (5bps = 0.0005)
@@ -4730,7 +4751,8 @@ async def submit_backlog_drain_order(
         SELECT id, alpha_id, region, is_sharpe, is_margin,
                (metrics->>'_self_corr')::float AS self_corr,
                metrics->'_iqc_marginal'->>'recommendation' AS verdict,
-               (metrics->'_iqc_marginal'->>'composite_score')::float AS composite
+               (metrics->'_iqc_marginal'->>'composite_score')::float AS composite,
+               (metrics->'_iqc_marginal'->>'delta_sharpe')::float AS brain_d
         FROM alphas
         WHERE {_where}
         """
@@ -4785,24 +4807,62 @@ async def submit_backlog_drain_order(
         for _aid, _g in _cdf.groupby("aid"):
             cand_series[int(_aid)] = _g.set_index("date")["pnl"]
 
-    candidates: List[Dict[str, Any]] = []
+    # ΔSharpe + its bootstrap-SE noise floor (methodology-audit hardening): a
+    # point ΔSharpe is meaningless without its SE (audit: SE≈0.08 > the routed
+    # signal). An INSIGNIFICANT ΔSharpe (|Δ| ≤ k·SE) must NOT be used as a hard
+    # routing signal → its score degrades to None so the greedy ranks it by
+    # breadth, not noise. Deflation (expected-max-Δ under the null, across N) is
+    # surfaced as a portfolio-level honesty flag.
     delta_by_id: Dict[int, Optional[float]] = {}
+    se_by_id: Dict[int, Optional[float]] = {}
+    sig_by_id: Dict[int, bool] = {}
+    for r in rows:
+        aid = int(r[0])
+        ds = marginal_delta_sharpe(base_returns, cand_series.get(aid)) if use_value else None
+        se = (
+            bootstrap_delta_sharpe_se(base_returns, cand_series.get(aid), n_boot=200)
+            if (use_value and ds is not None and aid in cand_series) else None
+        )
+        delta_by_id[aid] = ds
+        se_by_id[aid] = se
+        sig_by_id[aid] = is_delta_sharpe_significant(ds, se)
+
+    deflated_threshold = (
+        deflated_delta_sharpe_threshold(list(delta_by_id.values())) if use_value else 0.0
+    )
+
+    # Kill-switch wiring (review 2026-06-03 #7): before routing on the ΔSharpe
+    # SIGN, verify the offline ΔSharpe is STILL a valid proxy for BRAIN's
+    # authoritative marginal — pair each candidate's offline ΔSharpe with its
+    # stored BRAIN before-and-after (_iqc_marginal.delta_sharpe, r[8]) and measure
+    # the LIVE sign-agreement over THIS region's backlog. verdict==FALSIFIED
+    # (≤60%, coin-flip) ⇒ the sign is no longer trustworthy ⇒ STOP sign-routing
+    # and fall back to pure breadth. No static magic number — measured per call.
+    recon_pairs = (
+        [(delta_by_id.get(int(r[0])), float(r[8]) if r[8] is not None else None) for r in rows]
+        if use_value else []
+    )
+    recon_stat = (
+        sign_agreement_stats(recon_pairs) if recon_pairs
+        else {"verdict": "insufficient_sample", "sign_agreement_rate": None,
+              "n_sign_compared": 0, "spearman": None}
+    )
+    # FALSIFIED kills sign-routing; insufficient_sample / weak / supported keep it
+    # (weak still beats coin-flip — the alternative is throwing away a real signal).
+    sign_routing_ok = use_value and recon_stat["verdict"] != "FALSIFIED"
+
+    candidates: List[Dict[str, Any]] = []
     for r in rows:
         aid = int(r[0])
         sharpe = float(r[3]) if r[3] is not None else None
         composite = float(r[7]) if r[7] is not None else None
-        delta_sharpe = (
-            marginal_delta_sharpe(base_returns, cand_series.get(aid))
-            if use_value else None
-        )
-        delta_by_id[aid] = delta_sharpe
-        candidates.append({
+        ds = delta_by_id[aid]
+        cand: Dict[str, Any] = {
             "id": aid,
             "self_corr": float(r[5]) if r[5] is not None else None,
-            # value mode: score = ΔSharpe (None ok — greedy ranks those last).
-            # breadth fallback: composite if audited, else raw sharpe.
-            "score": delta_sharpe if use_value
-                     else (composite if composite is not None else (sharpe or 0.0)),
+            # breadth-mode tiebreak (only consulted when objective='breadth').
+            "score": composite if composite is not None else (sharpe or 0.0),
+            "measurable": aid in pnl_ids,
             "_brain_id": r[1],
             "_region": r[2],
             "_sharpe": sharpe,
@@ -4810,16 +4870,39 @@ async def submit_backlog_drain_order(
             "_composite": composite,
             "_verdict": r[6],
             "_pnl_covered": aid in pnl_ids,
-        })
+        }
+        if sign_routing_ok:
+            # SIGN-based value tier: the offline ΔSharpe MAGNITUDE is within its
+            # bootstrap noise floor, but its SIGN is reconciled against BRAIN's
+            # authoritative marginal each call (recon_stat above — only applied
+            # while verdict != FALSIFIED). Route on the validated sign: additive(0)
+            # > neutral/unmeasured-Δ(1) > dilutive(2) > no-PnL/unmeasurable(3),
+            # then by breadth; never on the noisy magnitude. A dilutive (Δ<0) alpha
+            # is drained LAST (it hurts the pool).
+            if aid not in pnl_ids:
+                cand["value_tier"] = 3
+            elif ds is None:
+                cand["value_tier"] = 1
+            elif ds > 1e-9:
+                cand["value_tier"] = 0
+            elif ds < -1e-9:
+                cand["value_tier"] = 2
+            else:
+                cand["value_tier"] = 1
+        candidates.append(cand)
 
-    objective = "value" if use_value else "breadth"
+    # FALSIFIED recon ⇒ breadth-only (don't route on a proxy that no longer tracks
+    # the authoritative marginal), even though a base pool exists.
+    objective = "value" if sign_routing_ok else "breadth"
     ordered, blocked = greedy_orthogonal_order(
         candidates, corr, threshold=float(threshold), objective=objective,
     )
 
     def _item(c: Dict[str, Any]) -> DrainOrderItem:
+        aid = int(c["id"])
+        ds = delta_by_id.get(aid)
         return DrainOrderItem(
-            alpha_pk=int(c["id"]),
+            alpha_pk=aid,
             brain_id=c.get("_brain_id"),
             region=c.get("_region"),
             rank=c.get("rank"),
@@ -4828,9 +4911,13 @@ async def submit_backlog_drain_order(
             sharpe=c.get("_sharpe"),
             margin_bps=c.get("_margin_bps"),
             composite=c.get("_composite"),
-            delta_sharpe=delta_by_id.get(int(c["id"])),
+            delta_sharpe=ds,
+            delta_sharpe_se=se_by_id.get(aid),
+            delta_sharpe_significant=sig_by_id.get(aid, False),
+            survives_deflation=(ds is not None and ds > deflated_threshold),
             verdict=c.get("_verdict"),
             pnl_covered=bool(c.get("_pnl_covered")),
+            value_tier=c.get("value_tier"),
         )
 
     n_cand = len(candidates)
@@ -4850,6 +4937,31 @@ async def submit_backlog_drain_order(
             f"{n_cand - n_pnl}/{n_cand} 候选缺本地 PnL — 其 ΔSharpe 与「与已选集相关性」"
             f"均无法度量,组合层排序里被排在可度量者之后。刷新 alpha_pnl 可提升覆盖。"
         )
+    n_significant = sum(1 for v in sig_by_id.values() if v)
+    n_survives = sum(
+        1 for aid, d in delta_by_id.items() if d is not None and d > deflated_threshold
+    )
+    n_additive = sum(1 for d in delta_by_id.values() if d is not None and d > 1e-9)
+    n_dilutive = sum(1 for d in delta_by_id.values() if d is not None and d < -1e-9)
+    # Live recon verdict, interpolated (no static magic number) — the actual rate
+    # measured over this region's offline↔BRAIN pairs this call.
+    _rate = recon_stat.get("sign_agreement_rate")
+    _rate_txt = (
+        f"{_rate * 100:.0f}% 同号(n={recon_stat.get('n_sign_compared')}, verdict={recon_stat['verdict']})"
+        if _rate is not None else f"样本不足(verdict={recon_stat['verdict']})"
+    )
+    if use_value and not sign_routing_ok:
+        _notes.append(
+            f"⛔ 对账 kill-switch 触发:离线 ΔSharpe 方向与 BRAIN 权威边际仅 {_rate_txt} "
+            f"≤60% → 已停用 sign 排序,退纯广度。实时核验见 GET /ops/marginal-reconciliation。"
+        )
+    elif use_value and n_pnl:
+        _notes.append(
+            f"方法论硬化(sign-based):ΔSharpe 仅 {n_significant}/{n_pnl} 个超出自身噪声地板"
+            f"(|Δ|>1.64·SE)→幅度噪声大,不作精排;但其方向本次对账与 BRAIN 权威边际 {_rate_txt},"
+            f"故按 sign 分层(增益 {n_additive} / 中性 / 稀释 {n_dilutive})+广度排序,稀释(Δ<0)者排在最后。"
+            f"实时核验见 GET /ops/marginal-reconciliation。"
+        )
     note = "；".join(_notes) or None
 
     return DrainOrderOut(
@@ -4859,6 +4971,12 @@ async def submit_backlog_drain_order(
         n_base_pool=n_base_pool,
         n_candidates=n_cand,
         n_with_pnl=n_pnl,
+        n_significant=n_significant,
+        n_survives_deflation=n_survives,
+        deflated_threshold=round(deflated_threshold, 4) if use_value else None,
+        recon_verdict=recon_stat.get("verdict") if use_value else None,
+        recon_sign_rate=recon_stat.get("sign_agreement_rate") if use_value else None,
+        recon_n_compared=recon_stat.get("n_sign_compared", 0) if use_value else 0,
         n_selected=len(ordered),
         n_blocked=len(blocked),
         selected=[_item(c) for c in ordered],
@@ -5021,6 +5139,295 @@ async def datasets_coverage(
         n_untapped=sum(1 for it in items if it.is_untapped),
         n_new=sum(1 for it in items if it.is_new),
         items=items,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Marginal-value reconciliation (methodology-audit kill-switch, 2026-06-03)
+#
+# Does our cheap OFFLINE marginal_drain ΔSharpe (vs the local 12-alpha pool) agree
+# with BRAIN's AUTHORITATIVE before-and-after Δsharpe (metrics._iqc_marginal.
+# delta_sharpe, computed on the real submitted portfolio)? The audit's load-
+# bearing gap was that the offline routing signal had never been reconciled.
+# Sign-agreement ≤ 60% (≈coin flip) over ≥15 pairs ⇒ the offline proxy is invalid
+# ⇒ STOP routing on it. NOTE: BRAIN before-and-after is itself a backtest-merge
+# estimate (not live-realized — that needs months of post-submission PnL the
+# platform doesn't have yet); 400s for already-submitted alphas. So this is a
+# NECESSARY-not-sufficient validity check on the offline proxy.
+# ---------------------------------------------------------------------------
+
+
+class ReconPair(BaseModel):
+    alpha_pk: int
+    brain_id: Optional[str] = None
+    offline_delta_sharpe: Optional[float] = None
+    brain_delta_sharpe: Optional[float] = None
+    sign_agree: Optional[bool] = None
+
+
+class MarginalReconOut(BaseModel):
+    region: Optional[str] = None
+    n_pairs: int
+    n_sign_compared: int
+    sign_agreement_rate: Optional[float] = None
+    spearman: Optional[float] = None
+    verdict: str                                 # supported | weak | FALSIFIED | insufficient_sample
+    kill_threshold: float
+    pairs: List[ReconPair]
+    note: Optional[str] = None
+
+
+@router.get("/marginal-reconciliation", response_model=MarginalReconOut)
+async def marginal_reconciliation(
+    region: Optional[str] = "USA",
+    limit: int = Query(300, ge=1, le=1000),
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> MarginalReconOut:
+    """Reconcile the offline marginal ΔSharpe against BRAIN's authoritative
+    before-and-after Δsharpe (the audit kill-switch). Fully offline — reuses the
+    BRAIN delta already fetched + stored by the IQC marginal audit
+    (``metrics._iqc_marginal.delta_sharpe``) vs our ``marginal_drain`` ΔSharpe to
+    the submitted pool. Returns the sign-agreement rate + Spearman + verdict.
+    """
+    from sqlalchemy import text as _text, bindparam
+    from backend.marginal_drain import build_pool_returns, marginal_delta_sharpe
+    from backend.marginal_recon import sign_agreement_stats
+
+    region = (region or "").strip() or None
+
+    # Base pool = submitted-pool combined returns. SINGLE region (eff_region) for
+    # BOTH pool and candidates — a cross-region pool/candidate mismatch produces a
+    # meaningless mixed-portfolio ΔSharpe and an invalid kill-switch stat
+    # (review 2026-06-03 #4).
+    eff_region = region or "USA"
+    pool_res = (await db.execute(_text(
+        "SELECT ap.alpha_id, ap.trade_date, ap.pnl FROM alpha_pnl ap "
+        "JOIN alphas a ON ap.alpha_id = a.id "
+        "WHERE a.date_submitted IS NOT NULL AND a.region = :r AND ap.pnl IS NOT NULL"
+    ), {"r": eff_region})).all()
+    pool_tuples = [(int(p[0]), p[1], float(p[2])) for p in pool_res if p[2] is not None]
+    base_full = build_pool_returns(pool_tuples)
+    pool_ids = {t[0] for t in pool_tuples}
+
+    def _base_excluding(aid: int):
+        # A SUBMITTED candidate is also a pool member → "add X to a pool that
+        # already contains X" biases its ΔSharpe toward 0 and diverges from the
+        # freeze/drain semantics. Exclude self per-row (review 2026-06-03 #5).
+        if aid not in pool_ids:
+            return base_full
+        return build_pool_returns([t for t in pool_tuples if t[0] != aid])
+
+    # Candidates: ALWAYS the same single region as the pool (eff_region).
+    rows = (await db.execute(_text(
+        """
+        SELECT id, alpha_id, (metrics->'_iqc_marginal'->>'delta_sharpe')::float AS brain_d
+        FROM alphas
+        WHERE (metrics->'_iqc_marginal'->>'delta_sharpe') IS NOT NULL
+          AND region = :region
+          AND EXISTS (SELECT 1 FROM alpha_pnl ap WHERE ap.alpha_id = alphas.id)
+        ORDER BY id DESC LIMIT :limit
+        """
+    ), {"limit": int(limit), "region": eff_region})).all()
+
+    ids = [int(r[0]) for r in rows]
+    pnl_by_id: Dict[int, Any] = {}
+    if ids and base_full is not None:
+        import pandas as _pd
+        pq = _text(
+            "SELECT alpha_id, trade_date, pnl FROM alpha_pnl "
+            "WHERE alpha_id IN :ids AND pnl IS NOT NULL"
+        ).bindparams(bindparam("ids", expanding=True))
+        prows = (await db.execute(pq, {"ids": ids})).all()
+        _df = _pd.DataFrame(
+            [(int(x[0]), x[1], float(x[2])) for x in prows if x[2] is not None],
+            columns=["aid", "date", "pnl"],
+        )
+        if not _df.empty:
+            for _aid, _g in _df.groupby("aid"):
+                pnl_by_id[int(_aid)] = _g.set_index("date")["pnl"]
+
+    pairs: List[ReconPair] = []
+    stat_pairs: List[tuple] = []
+    for r in rows:
+        aid = int(r[0])
+        brain_d = float(r[2]) if r[2] is not None else None
+        _base_aid = _base_excluding(aid)
+        offline = (
+            marginal_delta_sharpe(_base_aid, pnl_by_id.get(aid))
+            if (_base_aid is not None and aid in pnl_by_id) else None
+        )
+        stat_pairs.append((offline, brain_d))
+        agree = (
+            ((offline > 0) == (brain_d > 0))
+            if (offline is not None and brain_d is not None
+                and abs(offline) > 1e-9 and abs(brain_d) > 1e-9)
+            else None
+        )
+        pairs.append(ReconPair(
+            alpha_pk=aid, brain_id=r[1],
+            offline_delta_sharpe=offline, brain_delta_sharpe=brain_d,
+            sign_agree=agree,
+        ))
+
+    stat = sign_agreement_stats(stat_pairs)
+    note = None
+    if stat["verdict"] == "FALSIFIED":
+        note = "符号一致率 ≤ 60% — 离线 ΔSharpe 不是 BRAIN 权威边际的有效代理,停止用它排序。"
+    elif stat["verdict"] == "supported":
+        note = (
+            f"离线 ΔSharpe 与 BRAIN before-and-after 同号 {stat['sign_agreement_rate']*100:.0f}%"
+            f"(ρ={stat['spearman']})——方向信号有效。注意:per-candidate 幅度仍噪声(用 sign 不用精排);"
+            f"且 BRAIN before-and-after 本身是回测-merge 估计,非 live realized(后者需数月提交后 PnL)。"
+        )
+    return MarginalReconOut(
+        region=eff_region,
+        n_pairs=stat["n_pairs"],
+        n_sign_compared=stat["n_sign_compared"],
+        sign_agreement_rate=stat["sign_agreement_rate"],
+        spearman=stat["spearman"],
+        verdict=stat["verdict"],
+        kill_threshold=stat["kill_threshold"],
+        pairs=pairs,
+        note=note,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Forward-test reconciliation (2026-06-03). Unlike /marginal-reconciliation
+# (which recomputes offline ΔSharpe against TODAY's drifting pool), the forward
+# test reads the prediction FROZEN at submit time by submit_alpha (metrics.
+# _recon_predicted_delta_sharpe) — immutable, against the exact pre-submit pool.
+#
+# predicted(offline-at-submit) ↔ brain(before-and-after-at-submit): computable
+# now from the two frozen predictions. predicted ↔ REALIZED(live post-submission
+# PnL): structurally BLOCKED today — alpha_pnl is a frozen OS-backtest window and
+# BRAIN exposes no live PnL endpoint, so no alpha has post-submit realized PnL.
+# The hook freezes the prediction so the loop closes if/when realized exists.
+# ---------------------------------------------------------------------------
+
+_REALIZED_BLOCKED_REASON = (
+    "本地 alpha_pnl 是冻结的 OS 回测窗(止于 ~2023-12-29,无提交后 live PnL)、"
+    "BRAIN 亦无 live 提交后 PnL 端点 → realized 边际当前结构性不可得。"
+    "提交时已冻结预测(offline + BRAIN before-and-after),待 realized 数据可得"
+    "(未来 BRAIN live-PnL 端点或人工录入)即可对账闭环。"
+)
+
+
+class ForwardReconRow(BaseModel):
+    alpha_pk: int
+    brain_id: Optional[str] = None
+    region: Optional[str] = None
+    captured_at: Optional[str] = None
+    predicted_delta_sharpe: Optional[float] = None
+    brain_pre_submit_delta_sharpe: Optional[float] = None
+    pred_vs_brain_agree: Optional[bool] = None
+    pool_n: Optional[int] = None
+    measurable: Optional[bool] = None
+    realized_delta_sharpe: Optional[float] = None   # always None today (blocked)
+    realized_status: str = "blocked_no_live_pnl"
+
+
+class ForwardReconOut(BaseModel):
+    region: Optional[str] = None
+    n_frozen: int
+    n_measurable: int
+    pred_vs_brain: Dict[str, Any]          # sign_agreement_stats over frozen pairs
+    n_with_realized: int
+    realized_status: str                   # blocked_no_live_pnl | has_realized
+    realized_blocked_reason: str
+    rows: List[ForwardReconRow]
+    note: Optional[str] = None
+
+
+@router.get("/marginal-reconciliation/forward", response_model=ForwardReconOut)
+async def marginal_reconciliation_forward(
+    region: Optional[str] = None,
+    limit: int = Query(300, ge=1, le=1000),
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> ForwardReconOut:
+    """Forward-test reconciliation from the predictions FROZEN at submit time.
+
+    Surfaces every alpha with a ``metrics._recon_predicted_delta_sharpe`` record,
+    the predicted↔BRAIN-before-and-after sign agreement (computable now), and the
+    realized leg (structurally blocked today — reported honestly, never faked).
+    """
+    from sqlalchemy import text as _text
+    from backend.marginal_recon import sign_agreement_stats
+
+    region = (region or "").strip() or None
+    _where = "(metrics->'_recon_predicted_delta_sharpe') IS NOT NULL"
+    _params: Dict[str, Any] = {"limit": int(limit)}
+    if region:
+        _where += " AND region = :region"
+        _params["region"] = region
+    rows = (await db.execute(_text(
+        f"""
+        SELECT id, alpha_id, region,
+          (metrics->'_recon_predicted_delta_sharpe'->>'predicted_delta_sharpe')::float AS pred,
+          (metrics->'_recon_predicted_delta_sharpe'->>'brain_pre_submit_delta_sharpe')::float AS brain_pre,
+          (metrics->'_recon_predicted_delta_sharpe'->>'captured_at') AS captured_at,
+          (metrics->'_recon_predicted_delta_sharpe'->>'pool_n')::int AS pool_n,
+          (metrics->'_recon_predicted_delta_sharpe'->>'measurable')::boolean AS measurable
+        FROM alphas
+        WHERE {_where}
+        ORDER BY id DESC LIMIT :limit
+        """
+    ), _params)).all()
+
+    out_rows: List[ForwardReconRow] = []
+    pv_pairs: List[tuple] = []
+    n_measurable = 0
+    for r in rows:
+        pred = float(r[3]) if r[3] is not None else None
+        brain_pre = float(r[4]) if r[4] is not None else None
+        if r[7]:
+            n_measurable += 1
+        pv_pairs.append((pred, brain_pre))
+        agree = (
+            ((pred > 0) == (brain_pre > 0))
+            if (pred is not None and brain_pre is not None
+                and abs(pred) > 1e-9 and abs(brain_pre) > 1e-9)
+            else None
+        )
+        out_rows.append(ForwardReconRow(
+            alpha_pk=int(r[0]), brain_id=r[1], region=r[2],
+            captured_at=r[5], pool_n=r[6], measurable=bool(r[7]) if r[7] is not None else None,
+            predicted_delta_sharpe=pred, brain_pre_submit_delta_sharpe=brain_pre,
+            pred_vs_brain_agree=agree,
+            realized_delta_sharpe=None, realized_status="blocked_no_live_pnl",
+        ))
+
+    pred_vs_brain = sign_agreement_stats(pv_pairs)
+    note = None
+    if not out_rows:
+        note = (
+            "尚无冻结预测——submit_alpha 的 forward-test capture 是新加的,"
+            "下一次成功提交起才开始累积(过去 12 个提交无法回填,提交前的池状态不可重建)。"
+        )
+    else:
+        note = (
+            f"冻结 {len(out_rows)} 个预测;predicted↔BRAIN-before-and-after 符号一致率 "
+            f"{(pred_vs_brain['sign_agreement_rate']*100):.0f}%(verdict={pred_vs_brain['verdict']}) "
+            if pred_vs_brain.get("sign_agreement_rate") is not None
+            else f"冻结 {len(out_rows)} 个预测(predicted↔BRAIN 样本不足) "
+        )
+        note += "— 这是提交时不可变快照,优于 /marginal-reconciliation 的事后重算(后者随池增长漂移)。"
+
+    return ForwardReconOut(
+        region=region,
+        n_frozen=len(out_rows),
+        n_measurable=n_measurable,
+        pred_vs_brain=pred_vs_brain,
+        n_with_realized=0,
+        # NOT "accumulating" — nothing realized is incoming (structurally blocked).
+        # Predictions accumulate; the REALIZED leg stays blocked until live PnL
+        # exists. Flips to "has_realized" only once n_with_realized > 0.
+        realized_status="blocked_no_live_pnl",
+        realized_blocked_reason=_REALIZED_BLOCKED_REASON,
+        rows=out_rows,
+        note=note,
     )
 
 

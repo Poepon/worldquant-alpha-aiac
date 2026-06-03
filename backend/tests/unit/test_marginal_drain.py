@@ -13,8 +13,11 @@ import pandas as pd
 
 from backend.marginal_drain import (
     annualized_sharpe,
+    bootstrap_delta_sharpe_se,
     build_pool_returns,
+    deflated_delta_sharpe_threshold,
     greedy_orthogonal_order,
+    is_delta_sharpe_significant,
     marginal_delta_sharpe,
     pairwise_corr_from_pnl,
 )
@@ -168,6 +171,46 @@ def test_marginal_delta_sharpe_thin_overlap_none():
 
 
 # ---------------------------------------------------------------------------
+# Audit hardening: bootstrap SE noise floor + significance + deflation
+# ---------------------------------------------------------------------------
+
+
+def test_bootstrap_delta_sharpe_se_positive_and_deterministic():
+    pool = pd.Series([1.0 if i % 2 == 0 else -1.0 for i in range(160)])
+    cand = pd.Series([0.6 if i % 3 == 0 else -0.3 for i in range(160)])
+    se1 = bootstrap_delta_sharpe_se(pool, cand, n_boot=100, seed=7)
+    se2 = bootstrap_delta_sharpe_se(pool, cand, n_boot=100, seed=7)
+    assert se1 is not None and se1 > 0
+    assert se1 == se2                              # same seed → deterministic
+
+
+def test_bootstrap_delta_sharpe_se_thin_overlap_none():
+    pool = pd.Series([1.0, -1.0] * 40)             # 80 obs
+    cand = pd.Series([1.0, -1.0] * 10)             # 20 overlap < 60
+    assert bootstrap_delta_sharpe_se(pool, cand, min_overlap=60) is None
+
+
+def test_is_delta_sharpe_significant():
+    assert is_delta_sharpe_significant(0.5, 0.1) is True       # 0.5 > 1.64*0.1
+    assert is_delta_sharpe_significant(0.1, 0.1) is False      # within noise
+    assert is_delta_sharpe_significant(-0.5, 0.1) is True      # magnitude counts
+    assert is_delta_sharpe_significant(None, 0.1) is False
+    assert is_delta_sharpe_significant(0.5, None) is False
+    assert is_delta_sharpe_significant(0.5, 0.0) is False
+    # The motivating audit examples (±0.01–0.025 on SE≈0.08) are NOT significant.
+    assert is_delta_sharpe_significant(-0.009, 0.08) is False
+    assert is_delta_sharpe_significant(0.025, 0.08) is False
+
+
+def test_deflated_delta_sharpe_threshold():
+    assert deflated_delta_sharpe_threshold([0.05]) == 0.0          # N<2
+    # zero variance → effectively 0 (float residue ~1e-18 is negligible)
+    assert deflated_delta_sharpe_threshold([0.05, 0.05, 0.05]) < 1e-9
+    spread = deflated_delta_sharpe_threshold([0.3, -0.1, 0.05, 0.2, -0.2])
+    assert spread > 0                                              # expected-max under null
+
+
+# ---------------------------------------------------------------------------
 # greedy_orthogonal_order — value objective (ΔSharpe-driven, breadth-constrained)
 # ---------------------------------------------------------------------------
 
@@ -207,3 +250,52 @@ def test_greedy_breadth_mode_unchanged_by_objective_default():
     ]
     ordered, _ = greedy_orthogonal_order(cands, {(1, 2): 0.1}, threshold=0.7)
     assert ordered[0]["id"] == 2  # most orthogonal first, NOT highest score
+
+
+# ---------------------------------------------------------------------------
+# greedy value objective — SIGN-based tiers (reconciliation 2026-06-03)
+# ---------------------------------------------------------------------------
+
+
+def test_greedy_value_tier_orders_by_sign_not_magnitude():
+    # value_tier present ⇒ route on validated SIGN tier (additive 0 > neutral 1 >
+    # dilutive 2 > unmeasurable 3), then breadth — NOT on the noisy magnitude.
+    # Note ids 1 and 4: 4 has the larger raw |score| but a WORSE tier (dilutive),
+    # so it must rank below the additive 1 despite magnitude. All equal breadth.
+    cands = [
+        {"id": 1, "self_corr": 0.1, "score": 0.01, "value_tier": 0},   # additive
+        {"id": 2, "self_corr": 0.1, "score": None, "value_tier": 1},   # neutral/no-Δ
+        {"id": 3, "self_corr": 0.1, "score": None, "value_tier": 3},   # no PnL
+        {"id": 4, "self_corr": 0.1, "score": -0.99, "value_tier": 2},  # dilutive
+    ]
+    corr = {(a, b): 0.1 for a in range(1, 5) for b in range(a + 1, 5)}
+    ordered, blocked = greedy_orthogonal_order(cands, corr, threshold=0.7, objective="value")
+    assert [c["id"] for c in ordered] == [1, 2, 4, 3]
+    assert blocked == []
+
+
+def test_greedy_value_tier_breaks_ties_by_breadth():
+    # Same tier (both additive) ⇒ the more-orthogonal (lower max_corr) wins.
+    cands = [
+        {"id": 1, "self_corr": 0.1, "value_tier": 0},
+        {"id": 2, "self_corr": 0.1, "value_tier": 0},
+    ]
+    # 1 correlates with the seed-of-2 less than 2 does → but with only these two,
+    # the first picked is the globally most-orthogonal by min-max-corr seeding.
+    ordered, _ = greedy_orthogonal_order(
+        cands, {(1, 2): 0.2}, threshold=0.7, objective="value",
+    )
+    assert {c["id"] for c in ordered} == {1, 2}  # both selected, tier-equal
+
+
+def test_greedy_value_tier_falls_back_to_legacy_when_absent():
+    # No value_tier ⇒ legacy significant-magnitude ordering still holds.
+    cands = [
+        {"id": 1, "self_corr": 0.1, "score": 0.05},
+        {"id": 2, "self_corr": 0.1, "score": 0.30},
+        {"id": 3, "self_corr": 0.1, "score": None},
+        {"id": 4, "self_corr": 0.1, "score": -0.20},
+    ]
+    corr = {(a, b): 0.1 for a in range(1, 5) for b in range(a + 1, 5)}
+    ordered, _ = greedy_orthogonal_order(cands, corr, threshold=0.7, objective="value")
+    assert [c["id"] for c in ordered] == [2, 1, 4, 3]

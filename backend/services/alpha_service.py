@@ -709,6 +709,35 @@ class AlphaService(BaseService):
                 alpha.date_submitted = datetime.utcnow()
                 await self.db.commit()
 
+                # Capture region into a plain local NOW — a freeze-failure
+                # rollback below expires ALL session instances (rollback expiry is
+                # unconditional, NOT governed by expire_on_commit=False), so a
+                # later `alpha.region` read would emit an implicit lazy SELECT
+                # outside greenlet context (MissingGreenlet) and silently skip the
+                # skeleton refresh. The local sidesteps that (review 2026-06-03).
+                region_for_skeleton = alpha.region
+
+                # Forward-test capture (2026-06-03): freeze the OFFLINE predicted
+                # marginal ΔSharpe (+ BRAIN's pre-submit before-and-after) onto
+                # metrics at the moment of submit. The pre-submit pool state +
+                # window can't be reconstructed later (pool grows, windows shift)
+                # and BRAIN before-and-after 400s once submitted — so this MUST
+                # run now. ORDERED AFTER the date_submitted commit (own commit) so
+                # a freeze-query failure can NEVER poison the transaction that
+                # durably records the irreversible submission → no double-submit.
+                # On any failure: rollback (un-poison the session for the skeleton
+                # refresh below) + warn. Non-fatal by contract. See marginal_recon
+                # + GET /ops/marginal-reconciliation/forward.
+                try:
+                    await self._freeze_predicted_marginal(alpha)
+                    await self.db.commit()
+                except Exception as _frz_e:
+                    await self.db.rollback()
+                    logger.warning(
+                        f"[submit_alpha] forward-test predicted-marginal freeze "
+                        f"failed (non-fatal): {_frz_e}"
+                    )
+
                 # Post-submit: refresh portfolio-skeleton cache (DB-only,
                 # ~10ms) so the T1 strategy prompt stops nudging the LLM
                 # toward the shape we just submitted. Non-fatal.
@@ -716,7 +745,7 @@ class AlphaService(BaseService):
                     from backend.agents.seed_pool.portfolio_skeletons import (
                         refresh_portfolio_from_db,
                     )
-                    await refresh_portfolio_from_db(region=alpha.region)
+                    await refresh_portfolio_from_db(region=region_for_skeleton)
                 except Exception as e:
                     logger.warning(f"[submit_alpha] skeleton cache refresh failed: {e}")
 
@@ -739,6 +768,107 @@ class AlphaService(BaseService):
                         )
                     except Exception:
                         pass
+
+    async def _freeze_predicted_marginal(self, alpha) -> None:
+        """Forward-test capture: freeze this alpha's PREDICTED marginal value at
+        submit time onto ``metrics["_recon_predicted_delta_sharpe"]``.
+
+        Two predictions are frozen against the IMMUTABLE pre-submit state:
+          - ``predicted_delta_sharpe`` — our OFFLINE ΔSharpe of this alpha vs the
+            already-submitted pool in its region (excluding itself), on the common
+            local-PnL window. This is the signal the drain ranks on.
+          - ``brain_pre_submit_delta_sharpe`` — BRAIN's authoritative before-and-
+            after Δsharpe captured by the IQC marginal audit while the alpha was
+            still CAN_SUBMIT (``_iqc_marginal.delta_sharpe``). BRAIN before-and-
+            after 400s once submitted, so submit is the LAST moment this exists.
+
+        Why freeze (vs recompute later): the pool grows and windows shift, so the
+        pre-submit pool state is unreconstructable after the fact. The REALIZED
+        leg (post-submission live PnL) is structurally unavailable today —
+        ``alpha_pnl`` is a frozen OS-backtest window and BRAIN exposes no live PnL
+        endpoint — so this captures the PREDICTION now, ready to reconcile against
+        realized if/when that data exists. Non-fatal by contract (caller guards).
+        """
+        from sqlalchemy import text as _text
+        from backend.marginal_drain import build_pool_returns, marginal_delta_sharpe
+
+        region = alpha.region
+        # Read the FRESHEST metrics up front: the in-memory copy is the stale
+        # line-582 snapshot (expire_on_commit=False → the date_submitted commit
+        # didn't refresh it), so both the _iqc_marginal read and the whole-dict
+        # merge below would otherwise clobber a metrics update the concurrent 6h
+        # sync committed during this submit's BRAIN-poll window. Refreshing just
+        # metrics narrows the clobber window to the refresh→commit microseconds
+        # (a full atomic JSONB `||` merge would close it entirely but is PG-only;
+        # this stays dialect-portable + unit-tested). (review 2026-06-03)
+        try:
+            await self.db.refresh(alpha, ["metrics"])
+        except Exception:
+            pass  # refresh failure → fall back to the in-memory snapshot
+
+        # Pre-existing submitted pool in this region, EXCLUDING this alpha (its
+        # date_submitted was just stamped in-session — exclude by id so the pool
+        # is the portfolio this alpha is being ADDED to, not one containing it).
+        pool_rows = (await self.db.execute(_text(
+            "SELECT ap.alpha_id, ap.trade_date, ap.pnl FROM alpha_pnl ap "
+            "JOIN alphas a ON ap.alpha_id = a.id "
+            "WHERE a.date_submitted IS NOT NULL AND a.region = :r "
+            "AND a.id != :sid AND ap.pnl IS NOT NULL"
+        ), {"r": region, "sid": alpha.id})).all()
+        base = build_pool_returns(
+            [(int(p[0]), p[1], float(p[2])) for p in pool_rows if p[2] is not None]
+        )
+        pool_n = len({int(p[0]) for p in pool_rows})
+
+        cand_rows = (await self.db.execute(_text(
+            "SELECT trade_date, pnl FROM alpha_pnl WHERE alpha_id = :sid "
+            "AND pnl IS NOT NULL ORDER BY trade_date"
+        ), {"sid": alpha.id})).all()
+        cand = None
+        if cand_rows:
+            import pandas as _pd
+            cand = _pd.Series({r[0]: float(r[1]) for r in cand_rows if r[1] is not None})
+
+        predicted = (
+            marginal_delta_sharpe(base, cand)
+            if (base is not None and cand is not None and len(cand) > 0) else None
+        )
+
+        iqc = (alpha.metrics or {}).get("_iqc_marginal") or {}
+        brain_pre = iqc.get("delta_sharpe")
+        try:
+            brain_pre = float(brain_pre) if brain_pre is not None else None
+        except (TypeError, ValueError):
+            brain_pre = None
+
+        from datetime import datetime as _dt
+        payload = {
+            "predicted_delta_sharpe": round(predicted, 6) if predicted is not None else None,
+            "brain_pre_submit_delta_sharpe": brain_pre,
+            "pool_n": pool_n,
+            "region": region,
+            "measurable": predicted is not None,
+            "captured_at": _dt.utcnow().isoformat(),
+            "method": "marginal_drain.v1",
+        }
+        if base is not None and len(base):
+            payload["pool_window_start"] = str(base.index.min())[:10]
+            payload["pool_window_end"] = str(base.index.max())[:10]
+        if cand is not None and len(cand):
+            payload["cand_pnl_end"] = str(cand.index.max())[:10]
+
+        # Whole-dict reassign — Alpha.metrics is a raw JSONB column (no MutableDict
+        # wrapper), so in-place mutation is NOT change-tracked. Reassigning the
+        # column is the repo-wide safe pattern (mirrors audit_iqc_marginal). The
+        # `_`-prefixed key survives the 6h BRAIN-sync metrics MERGE untouched.
+        m = dict(alpha.metrics or {})
+        m["_recon_predicted_delta_sharpe"] = payload
+        alpha.metrics = m
+        logger.info(
+            f"[submit_alpha] froze predicted marginal for alpha {alpha.id}: "
+            f"offline={payload['predicted_delta_sharpe']} "
+            f"brain_pre={brain_pre} pool_n={pool_n}"
+        )
 
     async def _auto_revert_consultant_mode(self, reason: str) -> None:
         """Safety-net: BRAIN PROD-corr 返回 403 → 自动 clear ENABLE_BRAIN_CONSULTANT_MODE flag。
