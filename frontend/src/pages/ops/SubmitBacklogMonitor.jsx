@@ -437,6 +437,26 @@ export default function SubmitBacklogMonitor() {
       render: (v, r) => deltaSharpeTag(v, r.delta_sharpe_significant, r.delta_sharpe_se),
     },
     {
+      title: (
+        <Tooltip title="基于经对账验证的 ΔSharpe 方向的排序层:增益(先提交)→中性→稀释(排最后,提交会拖累组合)→无PnL。对账 FALSIFIED/样本不足时退纯广度,此列为「—」。">
+          <Space size={4}>方向层 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
+      dataIndex: 'value_tier',
+      key: 'value_tier',
+      width: 92,
+      render: (t) => {
+        if (t === null || t === undefined) return <Text type="secondary">—</Text>
+        const meta = {
+          0: { c: 'green', label: '增益' },
+          1: { c: 'gold', label: '中性' },
+          2: { c: 'red', label: '稀释' },
+          3: { c: 'default', label: '无PnL' },
+        }[t] || { c: 'default', label: String(t) }
+        return <Tag color={meta.c}>{meta.label}</Tag>
+      },
+    },
+    {
       title: 'self-corr',
       dataIndex: 'self_corr',
       key: 'self_corr',

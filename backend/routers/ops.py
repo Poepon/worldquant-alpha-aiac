@@ -4729,9 +4729,11 @@ async def submit_backlog_drain_order(
         pairwise_corr_from_pnl, greedy_orthogonal_order,
         build_pool_returns, marginal_delta_sharpe,
         bootstrap_delta_sharpe_se, deflated_delta_sharpe_threshold,
-        is_delta_sharpe_significant,
+        is_delta_sharpe_significant, sign_value_tier,
     )
-    from backend.marginal_recon import sign_agreement_stats
+    from backend.marginal_recon import (
+        sign_agreement_stats, route_on_sign_verdict, MIN_PAIRS_FOR_VERDICT,
+    )
 
     region = (region or "").strip() or None
     margin_min = float(margin_bps_min) / 10000.0  # bps → ratio (5bps = 0.0005)
@@ -4847,9 +4849,11 @@ async def submit_backlog_drain_order(
         else {"verdict": "insufficient_sample", "sign_agreement_rate": None,
               "n_sign_compared": 0, "spearman": None}
     )
-    # FALSIFIED kills sign-routing; insufficient_sample / weak / supported keep it
-    # (weak still beats coin-flip — the alternative is throwing away a real signal).
-    sign_routing_ok = use_value and recon_stat["verdict"] != "FALSIFIED"
+    # FAIL-CLOSED: route on the ΔSharpe sign ONLY when the live recon affirmatively
+    # validates it (supported/weak, ≥15 pairs). insufficient_sample (too few pairs
+    # to validate) AND FALSIFIED (coin flip) both fall back to pure breadth —
+    # routing on an UNVALIDATED sign is the mistake the audit flagged (review #2/#3).
+    sign_routing_ok = use_value and route_on_sign_verdict(recon_stat["verdict"])
 
     candidates: List[Dict[str, Any]] = []
     for r in rows:
@@ -4872,23 +4876,10 @@ async def submit_backlog_drain_order(
             "_pnl_covered": aid in pnl_ids,
         }
         if sign_routing_ok:
-            # SIGN-based value tier: the offline ΔSharpe MAGNITUDE is within its
-            # bootstrap noise floor, but its SIGN is reconciled against BRAIN's
-            # authoritative marginal each call (recon_stat above — only applied
-            # while verdict != FALSIFIED). Route on the validated sign: additive(0)
-            # > neutral/unmeasured-Δ(1) > dilutive(2) > no-PnL/unmeasurable(3),
-            # then by breadth; never on the noisy magnitude. A dilutive (Δ<0) alpha
-            # is drained LAST (it hurts the pool).
-            if aid not in pnl_ids:
-                cand["value_tier"] = 3
-            elif ds is None:
-                cand["value_tier"] = 1
-            elif ds > 1e-9:
-                cand["value_tier"] = 0
-            elif ds < -1e-9:
-                cand["value_tier"] = 2
-            else:
-                cand["value_tier"] = 1
+            # SIGN-based value tier (magnitude is noise; sign is validated against
+            # BRAIN this call — see sign_routing_ok). additive(0) > neutral(1) >
+            # dilutive(2, drain-last) > no-PnL(3); breadth orders within a tier.
+            cand["value_tier"] = sign_value_tier(ds, aid in pnl_ids)
         candidates.append(cand)
 
     # FALSIFIED recon ⇒ breadth-only (don't route on a proxy that no longer tracks
@@ -4951,10 +4942,16 @@ async def submit_backlog_drain_order(
         if _rate is not None else f"样本不足(verdict={recon_stat['verdict']})"
     )
     if use_value and not sign_routing_ok:
-        _notes.append(
-            f"⛔ 对账 kill-switch 触发:离线 ΔSharpe 方向与 BRAIN 权威边际仅 {_rate_txt} "
-            f"≤60% → 已停用 sign 排序,退纯广度。实时核验见 GET /ops/marginal-reconciliation。"
-        )
+        if recon_stat["verdict"] == "FALSIFIED":
+            _notes.append(
+                f"⛔ 对账 kill-switch 触发:离线 ΔSharpe 方向与 BRAIN 权威边际仅 {_rate_txt} "
+                f"≤60%(coin-flip)→ 已停用 sign 排序,退纯广度。实时核验见 GET /ops/marginal-reconciliation。"
+            )
+        else:  # insufficient_sample — fail-closed
+            _notes.append(
+                f"⚠️ 对账样本不足({_rate_txt},未达 ≥{MIN_PAIRS_FOR_VERDICT} 对验证门)→ 保守退纯广度"
+                f"(不在未验证的 sign 上路由)。积累更多带 BRAIN 边际+本地 PnL 的候选即可启用 sign 分层。"
+            )
     elif use_value and n_pnl:
         _notes.append(
             f"方法论硬化(sign-based):ΔSharpe 仅 {n_significant}/{n_pnl} 个超出自身噪声地板"

@@ -282,6 +282,29 @@ def is_delta_sharpe_significant(
     return abs(float(delta)) > k * float(se)
 
 
+def sign_value_tier(delta: Optional[float], has_pnl: bool, *, eps: float = 1e-9) -> int:
+    """Map a candidate's offline marginal ΔSharpe to a SIGN-based drain tier.
+
+    Lower tier = drained earlier. The MAGNITUDE is noise (within its bootstrap SE),
+    so only the SIGN is used, and only after the caller has validated it against
+    BRAIN (see ``marginal_recon.route_on_sign_verdict``):
+      0 = additive  (ΔSharpe > 0 — improves the pool, drain first)
+      1 = neutral   (measurable but ΔSharpe ≈ 0 or unknown)
+      2 = dilutive  (ΔSharpe < 0 — hurts the pool, drain LAST)
+      3 = unmeasurable (no local PnL — among-set corr can't be verified)
+    Within a tier the greedy orders by breadth (max-corr to the selected set).
+    """
+    if not has_pnl:
+        return 3
+    if delta is None:
+        return 1
+    if delta > eps:
+        return 0
+    if delta < -eps:
+        return 2
+    return 1
+
+
 def greedy_orthogonal_order(
     candidates: List[Dict[str, Any]],
     pairwise_corr: Dict[Tuple[int, int], float],

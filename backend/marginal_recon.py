@@ -38,6 +38,24 @@ except Exception:  # pragma: no cover
 KILL_SIGN_AGREEMENT = 0.60
 MIN_PAIRS_FOR_VERDICT = 15      # below this the verdict is "insufficient sample"
 
+# Verdicts under which the offline ΔSharpe SIGN is trustworthy enough to ROUTE on
+# (i.e. to split candidates into additive/dilutive tiers). FAIL-CLOSED: only an
+# AFFIRMATIVELY non-falsified verdict (≥ MIN_PAIRS_FOR_VERDICT pairs AND > 60%
+# agreement) qualifies. ``insufficient_sample`` (too few pairs to validate) and
+# ``FALSIFIED`` (≈ coin flip) both fall back to pure breadth — routing on a sign
+# we have NOT validated against BRAIN is exactly the mistake the audit flagged.
+_SIGN_ROUTABLE_VERDICTS = frozenset({"supported", "weak"})
+
+
+def route_on_sign_verdict(verdict: Optional[str]) -> bool:
+    """Whether the offline ΔSharpe sign is validated enough to route the drain on.
+
+    FAIL-CLOSED: True only for an affirmative ``supported``/``weak`` verdict.
+    ``insufficient_sample`` (no evidence the sign tracks BRAIN) and ``FALSIFIED``
+    (coin flip) → False → caller falls back to breadth-only ordering.
+    """
+    return verdict in _SIGN_ROUTABLE_VERDICTS
+
 
 def _spearman(xs: List[float], ys: List[float]) -> Optional[float]:
     """Spearman rank correlation (pure; ties via average rank). None if < 3 pts

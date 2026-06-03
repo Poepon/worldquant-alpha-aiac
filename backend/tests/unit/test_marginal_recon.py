@@ -10,10 +10,42 @@ import pytest
 
 from backend.marginal_recon import (
     sign_agreement_stats,
+    route_on_sign_verdict,
     _spearman,
     KILL_SIGN_AGREEMENT,
     MIN_PAIRS_FOR_VERDICT,
 )
+
+
+# ---------------------------------------------------------------------------
+# route_on_sign_verdict — FAIL-CLOSED gate (the drain kill-switch decision)
+# ---------------------------------------------------------------------------
+
+
+def test_route_on_sign_verdict_fail_closed():
+    # Only affirmatively-validated verdicts route on the sign.
+    assert route_on_sign_verdict("supported") is True
+    assert route_on_sign_verdict("weak") is True
+    # FALSIFIED (coin flip) and insufficient_sample (no evidence) both fall back.
+    assert route_on_sign_verdict("FALSIFIED") is False
+    assert route_on_sign_verdict("insufficient_sample") is False
+    assert route_on_sign_verdict(None) is False
+    assert route_on_sign_verdict("garbage") is False
+
+
+def test_route_gate_matches_stats_verdict_end_to_end():
+    # Coin-flip stats ⇒ FALSIFIED ⇒ do NOT route.
+    falsified = sign_agreement_stats([(0.5, 0.5)] * 9 + [(0.5, -0.5)] * 9)
+    assert falsified["verdict"] == "FALSIFIED"
+    assert route_on_sign_verdict(falsified["verdict"]) is False
+    # Too few pairs ⇒ insufficient_sample ⇒ do NOT route (fail-closed).
+    thin = sign_agreement_stats([(0.5, 0.5)] * 5)
+    assert thin["verdict"] == "insufficient_sample"
+    assert route_on_sign_verdict(thin["verdict"]) is False
+    # Strong agreement over enough pairs ⇒ supported ⇒ route.
+    strong = sign_agreement_stats([(0.5, 0.5)] * 30)
+    assert strong["verdict"] == "supported"
+    assert route_on_sign_verdict(strong["verdict"]) is True
 
 
 # ---------------------------------------------------------------------------

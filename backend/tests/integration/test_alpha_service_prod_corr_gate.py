@@ -247,3 +247,49 @@ async def test_auto_revert_failure_does_not_break_submit_response(mock_db, mock_
     # Still got the proper rejection response
     assert result["submitted"] is False
     mock_brain_with_redis.submit_alpha.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Forward-test freeze: non-fatal contract on the irreversible submit path
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_freeze_failure_is_non_fatal_and_skeleton_refresh_still_runs(
+    mock_db, mock_brain_with_redis
+):
+    """The predicted-marginal freeze is non-fatal: if _freeze_predicted_marginal
+    raises (after date_submitted is already committed), submit STILL returns
+    submitted=True, the session is rolled back, and the post-submit skeleton
+    refresh STILL runs with the region CAPTURED BEFORE the freeze (region_for_
+    skeleton) — not a rollback-expired alpha.region (review 2026-06-03)."""
+    from unittest.mock import call
+    from backend.services.alpha_service import AlphaService
+
+    db, alpha = mock_db                       # User mode (flag cache cleared) → no PROD-corr
+    svc = AlphaService(db)
+    svc.alpha_repo = MagicMock()
+    skeleton_mock = AsyncMock(return_value=None)
+
+    with (
+        patch(
+            "backend.services.correlation_service.CorrelationService.get_with_fallback",
+            new=AsyncMock(return_value=(0.3, CorrSource.LOCAL)),
+        ),
+        patch(
+            "backend.agents.seed_pool.portfolio_skeletons.refresh_portfolio_from_db",
+            new=skeleton_mock,
+        ),
+        patch.object(
+            AlphaService, "_freeze_predicted_marginal",
+            new=AsyncMock(side_effect=RuntimeError("freeze boom")),
+        ),
+    ):
+        result = await svc.submit_alpha(alpha.id, brain_adapter=mock_brain_with_redis)
+
+    # 1. submit succeeded despite the freeze blowing up (date_submitted already committed)
+    assert result["submitted"] is True
+    mock_brain_with_redis.submit_alpha.assert_awaited_once()
+    # 2. the freeze-failure branch rolled back (un-poison the session)
+    db.rollback.assert_awaited()
+    # 3. skeleton refresh STILL ran, with the captured region (not an expired attr)
+    skeleton_mock.assert_awaited_once_with(region="USA")

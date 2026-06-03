@@ -299,3 +299,30 @@ def test_greedy_value_tier_falls_back_to_legacy_when_absent():
     corr = {(a, b): 0.1 for a in range(1, 5) for b in range(a + 1, 5)}
     ordered, _ = greedy_orthogonal_order(cands, corr, threshold=0.7, objective="value")
     assert [c["id"] for c in ordered] == [2, 1, 4, 3]
+
+
+# ---------------------------------------------------------------------------
+# sign_value_tier — the drain's sign→tier bin logic (the wiring that routes)
+# ---------------------------------------------------------------------------
+
+
+def test_sign_value_tier_bins():
+    from backend.marginal_drain import sign_value_tier
+    # additive / dilutive / neutral are gated on PnL coverage.
+    assert sign_value_tier(0.05, True) == 0     # additive
+    assert sign_value_tier(-0.05, True) == 2    # dilutive (drain last)
+    assert sign_value_tier(0.0, True) == 1      # exactly zero → neutral
+    assert sign_value_tier(None, True) == 1     # measurable but no Δ → neutral
+    # no local PnL → unmeasurable, regardless of any (stale) delta.
+    assert sign_value_tier(0.5, False) == 3
+    assert sign_value_tier(None, False) == 3
+
+
+def test_sign_value_tier_eps_band_is_neutral():
+    from backend.marginal_drain import sign_value_tier
+    # |Δ| within eps is treated as zero (neutral), not additive/dilutive.
+    assert sign_value_tier(1e-12, True) == 1
+    assert sign_value_tier(-1e-12, True) == 1
+    # just outside eps flips to the signed tier.
+    assert sign_value_tier(1e-6, True) == 0
+    assert sign_value_tier(-1e-6, True) == 2
