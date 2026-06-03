@@ -191,3 +191,11 @@ pre {
 .ant-table-tbody > tr:hover > td {
   background: rgba(0, 212, 255, 0.05) !important;
 }
+
+/* Dataset coverage (P1): highlight NEW / UNTAPPED breadth opportunities. */
+.breadth-highlight-row > td {
+  background: rgba(156, 136, 255, 0.08) !important;
+}
+.breadth-highlight-row:hover > td {
+  background: rgba(156, 136, 255, 0.14) !important;
+}

@@ -7,8 +7,15 @@ from __future__ import annotations
 
 import pytest
 
+import math
+
+import pandas as pd
+
 from backend.marginal_drain import (
+    annualized_sharpe,
+    build_pool_returns,
     greedy_orthogonal_order,
+    marginal_delta_sharpe,
     pairwise_corr_from_pnl,
 )
 
@@ -91,3 +98,112 @@ def test_pairwise_corr_respects_min_overlap():
 def test_pairwise_corr_empty_inputs():
     assert pairwise_corr_from_pnl([]) == {}
     assert pairwise_corr_from_pnl([(1, 0, 1.0)]) == {}  # single alpha → no pairs
+
+
+# ---------------------------------------------------------------------------
+# Combination layer (P1 L2): annualized_sharpe / build_pool_returns / ΔSharpe
+# ---------------------------------------------------------------------------
+
+
+def test_annualized_sharpe_known_value():
+    # 120 vals alternating 1.1/-0.9 → mean 0.1, std(ddof=0) 1.0 → 0.1·√252 = 1.587
+    s = pd.Series([1.1 if i % 2 == 0 else -0.9 for i in range(120)])
+    sr = annualized_sharpe(s)
+    assert math.isclose(sr, 0.1 * math.sqrt(252), rel_tol=1e-6)
+
+
+def test_annualized_sharpe_degenerate():
+    assert annualized_sharpe(None) is None
+    assert annualized_sharpe(pd.Series([1.0] * 100)) is None        # zero vol
+    assert annualized_sharpe(pd.Series([1.0, -1.0] * 5)) is None      # < min_obs(60)
+
+
+def test_build_pool_returns_equal_vol():
+    # alpha1 std 1, alpha2 std 2 → unit-vol normalise → both [1,-1,…] → sum [2,-2,…]
+    rows = []
+    for d in range(8):
+        v = 1.0 if d % 2 == 0 else -1.0
+        rows.append((1, d, v))
+        rows.append((2, d, 2 * v))
+    pool = build_pool_returns(rows, equal_vol=True)
+    assert pool is not None
+    assert list(pool.round(6)) == [2.0 if d % 2 == 0 else -2.0 for d in range(8)]
+
+
+def test_build_pool_returns_drops_partial_member_dates():
+    # alpha1 spans days 0-7, alpha2 only days 4-7 → pool must use ONLY the common
+    # window (4-7), else partial-member dates inject membership-driven vol.
+    rows = []
+    for d in range(8):
+        rows.append((1, d, 1.0 if d % 2 == 0 else -1.0))
+    for d in range(4, 8):
+        rows.append((2, d, 2.0 if d % 2 == 0 else -2.0))
+    pool = build_pool_returns(rows, equal_vol=True)
+    assert pool is not None
+    assert list(pool.index) == [4, 5, 6, 7]          # common window only
+    assert list(pool.round(6)) == [2.0, -2.0, 2.0, -2.0]
+
+
+def test_marginal_delta_sharpe_diversification_positive():
+    # pool mean 0 (Sharpe 0); a positive-mean candidate lifts combined Sharpe → Δ>0.
+    pool = pd.Series([1.0 if i % 2 == 0 else -1.0 for i in range(120)])   # mean 0, Sharpe 0
+    cand = pd.Series([1.0 if i % 2 == 0 else 0.0 for i in range(120)])    # mean 0.5
+    d = marginal_delta_sharpe(pool, cand, equal_vol=True, min_overlap=60)
+    # cand unit-vol = [2,0,…]; combined [3,-1,…] mean 1 std 2 → 0.5·√252
+    assert d == pytest.approx(0.5 * math.sqrt(252), abs=0.01)
+    assert d > 0
+
+
+def test_marginal_delta_sharpe_identical_is_zero():
+    pool = pd.Series([1.0 if i % 3 == 0 else -0.4 for i in range(120)])
+    d = marginal_delta_sharpe(pool, pool.copy(), equal_vol=True, min_overlap=60)
+    # adding a scaled copy of the pool doesn't change Sharpe → Δ≈0
+    assert d == pytest.approx(0.0, abs=1e-6)
+
+
+def test_marginal_delta_sharpe_thin_overlap_none():
+    pool = pd.Series([1.0, -1.0] * 40)             # 80 obs
+    cand = pd.Series([1.0, -1.0] * 10)             # 20 obs overlap < 60
+    assert marginal_delta_sharpe(pool, cand, min_overlap=60) is None
+
+
+# ---------------------------------------------------------------------------
+# greedy_orthogonal_order — value objective (ΔSharpe-driven, breadth-constrained)
+# ---------------------------------------------------------------------------
+
+
+def test_greedy_value_orders_by_delta_sharpe_then_none_last():
+    # value mode: highest ΔSharpe first; negative still beats None; None last.
+    cands = [
+        {"id": 1, "self_corr": 0.1, "score": 0.05},
+        {"id": 2, "self_corr": 0.1, "score": 0.30},
+        {"id": 3, "self_corr": 0.1, "score": None},   # no ΔSharpe (no PnL)
+        {"id": 4, "self_corr": 0.1, "score": -0.20},
+    ]
+    corr = {(1, 2): 0.1, (1, 3): 0.1, (1, 4): 0.1, (2, 3): 0.1, (2, 4): 0.1, (3, 4): 0.1}
+    ordered, blocked = greedy_orthogonal_order(cands, corr, threshold=0.7, objective="value")
+    assert [c["id"] for c in ordered] == [2, 1, 4, 3]
+    assert blocked == []
+
+
+def test_greedy_value_respects_correlation_constraint():
+    # B is a 0.9-duplicate of the higher-ΔSharpe A → blocked once A is selected.
+    cands = [
+        {"id": 1, "self_corr": 0.1, "score": 0.30},
+        {"id": 2, "self_corr": 0.1, "score": 0.20},
+    ]
+    corr = {(1, 2): 0.9}
+    ordered, blocked = greedy_orthogonal_order(cands, corr, threshold=0.7, objective="value")
+    assert [c["id"] for c in ordered] == [1]
+    assert [c["id"] for c in blocked] == [2]
+    assert blocked[0]["max_corr_to_selected"] == 0.9
+
+
+def test_greedy_breadth_mode_unchanged_by_objective_default():
+    # P0-1 default ('breadth') still picks min-max-corr first.
+    cands = [
+        {"id": 1, "self_corr": 0.6, "score": 9.0},
+        {"id": 2, "self_corr": 0.1, "score": 1.0},
+    ]
+    ordered, _ = greedy_orthogonal_order(cands, {(1, 2): 0.1}, threshold=0.7)
+    assert ordered[0]["id"] == 2  # most orthogonal first, NOT highest score

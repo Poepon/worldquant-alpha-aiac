@@ -93,6 +93,14 @@ function maxCorrTag(v) {
   return <Tag color={color}>{v.toFixed(3)}</Tag>
 }
 
+// Marginal ΔSharpe to the submitted-pool combined portfolio (>0 = adding this
+// alpha improves combined Sharpe; <0 = dilutes; — = no local PnL / no base pool).
+function deltaSharpeTag(v) {
+  if (v === null || v === undefined) return <Tag>—</Tag>
+  const color = v > 0.02 ? 'success' : v >= 0 ? 'gold' : 'error'
+  return <Tag color={color}>{v > 0 ? '+' : ''}{v.toFixed(3)}</Tag>
+}
+
 // Self-corr 状态分桶:与 KPI 卡(撞门/近门槛/安全/未算)同口径,客户端过滤复用。
 const SELF_CORR_BUCKETS = {
   breach: { label: '撞门(≥0.7)', test: (v) => v !== null && v !== undefined && v >= 0.7 },
@@ -392,6 +400,18 @@ export default function SubmitBacklogMonitor() {
       width: 130,
       align: 'right',
       render: (v) => maxCorrTag(v),
+    },
+    {
+      title: (
+        <Tooltip title="加入此 alpha 后「已提交池组合」的 Sharpe 增量（等风险加权，OS 窗口）。>0=改善组合、值得提交；<0=稀释。组合层(L2)排序依据。">
+          <Space size={4}>Δ组合Sharpe <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
+      dataIndex: 'delta_sharpe',
+      key: 'delta_sharpe',
+      width: 120,
+      align: 'right',
+      render: (v) => deltaSharpeTag(v),
     },
     {
       title: 'self-corr',
@@ -695,19 +715,38 @@ export default function SubmitBacklogMonitor() {
             type="info"
             showIcon
             style={{ marginBottom: 12 }}
-            message="按此顺序提交，每个都最大化增量正交性"
+            message={
+              drainData?.objective === 'value'
+                ? '质量×广度排序：在不撞相关墙的前提下，先提交最能提升组合 Sharpe 的 alpha'
+                : '纯广度排序：每步挑与已选∪已提交集最不相关的 alpha 先提交'
+            }
             description={
               <Text style={{ fontSize: 12 }}>
-                贪心选择：每步挑「与已选 ∪ 已提交集 最大相关性最低」的 alpha 先提交
-                （Grinold-Kahn：有效广度 ≤ 1/ρ，先提交最正交的才真正增加独立下注）。相关性来自
-                本地 PnL（零 BRAIN 成本）+ 已存 self_corr；阻塞项=与已选集 max-corr ≥ 阈值，提交价值低。
+                {drainData?.objective === 'value' ? (
+                  <>
+                    组合层(L2)：广度作硬约束（与已选集 max-corr &lt; 阈值），<b>Δ组合Sharpe</b> 作目标——
+                    每步挑「加入后最能抬升已提交池组合 Sharpe」的 alpha（基准池 {drainData?.n_base_pool} 个已提交，
+                    等风险加权，OS 窗口）。ΔSharpe 与相关性均来自本地 PnL（零 BRAIN 成本）。
+                  </>
+                ) : (
+                  <>
+                    贪心：每步挑「与已选 ∪ 已提交集 最大相关性最低」的 alpha（Grinold-Kahn：有效广度 ≤ 1/ρ，
+                    先提交最正交的才真正增加独立下注）。相关性来自本地 PnL + 已存 self_corr。
+                  </>
+                )}
+                {' '}阻塞项=与已选集 max-corr ≥ 阈值，是近重复、提交价值低。
                 {drainData?.note ? (<><br /><Text type="warning">{drainData.note}</Text></>) : null}
               </Text>
             }
           />
           <Space wrap style={{ marginBottom: 8 }}>
+            <Tag color={drainData?.objective === 'value' ? 'purple' : 'default'}>
+              {drainData?.objective === 'value'
+                ? `质量×广度 (ΔSharpe · 基准池 ${drainData?.n_base_pool ?? 0})`
+                : '纯广度 (无基准池)'}
+            </Tag>
             <Tag color="cyan">候选 {drainData?.n_candidates ?? 0}</Tag>
-            <Tag color="success">可正交提交 {drainData?.n_selected ?? 0}</Tag>
+            <Tag color="success">可提交 {drainData?.n_selected ?? 0}</Tag>
             <Tag color="error">相关性阻塞 {drainData?.n_blocked ?? 0}</Tag>
             <Tag>有本地 PnL {drainData?.n_with_pnl ?? 0}/{drainData?.n_candidates ?? 0}</Tag>
             <Popconfirm

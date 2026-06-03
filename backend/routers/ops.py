@@ -23,7 +23,7 @@ disable auth — production MUST set it.
 from __future__ import annotations
 
 import os
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
@@ -4661,6 +4661,10 @@ class DrainOrderItem(BaseModel):
     sharpe: Optional[float] = None
     margin_bps: Optional[float] = None
     composite: Optional[float] = None
+    # Marginal ΔSharpe to the submitted-pool combined portfolio (P1 L2). >0 =
+    # adding this alpha improves the combined Sharpe (worth submitting for
+    # breadth); <0 = dilutes; None = no local PnL / no base pool.
+    delta_sharpe: Optional[float] = None
     verdict: Optional[str] = None
     pnl_covered: bool = False                   # had local PnL for among-set corr
 
@@ -4668,8 +4672,10 @@ class DrainOrderItem(BaseModel):
 class DrainOrderOut(BaseModel):
     region: Optional[str] = None
     threshold: float
+    objective: str                              # "value" (ΔSharpe-driven) | "breadth"
     n_candidates: int
     n_with_pnl: int
+    n_base_pool: int                            # # submitted alphas in the base portfolio
     n_selected: int
     n_blocked: int
     selected: List[DrainOrderItem]
@@ -4703,6 +4709,7 @@ async def submit_backlog_drain_order(
     from sqlalchemy import text as _text, bindparam
     from backend.marginal_drain import (
         pairwise_corr_from_pnl, greedy_orthogonal_order,
+        build_pool_returns, marginal_delta_sharpe,
     )
 
     region = (region or "").strip() or None
@@ -4743,16 +4750,59 @@ async def submit_backlog_drain_order(
 
     corr = pairwise_corr_from_pnl(pnl_rows)
 
+    # --- Combination layer (P1 L2): base = submitted-pool combined daily returns,
+    # built from the LOCAL alpha_pnl (bit-identical to the OS cache + fresher). Per
+    # candidate, ΔSharpe = Sharpe(pool+candidate) − Sharpe(pool) on the shared OS
+    # window — a quality×breadth signal that drives the order when available.
+    #
+    # SINGLE-REGION pool only: BRAIN's binding self-corr gate is same-region, so a
+    # cross-region pool would mis-measure ΔSharpe (review fix). Effective region =
+    # explicit param, else the candidates' unique region when homogeneous;
+    # multi-region without a param → no base pool → breadth-only order. ---
+    _cand_regions = {r[2] for r in rows if r[2]}
+    eff_region = region or (
+        next(iter(_cand_regions)) if len(_cand_regions) == 1 else None
+    )
+    base_returns = None
+    n_base_pool = 0
+    if eff_region:
+        pool_res = (await db.execute(_text(
+            "SELECT ap.alpha_id, ap.trade_date, ap.pnl FROM alpha_pnl ap "
+            "JOIN alphas a ON ap.alpha_id = a.id "
+            "WHERE a.date_submitted IS NOT NULL AND ap.pnl IS NOT NULL "
+            "AND a.region = :pregion"
+        ), {"pregion": eff_region})).all()
+        pool_rows = [(int(p[0]), p[1], float(p[2])) for p in pool_res if p[2] is not None]
+        n_base_pool = len({p[0] for p in pool_rows})
+        base_returns = build_pool_returns(pool_rows)  # equal-vol pool series or None
+    use_value = base_returns is not None
+
+    # Per-candidate daily series from the already-pulled pnl_rows (keyed by alpha_pk).
+    cand_series: Dict[int, Any] = {}
+    if use_value and pnl_rows:
+        import pandas as _pd
+        _cdf = _pd.DataFrame(pnl_rows, columns=["aid", "date", "pnl"])
+        for _aid, _g in _cdf.groupby("aid"):
+            cand_series[int(_aid)] = _g.set_index("date")["pnl"]
+
     candidates: List[Dict[str, Any]] = []
+    delta_by_id: Dict[int, Optional[float]] = {}
     for r in rows:
         aid = int(r[0])
         sharpe = float(r[3]) if r[3] is not None else None
         composite = float(r[7]) if r[7] is not None else None
+        delta_sharpe = (
+            marginal_delta_sharpe(base_returns, cand_series.get(aid))
+            if use_value else None
+        )
+        delta_by_id[aid] = delta_sharpe
         candidates.append({
             "id": aid,
             "self_corr": float(r[5]) if r[5] is not None else None,
-            # Tiebreak score: marginal composite if audited, else raw sharpe.
-            "score": composite if composite is not None else (sharpe or 0.0),
+            # value mode: score = ΔSharpe (None ok — greedy ranks those last).
+            # breadth fallback: composite if audited, else raw sharpe.
+            "score": delta_sharpe if use_value
+                     else (composite if composite is not None else (sharpe or 0.0)),
             "_brain_id": r[1],
             "_region": r[2],
             "_sharpe": sharpe,
@@ -4762,8 +4812,9 @@ async def submit_backlog_drain_order(
             "_pnl_covered": aid in pnl_ids,
         })
 
+    objective = "value" if use_value else "breadth"
     ordered, blocked = greedy_orthogonal_order(
-        candidates, corr, threshold=float(threshold)
+        candidates, corr, threshold=float(threshold), objective=objective,
     )
 
     def _item(c: Dict[str, Any]) -> DrainOrderItem:
@@ -4777,22 +4828,35 @@ async def submit_backlog_drain_order(
             sharpe=c.get("_sharpe"),
             margin_bps=c.get("_margin_bps"),
             composite=c.get("_composite"),
+            delta_sharpe=delta_by_id.get(int(c["id"])),
             verdict=c.get("_verdict"),
             pnl_covered=bool(c.get("_pnl_covered")),
         )
 
     n_cand = len(candidates)
     n_pnl = len(pnl_ids)
-    note = None
+    _notes = []
+    if not use_value:
+        if eff_region is None:
+            _notes.append(
+                "候选跨多个 region 且未指定 region → 退化为纯广度排序;指定单一 region 启用组合层 ΔSharpe。"
+            )
+        else:
+            _notes.append(
+                f"region={eff_region} 无已提交池本地 PnL → 纯广度排序;先同步该区已提交 alpha 的 PnL 可启用组合层。"
+            )
     if n_cand and n_pnl < n_cand:
-        note = (
-            f"{n_cand - n_pnl}/{n_cand} 候选缺本地 PnL — 它们的「与已选集相关性」"
-            f"无法度量(按 0 处理),排序退化为 self_corr 优先。刷新 alpha_pnl 可提升精度。"
+        _notes.append(
+            f"{n_cand - n_pnl}/{n_cand} 候选缺本地 PnL — 其 ΔSharpe 与「与已选集相关性」"
+            f"均无法度量,组合层排序里被排在可度量者之后。刷新 alpha_pnl 可提升覆盖。"
         )
+    note = "；".join(_notes) or None
 
     return DrainOrderOut(
         region=region,
         threshold=float(threshold),
+        objective=objective,
+        n_base_pool=n_base_pool,
         n_candidates=n_cand,
         n_with_pnl=n_pnl,
         n_selected=len(ordered),
@@ -4838,6 +4902,125 @@ async def submit_backlog_scan(
             f"已入队 {result.get('enqueued', 0)} 个边际审计任务(worker 后台逐个调 BRAIN);"
             f"轮询本页看 pending 递减"
         ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Dataset coverage / breadth diagnostic (P1, 2026-06-03)
+#
+# Makes the available-vs-mined catalog gap VISIBLE — which orthogonal data
+# surfaces the account can mine but isn't yet. Surfaces NEWLY-arrived datasets
+# (a fresh BRAIN-catalog row, e.g. earnings4: 375 fields synced 2026-06-02, an
+# entirely new 'earnings' category) and UNTAPPED ones (in rotation, has active
+# fields, 0 alphas) so the operator can FORCE-mine them immediately via a MANUAL
+# FLAT session rather than wait days for the bandit to organically discover them.
+# Per the methodology survey, breadth (new data sources → lower ρ) is the lever.
+# ---------------------------------------------------------------------------
+
+
+class DatasetCoverageItem(BaseModel):
+    dataset_id: str
+    category: Optional[str] = None
+    region: Optional[str] = None
+    mining_weight: Optional[float] = None
+    field_count: Optional[int] = None
+    active_field_count: int = 0
+    n_alphas: int = 0
+    cell_created_at: Optional[datetime] = None
+    in_rotation: bool = False        # ≥1 active datafield cell at (universe,delay)
+    is_new: bool = False             # cell first synced within new_within_days
+    is_untapped: bool = False        # in rotation + has active fields + 0 alphas
+
+
+class DatasetCoverageOut(BaseModel):
+    region: Optional[str] = None
+    universe: str
+    delay: int
+    n_available: int
+    n_in_rotation: int
+    n_mined: int                     # ≥1 alpha produced
+    n_untapped: int                  # in rotation, has fields, 0 alphas
+    n_new: int                       # cell synced within new_within_days
+    items: List[DatasetCoverageItem]
+
+
+@router.get("/datasets/coverage", response_model=DatasetCoverageOut)
+async def datasets_coverage(
+    region: Optional[str] = "USA",
+    universe: str = "TOP3000",
+    delay: int = 1,
+    new_within_days: int = Query(3, ge=1, le=30),
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> DatasetCoverageOut:
+    """Per-dataset breadth coverage at a (region, universe, delay) cell.
+
+    For each catalog dataset: its mining_weight + total/active field counts +
+    alpha-production count + cell age, plus three flags — ``in_rotation`` (has
+    an active field cell so the FLAT producer can actually mine it),
+    ``is_untapped`` (in rotation, has fields, but 0 alphas — an orthogonal
+    surface the picker hasn't visited), and ``is_new`` (cell first synced
+    recently — a fresh arrival to force-mine). Drives the DataManagement
+    「数据覆盖」panel + per-row 强制挖掘 (which launches a MANUAL FLAT session).
+    """
+    from sqlalchemy import text as _text
+
+    region = (region or "").strip() or None
+    _where = "TRUE"
+    _params: Dict[str, Any] = {"universe": universe, "delay": int(delay)}
+    if region:
+        _where = "d.region = :region"
+        _params["region"] = region
+
+    rows = (await db.execute(_text(
+        f"""
+        SELECT d.dataset_id, d.category, d.region,
+               dcs.mining_weight, dcs.field_count, dcs.created_at AS cell_created_at,
+               (SELECT COUNT(*) FROM datafield_cell_stats dfcs
+                  JOIN datafields f ON dfcs.datafield_ref = f.id
+                  WHERE f.dataset_id = d.id AND dfcs.universe = :universe
+                    AND dfcs.delay = :delay AND dfcs.is_active) AS active_fields,
+               (SELECT COUNT(*) FROM alphas a WHERE a.dataset_id = d.dataset_id) AS n_alphas
+        FROM datasets d
+        LEFT JOIN dataset_cell_stats dcs
+          ON dcs.dataset_ref = d.id AND dcs.universe = :universe AND dcs.delay = :delay
+        WHERE {_where}
+        ORDER BY active_fields DESC NULLS LAST, d.dataset_id
+        """
+    ), _params)).all()
+
+    cutoff = datetime.utcnow() - timedelta(days=int(new_within_days))
+    items: List[DatasetCoverageItem] = []
+    for r in rows:
+        active_fields = int(r[6] or 0)
+        n_alphas = int(r[7] or 0)
+        cell_created = r[5]
+        in_rotation = active_fields > 0
+        is_new = cell_created is not None and cell_created > cutoff
+        items.append(DatasetCoverageItem(
+            dataset_id=r[0],
+            category=r[1],
+            region=r[2],
+            mining_weight=float(r[3]) if r[3] is not None else None,
+            field_count=int(r[4]) if r[4] is not None else None,
+            active_field_count=active_fields,
+            n_alphas=n_alphas,
+            cell_created_at=cell_created,
+            in_rotation=in_rotation,
+            is_new=is_new,
+            is_untapped=in_rotation and n_alphas == 0,
+        ))
+
+    return DatasetCoverageOut(
+        region=region,
+        universe=universe,
+        delay=int(delay),
+        n_available=len(items),
+        n_in_rotation=sum(1 for it in items if it.in_rotation),
+        n_mined=sum(1 for it in items if it.n_alphas > 0),
+        n_untapped=sum(1 for it in items if it.is_untapped),
+        n_new=sum(1 for it in items if it.is_new),
+        items=items,
     )
 
 

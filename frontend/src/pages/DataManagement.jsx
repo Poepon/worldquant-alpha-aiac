@@ -24,7 +24,9 @@ import {
   SearchOutlined,
   FunctionOutlined,
   UnorderedListOutlined,
-  CheckCircleOutlined
+  CheckCircleOutlined,
+  RadarChartOutlined,
+  ThunderboltOutlined,
 } from '@ant-design/icons'
 import api from '../services/api'
 
@@ -626,6 +628,169 @@ const DatasetsTab = () => {
 }
 
 // Main Page Component
+// ---------------------------------------------------------------------------
+// CoverageTab (P1, 2026-06-03) — dataset breadth coverage + force-mine.
+// Surfaces NEW (freshly synced) and UNTAPPED (in rotation, has fields, 0 alphas)
+// orthogonal data surfaces so the operator can force-mine them immediately via
+// a MANUAL FLAT session instead of waiting for the bandit to discover them.
+// ---------------------------------------------------------------------------
+const CoverageTab = () => {
+  const qc = useQueryClient()
+  const [region, setRegion] = useState('USA')
+  const [universe, setUniverse] = useState('TOP3000')
+  const [delay, setDelay] = useState(1)
+
+  const { data, isLoading, isFetching, refetch } = useQuery({
+    queryKey: ['ops/datasets-coverage', region, universe, delay],
+    queryFn: () => api.getOpsDatasetsCoverage({ region, universe, delay }),
+    refetchInterval: 60_000,
+  })
+
+  const forceMine = useMutation({
+    mutationFn: (datasetId) =>
+      api.startFlatSession({ region, universe, datasets: [datasetId], delay }),
+    onSuccess: (_res, datasetId) => {
+      message.success(`已启动 FLAT 会话强制挖掘 ${datasetId}（${region}/${universe}/delay${delay}）`, 6)
+      qc.invalidateQueries({ queryKey: ['ops/datasets-coverage'] })
+    },
+    onError: (e) => {
+      const detail = e?.response?.data?.detail || e?.message || e
+      message.error(`强制挖掘启动失败：${detail}（需 ENABLE_FLAT_CONTINUOUS 开启 + worker 在线）`)
+    },
+  })
+
+  const items = data?.items || []
+  const summary = [
+    { label: '可用数据集', value: data?.n_available ?? '—', color: '#00d4ff' },
+    { label: '在轮转中', value: data?.n_in_rotation ?? '—', color: '#00ff88' },
+    { label: '已产出 alpha', value: data?.n_mined ?? '—', color: '#52c41a' },
+    { label: '未开采(有面0产出)', value: data?.n_untapped ?? '—', color: '#faad14' },
+    { label: '新到(近3天)', value: data?.n_new ?? '—', color: '#9c88ff' },
+  ]
+
+  const columns = [
+    {
+      title: '数据集',
+      dataIndex: 'dataset_id',
+      key: 'dataset_id',
+      render: (v, r) => (
+        <Space size={4}>
+          <Text strong>{v}</Text>
+          {r.is_new && <Tag color="purple">新到</Tag>}
+          {r.is_untapped && <Tag color="gold">未开采</Tag>}
+          {!r.in_rotation && <Tag>未入轮转</Tag>}
+        </Space>
+      ),
+    },
+    { title: '类别', dataIndex: 'category', key: 'category', width: 110, render: (v) => <Tag color="cyan">{v}</Tag> },
+    {
+      title: '活跃字段',
+      dataIndex: 'active_field_count',
+      key: 'active_field_count',
+      width: 100,
+      align: 'right',
+      sorter: (a, b) => a.active_field_count - b.active_field_count,
+      render: (v, r) => (
+        <Tooltip title={`总字段 ${r.field_count ?? '—'} / 活跃 ${v}（可挖面）`}>
+          <Text strong={v > 100}>{v}</Text>
+        </Tooltip>
+      ),
+    },
+    {
+      title: 'alpha 产出',
+      dataIndex: 'n_alphas',
+      key: 'n_alphas',
+      width: 100,
+      align: 'right',
+      sorter: (a, b) => a.n_alphas - b.n_alphas,
+      render: (v) => (v > 0 ? v : <Text type="warning">0</Text>),
+    },
+    {
+      title: 'mining_weight',
+      dataIndex: 'mining_weight',
+      key: 'mining_weight',
+      width: 120,
+      align: 'right',
+      render: (v) => (v != null ? v.toFixed(4) : '—'),
+    },
+    {
+      title: '首次同步',
+      dataIndex: 'cell_created_at',
+      key: 'cell_created_at',
+      width: 130,
+      render: (v) => (v ? String(v).replace('T', ' ').slice(0, 16) : '—'),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 120,
+      render: (_, r) => (
+        <Tooltip
+          title={
+            r.in_rotation
+              ? '立即启动 MANUAL FLAT 会话挖此数据集（绕开加权选择器，不等 bandit 发现）'
+              : '该数据集在此 cell 无活跃字段，无法挖掘（需先同步/激活字段）'
+          }
+        >
+          <Button
+            size="small"
+            type={r.is_untapped || r.is_new ? 'primary' : 'default'}
+            icon={<ThunderboltOutlined />}
+            disabled={!r.in_rotation}
+            loading={forceMine.isPending && forceMine.variables === r.dataset_id}
+            onClick={() => forceMine.mutate(r.dataset_id)}
+          >
+            强制挖掘
+          </Button>
+        </Tooltip>
+      ),
+    },
+  ]
+
+  return (
+    <div style={{ paddingTop: 16 }}>
+      <Space style={{ marginBottom: 16 }} wrap>
+        <Text type="secondary">Region:</Text>
+        <Select value={region} onChange={(v) => { setRegion(v); setUniverse(REGION_UNIVERSE_MAP[v] || 'TOP3000') }} style={{ width: 100 }}
+          options={Object.keys(REGION_UNIVERSE_MAP).map((r) => ({ value: r, label: r }))} />
+        <Text type="secondary">Universe:</Text>
+        <Input value={universe} onChange={(e) => setUniverse(e.target.value)} style={{ width: 120 }} />
+        <Text type="secondary">Delay:</Text>
+        <Select value={delay} onChange={setDelay} style={{ width: 90 }}
+          options={[{ value: 1, label: '1' }, { value: 0, label: '0 (原生)' }]} />
+        <Button icon={<SyncOutlined />} loading={isFetching} onClick={() => refetch()}>刷新</Button>
+      </Space>
+
+      <Paragraph type="secondary" style={{ fontSize: 12 }}>
+        breadth 诊断:哪些可挖的正交数据面账号有、但还没挖。<b>新到</b>=BRAIN catalog 近 3 天新增的 cell;
+        <b>未开采</b>=在轮转、有活跃字段、却 0 产出。对这些点「强制挖掘」立即跑一轮 MANUAL FLAT,
+        不必等 bandit 几天后才组织性发现（per 业界调查:新数据源才真降 ρ、增有效 breadth）。
+      </Paragraph>
+
+      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+        {summary.map((s) => (
+          <Col key={s.label} xs={12} sm={8} md={4}>
+            <Card className="glass-card" size="small">
+              <div style={{ fontSize: 12, color: '#888' }}>{s.label}</div>
+              <div style={{ fontSize: 24, fontWeight: 600, color: s.color }}>{s.value}</div>
+            </Card>
+          </Col>
+        ))}
+      </Row>
+
+      <Table
+        rowKey="dataset_id"
+        size="small"
+        loading={isLoading}
+        columns={columns}
+        dataSource={items}
+        pagination={false}
+        rowClassName={(r) => (r.is_new || r.is_untapped ? 'breadth-highlight-row' : '')}
+      />
+    </div>
+  )
+}
+
 export default function DataManagement() {
   const items = [
     {
@@ -637,6 +802,16 @@ export default function DataManagement() {
         </span>
       ),
       children: <DatasetsTab />,
+    },
+    {
+      key: 'coverage',
+      label: (
+        <span>
+          <RadarChartOutlined />
+          数据覆盖 (Coverage)
+        </span>
+      ),
+      children: <CoverageTab />,
     },
     {
       key: 'operators',

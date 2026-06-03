@@ -24,6 +24,7 @@ self_corr + marginal score and feeds them in.
 """
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, Optional, Tuple
 
 try:  # pandas is a hard dep elsewhere; guard only so import never crashes tooling
@@ -36,6 +37,9 @@ except Exception:  # pragma: no cover
 # mirrors CorrelationService.MIN_OVERLAP_DAYS so the among-set corr is on the
 # same footing as the stored self_corr (vs the submitted pool).
 MIN_OVERLAP_DAYS = 60
+
+# Trading days/yr for Sharpe annualisation (repo convention — qlib_prescreen.py:294).
+_TRADING_DAYS = 252
 
 
 def _key(a: int, b: int) -> Tuple[int, int]:
@@ -76,11 +80,116 @@ def pairwise_corr_from_pnl(
     return out
 
 
+# ---------------------------------------------------------------------------
+# Combination layer (P1 L2, 2026-06-03) — marginal ΔSharpe to the submitted pool.
+#
+# The industry survey (docs/industry_alpha_optimization_survey_2026-06-03.md, L2)
+# found the platform has NO combination layer — it gates/submits single alphas.
+# AlphaForge's entire gain is in dynamically combining; the offline analogue is:
+# does adding this candidate to the already-submitted portfolio IMPROVE the
+# combined Sharpe? That ΔSharpe is a quality×breadth signal (a low-corr,
+# positive-return alpha lifts combined Sharpe even if its standalone Sharpe is
+# modest — exactly Grinold-Kahn's breadth point). Zero BRAIN cost: both the pool
+# and the candidates come from the local alpha_pnl table.
+#
+# Weighting: equal-VOLATILITY (each member normalised to unit daily-vol before
+# summing) so book-size differences don't dominate — equal-risk = the right
+# breadth framing. NOTE: PnL is the OS-backtest window (~2019-2023), so ΔSharpe
+# is an OS-window estimate (pool + candidate share the same window → self-
+# consistent), NOT a live OOS number.
+# ---------------------------------------------------------------------------
+
+
+def annualized_sharpe(
+    daily_returns: Optional["pd.Series"], *, min_obs: int = MIN_OVERLAP_DAYS
+) -> Optional[float]:
+    """Annualised Sharpe of a daily-return series (mean/std(ddof=0)·√252 — the
+    repo convention, qlib_prescreen.py:294). None when < ``min_obs`` obs or
+    zero/degenerate volatility."""
+    if pd is None or daily_returns is None:
+        return None
+    s = daily_returns.dropna()
+    if len(s) < min_obs:
+        return None
+    sd = float(s.std(ddof=0))
+    if sd <= 0:
+        return None
+    return float(s.mean() / sd * math.sqrt(_TRADING_DAYS))
+
+
+def build_pool_returns(
+    rows: List[Tuple[int, Any, float]], *, equal_vol: bool = True
+) -> Optional["pd.Series"]:
+    """Combine alpha_pnl daily-PnL rows ``[(alpha_pk, trade_date, daily_pnl)]``
+    into ONE pool daily-return series (the submitted-pool base portfolio).
+
+    ``equal_vol=True`` normalises each member to unit daily-vol before summing
+    (equal-risk — removes book-size artifacts); ``False`` sums raw PnL
+    (equal-book). Returns None if no usable member.
+    """
+    if pd is None or not rows:
+        return None
+    df = pd.DataFrame(rows, columns=["aid", "date", "pnl"])
+    wide = df.pivot_table(index="date", columns="aid", values="pnl", aggfunc="last")
+    if wide.shape[1] < 1:
+        return None
+    # Restrict to the common date window (all members present) BEFORE summing, so
+    # the pool's volatility reflects market behaviour — not membership changes.
+    # Without this, partial-member dates inject heteroskedasticity into every
+    # ΔSharpe once submitted alphas have non-identical PnL windows (review fix).
+    wide = wide.dropna(how="any")
+    if wide.empty:
+        return None
+    if equal_vol:
+        stds = wide.std(ddof=0)
+        cols = [c for c in wide.columns if stds.get(c, 0.0) and float(stds[c]) > 0]
+        if not cols:
+            return None
+        wide = wide[cols] / stds[cols]
+    pool = wide.sum(axis=1)
+    return pool if not pool.empty else None
+
+
+def marginal_delta_sharpe(
+    pool_returns: Optional["pd.Series"],
+    candidate_daily: Optional["pd.Series"],
+    *,
+    equal_vol: bool = True,
+    min_overlap: int = MIN_OVERLAP_DAYS,
+) -> Optional[float]:
+    """Sharpe(pool + candidate) − Sharpe(pool), on overlapping dates.
+
+    >0 → the candidate IMPROVES the combined portfolio (worth submitting for
+    breadth); <0 → it dilutes. ``equal_vol`` normalises the candidate to unit
+    daily-vol before adding (matches the pool's equal-risk members). None on thin
+    overlap / degenerate vol.
+    """
+    if pd is None or pool_returns is None or candidate_daily is None:
+        return None
+    cand = candidate_daily.dropna()
+    if equal_vol:
+        csd = float(cand.std(ddof=0)) if len(cand) else 0.0
+        if csd <= 0:
+            return None
+        cand = cand / csd
+    aligned = pd.concat(
+        [pool_returns.rename("pool"), cand.rename("cand")], axis=1
+    ).dropna()
+    if len(aligned) < min_overlap:
+        return None
+    base = annualized_sharpe(aligned["pool"], min_obs=min_overlap)
+    combined = annualized_sharpe(aligned["pool"] + aligned["cand"], min_obs=min_overlap)
+    if base is None or combined is None:
+        return None
+    return round(combined - base, 4)
+
+
 def greedy_orthogonal_order(
     candidates: List[Dict[str, Any]],
     pairwise_corr: Dict[Tuple[int, int], float],
     *,
     threshold: float = 0.7,
+    objective: str = "breadth",
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Greedy farthest-point ordering that maximises incremental breadth.
 
@@ -100,7 +209,18 @@ def greedy_orthogonal_order(
         (their most-orthogonal achievable max-corr already ≥ threshold),
         annotated with ``max_corr_to_selected`` at stop time.
 
-    Determinism: ties on max-corr broken by higher ``score`` then lower ``id``.
+    ``objective``:
+      - ``"breadth"`` (default, P0-1): pick the candidate MINIMISING max-corr to
+        the selected set (pure farthest-point); ``score`` is only a tiebreak.
+      - ``"value"``: breadth becomes a HARD CONSTRAINT — among candidates still
+        below ``threshold``, pick the HIGHEST ``score`` (= marginal ΔSharpe), so
+        the order submits the most portfolio-improving alpha that still adds
+        breadth (quality×breadth). Candidates with no ``score`` (no PnL → ΔSharpe
+        unmeasurable AND among-set corr unmeasurable) are ordered LAST by breadth
+        — which also fixes a breadth-mode weakness where they falsely rank first
+        on max_corr=0.
+
+    Determinism: explicit id tiebreak throughout.
     """
     def corr(a: int, b: int) -> float:
         return pairwise_corr.get(_key(a, b), 0.0)
@@ -120,16 +240,28 @@ def greedy_orthogonal_order(
         return m
 
     while remaining:
-        # Pick the candidate minimising max-corr-to-selected; tie-break by
-        # higher score then lower id (deterministic).
-        scored = [
-            (max_corr_to_selected(c), -float(c.get("score") or 0.0), int(c["id"]), c)
-            for c in remaining
-        ]
-        scored.sort(key=lambda t: (t[0], t[1], t[2]))
-        best_mc, _, _, best = scored[0]
-        if best_mc >= threshold:
-            break  # everything left is correlation-blocked
+        metrics = [(c, max_corr_to_selected(c)) for c in remaining]
+        if objective == "value":
+            # Breadth as a hard constraint; ΔSharpe (score) as the objective.
+            admissible = [(c, mc) for c, mc in metrics if mc < threshold]
+            if not admissible:
+                break  # everything left is correlation-blocked
+            def _vkey(t):
+                c, mc = t
+                sv = c.get("score")
+                has = sv is not None
+                # has-value first (by ΔSharpe desc), then no-value by breadth.
+                return (0 if has else 1, -(float(sv) if has else 0.0), mc, int(c["id"]))
+            admissible.sort(key=_vkey)
+            best, best_mc = admissible[0]
+        else:
+            # breadth: minimise max-corr; tiebreak higher score then lower id.
+            metrics.sort(
+                key=lambda t: (t[1], -float(t[0].get("score") or 0.0), int(t[0]["id"]))
+            )
+            best, best_mc = metrics[0]
+            if best_mc >= threshold:
+                break  # everything left is correlation-blocked
         best["rank"] = len(ordered) + 1
         best["max_corr_to_selected"] = round(best_mc, 4)
         ordered.append(best)

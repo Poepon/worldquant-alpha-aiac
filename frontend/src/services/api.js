@@ -771,6 +771,16 @@ const api = {
     return data
   },
 
+  // Dataset breadth coverage (P1, 2026-06-03) — per-dataset available/in-rotation/
+  // untapped/new at a (region,universe,delay) cell. Surfaces fresh & starved
+  // orthogonal data surfaces (e.g. a new 375-field dataset) to force-mine.
+  getOpsDatasetsCoverage: async ({ region = 'USA', universe = 'TOP3000', delay = 1, newWithinDays = 3 } = {}) => {
+    const params = { universe, delay, new_within_days: newWithinDays }
+    if (region) params.region = region
+    const { data } = await client.get('/ops/datasets/coverage', { params })
+    return data
+  },
+
   // Optimization closure Stage A (2026-05-29) — cycles + 14d conversion rate.
   // Phase 16-A telemetry for the GO/STOP gate. conversion_rate_14d > 20% →
   // Stage B; < 10% → STOP. ENABLE_OPTIMIZATION_LOOP=False → empty cycles.
