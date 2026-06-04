@@ -784,10 +784,11 @@ const api = {
   // Returns { enabled, mode, tally_24h, count, items[] } where each item carries
   // outcome + gate_results.{gates,signals} (incl. competition delta_score). Use
   // outcome='would_submit' to review the shadow list before flipping to live.
-  getOpsAutoSubmitAudit: async ({ outcome = null, region = null, limit = 100 } = {}) => {
+  getOpsAutoSubmitAudit: async ({ outcome = null, region = null, limit = 100, latestOnly = false } = {}) => {
     const params = { limit }
     if (outcome) params.outcome = outcome
     if (region) params.region = region
+    if (latestOnly) params.latest_only = true
     const { data } = await client.get('/ops/auto-submit/audit', { params })
     return data
   },

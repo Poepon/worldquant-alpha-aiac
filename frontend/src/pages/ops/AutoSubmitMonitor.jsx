@@ -100,6 +100,11 @@ export default function AutoSubmitMonitor() {
   const [outcome, setOutcome] = useState('would_submit')
   const [region, setRegion] = useState(null)
 
+  // would_submit / skipped are per-run snapshots (each 6h beat re-writes a row
+  // per candidate) → pin to the latest beat firing so the same alpha isn't shown
+  // once per historical run. submitted/rejected are real events → show history.
+  const snapshotView = outcome === 'would_submit' || outcome === 'skipped'
+
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['ops/auto-submit/audit', outcome, region],
     queryFn: () =>
@@ -107,6 +112,7 @@ export default function AutoSubmitMonitor() {
         outcome: outcome === 'all' ? null : outcome,
         region,
         limit: 200,
+        latestOnly: snapshotView,
       }),
     refetchInterval: 30_000,
     staleTime: 10_000,
@@ -333,6 +339,11 @@ export default function AutoSubmitMonitor() {
       <Space style={{ marginBottom: 12 }} wrap>
         <Text type="secondary">查看:</Text>
         <Segmented value={outcome} onChange={setOutcome} options={OUTCOME_OPTIONS} />
+        {snapshotView && (
+          <Tooltip title="只显示最近一次 beat 的快照(每 6h 一次 beat 会给每个候选重写一行,否则同一 alpha 会按历史 run 重复出现)。看「全部」查跨 run 历史。">
+            <Tag color="blue">最近一次 beat 快照</Tag>
+          </Tooltip>
+        )}
         {outcome === 'skipped' && skipDist.length > 0 && (
           <Space wrap>
             <Text type="secondary" style={{ fontSize: 12 }}>各门挡下:</Text>

@@ -4988,6 +4988,7 @@ async def auto_submit_audit_recent(
     outcome: Optional[str] = None,
     region: Optional[str] = None,
     beat_run_id: Optional[str] = None,
+    latest_only: bool = False,
     _token: str = Depends(_require_ops_token),
     db: AsyncSession = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -4997,6 +4998,12 @@ async def auto_submit_audit_recent(
     rows here for N days and confirm none are garbage (each row carries the raw
     signal values + per-gate pass/fail in ``gate_results``). ``outcome`` filters
     to would_submit / submitted / rejected / skipped / error.
+
+    ``latest_only=True`` restricts to the MOST RECENT beat firing's snapshot —
+    each beat re-evaluates the whole backlog and writes a fresh row per candidate,
+    so without this the would_submit/skipped views accumulate one duplicate row
+    per alpha per 6h run. Use it for the snapshot views (would_submit/skipped);
+    leave it off for submitted/rejected history.
     """
     from sqlalchemy import select, desc, func as _func
     from backend.models import AutoSubmitAudit
@@ -5007,6 +5014,13 @@ async def auto_submit_audit_recent(
         q = q.where(AutoSubmitAudit.outcome == outcome)
     if region:
         q = q.where(AutoSubmitAudit.region == region)
+    # latest_only: resolve the most recent beat_run_id (a firing touches all
+    # regions, so filter by region first when given) and pin the snapshot to it.
+    if latest_only and not beat_run_id:
+        _lq = select(AutoSubmitAudit.beat_run_id).order_by(desc(AutoSubmitAudit.created_at)).limit(1)
+        if region:
+            _lq = _lq.where(AutoSubmitAudit.region == region)
+        beat_run_id = (await db.execute(_lq)).scalars().first()
     if beat_run_id:
         q = q.where(AutoSubmitAudit.beat_run_id == beat_run_id)
     rows = (await db.execute(q.limit(int(limit)))).scalars().all()
@@ -5037,6 +5051,7 @@ async def auto_submit_audit_recent(
         "mode": getattr(settings, "AUTO_SUBMIT_MODE", "shadow"),
         "enabled": bool(getattr(settings, "ENABLE_AUTO_SUBMIT", False)),
         "tally_24h": {o: int(c) for o, c in tally_rows},
+        "beat_run_id": beat_run_id,  # the run this snapshot is pinned to (latest_only)
         "count": len(items),
         "items": items,
     }
