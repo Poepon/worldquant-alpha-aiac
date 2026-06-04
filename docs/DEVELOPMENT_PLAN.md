@@ -73,7 +73,13 @@
 - **下一步动作**：起 AUTO delay-0 session，数据验证「严门是否压低产出」而非假设。注意记忆载 delay-0 曾撞长生命周期 client-rot sim-hang（已修 `d650222`/`36bc39b`，需 worker 重启加载）。
 - **依赖**：worker 重启；一轮 session soak。
 - **来源**：`46cb31c`（端到端接线）+ `b8a956`（delay-aware 阈值）；`config.py:1036`。
-- **战略**：✅ 支持（delay-0 是 USA catalog 内的正交新面，符合 breadth 基调；属窄轴 breadth）。
+- **战略**：~~✅ 支持~~ → **❌ 实证弱轴(2026-06-04 数据推翻)**。
+- **更新(2026-06-04 — 起一轮后实证 delay-0 不产 edge,已停)**：起了 task 3937(USA/TOP3000/AUTO/delay=0),端到端跑通(RAG→gen→sim→persist,LLM 全 coding-plan,sim 没挂 = `d650222` 扛住)。但**拉历史发现 delay-0 早已重度尝试**:19 任务 / **230 alpha**,与 delay-1 同口径对比:
+  - delay-0:avg Sharpe **−0.155** / 中位 **−0.14** / p90 0.35 / max 1.87 / ≥1.5 仅 **2(0.87%)** / **can_submit 0(0%)**。
+  - delay-1:avg **+0.48** / 中位 **+0.24** / p90 1.63 / max 16.2 / ≥1.5 **328(15%)** / can_submit 19。
+  - → 「严门压产能」假设**被推翻**:delay-0 是**根本没信号**(负中位),即便用 delay-1 的 1.5 门也只 0.87%。**已停 3937**(230 alpha 已是 soak 结论;再跑只烧配额)。
+  - **副产 bug(已修)**:停 3937 时发现 `_run_flat_iteration` 外层注入 `db` 的只读 setup 事务**没在 pipeline await 前关闭**→ idle-in-transaction 跨整个 session 持快照/行锁 25-34min,堵死优雅 STOP 端点 + worker 自身 persist;应急靠 `pg_terminate_backend` 才停掉。**已修**:pipeline await 前插 `await db.rollback()`(setup 只读不丢写;闭包用 producer session 的 `task_p` 不碰外层 `task`;finalize 本就 `db.refresh` 重取)。验证 82 FLAT/pipeline 测试 + 回归 `--all` 0 漂移。详见 [[reference_flat_idle_in_txn_lock_leak_2026_06_04]]。
+- **NO-GO 化**:delay-0 除非先证「delay-0 专属 generation 调优能拉起信号」(depth 投入,策略默认 NO-GO),否则不再作 breadth 轴跑。
 
 ### X3. USA catalog 新到 / 未开采数据集持续监控（coverage tab 运营节奏）
 
@@ -82,10 +88,11 @@
 - **依赖**：无（工具已 ship）。
 - **来源**：`backend/routers/ops.py:5062` GET /ops/datasets/coverage（`06b7536`）。
 - **战略**：✅ 支持（P2 运营优先级，但归到 NEXT 因与 breadth 同向）。
-
----
-
-## 3. LATER / 条件性（P2 — 待决策日 / 外部 gate）
+- **更新(2026-06-04 — coverage 实测读数)**：拉 `GET /ops/datasets/coverage`(USA/TOP3000,delay 0+1):
+  - delay-1:available **19** / in_rotation 18 / mined 17 / **untapped 仅 1**(`univ1`,pv 类、6 字段 = 策略 NO-GO「集中价量 edge 已挖尽」,不值得强制挖)/ new 1(earnings4 375 字段大新集,已被组织性挖 98 alpha)。
+  - delay-0:in_rotation 11,但实证不产 edge(见 X2)。
+  - **结论:USA catalog 两个 delay 轴的 breadth 基本见顶** —— delay-1 充分开采 + 无值得追的 untapped,delay-0 实证弱。**X3 实证强化:真正剩的大 breadth 杠杆 = 跨区域 L1(blocked-on Consultant),不是 USA untapped、不是 delay-0。** 「饿死」前提确已推翻(目录新鲜),但「USA 内还有未挖正交面」的乐观也被数据收窄。
+- **运营动作**:无需强制挖(univ1 低值;delay-0 已停)。低频看 coverage tab 等新数据集到达即可。
 
 ### L1. 跨区域数据源同步（CHN/HKG/JPN/EUR）—— 唯一真大 breadth 轴，blocked-on Consultant
 
