@@ -70,6 +70,8 @@ def test_passing_candidate_passes_all_gates():
     ("_in_ordered", False, "G9_orthogonal"),   # correlation-blocked
     ("max_corr_to_selected", 0.99, "G9_orthogonal"),
     ("max_corr_to_selected", None, "G9_orthogonal"),
+    ("self_corr", None, "G3b_self_corr"),       # un-measured self_corr → not submittable
+    ("self_corr", 0.99, "G3b_self_corr"),       # self_corr above threshold
 ])
 def test_each_gate_fails_closed(field, value, expect_gate):
     cand = _passing_candidate()

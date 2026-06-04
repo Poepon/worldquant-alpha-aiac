@@ -43,9 +43,15 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
     margin_min = float(getattr(settings, "AUTO_SUBMIT_MARGIN_BPS_MIN", 5.0)) / 10000.0
     thr = float(getattr(settings, "AUTO_SUBMIT_CORR_THRESHOLD", 0.7))
 
-    # G2 STRICT candidate SQL: unlike the human endpoint, NULL is_margin / NULL
-    # _self_corr are EXCLUDED (no "IS NULL OR" passthrough) — auto-submit never
-    # acts on un-measured signals.
+    # Candidate SQL = the SAME (lenient) population the drain-order endpoint uses,
+    # so the recon kill-switch verdict is measured over the FULL evidence (offline
+    # ΔSharpe vs BRAIN), not a tiny subset (measuring recon over only the
+    # strict-submittable rows starves it to insufficient_sample → perpetual
+    # fail-closed; shadow run 2026-06-04 caught exactly that). The STRICTNESS
+    # ("never act on an un-measured self_corr") moves to the per-candidate guard
+    # stack (evaluate_guard_stack G3b) — NULL-self_corr rows stay in the pool for
+    # the recon population but are NOT themselves submittable. is_margin is always
+    # non-NULL in practice; G6 still hard-gates margin per candidate.
     rows = (await db.execute(_text(
         """
         SELECT id, alpha_id, region, delay, is_sharpe, is_fitness, is_turnover, is_margin,
@@ -57,9 +63,9 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
         FROM alphas
         WHERE can_submit IS TRUE AND date_submitted IS NULL
           AND region = :region
-          AND is_margin IS NOT NULL AND is_margin >= :mmin
-          AND (metrics->>'_self_corr')::float IS NOT NULL
-          AND (metrics->>'_self_corr')::float < :thr
+          AND (is_margin IS NULL OR is_margin >= :mmin)
+          AND ((metrics->>'_self_corr')::float IS NULL
+               OR (metrics->>'_self_corr')::float < :thr)
         """
     ), {"region": region, "mmin": margin_min, "thr": thr})).all()
 
@@ -223,6 +229,13 @@ def evaluate_guard_stack(
 
     # G3 BRAIN form-compliance — guaranteed by the SQL (can_submit IS TRUE), recorded.
     gates["G3_can_submit"] = True
+
+    # G3b self_corr MUST be measured (not None) and below threshold. The candidate
+    # SQL is lenient (NULL self_corr allowed, so recon's population is the full
+    # evidence) — this gate is where auto-submit refuses to act on an un-measured
+    # orthogonality signal. submit_alpha's gate4 still does a LIVE re-check.
+    self_corr = cand.get("self_corr")
+    gates["G3b_self_corr"] = self_corr is not None and self_corr < corr_thr
 
     # G4 can_submit freshness (fail-closed when require_fresh): unknown / stale → fail.
     if not require_fresh:
