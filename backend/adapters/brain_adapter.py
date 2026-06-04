@@ -2102,6 +2102,77 @@ class BrainAdapter:
         )
         return {}
 
+    async def run_submission_check(
+        self, alpha_id: str, *, max_polls: int = 20, poll_interval: float = 3.0
+    ) -> Dict:
+        """GET /alphas/{id}/check — trigger + poll BRAIN's submission checks.
+
+        BRAIN computes the submission checks (incl. SELF / PROD correlation)
+        ASYNC server-side: the GET returns a Retry-After header while the job
+        runs; we poll the same path until it disappears, then is.checks holds the
+        resolved results. Calling this is the PREREQUISITE for /correlations/SELF
+        (and a fresh can_submit) to return real values instead of PENDING — the
+        canonical pre-submit step. Never raises (best-effort trigger).
+
+        Returns {success, status_code, body, polls} where body is the /check
+        response (``is.checks`` array, same shape compute_can_submit parses).
+        """
+        try:
+            resp = await self._safe_api_call("GET", f"/alphas/{alpha_id}/check")
+        except Exception as e:
+            logger.warning(f"[BrainAdapter] run_submission_check({alpha_id}) GET failed: {e}")
+            return {"success": False, "status_code": 0, "body": str(e), "polls": 0}
+
+        polls = 0
+        while polls < max_polls:
+            retry_after = resp.headers.get("retry-after") or resp.headers.get("Retry-After")
+            if not retry_after:
+                break  # no Retry-After ⇒ checks reached a terminal (computed) state
+            try:
+                await asyncio.sleep(float(retry_after))
+            except (TypeError, ValueError):
+                await asyncio.sleep(poll_interval)
+            try:
+                resp = await self._safe_api_call("GET", f"/alphas/{alpha_id}/check")
+            except Exception as e:
+                logger.warning(f"[BrainAdapter] run_submission_check({alpha_id}) poll failed: {e}")
+                return {"success": False, "status_code": 0, "body": str(e), "polls": polls}
+            polls += 1
+
+        body_text = resp.text or ""
+        try:
+            body = resp.json() if body_text else {}
+        except Exception:
+            body = body_text
+
+        # Extract the resolved SELF_CORRELATION check (BRAIN's authoritative
+        # self-corr verdict for submission) from is.checks. result ∈ PASS/FAIL/
+        # PENDING; value = the correlation, limit = the gate (0.7). This is the
+        # signal submit_alpha should gate on — distinct from the slower
+        # /correlations/SELF report endpoint which can stay PENDING.
+        self_corr_check = None
+        try:
+            _checks = (body.get("is") or {}).get("checks") if isinstance(body, dict) else None
+            if isinstance(_checks, list):
+                for _c in _checks:
+                    if isinstance(_c, dict) and str(_c.get("name", "")).upper() == "SELF_CORRELATION":
+                        self_corr_check = {
+                            "result": _c.get("result"),
+                            "value": _c.get("value"),
+                            "limit": _c.get("limit"),
+                        }
+                        break
+        except Exception:  # noqa: BLE001
+            self_corr_check = None
+
+        return {
+            "success": 200 <= resp.status_code < 300,
+            "status_code": resp.status_code,
+            "body": body,
+            "polls": polls,
+            "self_corr_check": self_corr_check,
+        }
+
     async def check_correlation(self, alpha_id: str, check_type: str = "PROD") -> Dict:
         """Return correlation report wrapped with status_code.
 

@@ -614,37 +614,74 @@ class AlphaService(BaseService):
                         logger.debug(f"[submit_alpha] self_corr cache read failed: {_cache_e}")
 
                 if not _self_corr_skip:
-                    corr_svc = CorrelationService(brain_adapter)
-                    corr, src = await corr_svc.get_with_fallback(
-                        alpha.alpha_id, region=alpha.region
-                    )
-                    # V-27.126 followup: BRAIN_PENDING means the corr job is still
-                    # computing (corr is None). Distinct from UNKNOWN ("could not
-                    # measure") — here we genuinely will know soon, so refuse now
-                    # and let the caller retry rather than submitting blind into a
-                    # possibly-high corr that would waste the slot.
-                    if src == CorrSource.BRAIN_PENDING:
+                    # AUTHORITATIVE self_corr gate = BRAIN GET /alphas/{id}/check.
+                    # BRAIN computes self/prod correlation async; /check triggers +
+                    # returns the RESOLVED SELF_CORRELATION (result PASS/FAIL/PENDING
+                    # + value vs limit 0.7). The separate /correlations/SELF report
+                    # endpoint can stay PENDING indefinitely (different/slower job),
+                    # which is why relying on it alone never let an alpha submit.
+                    # Use /check primary; fall back to /correlations/SELF only when
+                    # /check yields no SELF_CORRELATION (errored/absent).
+                    corr, src = None, None
+                    sc_check = None
+                    try:
+                        _chk = await brain_adapter.run_submission_check(alpha.alpha_id)
+                        sc_check = _chk.get("self_corr_check")
+                    except Exception as _chk_e:  # noqa: BLE001
+                        logger.warning(
+                            f"[submit_alpha] /check failed (non-fatal, will fall back "
+                            f"to /correlations/SELF): {_chk_e}"
+                        )
+
+                    _sc_result = (sc_check or {}).get("result")
+                    if _sc_result == "FAIL":
+                        _v = (sc_check or {}).get("value")
+                        _lim = (sc_check or {}).get("limit", 0.7)
                         return {
                             "submitted": False,
                             "reason": (
-                                "self_corr 仍在 BRAIN 侧计算中(corr pending)— "
-                                "稍后重试"
+                                f"self_corr {_v} >= {_lim} (BRAIN /check FAIL) — "
+                                f"BRAIN would reject; submitting would waste a slot"
                             ),
-                            "self_corr_source": src,
+                            "self_corr": _v,
+                            "self_corr_source": "brain_check",
+                        }
+                    elif _sc_result == "PASS":
+                        corr, src = (sc_check or {}).get("value"), "brain_check"  # passes
+                    elif _sc_result == "PENDING":
+                        return {
+                            "submitted": False,
+                            "reason": "self_corr 仍在 BRAIN 侧计算中(/check PENDING)— 稍后重试",
+                            "self_corr_source": "brain_check_pending",
                             "retryable": True,
                         }
-                    # src=UNKNOWN → corr is None → inconclusive, do NOT block.
-                    if src != CorrSource.UNKNOWN and corr is not None and corr >= 0.7:
-                        return {
-                            "submitted": False,
-                            "reason": (
-                                f"self_corr {corr:.3f} >= 0.7 ({src}) — BRAIN would "
-                                f"reject; submitting would waste a slot"
-                            ),
-                            "self_corr": corr,
-                            "self_corr_source": src,
-                        }
-                    # self_corr 通过 — 写 cache 让 PENDING 重试时跳过 BRAIN 调用
+                    else:
+                        # /check gave no SELF_CORRELATION → legacy /correlations/SELF.
+                        corr_svc = CorrelationService(brain_adapter)
+                        corr, src = await corr_svc.get_with_fallback(
+                            alpha.alpha_id, region=alpha.region
+                        )
+                        if src == CorrSource.BRAIN_PENDING:
+                            return {
+                                "submitted": False,
+                                "reason": (
+                                    "self_corr 仍在 BRAIN 侧计算中(corr pending)— 稍后重试"
+                                ),
+                                "self_corr_source": src,
+                                "retryable": True,
+                            }
+                        # src=UNKNOWN → corr is None → inconclusive, do NOT block.
+                        if src != CorrSource.UNKNOWN and corr is not None and corr >= 0.7:
+                            return {
+                                "submitted": False,
+                                "reason": (
+                                    f"self_corr {corr:.3f} >= 0.7 ({src}) — BRAIN would "
+                                    f"reject; submitting would waste a slot"
+                                ),
+                                "self_corr": corr,
+                                "self_corr_source": src,
+                            }
+                    # self_corr 通过 — 写 cache 让重试时跳过 BRAIN 调用
                     if _redis is not None:
                         try:
                             await _redis.setex(_self_corr_cache_key, 300, "1")
