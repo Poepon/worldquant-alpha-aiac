@@ -2,12 +2,15 @@
 
 > 生成日期：2026-06-04 · 技术负责人汇总 · 跨 8 条开发线提取的开口工作项归并、去重、按依赖排序。
 > 组织方式：**NOW / NEXT / LATER** 三档（非按开发线），每项标注「支持 / 违背 / 中性」战略基调。
+> **修订 2026-06-04 下午**：自动提交从「待验证影子」变为 **LIVE + 首笔真实提交(15816)**;N1/§6 据实重写,L5/§4 据 os 探查结论更新。所有数字经 live PG 实测核实(见各段)。
 
 ---
 
 ## 0. 战略定位（定调）
 
-本系统经记忆中 **≥4 次独立推导**反复收敛为同一结论：**execution-limited / selection-limited，不是 discovery-limited**。真瓶颈不在「挖不出 alpha」，而在「挖出来的 clean alpha 没人提交」——史上仅约 **12 次提交** vs **67+ can_submit 积压**（约 24× 缺口）。BRAIN 的提交门是 **self-corr < 0.7（同 region）**，所以提交价值取决于「与已提交池的正交度」而非「单 alpha 质量」。
+本系统经记忆中 **≥4 次独立推导**反复收敛为同一结论：**execution-limited / selection-limited，不是 discovery-limited**。真瓶颈不在「挖不出 alpha」，而在「挖出来的 clean alpha 没人提交」——截至 2026-06-04 下午,史上仅 **13 次提交**（含当天首笔自动提交 15816）vs **66 can_submit 积压**（live PG 实测,全 USA）。BRAIN 的提交门是 **self-corr < 0.7（同 region）**，所以提交价值取决于「与已提交池的正交度」而非「单 alpha 质量」。
+
+**2026-06-04 自动提交 live 实测强力印证此判断**：最近一次 beat 评估 41 个候选,1 提交、40 跳过,其中 **36 个(90% of skips)卡在 `G3b_self_corr`（self_corr ≥ 阈值）**,另 2 卡 sharpe、2 卡推荐。即:66 积压里真正「与已提交池正交、可提交」的子集只有**个位数**,提交速率天然被**正交度**（而非候选数量/per_run_cap）节流。这正是 breadth 天花板的运行时显形 —— 抽干当前正交子集后,唯一能继续提交的路是**新正交数据源**（见 L1）,不是多挖更多同源 alpha。
 
 由此，**只有两根高杠杆**：
 
@@ -22,15 +25,18 @@
 
 ## 1. NOW（P0 — 现在就做，最高杠杆且 ready）
 
-### N1. 把 41 个可正交提交的 clean alpha 真正提交（execution-limited 唯一真动针）
+### N1. 自动抽干提交积压（execution-limited 唯一真动针）
 
-- **做什么**：在 `SubmitBacklogMonitor` 的「正交抽干顺序」面板，按 `value_tier` + 广度顺序逐个**人工提交** `self_corr<0.7` 的候选。live 实测 67 候选 → **41 可正交提交 / 26 相关性阻塞**。
-- **下一步动作**：确认 operator 在线，在 `/ops/submit-backlog` 的正交抽干面板逐个点提交（`SubmitBacklogMonitor.jsx:251 submitPks`）。**保持人工 queue**——自动提交不可逆烧 BRAIN 配额（`config.py:1057-1060` 明示 Stage A SubmitPolicy 对每个 winner 返 `queue`、NEVER auto-submits）。
-- **依赖**：worker 在线（backlog 扫描）；operator 实际点提交。**无新代码**。
-- **来源**：drain-order 端点 + 面板已 ship（`13a75a7`/`06b7536`）；战略基调 P0「抽干积压」。
-- **战略**：✅ 支持（这是本计划唯一零-BRAIN-成本、直击真瓶颈的高杠杆动作）。
+- **做什么**：`auto_submit_tasks` beat 每 6h（:35）按正交度顺序自动提交 1 条最正交的 additive 候选;`SubmitBacklogMonitor` 的「正交抽干顺序」面板作人工补充。
+- **正交子集有多大(两种度量,别混淆)**：面板的 drain-order 用**离线 pairwise self-corr**估算 → 66 积压里约 **41 看似可正交 / 25 离线相关阻塞**;但自动提交 beat 的 G3b 用 **BRAIN 权威 self_corr(vs prod 池)**,最近一次 beat 实测 41 候选里 **36 个被 self_corr ≥ 阈值挡掉、仅个位数真正交**。**以 BRAIN 权威度量为准** —— 真正能提交的远少于离线 41,且每提交一条 prod 池就变、下一轮重算（§0)。离线 drain-order 仅作排序启发,不是「41 条都能发」。
+- **下一步动作**：自动提交 beat 现为**主路径**（见下「更新」）;`/ops/submit-backlog` 面板（`SubmitBacklogMonitor.jsx:251 submitPks`）降为人工补充/急用通道。**注意区分两条独立路径**:`config.py:1057-1060` 的 Stage A SubmitPolicy 恒返 `queue`、NEVER auto-submits —— 那是**优化闭环(L2)** 的策略;本 N1 的 `auto_submit_tasks` beat 是**另一条路径**,直接调 `submit_alpha`、不经优化闭环,守门栈自带 fail-closed（见下）。
+- **依赖**：worker + beat 在线 **且已在 `48e7246` 后重启**（否则定时 beat 撞 PENDING,见下「⚠ 运维必做」）。
+- **来源**：drain-order 端点 + 面板（`13a75a7`/`06b7536`）+ 自动提交闭环（`5a5be7b`…`48e7246`）；战略基调 P0「抽干积压」。
+- **战略**：✅ 支持（直击真瓶颈、不烧 sim 配额,仅消耗提交额度 —— 而提交正是这里要花的「钱」;每条提交都层层 fail-closed 守门）。
 - **附带价值**：每次成功提交都会触发 `AlphaService._freeze_predicted_marginal`（`e42a838f`）冻结 offline+BRAIN 两预测进 `metrics._recon_predicted_delta_sharpe` → 给 N2 累积 forward-test 样本。
-- **更新(2026-06-04)**：**自动提交已实现**(`backend/tasks/auto_submit_tasks.py` + `auto_submit_selector.py`,设计见 `auto_submit_design_2026-06-04.md`)。默认 OFF + 默认 `shadow`(只记 would-submit 名单不真发)。**当前动作改为**:先 `ENABLE_AUTO_SUBMIT=True` 跑影子模式,经 `GET /ops/auto-submit/audit` 人工复核名单 ≥7 天确无垃圾,再 `AUTO_SUBMIT_MODE='live'`(daily_cap=4)。守门栈层层 fail-closed(can_submit/红线/margin≥5bps/SUBMIT 推荐/additive/正交/recon supported),最终仍由 `submit_alpha` 兜底。手动 drain 面板继续作为补充。
+- **更新(2026-06-04 下午 — 已 LIVE + 首笔真实提交)**：自动提交不再是「待验证影子」——已切 **live 并完成首笔真实提交**:alpha **15816(`YPQ1e3VM`)→ IQC2026S2**,date_submitted 2026-06-04 15:23:15,Sharpe 1.75/Fitness 1.70/Turnover 0.38、BRAIN 8 项 check 全 PASS（live PG 核实）。当前生效开关:`ENABLE_AUTO_SUBMIT=true`(DB 热覆盖) + `ENABLE_CAN_SUBMIT_REFRESH=true` + `.env AUTO_SUBMIT_MODE=live` + `AUTO_SUBMIT_PER_RUN_CAP=1`(每 beat 只提**最正交的 additive 候选**,提交后 :50 刷新 can_submit、下个 :35 beat 重挑,逐条最优) + `daily_cap=4`。守门栈层层 fail-closed:G0 主开关 / G1 recon kill-switch / G2-G3 can_submit 严格 SQL + BRAIN 形式合规 / G3b self_corr 已测<阈 / G4 新鲜度(`metrics._brain_can_submit_at`≤12h) / G5 BRAIN 红线 / G6 margin≥5bps / G7 推荐=SUBMIT / G8 additive(sign_tier) / G9 正交排序 / G10 `submit_alpha` 原生兜底。设计见 `auto_submit_design_2026-06-04.md`。
+- **⚠ 运维必做(尚未确认已做)**：`/check` 修复(`48e7246`,gate4 改用 GET `/alphas/{id}/check` 权威结果、根治 `/correlations/SELF` 永久 PENDING)是 **in-module 代码、无热加载**。**运行中的 celery worker 若在 `48e7246`(提交于 2026-06-04 23:20 北京)之前启动,定时 :35 beat 仍跑旧代码、仍会撞 PENDING 发不出**。首笔 15816 之所以发成功,是用 fresh 进程**手动触发**的(15:07 旧码 pending 被拒 → /check 修复 → 15:23 fresh 进程提交成功;两次 beat_run_id 均在 audit 表可查)。**要让定时 beat 真正自主提交,须 `run.bat --restart` 让 worker/beat 加载 `48e7246`。** 重启后第一件事:看 `GET /ops/auto-submit/audit?latest_only=true` 确认定时 beat 真提交(而非全 PENDING-rejected)。
+- **急停**：热翻 `ENABLE_AUTO_SUBMIT=false`（ops flag,即时,无需重启）;`mode`/`cap` 改 .env 须重启（故意的安全摩擦,防误操作放大提交量）。
 
 ### N2. 维持并监控 marginal_recon kill-switch（验证 offline ΔSharpe 代理可信度）
 
@@ -39,6 +45,7 @@
 - **依赖**：worker + beat 在线（IQC auto-audit）。
 - **来源**：`backend/marginal_recon.py`；`9111bfc` fail-closed；战略基调 P0「验证 offline ΔSharpe 代理是否可信」。
 - **战略**：✅ 支持。**与 N1 互锁**：必须先真提交（N1）→ 累积 forward-test pairs → 才能把 verdict 从「事后对账」推进到「forward 二次印证」。当前在 verdict=supported 期间，ΔSharpe 排序作权威 routing 可接受；若退回 insufficient_sample 则降为辅助参考。
+- **更新(2026-06-04)**：首笔 15816 提交已触发 `_freeze_predicted_marginal` —— offline predicted ΔSharpe=**0.119**、BRAIN-pre-submit=**0.09** 已冻进 `metrics._recon_predicted_delta_sharpe`,即 forward-test 累计样本从 0 → **1 对**。N1 持续自动提交会继续累积;但注意 forward 的 **realized 腿仍结构性 blocked**（见 L5）,当前能累积的只是 predicted↔BRAIN-pre-submit 一致性,不是 predicted↔真实 OOS。
 
 > **N1 + N2 是本计划的重心。** 二者完全踩中战略基调 P0，且都是「运维执行 + 监控」而非工程。所有其它线在它们完成前都应让路。
 
@@ -108,10 +115,10 @@
 
 ### L5. forward-test realized 腿 + recon 累积 —— blocked-on-data，挂着观察
 
-- **做什么**：predicted↔realized ΔSharpe 真 live 对账。**结构性不可得**：本地 `alpha_pnl` 是冻结 OS 回测窗（止 2023-12-29，delete-then-insert 无增长）+ BRAIN 无 live 提交后 PnL 端点（对已提交 alpha before-and-after 返 400）。
-- **下一步动作**：无可做动作。forward 端点已诚实标 `blocked_no_live_pnl` + `realized_blocked_reason`。一旦 N1 开始批量提交，定期查 `GET /ops/marginal-reconciliation/forward` 看 predicted↔BRAIN-pre-submit 一致率累积（verdict 翻 supported 即 forward 侧二次印证 offline 代理）。待未来 BRAIN 暴露 live PnL 或数月后重算时再启。
-- **来源**：`ops.py:5396/5424`；`marginal_recon.py:9-19` DATA REALITY 注释。
-- **战略**：◼ 中性。
+- **做什么**：predicted↔realized ΔSharpe 真 live 对账。**结构性不可得（2026-06-04 直接探查确认,不是「等几天」）**：① 本地 `alpha_pnl` 是冻结 OS 回测窗（止 2023-12-29，delete-then-insert 无增长）;② BRAIN `GET /alphas/{id}` 的 `os.osISSharpeRatio` 对**所有**已提交 alpha（含 2026-04-19 即 1.5 个月前的)**均 null、os.checks 全 PENDING**,且 `/check` **不触发** os 计算;③ `before-and-after-performance` 对已提交 alpha 返 **400**（只对未提交 CAN_SUBMIT alpha 出值）;④ `/correlations/prod` 403（USER 无 Consultant）。→ realized 腿没有任何可用数据源。
+- **下一步动作**：**os 轮询 beat 暂缓**（无数据 = 空转,2026-06-04 决定）。forward 端点已诚实标 `blocked_no_live_pnl` + `realized_blocked_reason`。N1 自动提交会持续累积 predicted↔BRAIN-pre-submit 一致性（非真实 OOS,见 N2）。**~2026-07 复查**任一已提交 alpha 的 `os.osISSharpeRatio` 是否开始填充;填了再建 os 轮询 + 接 `marginal_recon` realized 腿。在此之前**不押日历时间**。
+- **来源**：`ops.py:5396/5424`；`marginal_recon.py:9-19` DATA REALITY 注释；2026-06-04 BRAIN 只读探查 + memory `project_auto_submit_shipped_2026_06_04`。
+- **战略**：◼ 中性（blocked-on-external-data,无可推进动作）。
 
 ### L6. 低杠杆维护清理（一次性、可选）
 
@@ -128,7 +135,8 @@
 | 日期 / Gate | 决策点 | 判据（GO / NO-GO） | 当前态 |
 |---|---|---|---|
 | **持续 / 实时** | marginal_recon kill-switch 数据 gate | 符号一致率 **≤60% over ≥15 pairs → 停用 offline ΔSharpe 退纯广度**（自动 fail-closed）；>60% & ≥15 → 按 sign 分层 routing | live ≈87.5% / n≈38–42 = **supported / PASS**（端点每次调用实时算，非一次性 milestone）|
-| **N1 进行中 → 数周** | forward-test 累积达 ≥15 pairs | 累积到 15 对后 forward 侧给 verdict，可二次印证 offline 代理；**依赖 N1 真提交触发 freeze hook** | 从 0 累积（过去 12 提交无法回填）|
+| **N1 进行中 → 数周** | forward-test 累积达 ≥15 pairs（predicted↔BRAIN-pre-submit) | 累积到 15 对后 forward 侧给 verdict，可二次印证 offline 代理；**依赖 N1 真提交触发 freeze hook** | **1 对已 freeze**（15816,offline 0.119/BRAIN-pre 0.09）;N1 自动提交持续累积（过去 13 提交大多无法回填）|
+| **~2026-07** | BRAIN OS 端点是否暴露 realized 数据 | 任一已提交 alpha 的 `os.osISSharpeRatio` 由 null → 有值 = GO 建 os 轮询接 recon realized 腿;仍 null = 继续挂起 | **blocked**（2026-06-04 实测 1.5mo 前的也 null,/check 不触发,before-after 400）|
 | **~2026-07-04 ±5d**（**stale**）| R12 critical-path 决策 | 原 plan：Sprint1 ship +30d obs → evaluator GO/NO-GO/PARTIAL。**但 obs day-0 从未发生**（12794 alpha 0 llm_mode stamp / 5的6 sentinel 0 行）→ 今天跑只会 INSUFFICIENT | **建议 NO-GO / 搁置**；日期标 stale（不再安排日历时间）|
 | **优化 Stage A 14d 观察 gate** | Stage A → B 升档转化率 gate | 原 plan：>20% GO / <10% STOP；**已被 0.2% 单点实测短路（46× 偏离 STOP 线）** | **closed-by-STOP**（不再跑 14d cohort）|
 | **Orchestrator soak gate** | 翻 `ENABLE_AUTO_ORCHESTRATOR` | 前置：流水线 ≥48h soak 无问题 **且** heartbeat-abort ≥1 周无 false-positive。**两前置均未满足**（48h 被跳过 + 3930 误杀 fix 后 0 soak）| **未过 + 即便过也不优先**（execution-limited 冲突）|
@@ -140,7 +148,7 @@
 
 | 项 | 判定 | 一句理由 |
 |---|---|---|
-| **多挖 / 自动续挖（orchestrator 翻 flag、Phase 2 bandit、Phase 3 多账号）** | NO-GO / 冻结 | 供给已 67+ >> 选择能力（史上 12 提交），自动多挖只把供给推得更远超，放大错误轴 |
+| **多挖 / 自动续挖（orchestrator 翻 flag、Phase 2 bandit、Phase 3 多账号）** | NO-GO / 冻结 | 供给已 66 积压 >> 选择能力（史上仅 13 提交;且 66 积压里 BRAIN 权威 self_corr 下仅个位数真正交可发）,自动多挖只把供给推得更远超,放大错误轴 |
 | **纯设置扫掠优化（Stage A 自动 beat + Stage B/C 升档）** | NO-GO | 实测 0.2% 转化 = plan 自己 <10% STOP 闸的 46× 偏离；Stage C 还需 CONSULTANT 80 槽 |
 | **EVAL 阈值微调（含 turnover-cap 0.4→0.7 全局放宽）** | NO-GO（全局）| delay 不对称内在自洽 + 0.4-0.85 是 PROVISIONAL 降级非 FAIL；改全局 band 影响 394/1426 alpha = 高风险，违「阈值改动致 89%→1%」教训。若必须，只做**优化器专属窄改**（但优化器 beat 已停，无紧迫性）|
 | **universe 轮转扩 breadth** | NO-GO | 同-region self-corr<0.7 门 + Grinold 广度=独立下注（换股票池=相关 PnL≈0 breadth）；实证 transfer-harvest 70→4→self-corr 后净新 0。唯一例外 = 已逐个 verify 的 TOPSP500 窄例（RRd2kvJz self-corr 0.31），非通用 lever |
@@ -154,9 +162,8 @@
 
 ## 6. 冲突 / 存疑（供人拍板）
 
-1. **N1「手动 vs 自动提交」策略决策（最重要）**：当前唯一提交路径 = operator 手动点 `submitPks`。是否上「恒-queue 之外的自动 SubmitPolicy beat」把提交从 12 推到 ~70+？
-   - **存疑点**：自动提交**不可逆烧 BRAIN 配额**（`config.py:1057-1060` Stage B auto-submit 升级本就 gated on Stage A 14d GO，而 Stage A 已 STOP）。
-   - **技术负责人建议**：**先用已 ship 的 drain-order 面板手动批量提交本批 clean alpha（零新代码）**，验证 N2 recon verdict 在真提交后是否保持 supported，再考虑是否值得为自动化承担不可逆配额风险。**请用户拍板：手动批量 vs 实现自动 SubmitPolicy。**
+1. **N1「手动 vs 自动提交」—— ✅ 已决（2026-06-04 实施）**：决策 = **上独立的 `auto_submit_tasks` beat 自动提交**（不走优化闭环的恒-queue SubmitPolicy）。配额风险用守门栈 + `per_run_cap=1` + `daily_cap=4` + shadow-先行（已跑 5 beat / 3 would_submit）控制;急停热翻 `ENABLE_AUTO_SUBMIT`。首笔 15816 已真实提交、8 项 check 全 PASS。手动 drain 面板保留作补充。**此条不再是开放冲突,留作决策记录。**
+   - **唯一遗留运维项**：见 N1「⚠ 运维必做」—— 定时 beat 自主提交前须重启 worker 加载 `48e7246`(/check 修复),否则定时 beat 仍撞 PENDING。这是**执行步骤**,非战略冲突。
 
 2. **优化闭环该「停」还是「续」**：已基本收口为 STOP。技术负责人判断 = **STOP 自动闭环 + 保留 manual/robustness/drain/recon 工具箱**。无矛盾，但若用户对「彻底封棺 vs 留 default-OFF 半活」有偏好可拍板（建议仅在文档头标 SUPERSEDED，不删代码）。
 
@@ -170,7 +177,7 @@
 |---|---|---|
 | 优化闭环（L1 扫掠 / 边际） | 收口（STOP + 转向产出已 ship）| N1/N2 副产物 + L2 封棺 |
 | Breadth（新数据源 / 覆盖 / L2 组合层）| 工具齐备 LIVE，开口=blocked-on-data/decision | N2 验证 + X2/X3 + L1 跨区域 |
-| 提交积压抽干 + 边际对账 | recon 闭环已 ship+push，真 P0 执行未发生 | **N1 + N2（重心）** |
+| 提交积压抽干 + 边际对账 | recon 闭环已 ship;**自动提交 live + 首笔 15816 已发**;drain 进行中（待重启让定时 beat 自主跑）| **N1 + N2（重心）** |
 | 挖掘 Orchestrator | Phase 1 完成，flag OFF no-op | L4 冻结 |
 | R12 + Phase 4 deferred | 工具链 ship，obs 从未起算 | L3 搁置 |
 | 挖掘质量 RAG + CoSTEER | 修债完成，A/B 零效应 | §5 NO-GO/LOW |
