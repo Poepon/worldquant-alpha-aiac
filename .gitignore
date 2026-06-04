@@ -56,6 +56,11 @@ backups/
 /docs/phase3_readiness
 /docs/pillar_balance
 /docs/regime_state
+# iqc_marginal_audit.py auto-writes timestamped reports here; ignore them but
+# keep the one audit referenced as the documented --from-audit example.
+/docs/iqc_audit/*
+!/docs/iqc_audit/audit_2026-05-11_1231.json
+!/docs/iqc_audit/audit_2026-05-11_1231.md
 
 # R13 factor-data vendor sources — large binaries, re-downloadable from
 # the vendor; the derived parquet + cleaned CSVs are committed instead.

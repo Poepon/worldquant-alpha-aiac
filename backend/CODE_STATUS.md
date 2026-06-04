@@ -3,6 +3,8 @@
 > 此文档明确标注每个模块的状态，指导渐进式重构。
 > 
 > **最后更新**: 2026-01-29 - 所有重构任务已完成
+>
+> **覆盖范围(2026-06-04 复核)**:本文档准确描述 2026-01 完成的**分层重构骨架**(protocols/models/repositories/services/adapters/routers/tasks),这部分今天仍成立。但它**不覆盖** 2026-01 之后构建的主线,包括:`agents/core/`(RD-Agent CoSTEER)、`agents/pipeline/`(FLAT 生产者-消费者流水线)、`services/optimization/`(优化闭环)、`tasks/orchestrator.py`、LLM 路由(`agents/services/llm_service.py:resolve_model_for`)、FLAT/ONESHOT 调度模型,以及 tier/cascade 系统的退役。这些以根目录 `CLAUDE.md` 为准;历史文档见 `docs/archive/`。
 
 ---
 

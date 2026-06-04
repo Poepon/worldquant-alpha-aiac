@@ -1,5 +1,7 @@
 # 重构状态报告
 
+> **状态(2026-06-04 复核)**:本文档描述的 2026-01 分层重构(Router→Service→Repository)**已全部完成**——下方原「⚠️ 需要改动」清单中的 Service 创建与大文件拆分均已落地。本文件保留作分层架构的**规约说明**(依赖方向、可测试性标准、改动模板),不再是待办清单。当前系统架构(FLAT/ONESHOT 调度、`agents/pipeline/` 流水线、`agents/core/` CoSTEER、`services/optimization/` 等 2026-01 之后的主线)以根目录 `CLAUDE.md` 为准。
+
 ## 一、代码状态分类
 
 ### ✅ 已完成重构 - 不需要改动
@@ -25,31 +27,29 @@
 
 ---
 
-### ⚠️ 需要改动 - 直接 DB 访问
+### ✅ 已完成 - Service 层全部创建
 
-这些路由文件仍然直接访问数据库，需要创建对应的 Service 层：
+下列 router 对应的 Service 均已创建(`task/run/dataset/operator/knowledge/config_service.py` 全部存在):
 
-| 文件 | 问题 | 改动方案 | 状态 |
-|------|------|----------|------|
-| `routers/tasks.py` | ~~直接 DB 访问~~ | ~~创建 TaskService~~ | ✅ 已完成 |
-| `routers/runs.py` | 直接 DB 访问 | 使用 `TaskRepository` | ⏳ 待改 |
-| `routers/datasets.py` | 直接 DB 访问 | 创建 `DatasetService` | ⏳ 待改 |
-| `routers/operators.py` | 直接 DB 访问 | 创建 `OperatorService` | ⏳ 待改 |
-| `routers/knowledge.py` | 直接 DB 访问 | 使用 `KnowledgeRepository` | ⏳ 待改 |
-| `routers/config.py` | 直接 DB 访问 | 创建 `ConfigService` | ⏳ 待改 |
+| 文件 | 对应 Service | 状态 |
+|------|----------|------|
+| `routers/tasks.py` | `TaskService` | ✅ |
+| `routers/runs.py` | `RunService` | ✅ |
+| `routers/datasets.py` | `DatasetService` | ✅ |
+| `routers/operators.py` | `OperatorService` | ✅ |
+| `routers/knowledge.py` | `KnowledgeService` | ✅ |
+| `routers/config.py` | `ConfigService` | ✅ |
+
+> 注:个别 router 历史上仍残留 inline DB 查询。改动这些文件时**优先走对应 Service,勿重新引入 inline query**(同 `CLAUDE.md` 分层规则)。
 
 ---
 
-### ⚠️ 需要改动 - 大文件拆分
+### ✅ 已完成 - 大文件拆分
 
-这些文件过大，需要进一步模块化：
-
-| 文件 | 行数 | 改动方案 |
-|------|------|----------|
-| `agents/graph/nodes.py` | 1429 | 拆分为 `nodes/generation.py`, `nodes/validation.py`, `nodes/evaluation.py` |
-| `agents/prompts.py` | 907 | 拆分为 `prompts/mining.py`, `prompts/feedback.py`, `prompts/evaluation.py` |
-| `agents/mining_agent.py` | 870 | 提取工具方法到 `agents/utils/` |
-| `agents/services/rag_service.py` | 735 | 提取评分逻辑到 `scoring_service.py` |
+| 原文件 | 拆分结果 | 状态 |
+|------|------|------|
+| `agents/graph/nodes.py` | `nodes/{base,generation,validation,evaluation,persistence}.py` | ✅ |
+| `agents/prompts.py` | `prompts/` 包(`generation/hypothesis/validation/analysis/...`,旧 `prompts.py` 为 re-export shim) | ✅ |
 
 ---
 
@@ -220,33 +220,7 @@ async def evaluate_alpha_repository():
 
 ## 五、下一步改动清单
 
-### P0 (立即执行)
-
-1. **创建剩余 Service 层**
-   - [ ] `TaskService` - 封装 `routers/tasks.py` 的业务逻辑
-   - [ ] `DatasetService` - 封装 `routers/datasets.py` 的业务逻辑
-   - [ ] `KnowledgeService` - 封装 `routers/knowledge.py` 的业务逻辑
-
-2. **修复 Router 层**
-   - [ ] `routers/tasks.py` - 改为使用 TaskService
-   - [ ] `routers/datasets.py` - 改为使用 DatasetService
-   - [ ] `routers/knowledge.py` - 改为使用 KnowledgeService
-
-### P1 (一周内)
-
-3. **拆分大文件**
-   - [ ] `nodes.py` → 多个节点模块
-   - [ ] `prompts.py` → 按功能分类
-
-4. **补充测试**
-   - [ ] Repository 层 100% 测试覆盖
-   - [ ] Service 层核心方法测试
-
-### P2 (两周内)
-
-5. **性能基线**
-   - [ ] 建立各模块性能基线
-   - [ ] 集成到 CI/CD
+> 原 P0/P1 清单(创建剩余 Service、修复 Router、拆分 `nodes.py`/`prompts.py`)**已全部完成**(见上文 ✅ 段落)。本文档现仅作分层规约参考,无遗留待办。新工作的现状以 `CLAUDE.md` 与 `docs/INDEX.md` 为准。
 
 ---
 
