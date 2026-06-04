@@ -99,6 +99,10 @@ from backend.tasks.optimization_tasks import (  # noqa: F401
     run_manual_optimization_cycle,
 )
 
+# Auto-submit beat (2026-06-04): automates the orthogonal backlog drain.
+# Default OFF + default mode 'shadow' (logs would-submit list, no real submit).
+from backend.tasks.auto_submit_tasks import run_auto_submit_cycle  # noqa: F401
+
 __all__ = [
     # Utilities
     "run_async",

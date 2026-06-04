@@ -1080,6 +1080,28 @@ class Settings(BaseSettings):
     OPT_ROBUSTNESS_FILTER: bool = True      # apply RobustnessFilter post-WinnerSelector
     OPT_PLATEAU_BAND: float = 0.15          # same-neut sibling must reach sharpe_min - this
 
+    # ── Auto-submit (2026-06-04) — automate the orthogonal backlog drain.
+    # System is execution-limited (67+ clean alphas, ~12 ever submitted). This 6h
+    # beat picks the top of the GET /ops/submit-backlog/drain-order sequence and
+    # submits via AlphaService.submit_alpha — which KEEPS all its irreversible
+    # gates (can_submit / live self_corr<0.7 / Redis lock / re-check). On top, the
+    # beat applies a full FAIL-CLOSED guard stack (auto_submit_selector).
+    # SHADOW-FIRST: ENABLE_AUTO_SUBMIT default OFF; even when ON, AUTO_SUBMIT_MODE
+    # defaults to 'shadow' = log a would-submit list WITHOUT submitting. Flip to
+    # 'live' only after the shadow list is human-verified for N days. ENABLE_
+    # prefix → flag is runtime-overridable (config.py __getattribute__ hook).
+    ENABLE_AUTO_SUBMIT: bool = False              # master kill-switch (default OFF)
+    AUTO_SUBMIT_MODE: str = "shadow"              # off | shadow | live
+    AUTO_SUBMIT_DAILY_CAP: int = 4                # AIAC-side per-UTC-day live submit cap
+    AUTO_SUBMIT_PER_RUN_CAP: int = 2              # max live submits per beat firing
+    AUTO_SUBMIT_MARGIN_BPS_MIN: float = 5.0       # economic gate (bps); <0 hard SKIP
+    AUTO_SUBMIT_CANSUBMIT_MAX_AGE_H: int = 12     # can_submit freshness window (live mode)
+    AUTO_SUBMIT_REQUIRE_FRESH_CANSUBMIT: bool = True  # live: stale/unknown freshness → skip
+    AUTO_SUBMIT_REGIONS: str = "USA"              # CSV; drained one region at a time
+    AUTO_SUBMIT_REQUIRE_RECON_VERDICT: str = "supported"  # Stage1 only 'supported'; 'weak' widens
+    AUTO_SUBMIT_CORR_THRESHOLD: float = 0.7       # self/among-set corr ceiling (= MAX_CORRELATION)
+    AUTO_SUBMIT_BEAT_INTERVAL_HOURS: int = 6
+
     # ── Marginal-contribution submit recommendation (backend/marginal_analysis.py)
     # Calibration for the multi-dimensional before-and-after scorecard. Scalar
     # tunables here; per-dim scales/weights are dict properties below (loaded as

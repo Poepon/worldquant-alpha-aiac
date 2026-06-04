@@ -232,3 +232,30 @@ class AlphaPnl(SQLAlchemyBase):
     pnl = Column(Float)
     cumulative_pnl = Column(Float)
     created_at = Column(DateTime, server_default=func.now())
+
+
+class AutoSubmitAudit(SQLAlchemyBase):
+    """Audit trail for the auto-submit beat (2026-06-04).
+
+    One row per candidate the beat evaluated — in BOTH shadow and live mode —
+    recording which guard gates it passed, the raw signal values at decision
+    time, and the final outcome. Shadow mode writes ``would_submit`` rows WITHOUT
+    submitting (the human-review surface before flipping to live); live mode
+    writes ``submitted`` / ``rejected`` / ``error`` / ``skipped``.
+
+    ``alpha_pk`` is a plain Integer (not FK) so audit rows survive alpha purges.
+    """
+    __tablename__ = "auto_submit_audit"
+    __table_args__ = {'extend_existing': True}
+
+    id = Column(Integer, primary_key=True)
+    alpha_pk = Column(Integer, index=True, nullable=False)
+    alpha_brain_id = Column(String(20), nullable=True)
+    region = Column(String(20), nullable=True, index=True)
+    mode = Column(String(10), nullable=False)        # shadow | live
+    outcome = Column(String(20), nullable=False, index=True)  # would_submit|submitted|rejected|skipped|error
+    skip_reason = Column(Text, nullable=True)        # which gate failed / why
+    gate_results = Column(JSONB, default={})         # all signal values + per-gate pass/fail
+    brain_response = Column(JSONB, nullable=True)     # submit_alpha return (live)
+    beat_run_id = Column(String(40), index=True, nullable=True)  # groups one beat firing
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), index=True)

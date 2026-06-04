@@ -35,6 +35,7 @@ from backend.models.alpha import (
     Alpha,
     AlphaFailure,
     AlphaPnl,
+    AutoSubmitAudit,
 )
 
 # Status transition audit
@@ -156,6 +157,7 @@ __all__ = [
     "Alpha",
     "AlphaFailure",
     "AlphaPnl",
+    "AutoSubmitAudit",
     "AlphaStatusTransition",
     "HypothesisStatusTransition",
     # Hypothesis (Phase 2)

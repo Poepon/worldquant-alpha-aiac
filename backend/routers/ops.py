@@ -4982,6 +4982,66 @@ async def submit_backlog_drain_order(
     )
 
 
+@router.get("/auto-submit/audit")
+async def auto_submit_audit_recent(
+    limit: int = Query(100, ge=1, le=500),
+    outcome: Optional[str] = None,
+    region: Optional[str] = None,
+    beat_run_id: Optional[str] = None,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+) -> Dict[str, Any]:
+    """Recent auto-submit audit rows — the SHADOW would-submit review surface.
+
+    Before flipping ``AUTO_SUBMIT_MODE='live'``, eyeball ``outcome='would_submit'``
+    rows here for N days and confirm none are garbage (each row carries the raw
+    signal values + per-gate pass/fail in ``gate_results``). ``outcome`` filters
+    to would_submit / submitted / rejected / skipped / error.
+    """
+    from sqlalchemy import select, desc, func as _func
+    from backend.models import AutoSubmitAudit
+    from backend.config import settings  # local import — hot-reads flag overrides
+
+    q = select(AutoSubmitAudit).order_by(desc(AutoSubmitAudit.created_at))
+    if outcome:
+        q = q.where(AutoSubmitAudit.outcome == outcome)
+    if region:
+        q = q.where(AutoSubmitAudit.region == region)
+    if beat_run_id:
+        q = q.where(AutoSubmitAudit.beat_run_id == beat_run_id)
+    rows = (await db.execute(q.limit(int(limit)))).scalars().all()
+
+    # Outcome tallies over the last 24h (quick health snapshot).
+    since = datetime.utcnow() - timedelta(hours=24)
+    tally_rows = (await db.execute(
+        select(AutoSubmitAudit.outcome, _func.count())
+        .where(AutoSubmitAudit.created_at >= since)
+        .group_by(AutoSubmitAudit.outcome)
+    )).all()
+
+    items = [{
+        "id": r.id,
+        "alpha_pk": r.alpha_pk,
+        "alpha_brain_id": r.alpha_brain_id,
+        "region": r.region,
+        "mode": r.mode,
+        "outcome": r.outcome,
+        "skip_reason": r.skip_reason,
+        "gate_results": r.gate_results,
+        "brain_response": r.brain_response,
+        "beat_run_id": r.beat_run_id,
+        "created_at": r.created_at.isoformat() if r.created_at else None,
+    } for r in rows]
+
+    return {
+        "mode": getattr(settings, "AUTO_SUBMIT_MODE", "shadow"),
+        "enabled": bool(getattr(settings, "ENABLE_AUTO_SUBMIT", False)),
+        "tally_24h": {o: int(c) for o, c in tally_rows},
+        "count": len(items),
+        "items": items,
+    }
+
+
 @router.post("/submit-backlog/scan", response_model=BacklogScanOut)
 async def submit_backlog_scan(
     limit: int = Query(200, ge=1, le=500),

@@ -4,6 +4,12 @@
 > 已完成 / 已退役 / 被取代的历史文档已移入 [`archive/`](archive/)（按主题分目录）。
 > 最近一次整理:2026-06-04（详见 `_doc_triage_report_2026-06-04.md`）。
 
+## 📋 开发计划
+
+| 文档 | 说明 |
+|---|---|
+| **[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)** | **当前开发计划(2026-06-04)** — NOW/NEXT/LATER 三档 + 决策日历 + NO-GO 清单。战略基调:execution-limited → 抽干提交积压 + 新正交数据源 breadth |
+
 ## 竞品 / 外部调研（reference）
 
 | 文档 | 说明 |
@@ -20,6 +26,7 @@
 
 | 文档 | 说明 |
 |---|---|
+| [auto_submit_design_2026-06-04.md](auto_submit_design_2026-06-04.md) | 自动提交守门栈设计(as-built);默认 OFF+shadow,影子→live 分阶段 |
 | [heartbeat_liveness_redesign_2026-06-03.md](heartbeat_liveness_redesign_2026-06-03.md) | 流水线 per-coroutine heartbeat 活系统设计（已 ship c07a1ea） |
 | [rag_knowledge_retrieval_design_2026-05-21.md](rag_knowledge_retrieval_design_2026-05-21.md) | 现行 RAG 检索分层设计 + roadmap |
 | [optimization_closure_plan_v1_2026-05-28.md](optimization_closure_plan_v1_2026-05-28.md) | 优化闭环:Stage A 已 ship,B/C 待 14d GO gate |

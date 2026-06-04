@@ -362,4 +362,12 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_optimization_cycle",
         "schedule": crontab(hour="*/6", minute=15),
     },
+    # Auto-submit beat (2026-06-04): every 6h at :35 past the hour (dodges the
+    # :00 sync / :15 opt / :20 prune / :30 corr-cache cluster). Automates the
+    # orthogonal backlog drain. Gated by ENABLE_AUTO_SUBMIT (default OFF) +
+    # AUTO_SUBMIT_MODE (default 'shadow' — logs would-submit, never submits).
+    "run-auto-submit-cycle": {
+        "task": "backend.tasks.run_auto_submit_cycle",
+        "schedule": crontab(hour="*/6", minute=35),
+    },
 }
