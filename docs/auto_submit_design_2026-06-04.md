@@ -57,3 +57,65 @@
 ## 6. 残余风险(无新门可堵,靠影子期 + 保守 cap + 人工抽查缓释)
 
 (a) BRAIN before-and-after 对已提交返 400 → composite/ΔSharpe 是回测合并估计非活体;(b) 真 OOS 需数月 post-submit PnL;(c) Redis 全宕的无锁双发(BRAIN 400 兜底);(d) 非 sweep 来源、红线达标但过拟合的 IS alpha。
+
+## 7. 运维上线 Runbook
+
+> 默认全关,以下任一步前系统行为不变。配置项可写 `.env` 或运行时 flag override(`ENABLE_AUTO_SUBMIT` 以 `ENABLE_` 开头,可热刷)。
+
+### 7.1 一次性:迁移 + 重启
+
+```bash
+# 1) 应用迁移(纯加 auto_submit_audit 表,additive,has_table 守卫,零风险)
+cd backend && alembic upgrade head        # head 应为 m4a9c7e2b1f8
+
+# 2) 重启 worker + beat 加载新代码(默认全关,重启后行为不变)
+run.bat --restart                          # 或你的常规重启方式
+```
+
+### 7.2 Stage 0 — 影子模式(≥7 天,0 真提交)
+
+```
+.env:  ENABLE_AUTO_SUBMIT=True
+       AUTO_SUBMIT_MODE=shadow          # 默认值,可不写
+```
+- 每 6h(:35)beat 跑完整守门栈,把 would-submit / skipped 全量写 `auto_submit_audit`,**不调 submit_alpha**。
+- 复核:`GET /ops/auto-submit/audit?outcome=would_submit`(看名单 + 每条 gate_results 信号值);`?outcome=skipped` 看被哪个 gate 挡下。
+- **进入 Stage 1 判据**:连续 ≥7 天人工核 would-submit 名单、确认 0 垃圾;recon verdict 在该 region 稳定 supported。
+- **排障**:名单恒为空 → 多半 `metrics_snapshot_at` 未刷新使 G4 新鲜度门挡光(安全但无产出)。先确认 6h sync/refresh beat 在跑并刷新该字段;或临时 `AUTO_SUBMIT_REQUIRE_FRESH_CANSUBMIT=False` 观察(注意这会放宽 G4)。
+
+### 7.3 Stage 1 — live(≥14 天,极保守)
+
+```
+.env:  AUTO_SUBMIT_MODE=live
+       AUTO_SUBMIT_DAILY_CAP=4          # 每 UTC 日上限(你定)
+       AUTO_SUBMIT_PER_RUN_CAP=2        # 单次 beat 上限
+       AUTO_SUBMIT_REQUIRE_RECON_VERDICT=supported
+```
+- 行为:每次 beat 最多提交 `per_run_cap` 个、每日最多 `daily_cap` 个、最正交/additive/supported 的顶档;其余仍进人工 drain 队列。
+- 监控:`GET /ops/auto-submit/audit?outcome=submitted`(已提交)/ `?outcome=rejected`(BRAIN 拒,会自动回退当日配额计数)。
+- 紧急停:`ENABLE_AUTO_SUBMIT=False`(整功能停)或 `AUTO_SUBMIT_MODE=shadow`(退回只观察)。
+- **进入 Stage 2 判据**:≥14 天 0 起垃圾事故 + BRAIN 接受率 100%。
+
+### 7.4 Stage 2 — 放宽(可选)
+
+```
+AUTO_SUBMIT_DAILY_CAP=  (上调)
+AUTO_SUBMIT_REQUIRE_RECON_VERDICT=weak   # 纳入 weak(>60% 但 <70%,≥15 对)
+AUTO_SUBMIT_REGIONS=USA,...              # 多 region(逐 region 跑保 self_corr 同区)
+```
+**永不放宽**:G5 BRAIN 红线 / G6 margin≥5bps / G9 相关性 blocked 排除 / dilutive(value_tier≠0)绝不提 / FALSIFIED 整 region 停手。
+
+### 7.5 配置项速查
+
+| 旋钮 | 默认 | 作用 |
+|---|---|---|
+| `ENABLE_AUTO_SUBMIT` | False | 主开关 |
+| `AUTO_SUBMIT_MODE` | shadow | off / shadow / live |
+| `AUTO_SUBMIT_DAILY_CAP` | 4 | 每 UTC 日 live 提交上限 |
+| `AUTO_SUBMIT_PER_RUN_CAP` | 2 | 单 beat live 提交上限 |
+| `AUTO_SUBMIT_MARGIN_BPS_MIN` | 5.0 | 经济门 bps |
+| `AUTO_SUBMIT_CANSUBMIT_MAX_AGE_H` | 12 | can_submit 新鲜度窗口 |
+| `AUTO_SUBMIT_REQUIRE_FRESH_CANSUBMIT` | True | 新鲜度未知/超期 → 不提交 |
+| `AUTO_SUBMIT_REGIONS` | USA | CSV,逐 region 跑 |
+| `AUTO_SUBMIT_REQUIRE_RECON_VERDICT` | supported | Stage1 仅 supported;weak 放宽 |
+| `AUTO_SUBMIT_CORR_THRESHOLD` | 0.7 | self/among-set 相关上限 |
