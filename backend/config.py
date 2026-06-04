@@ -71,25 +71,35 @@ def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
     LLM_FUNCTION_MODEL_MAP env never crashes Settings() construction. env keys
     merge OVER the defaults (partial-override).
     """
-    # Per-node benchmark FINAL (2026-05-29, runs=3 for expr nodes). NOTE: the
-    # hypothesis/code_gen picks were REVERTED to kimi-k2.6 on 2026-06-01 after a
-    # live single-node A/B (Phase C) showed the benchmark-preferred reasoning
-    # models (dsv4-pro hypothesis / qwen3.6-plus code_gen) DON'T beat kimi online
-    # (Welch t=1.67 ns; kimi numerically better) yet cost ~48% more tokens — they
-    # burn ~2-7k reasoning tokens per call that llm_service discards. See
-    # reference_routing_reasoning_models_no_online_edge_2026_06_01. Offline
-    # benchmark != online value for reasoning models.
+    # 2026-06-04 HARDENING: startup default now MIRRORS the live DB override
+    # (LLM_FUNCTION_MODEL_MAP, ops_console 2026-06-04) — all nodes route to the
+    # aliyun_coding_plan provider via provider_ref. Rationale: the token-plan
+    # gateway (aliyun_maas / token-plan.cn-beijing.maas.aliyuncs.com) ran OUT OF
+    # BUDGET, so production switched to aliyun_coding_plan (coding.dashscope). The
+    # base "openai" provider resolves to api.openai.com with an EMPTY key (no
+    # credential:openai_* / no .env OPENAI_*), i.e. a DEAD endpoint — so a
+    # cache-cold window, a deleted override, or a flipped-OFF flag must NOT fall
+    # back to it. Mirroring live here + the __default__ catch-all (captures
+    # unmapped node_keys AND untagged node_key=None calls) + the routing flag
+    # defaulting ON (below) keeps every fallback path on a LIVE provider.
+    # NOTE: the per-model picks are constrained by the coding-plan menu, NOT the
+    # 2026-06-01 kimi-vs-reasoning A/B preference — that conclusion
+    # (reference_routing_reasoning_models_no_online_edge_2026_06_01) is moot once
+    # token-plan's kimi-k2.6 is no longer reachable. Secret keys stay in
+    # CredentialsService (credential:llm_provider_aliyun_coding_plan).
+    _CP = "aliyun_coding_plan"
     defaults: Dict[str, Dict[str, str]] = {
-        "hypothesis":          {"model": "kimi-k2.6",        "provider": "openai"},  # was dsv4-pro (A/B reverted 06-01)
-        "code_gen":            {"model": "kimi-k2.6",        "provider": "openai"},  # was qwen3.6-plus (A/B reverted 06-01)
-        "self_correct":        {"model": "deepseek-v4-flash", "provider": "openai"},
-        "r1b_retry":           {"model": "qwen3.6-flash",     "provider": "openai"},
-        "llm_mutate_alpha":    {"model": "kimi-k2.5",         "provider": "openai"},
-        "llm_crossover_alpha": {"model": "kimi-k2.5",         "provider": "openai"},
-        "r1b_mutate":          {"model": "kimi-k2.6",         "provider": "openai"},
-        "r5_alignment_c1":     {"model": "deepseek-v4-flash", "provider": "openai"},
-        "r5_alignment_c2":     {"model": "kimi-k2.6",         "provider": "openai"},
-        "attribution":         {"model": "kimi-k2.5",         "provider": "openai"},
+        "hypothesis":          {"model": "qwen3.6-plus",  "provider_ref": _CP},
+        "code_gen":            {"model": "kimi-k2.5",      "provider_ref": _CP},
+        "self_correct":        {"model": "qwen3.6-flash",  "provider_ref": _CP},
+        "r1b_retry":           {"model": "qwen3.6-flash",  "provider_ref": _CP},
+        "llm_mutate_alpha":    {"model": "kimi-k2.5",      "provider_ref": _CP},
+        "llm_crossover_alpha": {"model": "kimi-k2.5",      "provider_ref": _CP},
+        "r1b_mutate":          {"model": "kimi-k2.5",      "provider_ref": _CP},
+        "r5_alignment_c1":     {"model": "qwen3.6-flash",  "provider_ref": _CP},
+        "r5_alignment_c2":     {"model": "kimi-k2.5",      "provider_ref": _CP},
+        "attribution":         {"model": "kimi-k2.5",      "provider_ref": _CP},
+        "__default__":         {"model": "qwen3.6-plus",  "provider_ref": _CP},
     }
     env_val = os.getenv("LLM_FUNCTION_MODEL_MAP")
     if not env_val:
@@ -138,11 +148,22 @@ def _load_llm_providers() -> Dict[str, Dict[str, str]]:
                                  "base_url": ""}
         }
 
-    Default empty — operators register providers from the ConfigCenter UI (which
-    writes the LLM_PROVIDERS json feature-flag into _flag_override_cache). This is
-    only the STARTUP seed; override via LLM_PROVIDERS env (JSON object).
+    This is only the STARTUP seed; the ConfigCenter UI writes the LLM_PROVIDERS
+    json feature-flag into _flag_override_cache (which wins). 2026-06-04 HARDENING:
+    seed now MIRRORS the live override (3 providers) instead of empty, so a
+    cache-cold window can still resolve the provider_ref entries in the
+    LLM_FUNCTION_MODEL_MAP startup default (above) — otherwise an unresolved ref
+    falls through to the DEAD base "openai" endpoint. Secret keys are NOT here —
+    they live encrypted in CredentialsService under credential:llm_provider_<name>.
     Module-level + fault-tolerant, mirroring _load_llm_function_model_map."""
-    defaults: Dict[str, Dict[str, str]] = {}
+    defaults: Dict[str, Dict[str, str]] = {
+        "aliyun_coding_plan": {"label": "阿里云CodingPlan", "sdk": "openai",
+                               "base_url": "https://coding.dashscope.aliyuncs.com/v1"},
+        "aliyun_maas": {"label": "阿里云TokenPlan", "sdk": "openai",
+                        "base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"},
+        "anthropic": {"label": "anthropic", "sdk": "anthropic",
+                      "base_url": "https://ai.yaspost.com"},
+    }
     env_val = os.getenv("LLM_PROVIDERS")
     if not env_val:
         return defaults
@@ -304,6 +325,15 @@ class Settings(BaseSettings):
     # so the __getattribute__ hook honours a runtime override (the map body
     # itself is NOT read via settings.X — resolve_model_for reads
     # _flag_override_cache directly, since non-ENABLE_ names bypass the hook).
+    # Default OFF (byte-for-byte legacy). The live DB override has been ON since
+    # 2026-05-31; the cross-process refresher (feature_flag_runtime) WARMS the
+    # cache synchronously at FastAPI lifespan / Celery worker_process_init BEFORE
+    # the first task runs, so production sees the DB flag ON with no cache-cold
+    # window — defaulting this ON would add ~zero prod safety yet make every test
+    # that constructs a real LLMService route to a live endpoint. The coding-plan
+    # startup map + provider seed below ARE hardened (so an override-deleted /
+    # flag-on-cache-warm path still degrades to a live endpoint, never the dead
+    # base "openai"). A brand-new env with NO DB override needs a one-time ops flip.
     ENABLE_PER_FUNCTION_LLM_ROUTING: bool = (
         os.getenv("ENABLE_PER_FUNCTION_LLM_ROUTING", "false").strip().lower()
         in ("1", "true", "yes")

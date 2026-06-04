@@ -36,7 +36,11 @@ def test_flag_off_returns_none(monkeypatch):
     assert resolve_model_for("code_gen") is None
 
 
-def test_none_or_empty_node_key_returns_none(routing_on):
+def test_none_or_empty_node_key_returns_none(routing_on, monkeypatch):
+    # 2026-06-04: the STARTUP default now carries a __default__ catch-all (coding-
+    # plan hardening), which by design captures node_key=None/unmapped. To test the
+    # "no matching entry → None" contract we set an explicit map WITHOUT __default__.
+    _set_map(monkeypatch, {"code_gen": _VALID})
     assert resolve_model_for(None) is None
     assert resolve_model_for("") is None
 
@@ -94,10 +98,17 @@ def test_override_wins_over_startup_default(routing_on, monkeypatch):
 
 def test_startup_default_used_when_no_override(routing_on, monkeypatch):
     monkeypatch.delitem(cfg._flag_override_cache, "LLM_FUNCTION_MODEL_MAP", raising=False)
+    monkeypatch.delitem(cfg._flag_override_cache, "LLM_PROVIDERS", raising=False)
     r = resolve_model_for("hypothesis")
-    # hypothesis startup default reverted to kimi-k2.6 on 2026-06-01 after the
-    # live A/B (dsv4-pro had no online edge + cost ~48% more — reasoning tokens).
-    assert r is not None and r["model"] == "kimi-k2.6"
+    # 2026-06-04 HARDENING: startup default now mirrors the live DB override —
+    # every node routes to aliyun_coding_plan (token-plan ran out of budget). The
+    # provider_ref expands via the LLM_PROVIDERS startup seed → provider "openai"
+    # (coding-plan's sdk) + the coding.dashscope base_url + the per-provider key_ref.
+    assert r is not None
+    assert r["model"] == "qwen3.6-plus"
+    assert r["provider"] == "openai"
+    assert r["base_url"] == "https://coding.dashscope.aliyuncs.com/v1"
+    assert r["api_key_ref"] == "llm_provider_aliyun_coding_plan"
 
 
 # --------------------------------------------------------------- shallow copy
