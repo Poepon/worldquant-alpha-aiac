@@ -112,8 +112,20 @@ def test_signals_recorded_for_audit():
     sig = ev["signals"]
     for key in ("sharpe", "fitness", "turnover", "margin", "margin_bps",
                 "composite", "recommendation", "value_tier", "self_corr",
-                "max_corr_to_selected", "can_submit_age_h", "sign_routing_ok"):
+                "max_corr_to_selected", "can_submit_age_h", "sign_routing_ok",
+                "delta_score", "iqc_scope"):
         assert key in sig
+
+
+def test_negative_delta_score_does_not_gate():
+    """Δscore is informational only — a competition-score-dilutive alpha still
+    passes (policy optimizes portfolio marginal value per user goal)."""
+    cand = _passing_candidate()
+    cand["_delta_score"] = -306.0
+    cand["_iqc_scope"] = "competitions/IQC2026S2"
+    ev = evaluate_guard_stack(cand, sign_routing_ok=True, settings=settings)
+    assert ev["passed"] is True
+    assert ev["signals"]["delta_score"] == -306.0
 
 
 def test_cs_age_hours():

@@ -59,7 +59,9 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
                metrics->'_iqc_marginal'->>'recommendation' AS recommendation,
                (metrics->'_iqc_marginal'->>'composite_score')::float AS composite,
                (metrics->'_iqc_marginal'->>'delta_sharpe')::float AS brain_d,
-               metrics->>'_brain_can_submit_at' AS cs_at
+               metrics->>'_brain_can_submit_at' AS cs_at,
+               (metrics->'_iqc_marginal'->>'delta_score')::float AS delta_score,
+               metrics->'_iqc_marginal'->>'scope' AS iqc_scope
         FROM alphas
         WHERE can_submit IS TRUE AND date_submitted IS NULL
           AND region = :region
@@ -146,6 +148,11 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
             "_recommendation": r[9],
             "_cs_snapshot": r[12],   # _brain_can_submit_at (can_submit-verdict freshness, ISO str)
             "_pnl_covered": aid in pnl_ids,
+            # Competition before-and-after Δscore (informational only — NOT a gate;
+            # surfaced in the audit so the human sees the competition-score cost of
+            # each submit even though the policy optimizes portfolio marginal value).
+            "_delta_score": float(r[13]) if r[13] is not None else None,
+            "_iqc_scope": r[14],
         }
         if sign_routing_ok:
             cand["value_tier"] = sign_value_tier(delta_by_id.get(aid), aid in pnl_ids)
@@ -293,5 +300,10 @@ def evaluate_guard_stack(
         "can_submit_age_h": round(cs_age, 2) if cs_age is not None else None,
         "pnl_covered": bool(cand.get("_pnl_covered")),
         "sign_routing_ok": bool(sign_routing_ok),
+        # Informational ONLY (not a gate): competition before-and-after Δscore +
+        # its scope. Lets the human see the competition-score cost per submit; the
+        # policy itself optimizes portfolio marginal value (Δsharpe), per user goal.
+        "delta_score": cand.get("_delta_score"),
+        "iqc_scope": cand.get("_iqc_scope"),
     }
     return {"passed": passed, "skip_reason": skip_reason, "gates": gates, "signals": signals}
