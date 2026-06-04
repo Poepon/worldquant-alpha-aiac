@@ -60,6 +60,12 @@
 - **依赖**：worker 重启 + 一轮 FLAT 产出 + 一次真实 BRAIN 调用。
 - **来源**：`b846db1`、`7034050`（默认模型 durable 回退 kimi）、`config.py:83-84`。
 - **战略**：◼ 中性（「防退化」非「求进展」；属降本 + 稳定性维护）。**但 P1 优先级正当**——若凭证迁移把生产打坏会同时阻断 N1/N2 所需的 worker 在线。
+- **更新(2026-06-04 — 已冒烟 PASS + 顺手硬化)**：3 路并行核实(flag/DB/代码 + LLM 日志/凭证),结论 **HEALTHY**:
+  - **路由 ON 且健康**:`ENABLE_PER_FUNCTION_LLM_ROUTING` DB override=true(5-31);LLM 日志 model 为 4 种混合(kimi-k2.6/k2.5、qwen3.6-flash/plus),**零 gpt-*/api.openai.com** → 凭证迁移没把路由打回原厂。Brain 凭证已迁 `SystemConfig` 加密表(DB 优先、.env 空、`credential:brain_*`),首笔 15816 真提交即证登录健康。
+  - **关键发现 — provider 迁移**:`hypothesis=qwen3.6-plus`/`code_gen=kimi-k2.5` **不是退化** —— **token-plan(aliyun_maas)额度耗尽,生产 6-04 切到 `aliyun_coding_plan`(coding.dashscope)**。6-01「kimi 赢 reasoning」结论在 token-plan 失额后已不适用。
+  - **抓到并修了一个真地雷**:基础 `openai` provider 解析到 `api.openai.com` + **空 key = 死端点**(无 `credential:openai_*`/无 .env OPENAI_*),LLM 全靠 DB override 单根吊命。**已硬化**(commit 待提交):`config.py` 启动默认 `LLM_FUNCTION_MODEL_MAP` + `_load_llm_providers` seed **镜像 live coding-plan**(含 `__default__` catch-all)→ override 删/cache 冷都退活端点。flag 默认**保持 OFF**(查实 `feature_flag_runtime` 启动同步水合 cache,冷窗不存在,翻 ON 零增益且破坏测试保真)。2 个直接断言旧默认的测试已更新,回归 `--all` 全过 0 漂移。
+  - **遗留运维注意**:翻 `ENABLE_PER_FUNCTION_LLM_ROUTING` OFF 现等于 **LLM kill-switch**(无活基础兜底);全新部署/无 DB override 需一次性 ops 翻 ON。CLAUDE.md「LLM routing」段已更新反映 coding-plan + 此 footgun。
+  - **X1 实质 DONE**(冒烟 + 硬化均完成);唯一未跑 = live 重启后一轮 fresh FLAT 实测(并入 X2 一起),因最近 LLM 日志停在 6-04 02:31(此后无 FLAT 挖掘,worker 活着但没在挖)。
 
 ### X2. delay-0 原生 FLAT session 真跑一轮（接线已 ship，产出待 soak）
 
