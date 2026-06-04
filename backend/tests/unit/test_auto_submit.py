@@ -124,6 +124,9 @@ def test_cs_age_hours():
     # naive snapshot treated as UTC (defensive)
     naive = datetime(2026, 6, 4, 7, 0, 0)
     assert abs(_cs_age_hours(naive, now_utc=now) - 5.0) < 1e-6
+    # ISO string (JSONB text from _brain_can_submit_at) is parsed
+    assert abs(_cs_age_hours("2026-06-04T07:00:00", now_utc=now) - 5.0) < 1e-6
+    assert _cs_age_hours("not-a-date", now_utc=now) is None
 
 
 @pytest.mark.parametrize("verdict,require,expected", [

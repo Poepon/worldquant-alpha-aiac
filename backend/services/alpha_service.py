@@ -437,6 +437,11 @@ class AlphaService(BaseService):
             "_brain_can_submit": ok,
             "_brain_failed_checks": failed,
             "_brain_pending_checks": pending,
+            # can_submit-verdict freshness stamp (2026-06-04): naive-UTC ISO. This
+            # is distinct from metrics_snapshot_at (full-metrics sync) — it marks
+            # when can_submit itself was last re-checked against BRAIN. Auto-submit
+            # G4 freshness keys off THIS.
+            "_brain_can_submit_at": datetime.utcnow().isoformat(),
         }
         await self.db.execute(
             _sql_update(_Alpha)

@@ -59,7 +59,7 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
                metrics->'_iqc_marginal'->>'recommendation' AS recommendation,
                (metrics->'_iqc_marginal'->>'composite_score')::float AS composite,
                (metrics->'_iqc_marginal'->>'delta_sharpe')::float AS brain_d,
-               metrics_snapshot_at
+               metrics->>'_brain_can_submit_at' AS cs_at
         FROM alphas
         WHERE can_submit IS TRUE AND date_submitted IS NULL
           AND region = :region
@@ -144,7 +144,7 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
             "_margin": float(r[7]) if r[7] is not None else None,
             "_composite": composite,
             "_recommendation": r[9],
-            "_cs_snapshot": r[12],
+            "_cs_snapshot": r[12],   # _brain_can_submit_at (can_submit-verdict freshness, ISO str)
             "_pnl_covered": aid in pnl_ids,
         }
         if sign_routing_ok:
@@ -171,11 +171,17 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
 
 
 def _cs_age_hours(snapshot, now_utc: Optional[datetime] = None) -> Optional[float]:
-    """Hours since the alpha's metrics were last refreshed from BRAIN. None when
-    no snapshot timestamp (→ freshness unknown)."""
+    """Hours since can_submit was last re-checked against BRAIN (the
+    ``_brain_can_submit_at`` stamp). Accepts an ISO string (JSONB text) or a
+    datetime. None when absent (→ freshness unknown → G4 fail-closed)."""
     if snapshot is None:
         return None
     now = now_utc or datetime.now(timezone.utc)
+    if isinstance(snapshot, str):
+        try:
+            snapshot = datetime.fromisoformat(snapshot)
+        except (ValueError, TypeError):
+            return None
     ts = snapshot
     # Column is DateTime(timezone=True), but some writers stamp datetime.utcnow()
     # (naive). We assume naive == UTC here — correct ONLY while every writer of
