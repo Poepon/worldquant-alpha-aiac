@@ -957,6 +957,19 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "2026-05-28.md."
         ),
     ),
+    "ENABLE_AUTO_SUBMIT": FlagSpec(
+        name="ENABLE_AUTO_SUBMIT",
+        flag_type="bool",
+        group="Phase16-B",
+        description=(
+            "自动提交 master 开关(默认 OFF)。ON 后 6h beat 跑正交抽干守门栈;"
+            "AUTO_SUBMIT_MODE(.env,非热翻)='shadow'(默认)只记 would-submit 名单不真发,"
+            "'live' 才按 daily_cap 真提交。守门栈层层 fail-closed(can_submit/红线/margin≥5bps/"
+            "推荐=SUBMIT/additive/正交/recon supported),最终仍由 submit_alpha 兜底。"
+            "热翻此开关可即时启停(含紧急关停);名单见 GET /ops/auto-submit/audit。"
+            "设计 docs/auto_submit_design_2026-06-04.md。"
+        ),
+    ),
     "ENABLE_DATASET_VALUE_BANDIT": FlagSpec(
         name="ENABLE_DATASET_VALUE_BANDIT",
         flag_type="bool",
