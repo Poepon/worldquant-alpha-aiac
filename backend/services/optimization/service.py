@@ -141,13 +141,24 @@ class OptimizationService:
                 winners, robustness_rejected = self.robustness.apply(
                     winners, sim_results, delay
                 )
-            n_winners = len(winners)
+            n_winners_selected = len(winners)
 
             persisted_pks = await self.persister.save(
                 winners=winners,
                 parent_alpha_id=parent_id,
                 opt_run_id=opt_run_id,
             )
+
+            # n_winners == winners that ACTUALLY became alpha rows. The persister
+            # returns None for a winner whose persist hit a unique collision
+            # (BRAIN re-issued an alpha_id we already hold → the variant is a dup
+            # of an existing alpha). Recording the SELECTED count instead made
+            # optimization_runs.n_winners exceed the linkable alphas.
+            # optimization_run_id rows → the cycles UI showed a phantom "winner
+            # with no clickable ID" (e.g. cycle 105). Keep the invariant:
+            # n_winners == COUNT(alphas WHERE optimization_run_id = this cycle).
+            n_persisted = sum(1 for pk in persisted_pks if pk is not None)
+            n_winners = n_persisted
 
             await self.repository.record_persist(
                 opt_run_id=opt_run_id,
@@ -174,15 +185,17 @@ class OptimizationService:
                         "(non-fatal): %s", ex,
                     )
 
-            cycle_meta = (
-                {
-                    "robustness_rejected": robustness_rejected,
-                    "n_robustness_rejected": len(robustness_rejected),
-                }
-                if robustness_rejected else None
-            )
+            cycle_meta: Dict[str, Any] = {}
+            if robustness_rejected:
+                cycle_meta["robustness_rejected"] = robustness_rejected
+                cycle_meta["n_robustness_rejected"] = len(robustness_rejected)
+            if n_winners_selected != n_persisted:
+                # A winner was selected but failed to persist (alpha_id collision)
+                # — keep the diagnostic so the n_winners drop is explainable.
+                cycle_meta["n_winners_selected"] = n_winners_selected
+                cycle_meta["n_winners_persist_failed"] = n_winners_selected - n_persisted
             await self.repository.finish_cycle(
-                opt_run_id=opt_run_id, metadata=cycle_meta
+                opt_run_id=opt_run_id, metadata=(cycle_meta or None)
             )
             return {
                 "opt_run_id": opt_run_id,

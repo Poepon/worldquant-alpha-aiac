@@ -1,6 +1,11 @@
 """SettingsSweepGenerator — Stage A's only generator.
 
-Produces 10 fixed variants per candidate alpha along three axes:
+Produces up to ``max_variants`` variants per candidate alpha (default 10, wired
+from ``settings.MAX_OPTIMIZATION_VARIANTS`` by the factory; capped at the 10-cell
+grid below — to exceed 10 you must add rows to ``_GRID``). The grid is traversed
+in order and truncated to ``max_variants`` BEFORE the dedup pass, so a smaller cap
+keeps the most important cells first (anchor → neut swap → decay sweep → …) and
+spends fewer BRAIN sim slots. Variants sweep three axes:
 
   - decay ∈ {0, 4, 16, 64}
   - window ∈ {20, 40, 60, 120}      (rewrites the first ts_*(_, N) numeric
@@ -80,9 +85,19 @@ def _substitute_first_window(expression: str, new_window: int) -> str:
 
 
 class SettingsSweepGenerator:
-    """Layer-2 generator. Stateless — single instance is fine across cycles."""
+    """Layer-2 generator. Stateless — single instance is fine across cycles.
+
+    ``max_variants`` caps how many of the ``_GRID`` cells are tried (default 10 =
+    the whole grid, so the default is byte-identical to the pre-config behaviour).
+    Injected from ``settings.MAX_OPTIMIZATION_VARIANTS`` by ``build_optimization_
+    service``. Clamped to [1, len(_GRID)] — a value above the grid length just
+    uses the full grid (the grid is the hard ceiling).
+    """
 
     name = "settings_sweep"
+
+    def __init__(self, max_variants: int = 10) -> None:
+        self._max_variants = max(1, min(int(max_variants), len(_GRID)))
 
     async def generate(self, alpha) -> List[Variant]:
         """Produce up to 10 variants from ``alpha`` (a backend.models.Alpha row).
@@ -112,7 +127,7 @@ class SettingsSweepGenerator:
         baseline_delay = int(1 if _delay is None else _delay)
 
         out: List[Variant] = []
-        for neut, decay, window_override in _GRID:
+        for neut, decay, window_override in _GRID[:self._max_variants]:
             expr = baseline_expr
             tag_parts = [f"decay={decay}", f"neut={neut}"]
             if window_override is not None and baseline_window is not None and (

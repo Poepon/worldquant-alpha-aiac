@@ -306,17 +306,35 @@ export default function OptimizationCyclesMonitor() {
       title: 'Winners',
       dataIndex: 'n_winners',
       key: 'n_winners',
-      width: 80,
-      render: (v, c) =>
-        c.n_variants > 0 ? (
-          <Tooltip title={`本 cycle 转化率 = ${v} / ${c.n_variants} = ${((v / c.n_variants) * 100).toFixed(1)}%`}>
-            <Text strong={v > 0} type={v > 0 ? 'success' : undefined}>
-              {v}
-            </Text>
-          </Tooltip>
-        ) : (
-          v
-        ),
+      width: 150,
+      render: (v, c) => {
+        const ids = c.winner_alpha_ids || []
+        const count =
+          c.n_variants > 0 ? (
+            <Tooltip title={`本 cycle 转化率 = ${v} / ${c.n_variants} = ${((v / c.n_variants) * 100).toFixed(1)}%`}>
+              <Text strong={v > 0} type={v > 0 ? 'success' : undefined}>{v}</Text>
+            </Tooltip>
+          ) : (
+            <Text>{v}</Text>
+          )
+        if (v === 0) return count
+        return (
+          <Space size={4} wrap>
+            {count}
+            {ids.length > 0 ? (
+              ids.map((aid) => (
+                <Link key={aid} to={`/alphas/${aid}`} target="_blank">
+                  <Tag color="success" style={{ marginInlineEnd: 0, cursor: 'pointer' }}>#{aid}</Tag>
+                </Link>
+              ))
+            ) : (
+              <Tooltip title="cycle 记录有 winner,但其 alpha 行未回链(持久化失败或已被清理)— 无法跳转">
+                <Tag color="warning" style={{ marginInlineEnd: 0 }}>ID 缺失</Tag>
+              </Tooltip>
+            )}
+          </Space>
+        )
+      },
     },
     {
       title: 'Submitted',

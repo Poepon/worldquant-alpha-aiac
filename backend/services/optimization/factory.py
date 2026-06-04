@@ -51,7 +51,9 @@ def build_optimization_service(db: Any, brain: Any) -> "Any":
         from backend.services.optimization.robustness import RobustnessFilter
         robustness = RobustnessFilter()
     return OptimizationService(
-        generator=SettingsSweepGenerator(),
+        generator=SettingsSweepGenerator(
+            max_variants=int(getattr(_cfg, "MAX_OPTIMIZATION_VARIANTS", 10)),
+        ),
         simulator=BrainSimulator(brain),
         winner_selector=WinnerSelector(),
         persister=Persister(db, corr_service=corr, repository=repo),

@@ -177,3 +177,47 @@ async def test_tag_format_is_pipe_delimited():
 @pytest.mark.asyncio
 async def test_generator_name_attribute_matches_protocol():
     assert SettingsSweepGenerator.name == "settings_sweep"
+
+
+# ---------------------------------------------------------------------------
+# max_variants cap (config-wired, 2026-06-04)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_default_max_variants_unchanged_full_grid():
+    # No arg → default 10 → byte-identical to pre-config behaviour (full grid).
+    gen = SettingsSweepGenerator()
+    variants = await gen.generate(FakeAlpha(expression=_15621_EXPR, delay=0))
+    assert len(variants) == 10
+
+
+@pytest.mark.asyncio
+async def test_max_variants_caps_the_grid_before_dedup():
+    # Cap 5 → first 5 grid cells (anchor + neut swap + 3 decay sweeps, no window
+    # rows) → all distinct → exactly 5, anchor still first.
+    gen = SettingsSweepGenerator(max_variants=5)
+    variants = await gen.generate(FakeAlpha(expression=_15621_EXPR, delay=0))
+    assert len(variants) == 5
+    assert variants[0].settings["neutralization"] == "INDUSTRY"
+    assert variants[0].settings["decay"] == 4
+    # window-axis rows (#6-8) are beyond the cap → no window= tags survive
+    assert not any("window=" in v.tag for v in variants)
+
+
+@pytest.mark.asyncio
+async def test_max_variants_clamped_to_grid_ceiling():
+    # Above the grid length → clamped to the full grid (grid is the hard ceiling).
+    gen = SettingsSweepGenerator(max_variants=99)
+    variants = await gen.generate(FakeAlpha(expression=_15621_EXPR, delay=0))
+    assert len(variants) == 10
+
+
+@pytest.mark.asyncio
+async def test_max_variants_floor_is_one():
+    # 0 / negative clamps to 1 (never an empty sweep).
+    for bad in (0, -3):
+        gen = SettingsSweepGenerator(max_variants=bad)
+        variants = await gen.generate(FakeAlpha(expression=_15621_EXPR, delay=0))
+        assert len(variants) == 1
+        assert variants[0].settings["decay"] == 4  # the anchor cell

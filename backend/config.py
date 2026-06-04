@@ -1649,8 +1649,13 @@ class Settings(BaseSettings):
     SIM_PIPELINE_LIVENESS_GRACE_SEC: int = 120
 
     # Optimization Chain Settings
+    # MAX_OPTIMIZATION_VARIANTS caps the SettingsSweepGenerator grid (2026-06-04:
+    # wired via build_optimization_service → generator truncates _GRID[:N] before
+    # dedup). Default 10 = the full hand-picked grid; the grid's 10 cells are the
+    # hard ceiling (raise past 10 only by adding _GRID rows). Lower it for cheaper
+    # sweeps (fewer BRAIN sims/cycle).
     MAX_OPTIMIZATION_VARIANTS: int = 10
-    MAX_SETTINGS_VARIANTS: int = 5
+    MAX_SETTINGS_VARIANTS: int = 5           # UNUSED (no wiring) — reserved/legacy
     OPTIMIZATION_BUDGET_PER_ALPHA: int = 20  # Max simulations per optimization target
     
     # Field Screening Settings
