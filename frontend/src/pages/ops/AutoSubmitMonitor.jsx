@@ -150,6 +150,7 @@ export default function AutoSubmitMonitor() {
   }
 
   const tally = data?.tally_24h || {}
+  const snap = data?.snapshot_tally || {}   // latest beat firing's outcome breakdown
   const enabled = data?.enabled
   const mode = data?.mode || 'shadow'
 
@@ -311,22 +312,25 @@ export default function AutoSubmitMonitor() {
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col xs={12} sm={6} lg={4}>
           <Card className="glass-card">
-            <Statistic title="将提交 (24h)" value={tally.would_submit ?? 0} valueStyle={{ color: '#00ff88' }} />
+            <Statistic title="将提交 (本次 beat)" value={snap.would_submit ?? 0} valueStyle={{ color: '#00ff88' }} />
+            <Text type="secondary" style={{ fontSize: 11 }}>最近一次评估的快照</Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6} lg={4}>
+          <Card className="glass-card">
+            <Statistic title="已跳过 (本次 beat)" value={snap.skipped ?? 0} valueStyle={{ color: '#888' }} />
+            <Text type="secondary" style={{ fontSize: 11 }}>被守门栈挡下</Text>
           </Card>
         </Col>
         <Col xs={12} sm={6} lg={4}>
           <Card className="glass-card">
             <Statistic title="已提交 (24h)" value={tally.submitted ?? 0} valueStyle={{ color: '#00d4ff' }} />
+            <Text type="secondary" style={{ fontSize: 11 }}>真实提交事件(累计)</Text>
           </Card>
         </Col>
         <Col xs={12} sm={6} lg={4}>
           <Card className="glass-card">
             <Statistic title="BRAIN 拒 (24h)" value={tally.rejected ?? 0} valueStyle={{ color: '#ffb700' }} />
-          </Card>
-        </Col>
-        <Col xs={12} sm={6} lg={4}>
-          <Card className="glass-card">
-            <Statistic title="已跳过 (24h)" value={tally.skipped ?? 0} valueStyle={{ color: '#888' }} />
           </Card>
         </Col>
         <Col xs={12} sm={6} lg={4}>

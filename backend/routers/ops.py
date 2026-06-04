@@ -5014,18 +5014,35 @@ async def auto_submit_audit_recent(
         q = q.where(AutoSubmitAudit.outcome == outcome)
     if region:
         q = q.where(AutoSubmitAudit.region == region)
-    # latest_only: resolve the most recent beat_run_id (a firing touches all
-    # regions, so filter by region first when given) and pin the snapshot to it.
+    # Resolve the most recent beat firing (region-filtered when given) — used both
+    # to pin the latest_only snapshot AND to compute the per-run snapshot tally.
+    _lq = select(AutoSubmitAudit.beat_run_id).order_by(desc(AutoSubmitAudit.created_at)).limit(1)
+    if region:
+        _lq = _lq.where(AutoSubmitAudit.region == region)
+    latest_beat_run_id = (await db.execute(_lq)).scalars().first()
+
     if latest_only and not beat_run_id:
-        _lq = select(AutoSubmitAudit.beat_run_id).order_by(desc(AutoSubmitAudit.created_at)).limit(1)
-        if region:
-            _lq = _lq.where(AutoSubmitAudit.region == region)
-        beat_run_id = (await db.execute(_lq)).scalars().first()
+        beat_run_id = latest_beat_run_id
     if beat_run_id:
         q = q.where(AutoSubmitAudit.beat_run_id == beat_run_id)
     rows = (await db.execute(q.limit(int(limit)))).scalars().all()
 
-    # Outcome tallies over the last 24h (quick health snapshot).
+    # Snapshot tally — outcome breakdown for the LATEST beat firing (matches the
+    # de-duped would_submit/skipped tables; the right "current state" KPI vs the
+    # cumulative 24h event count below).
+    snapshot_tally: Dict[str, int] = {}
+    if latest_beat_run_id:
+        _sq = select(AutoSubmitAudit.outcome, _func.count()).where(
+            AutoSubmitAudit.beat_run_id == latest_beat_run_id
+        )
+        if region:
+            _sq = _sq.where(AutoSubmitAudit.region == region)
+        snapshot_tally = {
+            o: int(c)
+            for o, c in (await db.execute(_sq.group_by(AutoSubmitAudit.outcome))).all()
+        }
+
+    # Outcome tallies over the last 24h (cumulative event activity).
     since = datetime.utcnow() - timedelta(hours=24)
     tally_rows = (await db.execute(
         select(AutoSubmitAudit.outcome, _func.count())
@@ -5051,7 +5068,9 @@ async def auto_submit_audit_recent(
         "mode": getattr(settings, "AUTO_SUBMIT_MODE", "shadow"),
         "enabled": bool(getattr(settings, "ENABLE_AUTO_SUBMIT", False)),
         "tally_24h": {o: int(c) for o, c in tally_rows},
-        "beat_run_id": beat_run_id,  # the run this snapshot is pinned to (latest_only)
+        "snapshot_tally": snapshot_tally,        # latest beat firing's outcome breakdown
+        "latest_beat_run_id": latest_beat_run_id,
+        "beat_run_id": beat_run_id,  # the run this query is pinned to (latest_only)
         "count": len(items),
         "items": items,
     }
@@ -5528,6 +5547,10 @@ class CycleSummary(BaseModel):
     trigger_source: str
     n_variants: int
     n_winners: int
+    # DB ids of the winner alphas persisted for this cycle (alphas.
+    # optimization_run_id reverse-FK). May be SHORTER than n_winners when a
+    # winner's persist failed / its alpha row was later cleaned up.
+    winner_alpha_ids: List[int] = []
     n_submitted: int                 # SubmitPolicy "submit" count
     sim_budget_used: int
     sim_budget_granted: int
@@ -5611,6 +5634,20 @@ async def optimization_cycles(
         """
     ), {"days": str(int(days)), "limit": int(limit)})).all()
 
+    # Reverse-lookup winner alpha DB ids for the cycles on this page (one query;
+    # alphas.optimization_run_id is the persister's back-ref). best-sharpe first.
+    from sqlalchemy import bindparam as _bindparam
+    _cycle_ids = [int(r[0]) for r in rows]
+    winners_by_run: Dict[int, List[int]] = {}
+    if _cycle_ids:
+        wq = _text(
+            "SELECT optimization_run_id, id FROM alphas "
+            "WHERE optimization_run_id IN :ids "
+            "ORDER BY optimization_run_id, is_sharpe DESC NULLS LAST"
+        ).bindparams(_bindparam("ids", expanding=True))
+        for run_id, alpha_id in (await db.execute(wq, {"ids": _cycle_ids})).all():
+            winners_by_run.setdefault(int(run_id), []).append(int(alpha_id))
+
     cycles = [
         CycleSummary(
             id=int(r[0]),
@@ -5619,6 +5656,7 @@ async def optimization_cycles(
             trigger_source=str(r[3]),
             n_variants=int(r[4] or 0),
             n_winners=int(r[5] or 0),
+            winner_alpha_ids=winners_by_run.get(int(r[0]), []),
             n_submitted=int(r[6] or 0),
             sim_budget_used=int(r[7] or 0),
             sim_budget_granted=int(r[8] or 0),
