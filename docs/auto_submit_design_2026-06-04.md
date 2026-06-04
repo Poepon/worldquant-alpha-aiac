@@ -74,14 +74,15 @@ run.bat --restart                          # 或你的常规重启方式
 
 ### 7.2 Stage 0 — 影子模式(≥7 天,0 真提交)
 
+经 ops flag 热翻(两个都要开;均 `ENABLE_` 前缀、已注册 SUPPORTED_FLAGS):
 ```
-.env:  ENABLE_AUTO_SUBMIT=True
-       AUTO_SUBMIT_MODE=shadow          # 默认值,可不写
+PATCH /ops/flags/ENABLE_AUTO_SUBMIT       {"value": true}   # mode 默认 shadow
+PATCH /ops/flags/ENABLE_CAN_SUBMIT_REFRESH {"value": true}  # 保 G4 新鲜度可持续(必开)
 ```
-- 每 6h(:35)beat 跑完整守门栈,把 would-submit / skipped 全量写 `auto_submit_audit`,**不调 submit_alpha**。
+- 每 6h(:35)auto-submit beat 跑完整守门栈,把 would-submit / skipped 全量写 `auto_submit_audit`,**不调 submit_alpha**。每 6h(:50)can_submit 刷新 beat 重验 backlog。
 - 复核:`GET /ops/auto-submit/audit?outcome=would_submit`(看名单 + 每条 gate_results 信号值);`?outcome=skipped` 看被哪个 gate 挡下。
 - **进入 Stage 1 判据**:连续 ≥7 天人工核 would-submit 名单、确认 0 垃圾;recon verdict 在该 region 稳定 supported。
-- **排障**:名单恒为空 → 多半 `metrics_snapshot_at` 未刷新使 G4 新鲜度门挡光(安全但无产出)。先确认 6h sync/refresh beat 在跑并刷新该字段;或临时 `AUTO_SUBMIT_REQUIRE_FRESH_CANSUBMIT=False` 观察(注意这会放宽 G4)。
+- **排障**:would-submit 恒空 → 多半 **G4 新鲜度**(`_brain_can_submit_at` > 12h)。**这正是为何 `ENABLE_CAN_SUBMIT_REFRESH` 必须同时开**:它每 6h 重盖 can_submit 验证戳。若仍空,确认该 beat 在跑(`GET /ops/auto-submit/audit?outcome=skipped` 看 skip_reason 是否 G4_freshness 占多),或手动跑一次 `POST /alphas/refresh-can-submit`。注:`_brain_can_submit_at`(can_submit 验证新鲜度)≠ `metrics_snapshot_at`(完整 metrics 同步)。
 
 ### 7.3 Stage 1 — live(≥14 天,极保守)
 
@@ -119,3 +120,7 @@ AUTO_SUBMIT_REGIONS=USA,...              # 多 region(逐 region 跑保 self_cor
 | `AUTO_SUBMIT_REGIONS` | USA | CSV,逐 region 跑 |
 | `AUTO_SUBMIT_REQUIRE_RECON_VERDICT` | supported | Stage1 仅 supported;weak 放宽 |
 | `AUTO_SUBMIT_CORR_THRESHOLD` | 0.7 | self/among-set 相关上限 |
+| `ENABLE_CAN_SUBMIT_REFRESH` | False | 周期 can_submit 刷新 beat 开关(保 G4 新鲜度;auto-submit live 前必开) |
+| `CAN_SUBMIT_REFRESH_MAX_PER_RUN` | 200 | 每次刷新 beat 的 BRAIN GET 上限(最旧戳优先) |
+
+> **G4 新鲜度的可持续性**:G4 keying off `metrics._brain_can_submit_at`(由 `refresh_can_submit` 盖戳)。`run_can_submit_refresh` beat(每 6h :50,gated by `ENABLE_CAN_SUBMIT_REFRESH`)对 backlog 重验 → 戳保持 <12h → G4 持续可满足;同时把 BRAIN 现已拒绝的 alpha 降级出 backlog。**不开此 beat,G4 戳会 ~12h 后过期,would-submit 掉回 0。**
