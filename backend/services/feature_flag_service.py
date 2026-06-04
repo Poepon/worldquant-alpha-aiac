@@ -970,6 +970,18 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "设计 docs/auto_submit_design_2026-06-04.md。"
         ),
     ),
+    "ENABLE_CAN_SUBMIT_REFRESH": FlagSpec(
+        name="ENABLE_CAN_SUBMIT_REFRESH",
+        flag_type="bool",
+        group="Phase16-B",
+        description=(
+            "can_submit 周期刷新 beat(默认 OFF)。每 6h :50 对 can_submit=True/未提交"
+            " backlog 按最旧戳优先重查 BRAIN,保 can_submit 验证 + _brain_can_submit_at"
+            " 新鲜度 <自动提交 G4 窗(12h),并把 BRAIN 现已拒绝(如 self_corr 升过 0.7)"
+            "的 alpha 降级出 backlog。只读 BRAIN GET、1 req/s,单飞锁。auto-submit live"
+            "前应开启,否则 G4 新鲜戳 ~12h 后过期 → would_submit 掉回 0。"
+        ),
+    ),
     "ENABLE_DATASET_VALUE_BANDIT": FlagSpec(
         name="ENABLE_DATASET_VALUE_BANDIT",
         flag_type="bool",

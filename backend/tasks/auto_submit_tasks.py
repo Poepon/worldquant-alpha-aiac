@@ -323,3 +323,95 @@ async def _audit(
             await db.rollback()
         except Exception:  # noqa: BLE001
             pass
+
+
+# ---------------------------------------------------------------------------
+# can_submit periodic refresh beat (2026-06-04)
+# ---------------------------------------------------------------------------
+_CS_REFRESH_LOCK_KEY = "can_submit_refresh:inflight"
+_CS_REFRESH_LOCK_TTL = 1800  # 30min — generous upper bound for a paced batch
+
+
+@celery_app.task(name="backend.tasks.run_can_submit_refresh")
+def run_can_submit_refresh() -> Dict[str, Any]:
+    """Celery entry point (Windows --pool=solo friendly via run_async)."""
+    return run_async(_run_can_submit_refresh())
+
+
+async def _run_can_submit_refresh() -> Dict[str, Any]:
+    """Re-check can_submit for the can_submit=True / unsubmitted backlog against
+    BRAIN, stalest-first, to keep the verdict + its ``_brain_can_submit_at``
+    freshness stamp current (auto-submit G4) and demote alphas BRAIN now rejects.
+
+    Read-only BRAIN GETs, paced 1 req/s. Gated by ENABLE_CAN_SUBMIT_REFRESH
+    (default OFF). Single-flight via a Redis NX lock so it can't overlap itself
+    or a manual batch refresh.
+    """
+    if not bool(getattr(settings, "ENABLE_CAN_SUBMIT_REFRESH", False)):
+        return {"skipped": "flag_off"}
+
+    import asyncio as _asyncio
+    from sqlalchemy import text as _text
+    from backend.adapters.brain_adapter import BrainAdapter
+    from backend.services.alpha_service import AlphaService
+
+    redis = await _get_redis()
+    holds_lock = False
+    if redis is not None:
+        try:
+            holds_lock = bool(
+                await redis.set(_CS_REFRESH_LOCK_KEY, "1", nx=True, ex=_CS_REFRESH_LOCK_TTL)
+            )
+            if not holds_lock:
+                return {"skipped": "refresh_inflight"}
+        except Exception as ex:  # noqa: BLE001
+            logger.warning("[can_submit_refresh] lock failed (continuing): %s", ex)
+
+    max_n = int(getattr(settings, "CAN_SUBMIT_REFRESH_MAX_PER_RUN", 200))
+    refreshed = still = flipped = skipped = 0
+    try:
+        async with AsyncSessionLocal() as db:
+            # stalest-first: never-stamped (NULL) first, then oldest ISO stamp
+            # (ISO text sorts chronologically). Bounds BRAIN GETs to max_n/run.
+            ids = [r[0] for r in (await db.execute(_text(
+                """
+                SELECT id FROM alphas
+                WHERE can_submit IS TRUE AND date_submitted IS NULL AND alpha_id IS NOT NULL
+                ORDER BY (metrics->>'_brain_can_submit_at') ASC NULLS FIRST, id
+                LIMIT :lim
+                """
+            ), {"lim": max_n})).all()]
+            if not ids:
+                return {"scanned": 0, "refreshed": 0}
+            svc = AlphaService(db)
+            async with BrainAdapter() as ba:
+                for aid in ids:
+                    await _asyncio.sleep(1.0)
+                    try:
+                        res = await svc.refresh_can_submit(aid, brain_adapter=ba)
+                    except Exception as ex:  # noqa: BLE001 — per-alpha failure never aborts the run
+                        logger.warning("[can_submit_refresh] alpha_pk=%s failed: %s", aid, ex)
+                        skipped += 1
+                        continue
+                    if res is None:
+                        skipped += 1
+                        continue
+                    refreshed += 1
+                    if res.get("can_submit"):
+                        still += 1
+                    else:
+                        flipped += 1
+            logger.info(
+                "[can_submit_refresh] scanned=%d refreshed=%d still=%d flipped_false=%d skipped=%d",
+                len(ids), refreshed, still, flipped, skipped,
+            )
+            return {
+                "scanned": len(ids), "refreshed": refreshed,
+                "still_can_submit": still, "flipped_false": flipped, "skipped": skipped,
+            }
+    finally:
+        if redis is not None and holds_lock:
+            try:
+                await redis.delete(_CS_REFRESH_LOCK_KEY)
+            except Exception:  # noqa: BLE001
+                pass

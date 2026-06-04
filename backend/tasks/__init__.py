@@ -101,7 +101,11 @@ from backend.tasks.optimization_tasks import (  # noqa: F401
 
 # Auto-submit beat (2026-06-04): automates the orthogonal backlog drain.
 # Default OFF + default mode 'shadow' (logs would-submit list, no real submit).
-from backend.tasks.auto_submit_tasks import run_auto_submit_cycle  # noqa: F401
+# run_can_submit_refresh keeps the backlog's can_submit + _brain_can_submit_at fresh.
+from backend.tasks.auto_submit_tasks import (  # noqa: F401
+    run_auto_submit_cycle,
+    run_can_submit_refresh,
+)
 
 __all__ = [
     # Utilities

@@ -129,6 +129,14 @@ def test_cs_age_hours():
     assert _cs_age_hours("not-a-date", now_utc=now) is None
 
 
+def test_can_submit_refresh_flag_off_early_exit(monkeypatch):
+    """The periodic can_submit refresh beat is a no-op when its flag is OFF."""
+    import asyncio
+    from backend.tasks.auto_submit_tasks import _run_can_submit_refresh
+    monkeypatch.setattr(settings, "ENABLE_CAN_SUBMIT_REFRESH", False, raising=False)
+    assert asyncio.run(_run_can_submit_refresh()) == {"skipped": "flag_off"}
+
+
 @pytest.mark.parametrize("verdict,require,expected", [
     ("supported", "supported", True),
     ("weak", "supported", False),

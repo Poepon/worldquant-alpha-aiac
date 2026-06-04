@@ -370,4 +370,13 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_auto_submit_cycle",
         "schedule": crontab(hour="*/6", minute=35),
     },
+    # can_submit periodic refresh (2026-06-04): every 6h at :50, re-checks the
+    # can_submit=True backlog against BRAIN (stalest-first) so the verdict + its
+    # _brain_can_submit_at freshness stamp stay < the auto-submit G4 window and
+    # stale/correlated alphas get demoted out of the backlog. Gated by
+    # ENABLE_CAN_SUBMIT_REFRESH (default OFF). Read-only BRAIN GETs, paced 1/s.
+    "run-can-submit-refresh": {
+        "task": "backend.tasks.run_can_submit_refresh",
+        "schedule": crontab(hour="*/6", minute=50),
+    },
 }

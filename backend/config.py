@@ -1102,6 +1102,15 @@ class Settings(BaseSettings):
     AUTO_SUBMIT_CORR_THRESHOLD: float = 0.7       # self/among-set corr ceiling (= MAX_CORRELATION)
     AUTO_SUBMIT_BEAT_INTERVAL_HOURS: int = 6
 
+    # ── can_submit periodic refresh (2026-06-04) — keeps the can_submit verdict
+    # (and its _brain_can_submit_at freshness stamp, read by auto-submit G4) ≤
+    # CAN_SUBMIT_REFRESH window by re-checking the can_submit=True / unsubmitted
+    # backlog against BRAIN, stalest-first. Also demotes alphas BRAIN now rejects
+    # (e.g. self_corr crept ≥0.7 vs the growing submitted pool) out of the backlog.
+    # Read-only BRAIN GETs (no submission), paced 1 req/s. Default OFF.
+    ENABLE_CAN_SUBMIT_REFRESH: bool = False        # master switch (default OFF)
+    CAN_SUBMIT_REFRESH_MAX_PER_RUN: int = 200      # cap BRAIN GETs per firing (stalest-first)
+
     # ── Marginal-contribution submit recommendation (backend/marginal_analysis.py)
     # Calibration for the multi-dimensional before-and-after scorecard. Scalar
     # tunables here; per-dim scales/weights are dict properties below (loaded as
