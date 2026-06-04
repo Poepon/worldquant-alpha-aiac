@@ -22,6 +22,7 @@ import {
   ReadOutlined,
   CheckSquareOutlined,
   SendOutlined,
+  RobotOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -62,6 +63,7 @@ const menuItems = [
     children: [
       { key: '/ops/overview', label: '总览' },
       { key: '/ops/submit-backlog', icon: <SendOutlined />, label: '提交积压' },
+      { key: '/ops/auto-submit', icon: <RobotOutlined />, label: '自动提交 (影子)' },
       { key: '/ops/optimization-cycles', icon: <ThunderboltOutlined />, label: '优化闭环 (Stage A)' },
       { key: '/ops/orchestrator', icon: <ThunderboltOutlined />, label: 'Orchestrator (Phase 1)' },
       { key: '/ops/feature-flags', label: 'Feature Flag' },

@@ -780,6 +780,17 @@ const api = {
     const { data } = await client.get('/ops/submit-backlog/drain-order', { params })
     return data
   },
+  // Auto-submit audit (2026-06-04) — the shadow would-submit review surface.
+  // Returns { enabled, mode, tally_24h, count, items[] } where each item carries
+  // outcome + gate_results.{gates,signals} (incl. competition delta_score). Use
+  // outcome='would_submit' to review the shadow list before flipping to live.
+  getOpsAutoSubmitAudit: async ({ outcome = null, region = null, limit = 100 } = {}) => {
+    const params = { limit }
+    if (outcome) params.outcome = outcome
+    if (region) params.region = region
+    const { data } = await client.get('/ops/auto-submit/audit', { params })
+    return data
+  },
 
   // Marginal-value reconciliation (methodology-audit kill-switch, 2026-06-03) —
   // does our OFFLINE marginal ΔSharpe agree (sign+rank) with BRAIN's

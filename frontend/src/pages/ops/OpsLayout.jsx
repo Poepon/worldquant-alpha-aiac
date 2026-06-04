@@ -25,6 +25,7 @@ import R13FactorLensMonitor from './R13FactorLensMonitor'
 import G10LogicMonitor from './G10LogicMonitor'
 import G3v2Monitor from './G3v2Monitor'
 import SubmitBacklogMonitor from './SubmitBacklogMonitor'
+import AutoSubmitMonitor from './AutoSubmitMonitor'
 import OptimizationCyclesMonitor from './OptimizationCyclesMonitor'
 import OrchestratorMonitor from './OrchestratorMonitor'
 import LLMRoutingConsole from './LLMRoutingConsole'
@@ -65,6 +66,8 @@ export default function OpsLayout() {
         <Route index element={<Navigate to="overview" replace />} />
         {/* Submit-backlog drain (2026-05-28) — verdict-ranked can_submit queue */}
         <Route path="submit-backlog" element={<SubmitBacklogMonitor />} />
+        {/* Auto-submit shadow review (2026-06-04) — would-submit list + Δscore */}
+        <Route path="auto-submit" element={<AutoSubmitMonitor />} />
         {/* Phase 16-A optimization Stage A (2026-05-29) — cycles + 14d GO/STOP */}
         <Route path="optimization-cycles" element={<OptimizationCyclesMonitor />} />
         {/* Phase 1 — Feature Flag Console */}
