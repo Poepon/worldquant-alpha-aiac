@@ -67,5 +67,9 @@
 | `spike/` | 技术验证 spike 报告 |
 | `snapshots/` | datafields/operators 冻结快照 + backlog 抽干快照 |
 | `misc_plans/` | master_implementation_plan、phase15 schema、inverted-hypothesis 等已退役/未实施大 plan |
-| `cutover_backups/` | DB cutover 回滚备份（cell_stats / phase16a） |
+| `llm_benchmarks/` | LLM 质量 / per-node 路由 benchmark 结果(支撑 kimi-k2.6 选型决策) |
+| `db_backups/` | 一次性 DB 变更前的 SQL 备份(dataset_id restamp / bandit mining_weight) |
+| `misc_data/` | 其他一次性脚本产物(transfer harvest、cell-edge probe) |
 | `portfolio_theme/` `v26_retrospective/` `v22_5_backfill/` | 一次性分析 / 复盘 |
+
+> 注:脚本在 `docs/` 顶层生成的带日期产物(`backlog_drain_*` / `dirty_data_scan_*` / `llm_alpha_quality_benchmark_*` / `transfer_harvest_*`)已加入 `.gitignore`,不会再污染顶层。

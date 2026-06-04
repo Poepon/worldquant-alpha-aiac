@@ -61,6 +61,14 @@ backups/
 /docs/iqc_audit/*
 !/docs/iqc_audit/audit_2026-05-11_1231.json
 !/docs/iqc_audit/audit_2026-05-11_1231.md
+# 脚本在 docs/ 顶层生成的带日期产物 — 不入库(归档副本在 docs/archive/ 下不受影响)。
+# 来源:backlog_drain_rank.py / _scan_dirty_data_*.py / benchmark_llm_alpha_quality.py / _transfer_harvest_*.py
+/docs/backlog_drain_*.json
+/docs/backlog_drain_*.md
+/docs/dirty_data_scan_*.json
+/docs/dirty_data_scan_*.md
+/docs/llm_alpha_quality_benchmark_*.json
+/docs/transfer_harvest_*.json
 
 # R13 factor-data vendor sources — large binaries, re-downloadable from
 # the vendor; the derived parquet + cleaned CSVs are committed instead.

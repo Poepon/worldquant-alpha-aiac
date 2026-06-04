@@ -1,0 +1,20 @@
+{
+  "region": "USA",
+  "pool_submitted": 11,
+  "backlog": 67,
+  "gate2_survivors": 7,
+  "submit_ready": 1,
+  "greedy_set": 1,
+  "submit_order": [
+    {
+      "brain_id": "QP2xRAKX",
+      "dataset": "news12",
+      "self_corr": 0.3985,
+      "composite": 0.711,
+      "rec": "NEUTRAL",
+      "is_sharpe": 1.28,
+      "is_margin": 0.001764,
+      "expr": "multiply(-1, ts_decay_linear(ts_std_dev(vec_avg(nws12_mainz_range), 10), 4))"
+    }
+  ]
+}

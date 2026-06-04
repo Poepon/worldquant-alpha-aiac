@@ -1,0 +1,67 @@
+{
+  "generated": "2026-05-26T03:26:35.954806Z",
+  "n_winners": 70,
+  "n_survivors": 4,
+  "survivors": [
+    {
+      "id": 7556,
+      "alpha_id": "0me6MGjr",
+      "dataset": "analyst4",
+      "expr": "group_neutralize(ts_mean(anl4_adjusted_netincome_ft, 20), sector)",
+      "decay": 0,
+      "neut": "NONE",
+      "trunc": 0.08,
+      "base_sh": 1.82,
+      "sp_sh": 1.32,
+      "sp_fit": 1.6,
+      "sp_to": 0.0308,
+      "sp_margin": 0.012012,
+      "fails": []
+    },
+    {
+      "id": 7555,
+      "alpha_id": "e7dvxzPM",
+      "dataset": "analyst4",
+      "expr": "group_neutralize(ts_mean(anl4_adjusted_netincome_ft, 20), industry)",
+      "decay": 0,
+      "neut": "NONE",
+      "trunc": 0.08,
+      "base_sh": 1.87,
+      "sp_sh": 1.3,
+      "sp_fit": 1.51,
+      "sp_to": 0.0347,
+      "sp_margin": 0.009753,
+      "fails": []
+    },
+    {
+      "id": 7756,
+      "alpha_id": "9q9zq8PV",
+      "dataset": "pv1",
+      "expr": "subtract(multiply(-1, ts_mean(returns, 5)), group_mean(multiply(-1, ts_mean(returns, 5)), cap, industry))",
+      "decay": 0,
+      "neut": "NONE",
+      "trunc": 0.08,
+      "base_sh": 1.44,
+      "sp_sh": 1.27,
+      "sp_fit": 1.0,
+      "sp_to": 0.6328,
+      "sp_margin": 0.001246,
+      "fails": []
+    },
+    {
+      "id": 7762,
+      "alpha_id": "88OmdVMo",
+      "dataset": "pv1",
+      "expr": "subtract(multiply(-1, ts_mean(returns, 5)), group_mean(multiply(-1, ts_mean(returns, 5)), cap, subindustry))",
+      "decay": 0,
+      "neut": "NONE",
+      "trunc": 0.08,
+      "base_sh": 1.44,
+      "sp_sh": 1.38,
+      "sp_fit": 1.05,
+      "sp_to": 0.633,
+      "sp_margin": 0.001166,
+      "fails": []
+    }
+  ]
+}

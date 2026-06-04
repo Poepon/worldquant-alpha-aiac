@@ -1,0 +1,96 @@
+{
+  "aggregate": [
+    {
+      "model": "claude-opus-4-7",
+      "runs": 1,
+      "quality_mean": 0.1983,
+      "quality_std": 0.0,
+      "quality_min": 0.1983,
+      "quality_max": 0.1983,
+      "valid_rate_mean": 1.0,
+      "p_pass_mean": 0.225,
+      "p_pass_std": 0.0,
+      "diversity_mean": 0.76,
+      "n_alphas_mean": 50,
+      "avg_latency_s_mean": 9.5
+    },
+    {
+      "model": "claude-sonnet-4-6",
+      "runs": 1,
+      "quality_mean": 0.0,
+      "quality_std": 0.0,
+      "quality_min": 0.0,
+      "quality_max": 0.0,
+      "valid_rate_mean": 0.0,
+      "p_pass_mean": 0.0,
+      "p_pass_std": 0.0,
+      "diversity_mean": 0.0,
+      "n_alphas_mean": 0,
+      "avg_latency_s_mean": 9.3
+    },
+    {
+      "model": "claude-haiku-4-5-20251001",
+      "runs": 1,
+      "quality_mean": 0.0,
+      "quality_std": 0.0,
+      "quality_min": 0.0,
+      "quality_max": 0.0,
+      "valid_rate_mean": 0.0,
+      "p_pass_mean": 0.0,
+      "p_pass_std": 0.0,
+      "diversity_mean": 0.0,
+      "n_alphas_mean": 0,
+      "avg_latency_s_mean": 0.1
+    }
+  ],
+  "raw_per_model": {
+    "claude-opus-4-7": [
+      {
+        "model": "claude-opus-4-7",
+        "n_alphas": 50,
+        "calls": 5,
+        "call_fail": 0,
+        "json_fail": 0,
+        "last_err": null,
+        "valid_rate": 1.0,
+        "mean_p_pass": 0.225,
+        "diversity": 0.76,
+        "avg_latency_s": 9.5,
+        "tokens": 3745,
+        "quality_score": 0.1983
+      }
+    ],
+    "claude-sonnet-4-6": [
+      {
+        "model": "claude-sonnet-4-6",
+        "n_alphas": 0,
+        "calls": 9,
+        "call_fail": 0,
+        "json_fail": 9,
+        "last_err": null,
+        "valid_rate": 0.0,
+        "mean_p_pass": 0.0,
+        "diversity": 0.0,
+        "avg_latency_s": 9.3,
+        "tokens": 6417,
+        "quality_score": 0.0
+      }
+    ],
+    "claude-haiku-4-5-20251001": [
+      {
+        "model": "claude-haiku-4-5-20251001",
+        "n_alphas": 0,
+        "calls": 9,
+        "call_fail": 9,
+        "json_fail": 0,
+        "last_err": "llm_api_circuit_open",
+        "valid_rate": 0.0,
+        "mean_p_pass": 0.0,
+        "diversity": 0.0,
+        "avg_latency_s": 0.1,
+        "tokens": 0,
+        "quality_score": 0.0
+      }
+    ]
+  }
+}
