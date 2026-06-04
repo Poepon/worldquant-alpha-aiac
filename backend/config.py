@@ -123,9 +123,45 @@ def _load_llm_available_models() -> list:
         return defaults
 
 
+def _load_llm_providers() -> Dict[str, Dict[str, str]]:
+    """Load the named LLM-provider registry (2026-06-04). A provider profile is a
+    pre-configured ``endpoint + sdk`` entity that a routing entry references by
+    name via ``provider_ref`` (see resolve_model_for). The provider's *secret*
+    API key is NOT stored here — it lives encrypted in CredentialsService under
+    the credential key ``llm_provider_<name>``, resolved at call time through the
+    existing api_key_ref mechanism. Shape:
+
+        {
+          "moonshot": {"label": "Moonshot官方", "sdk": "openai",
+                       "base_url": "https://api.moonshot.cn/v1"},
+          "anthropic_official": {"label": "Anthropic", "sdk": "anthropic",
+                                 "base_url": ""}
+        }
+
+    Default empty — operators register providers from the ConfigCenter UI (which
+    writes the LLM_PROVIDERS json feature-flag into _flag_override_cache). This is
+    only the STARTUP seed; override via LLM_PROVIDERS env (JSON object).
+    Module-level + fault-tolerant, mirroring _load_llm_function_model_map."""
+    defaults: Dict[str, Dict[str, str]] = {}
+    env_val = os.getenv("LLM_PROVIDERS")
+    if not env_val:
+        return defaults
+    try:
+        parsed = json.loads(env_val)
+        if not isinstance(parsed, dict):
+            raise ValueError("LLM_PROVIDERS must be a JSON object")
+        return {**defaults, **parsed}
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        _config_logger.warning(
+            "[config] LLM_PROVIDERS parse failed, using defaults | error=%s", e,
+        )
+        return defaults
+
+
 # Module-level caches — same Pydantic-bypass rationale as the thinking table.
 _LLM_FUNCTION_MODEL_MAP_CACHE: Dict[str, Dict[str, str]] = _load_llm_function_model_map()
 _LLM_AVAILABLE_MODELS_CACHE: list = _load_llm_available_models()
+_LLM_PROVIDERS_CACHE: Dict[str, Dict[str, str]] = _load_llm_providers()
 
 
 # Marginal-contribution scorecard calibration (consumed by
@@ -283,6 +319,15 @@ class Settings(BaseSettings):
     @property
     def LLM_AVAILABLE_MODELS(self) -> list:
         return _LLM_AVAILABLE_MODELS_CACHE
+
+    # Named LLM-provider registry (2026-06-04). name → {label, sdk, base_url}.
+    # Secret keys live in CredentialsService (llm_provider_<name>), NOT here.
+    # Runtime overrides live in _flag_override_cache via the LLM_PROVIDERS json
+    # feature-flag — resolve_model_for reads that cache directly (non-ENABLE_
+    # name bypasses the __getattribute__ hook, same as LLM_FUNCTION_MODEL_MAP).
+    @property
+    def LLM_PROVIDERS(self) -> Dict[str, Dict[str, str]]:
+        return _LLM_PROVIDERS_CACHE
 
     # Mining Configuration
     DEFAULT_REGION: str = "USA"

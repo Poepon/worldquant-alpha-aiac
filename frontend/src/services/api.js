@@ -286,15 +286,6 @@ const api = {
     return data
   },
 
-  setLLMCredentials: async (apiKey, baseUrl, model) => {
-    const { data } = await client.post('/config/credentials/llm', { 
-      api_key: apiKey, 
-      base_url: baseUrl, 
-      model 
-    })
-    return data
-  },
-
   testBrainCredentials: async () => {
     const { data } = await client.post('/config/credentials/brain/test')
     return data
@@ -302,6 +293,25 @@ const api = {
 
   deleteCredential: async (key) => {
     const { data } = await client.delete(`/config/credentials/${key}`)
+    return data
+  },
+
+  // LLM Provider registry (named endpoint+key profiles for per-function routing)
+  listLLMProviders: async () => {
+    const { data } = await client.get('/config/llm-providers')
+    return data
+  },
+
+  saveLLMProvider: async ({ name, label, sdk, baseUrl, apiKey }) => {
+    const body = { name, label, sdk, base_url: baseUrl }
+    // Omit api_key when blank so an edit keeps the existing stored secret.
+    if (apiKey) body.api_key = apiKey
+    const { data } = await client.post('/config/llm-providers', body)
+    return data
+  },
+
+  deleteLLMProvider: async (name) => {
+    const { data } = await client.delete(`/config/llm-providers/${name}`)
     return data
   },
 

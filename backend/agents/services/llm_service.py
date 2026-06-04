@@ -286,12 +286,55 @@ def clear_task_function_overrides(token=None):
     _TASK_FN_OVERRIDES.set(None)
 
 
+def _resolve_provider_registry() -> Dict[str, Any]:
+    """Read the named-provider registry (LLM_PROVIDERS) — runtime override from
+    _flag_override_cache wins, else the startup default cache. Same direct-read
+    pattern as resolve_model_for uses for LLM_FUNCTION_MODEL_MAP (the
+    __getattribute__ hook only honours ENABLE_-prefixed names). Never raises."""
+    try:
+        from backend.config import _flag_override_cache, _LLM_PROVIDERS_CACHE
+        override = _flag_override_cache.get("LLM_PROVIDERS")
+        reg = override if override is not None else _LLM_PROVIDERS_CACHE
+        return reg if isinstance(reg, dict) else {}
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _expand_provider_ref(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """If ``entry`` references a named provider via ``provider_ref``, expand the
+    profile's {sdk→provider, base_url, api_key_ref} onto a working copy. The
+    profile WINS over inline fields (the UI produces provider_ref-only entries;
+    inline base_url/api_key_ref survive only on legacy JSON with no provider_ref).
+    Unknown ref → returned unchanged (resolution then falls back to the default
+    provider, and any 401 trips that scope's circuit → P1#6 fallback)."""
+    ref = entry.get("provider_ref")
+    if not ref or not isinstance(ref, str):
+        return entry
+    prof = _resolve_provider_registry().get(ref)
+    if not isinstance(prof, dict):
+        return entry
+    merged = dict(entry)
+    merged.pop("provider_ref", None)
+    merged["provider"] = prof.get("sdk") or prof.get("provider") or "openai"
+    # base_url: profile value (may be empty → use SDK default, e.g. anthropic)
+    if prof.get("base_url"):
+        merged["base_url"] = prof["base_url"]
+    else:
+        merged.pop("base_url", None)
+    # Secret key resolved later via api_key_ref. Profile may pin an explicit ref;
+    # otherwise derive the conventional per-provider credential key.
+    merged["api_key_ref"] = prof.get("api_key_ref") or f"llm_provider_{ref}"
+    return merged
+
+
 def _validate_model_entry(entry) -> Optional[Dict[str, Any]]:
     """Validate + shallow-copy a ``{model, provider, ...}`` entry. Returns None
     when malformed (not a dict / missing model / bad provider). The shallow copy
-    prevents callers from mutating a shared cache/override object."""
+    prevents callers from mutating a shared cache/override object. An entry may
+    reference a named provider via ``provider_ref`` (expanded first)."""
     if not isinstance(entry, dict):
         return None
+    entry = _expand_provider_ref(entry)
     model = entry.get("model")
     if not model or not isinstance(model, str):
         return None
@@ -320,21 +363,24 @@ def resolve_model_for(
          hook only honours ``ENABLE_``-prefixed overrides, so ``settings.X`` would
          never see the front-end edit), falling back to the startup default cache.
 
-    Returns ``None`` (→ caller uses self.model/self.provider) in every non-routing
-    path, so flag-OFF + no task override is byte-for-byte legacy. Per-entry
-    validation is defensive and NEVER raises — a bad edit must not crash a round.
-    ``region`` reserved for future per-region overrides.
+    Returns ``None`` (→ caller uses self.model/self.provider) only when routing
+    is OFF or no entry (specific OR ``__default__``) applies — so flag-OFF with no
+    map is byte-for-byte legacy. When a ``__default__`` catch-all IS configured it
+    also captures untagged calls (node_key=None) and unmapped node_keys, so the
+    construction default (e.g. a legacy/exhausted gateway) is never reached. Per-
+    entry validation is defensive and NEVER raises — a bad edit must not crash a
+    round. ``region`` reserved for future per-region overrides.
     """
     try:
-        if not node_key:
-            return None
-        # 1. task-level override (contextvar) — independent of the global flag.
-        task_ov = _TASK_FN_OVERRIDES.get()
-        if isinstance(task_ov, dict) and node_key in task_ov:
-            resolved = _validate_model_entry(task_ov.get(node_key))
-            if resolved is not None:
-                return resolved
-            # malformed task entry → fall through to the global map (don't break)
+        # 1. task-level override (contextvar) — node-specific, independent of the
+        # global flag. Untagged calls (node_key=None) skip this layer.
+        if node_key:
+            task_ov = _TASK_FN_OVERRIDES.get()
+            if isinstance(task_ov, dict) and node_key in task_ov:
+                resolved = _validate_model_entry(task_ov.get(node_key))
+                if resolved is not None:
+                    return resolved
+                # malformed task entry → fall through to the global map (don't break)
         # 2. global map (flag-gated). An override (even malformed) means the
         # front-end intends to REPLACE the startup map → honour iff well-formed
         # dict, else None (NOT the superseded startup map). Startup default is
@@ -346,7 +392,17 @@ def resolve_model_for(
         model_map = override if override is not None else _LLM_FUNCTION_MODEL_MAP_CACHE
         if not isinstance(model_map, dict):
             return None
-        return _validate_model_entry(model_map.get(node_key))
+        # Explicit per-node entry wins; else fall back to a catch-all
+        # ``__default__`` entry (when present) so node_keys the operator did NOT
+        # map — AND untagged calls (node_key=None) — still route to their chosen
+        # provider instead of the construction default (self.model/self.base_url,
+        # which may point at an exhausted or legacy gateway the operator never
+        # intended to use). No __default__ key → None → caller uses self.model
+        # (byte-for-byte legacy).
+        entry = model_map.get(node_key) if node_key else None
+        if entry is None:
+            entry = model_map.get("__default__")
+        return _validate_model_entry(entry)
     except Exception as e:  # noqa: BLE001 — routing must never break a call
         logger.warning(f"[resolve_model_for] node_key={node_key!r} failed, using default | {e}")
         return None
@@ -637,6 +693,38 @@ class LLMService:
         async with self._credentials_lock:
             if self._credentials_loaded:
                 return
+
+            # Prefer the configured DEFAULT PROVIDER (the __default__ routing
+            # entry) as the construction base, so the operator's provider — not
+            # the .env OPENAI_* gateway — backs self.model/base_url/client. Per-
+            # call routing already sends every tagged/untagged call through the
+            # default (resolve_model_for), so this just stops the DORMANT default
+            # client from pointing at a .env endpoint the operator retired. Only
+            # activates for an openai-sdk default whose key resolves; any miss
+            # falls through to the legacy OPENAI_* path below (unchanged).
+            try:
+                default_route = resolve_model_for(None)  # __default__ when set + flag ON
+            except Exception:  # noqa: BLE001
+                default_route = None
+            if (
+                isinstance(default_route, dict)
+                and default_route.get("provider") == "openai"
+                and default_route.get("base_url")
+            ):
+                akr = default_route.get("api_key_ref")
+                key = await self._resolve_api_key_ref(akr) if akr else None
+                if key:
+                    self.api_key = key
+                    self.base_url = default_route["base_url"]
+                    if default_route.get("model"):
+                        self.model = default_route["model"]
+                    self.client = self._build_openai_client(self.api_key, self.base_url)
+                    self._credentials_loaded = True
+                    logger.info(
+                        "[LLMService] construction default ← __default__ provider "
+                        f"| base_url={self.base_url} model={self.model} (.env OPENAI_* unused)"
+                    )
+                    return
 
             try:
                 from backend.database import AsyncSessionLocal

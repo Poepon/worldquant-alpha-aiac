@@ -92,6 +92,28 @@ class CredentialStatusResponse(BaseModel):
     updated_at: Optional[str] = None
 
 
+class LLMProviderRequest(BaseModel):
+    """Upsert a named LLM provider profile (endpoint + key). The secret api_key
+    is stored encrypted in CredentialsService (key llm_provider_<name>); the
+    endpoint metadata goes into the LLM_PROVIDERS json feature-flag."""
+    name: str = Field(..., description="厂商唯一标识 (slug, 如 moonshot / aliyun_maas)")
+    label: str = Field(default="", description="展示名 (如 Moonshot官方)")
+    sdk: str = Field(default="openai", description="SDK 类型: openai | anthropic")
+    base_url: str = Field(default="", description="API base URL (anthropic 留空=官方默认)")
+    api_key: Optional[str] = Field(
+        default=None,
+        description="API 密钥;留空=保留已存密钥不变 (编辑时)",
+    )
+
+
+class LLMProviderStatus(BaseModel):
+    name: str
+    label: str
+    sdk: str
+    base_url: str
+    has_key: bool
+
+
 class OperatorPrefResponse(BaseModel):
     operator_name: str
     status: str
@@ -242,6 +264,131 @@ async def delete_credential(
         )
     
     return {"success": True, "message": f"Credential '{key}' deleted"}
+
+
+# =============================================================================
+# LLM PROVIDER REGISTRY (named endpoint+key profiles for per-function routing)
+# =============================================================================
+# A provider profile = pre-configured {label, sdk, base_url} stored in the
+# LLM_PROVIDERS json feature-flag; the secret api_key lives encrypted in
+# CredentialsService under credential key ``llm_provider_<name>`` and is resolved
+# at call time via the routing entry's derived api_key_ref. The ops LLM-Routing
+# console references a provider by name (provider_ref) instead of typing the
+# endpoint/key inline. See backend/agents/services/llm_service.py:_expand_provider_ref.
+
+_PROVIDER_FLAG = "LLM_PROVIDERS"
+
+
+def _read_provider_registry() -> Dict[str, Dict[str, Any]]:
+    """Effective LLM_PROVIDERS map: runtime override wins, else startup default."""
+    from backend.config import _flag_override_cache, _LLM_PROVIDERS_CACHE
+    override = _flag_override_cache.get(_PROVIDER_FLAG)
+    reg = override if override is not None else _LLM_PROVIDERS_CACHE
+    return dict(reg) if isinstance(reg, dict) else {}
+
+
+def _provider_cred_key(name: str) -> str:
+    return f"llm_provider_{name}"
+
+
+@router.get("/llm-providers", response_model=List[LLMProviderStatus])
+async def list_llm_providers(db: AsyncSession = Depends(get_db)):
+    """List configured LLM providers with key-set status (keys never returned)."""
+    service = get_credentials_service(db)
+    registry = _read_provider_registry()
+    out: List[LLMProviderStatus] = []
+    for name, prof in registry.items():
+        if not isinstance(prof, dict):
+            continue
+        key_val = await service.get_credential(_provider_cred_key(name))
+        out.append(LLMProviderStatus(
+            name=name,
+            label=str(prof.get("label") or name),
+            sdk=str(prof.get("sdk") or prof.get("provider") or "openai"),
+            base_url=str(prof.get("base_url") or ""),
+            has_key=bool(key_val),
+        ))
+    out.sort(key=lambda p: p.name)
+    return out
+
+
+@router.post("/llm-providers")
+async def upsert_llm_provider(
+    payload: LLMProviderRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Create or update a named LLM provider. Writes the endpoint metadata to the
+    LLM_PROVIDERS feature-flag and (if api_key supplied) the encrypted secret."""
+    from backend.services.feature_flag_service import FeatureFlagService
+
+    name = (payload.name or "").strip()
+    if not name or not all(c.isalnum() or c in ("_", "-") for c in name):
+        raise HTTPException(
+            status_code=400,
+            detail="name 必须非空且仅含字母/数字/下划线/连字符",
+        )
+    if payload.sdk not in ("openai", "anthropic"):
+        raise HTTPException(status_code=400, detail="sdk 必须是 openai 或 anthropic")
+
+    cred_service = get_credentials_service(db)
+
+    # Secret: store only when provided. On edit with blank api_key, keep existing.
+    if payload.api_key:
+        await cred_service.set_credential(
+            _provider_cred_key(name),
+            payload.api_key,
+            description=f"LLM provider API key ({name})",
+        )
+
+    # Merge the profile into the registry and persist the flag.
+    registry = _read_provider_registry()
+    registry[name] = {
+        "label": (payload.label or name).strip(),
+        "sdk": payload.sdk,
+        "base_url": (payload.base_url or "").strip(),
+    }
+    flag_service = FeatureFlagService(db)
+    await flag_service.set(_PROVIDER_FLAG, registry, actor="config_center")
+
+    # Invalidate caches so this process re-resolves immediately; worker processes
+    # pick up the flag via their 60s refresher and the secret via CredentialsService.
+    CredentialsService.invalidate_cache()
+    try:
+        from backend.agents.services.llm_service import get_llm_service
+        get_llm_service().invalidate_credentials_cache()
+    except Exception:
+        pass
+
+    has_key = bool(await cred_service.get_credential(_provider_cred_key(name)))
+    return {
+        "success": True,
+        "name": name,
+        "has_key": has_key,
+        "message": f"厂商「{name}」已保存。worker 进程 ≤60s 内同步路由配置。",
+    }
+
+
+@router.delete("/llm-providers/{name}")
+async def delete_llm_provider(
+    name: str,
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a provider profile + its stored secret."""
+    from backend.services.feature_flag_service import FeatureFlagService
+
+    registry = _read_provider_registry()
+    if name not in registry:
+        raise HTTPException(status_code=404, detail=f"厂商「{name}」不存在")
+
+    del registry[name]
+    flag_service = FeatureFlagService(db)
+    await flag_service.set(_PROVIDER_FLAG, registry, actor="config_center")
+
+    cred_service = get_credentials_service(db)
+    await cred_service.delete_credential(_provider_cred_key(name))
+    CredentialsService.invalidate_cache()
+
+    return {"success": True, "message": f"厂商「{name}」已删除"}
 
 
 # =============================================================================

@@ -37,9 +37,6 @@ const FLAG_ENABLE = 'ENABLE_PER_FUNCTION_LLM_ROUTING'
 const FLAG_MAP = 'LLM_FUNCTION_MODEL_MAP'
 const FLAG_MODELS = 'LLM_AVAILABLE_MODELS'
 
-// Provider whitelist — the OpenAI-compatible llm_service only knows these two.
-const PROVIDERS = ['openai', 'anthropic']
-
 // Fallback model list if LLM_AVAILABLE_MODELS flag is unreadable / empty.
 // Mirrors backend config._load_llm_available_models() defaults.
 const FALLBACK_MODELS = [
@@ -76,31 +73,39 @@ const nextRowId = () => {
 }
 
 // Coerce a feature-flag effective_value (which the backend returns as a decoded
-// json object/array, or null) into the row array the table renders.
+// json object/array, or null) into the row array the table renders. Entries now
+// reference a named provider via provider_ref; legacy entries carrying inline
+// provider/base_url (no provider_ref) load with an empty provider_ref — the
+// operator must re-pick a registered provider to re-save them.
+// The special "__default__" key is the catch-all fallback (managed by its own
+// card, not the node table), so it is excluded from the rendered rows.
+const DEFAULT_KEY = '__default__'
+
 function mapToRows(mapObj) {
   if (!mapObj || typeof mapObj !== 'object' || Array.isArray(mapObj)) return []
-  return Object.entries(mapObj).map(([node_key, entry]) => {
-    const e = entry && typeof entry === 'object' ? entry : {}
-    return {
-      _id: nextRowId(),
-      node_key,
-      model: e.model || '',
-      provider: e.provider || 'openai',
-      base_url: e.base_url || '',
-      thinking_effort: e.thinking_effort || '',
-    }
-  })
+  return Object.entries(mapObj)
+    .filter(([node_key]) => node_key !== DEFAULT_KEY)
+    .map(([node_key, entry]) => {
+      const e = entry && typeof entry === 'object' ? entry : {}
+      return {
+        _id: nextRowId(),
+        node_key,
+        model: e.model || '',
+        provider_ref: e.provider_ref || '',
+        thinking_effort: e.thinking_effort || '',
+      }
+    })
 }
 
-// Assemble the table rows back into the json the backend expects. Optional
-// fields (base_url / thinking_effort) only included when non-empty.
+// Assemble the table rows back into the json the backend expects. Each entry is
+// {model, provider_ref} (+ thinking_effort when set); the backend expands
+// provider_ref → provider/base_url/api_key_ref at resolve time.
 function rowsToMap(rows) {
   const out = {}
   for (const r of rows) {
     const key = (r.node_key || '').trim()
     if (!key) continue
-    const entry = { model: (r.model || '').trim(), provider: r.provider || 'openai' }
-    if (r.base_url && r.base_url.trim()) entry.base_url = r.base_url.trim()
+    const entry = { model: (r.model || '').trim(), provider_ref: (r.provider_ref || '').trim() }
     if (r.thinking_effort && r.thinking_effort.trim()) {
       entry.thinking_effort = r.thinking_effort.trim()
     }
@@ -137,7 +142,13 @@ export default function LLMRoutingConsole() {
   const [masterOn, setMasterOn] = useState(false)
   const [masterSource, setMasterSource] = useState('default')
   const [availableModels, setAvailableModels] = useState(FALLBACK_MODELS)
+  const [providers, setProviders] = useState([])
   const [rows, setRows] = useState([])
+  // Catch-all default (the __default__ map entry) — covers every node_key not
+  // explicitly listed below, plus untagged calls. Empty = no fallback (unmapped
+  // nodes use the construction default).
+  const [defaultRef, setDefaultRef] = useState('')
+  const [defaultModel, setDefaultModel] = useState('')
 
   const [auditOpen, setAuditOpen] = useState(false)
   const [audit, setAudit] = useState([])
@@ -146,7 +157,10 @@ export default function LLMRoutingConsole() {
   const fetchAll = useCallback(async () => {
     setLoading(true)
     try {
-      const flags = await api.listFeatureFlags()
+      const [flags, providerList] = await Promise.all([
+        api.listFeatureFlags(),
+        api.listLLMProviders().catch(() => []),
+      ])
       const byName = {}
       for (const f of flags) byName[f.name] = f
 
@@ -162,8 +176,14 @@ export default function LLMRoutingConsole() {
           : FALLBACK_MODELS,
       )
 
+      setProviders(Array.isArray(providerList) ? providerList : [])
+
       const mapFlag = byName[FLAG_MAP]
-      setRows(mapToRows(mapFlag?.effective_value))
+      const mapVal = mapFlag?.effective_value
+      setRows(mapToRows(mapVal))
+      const def = mapVal && typeof mapVal === 'object' ? mapVal[DEFAULT_KEY] : null
+      setDefaultRef((def && def.provider_ref) || '')
+      setDefaultModel((def && def.model) || '')
     } catch (e) {
       message.error(`加载路由配置失败：${e?.response?.data?.detail || e.message}`)
     } finally {
@@ -183,6 +203,20 @@ export default function LLMRoutingConsole() {
     return [...set].map((m) => ({ label: m, value: m }))
   }, [availableModels, rows])
 
+  // Provider dropdown options + a name→profile lookup for the SDK/endpoint hint.
+  const providerByName = useMemo(() => {
+    const m = {}
+    for (const p of providers) m[p.name] = p
+    return m
+  }, [providers])
+  const providerOptions = useMemo(
+    () => providers.map((p) => ({
+      label: `${p.label || p.name}${p.has_key ? '' : ' ⚠无密钥'}`,
+      value: p.name,
+    })),
+    [providers],
+  )
+
   const updateRow = (id, patch) => {
     setRows((prev) => prev.map((r) => (r._id === id ? { ...r, ...patch } : r)))
   }
@@ -198,8 +232,7 @@ export default function LLMRoutingConsole() {
         _id: nextRowId(),
         node_key: '',
         model: availableModels[0] || '',
-        provider: 'openai',
-        base_url: '',
+        provider_ref: providers[0]?.name || '',
         thinking_effort: '',
       },
     ])
@@ -245,12 +278,31 @@ export default function LLMRoutingConsole() {
       } else if (!known.has(r.model.trim())) {
         warnings.push(`${label}：model「${r.model.trim()}」不在可选清单内（允许，但请确认拼写）`)
       }
-      if (!PROVIDERS.includes(r.provider)) {
-        errors.push(`${label}：provider 必须是 ${PROVIDERS.join(' / ')}`)
+      const ref = (r.provider_ref || '').trim()
+      if (!ref) {
+        errors.push(`${label}：必须选择一个厂商（先到 配置中心 → LLM 厂商 登记）`)
+      } else if (!providerByName[ref]) {
+        errors.push(`${label}：厂商「${ref}」不存在（可能已删除，请重新选择）`)
+      } else if (!providerByName[ref].has_key) {
+        warnings.push(`${label}：厂商「${ref}」尚未配置密钥，调用会落到默认 key`)
       }
     })
+    // Catch-all default: optional, but if either field is set BOTH must be valid.
+    const dRef = (defaultRef || '').trim()
+    const dModel = (defaultModel || '').trim()
+    if (dRef || dModel) {
+      if (!dModel) errors.push('默认兜底：已选厂商但未填默认模型')
+      if (!dRef) errors.push('默认兜底：已填模型但未选厂商')
+      else if (!providerByName[dRef]) errors.push(`默认兜底：厂商「${dRef}」不存在`)
+      else if (!providerByName[dRef].has_key) {
+        warnings.push(`默认兜底：厂商「${dRef}」尚未配置密钥`)
+      }
+      if (dModel && !known.has(dModel)) {
+        warnings.push(`默认兜底：model「${dModel}」不在可选清单内（允许，请确认拼写）`)
+      }
+    }
     return { ok: errors.length === 0, errors, warnings }
-  }, [rows, availableModels])
+  }, [rows, availableModels, providerByName, defaultRef, defaultModel])
 
   const handleSaveMap = async () => {
     const { ok, errors, warnings } = validateRows()
@@ -274,11 +326,21 @@ export default function LLMRoutingConsole() {
     setSavingMap(true)
     try {
       const payload = rowsToMap(rows)
+      const dRef = (defaultRef || '').trim()
+      const dModel = (defaultModel || '').trim()
+      if (dRef && dModel) {
+        payload[DEFAULT_KEY] = { model: dModel, provider_ref: dRef }
+      }
       const updated = await api.setFeatureFlag(FLAG_MAP, payload)
       // Re-hydrate from the authoritative stored value.
-      setRows(mapToRows(updated?.effective_value ?? payload))
+      const stored = updated?.effective_value ?? payload
+      setRows(mapToRows(stored))
+      const def = stored && typeof stored === 'object' ? stored[DEFAULT_KEY] : null
+      setDefaultRef((def && def.provider_ref) || '')
+      setDefaultModel((def && def.model) || '')
+      const nNodes = Object.keys(payload).filter((k) => k !== DEFAULT_KEY).length
       message.success(
-        `路由映射已保存（${Object.keys(payload).length} 个 node_key）。点『立即生效』让本 API 进程立刻读取；跑挖掘的 worker 进程走自身 60s 后台刷新（≤60s 生效）。`,
+        `路由配置已保存（${nNodes} 个 node_key${payload[DEFAULT_KEY] ? ' + 默认兜底' : ''}）。点『立即生效』让本 API 进程立刻读取；跑挖掘的 worker 进程走自身 60s 后台刷新（≤60s 生效）。`,
       )
     } catch (e) {
       message.error(`保存失败：${e?.response?.data?.detail || e.message}`)
@@ -362,29 +424,34 @@ export default function LLMRoutingConsole() {
       ),
     },
     {
-      title: 'provider',
-      dataIndex: 'provider',
-      width: 140,
-      render: (val, row) => (
-        <Select
-          value={val}
-          style={{ width: '100%' }}
-          options={PROVIDERS.map((p) => ({ label: p, value: p }))}
-          onChange={(v) => updateRow(row._id, { provider: v })}
-        />
-      ),
-    },
-    {
-      title: 'base_url (可选)',
-      dataIndex: 'base_url',
-      width: 200,
-      render: (val, row) => (
-        <Input
-          value={val}
-          placeholder="覆盖默认 base_url"
-          onChange={(e) => updateRow(row._id, { base_url: e.target.value })}
-        />
-      ),
+      title: '厂商',
+      dataIndex: 'provider_ref',
+      width: 220,
+      render: (val, row) => {
+        const prof = providerByName[val]
+        return (
+          <Space direction="vertical" size={2} style={{ width: '100%' }}>
+            <Select
+              value={val || undefined}
+              placeholder="选择厂商"
+              style={{ width: '100%' }}
+              status={val && !prof ? 'error' : undefined}
+              options={providerOptions}
+              notFoundContent="未登记厂商 — 先到 配置中心 → LLM 厂商"
+              onChange={(v) => updateRow(row._id, { provider_ref: v || '' })}
+            />
+            {prof ? (
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                {prof.sdk} · {prof.base_url || 'SDK 默认'}
+              </Text>
+            ) : val ? (
+              <Text type="danger" style={{ fontSize: 11 }}>
+                厂商不存在
+              </Text>
+            ) : null}
+          </Space>
+        )
+      },
     },
     {
       title: 'thinking_effort (可选)',
@@ -438,12 +505,28 @@ export default function LLMRoutingConsole() {
       </Space>
 
       <Paragraph type="secondary">
-        为每个功能块（node_key）路由到不同 LLM 模型。热路径（hypothesis / code_gen）走质量优模型，
-        辅助路径（self_correct / retry）走便宜快模型。修改映射后点『保存映射』提交，再点『立即生效』让
-        本进程与其它后台进程立刻读取（否则 60 秒内自动同步）。底层三个 Flag 都在{' '}
+        为每个功能块（node_key）选择厂商并路由到不同 LLM 模型。热路径（hypothesis / code_gen）走质量优模型，
+        辅助路径（self_correct / retry）走便宜快模型。厂商的 endpoint + 密钥在{' '}
+        <Link to="/config">配置中心 → LLM 厂商</Link> 预先登记，这里只需选厂商 + 填模型。修改后点『保存映射』
+        提交，再点『立即生效』让本进程与其它后台进程立刻读取（否则 60 秒内自动同步）。底层 Flag 都在{' '}
         <Link to="/ops/feature-flags">Feature Flag 控制台</Link> 的{' '}
         <Text code>LLM-Routing</Text> 分组中。
       </Paragraph>
+
+      {!loading && providers.length === 0 && (
+        <Alert
+          type="warning"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="尚未登记任何 LLM 厂商"
+          description={
+            <span>
+              路由表需要先有厂商可选。请到 <Link to="/config">配置中心 → LLM 厂商</Link>{' '}
+              登记 endpoint + 密钥后再回来配置路由。
+            </span>
+          }
+        />
+      )}
 
       <Card size="small" className="glass-card" style={{ marginBottom: 16 }}>
         <Space size="large" align="center">
@@ -472,6 +555,56 @@ export default function LLMRoutingConsole() {
           </Tag>
           {!masterOn && (
             <Text type="secondary">（当前关闭 — 下表配置不生效，所有 node 走全局默认模型）</Text>
+          )}
+        </Space>
+      </Card>
+
+      <Card
+        size="small"
+        className="glass-card"
+        style={{ marginBottom: 16 }}
+        title={
+          <Space>
+            <Text strong>默认兜底路由</Text>
+            <Tooltip title="任何未在下表单独配置的功能块（以及未标记 node_key 的调用）都走这里。不设=回退到 .env 的构造默认端点（如 token-plan），可能命中你没打算用的网关。">
+              <InfoCircleOutlined style={{ color: '#9c88ff' }} />
+            </Tooltip>
+          </Space>
+        }
+      >
+        <Space wrap align="center">
+          <Text type="secondary">厂商</Text>
+          <Select
+            value={defaultRef || undefined}
+            placeholder="选择默认厂商"
+            style={{ width: 220 }}
+            allowClear
+            status={defaultRef && !providerByName[defaultRef] ? 'error' : undefined}
+            options={providerOptions}
+            notFoundContent="未登记厂商 — 先到 配置中心 → LLM 厂商"
+            onChange={(v) => setDefaultRef(v || '')}
+          />
+          <Text type="secondary">模型</Text>
+          <Select
+            value={defaultModel || undefined}
+            placeholder="默认模型"
+            showSearch
+            allowClear
+            style={{ width: 220 }}
+            options={modelOptions}
+            onChange={(v) => setDefaultModel(v || '')}
+            filterOption={(input, opt) =>
+              (opt?.label ?? '').toLowerCase().includes(input.toLowerCase())
+            }
+          />
+          {defaultRef && providerByName[defaultRef] ? (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              → {providerByName[defaultRef].sdk} · {providerByName[defaultRef].base_url || 'SDK 默认'}
+            </Text>
+          ) : (
+            <Text type="warning" style={{ fontSize: 12 }}>
+              未设 → 未配置的功能块回退到 .env 构造默认端点
+            </Text>
           )}
         </Space>
       </Card>

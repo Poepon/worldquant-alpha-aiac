@@ -23,6 +23,7 @@ import {
   Select,
   Modal,
   Descriptions,
+  Popconfirm,
 } from 'antd'
 import {
   SettingOutlined,
@@ -34,7 +35,10 @@ import {
   SyncOutlined,
   EyeInvisibleOutlined,
   EyeTwoTone,
-  ApiOutlined,
+  PlusOutlined,
+  EditOutlined,
+  DeleteOutlined,
+  ClusterOutlined,
 } from '@ant-design/icons'
 import api from '../services/api'
 
@@ -42,7 +46,6 @@ const { Title, Text, Paragraph } = Typography
 
 export default function ConfigCenter() {
   const [brainForm] = Form.useForm()
-  const [llmForm] = Form.useForm()
 
   // Fetch knowledge entries
   const { data: successPatterns, isLoading: patternsLoading } = useQuery({
@@ -68,18 +71,6 @@ export default function ConfigCenter() {
       message.success('Brain 平台凭证保存成功')
       refetchCredentials()
       brainForm.resetFields()
-    },
-    onError: (error) => {
-      message.error(`保存失败: ${error.response?.data?.detail || error.message}`)
-    },
-  })
-
-  const saveLLMCredentialsMutation = useMutation({
-    mutationFn: ({ apiKey, baseUrl, model }) => api.setLLMCredentials(apiKey, baseUrl, model),
-    onSuccess: () => {
-      message.success('LLM API 凭证保存成功')
-      refetchCredentials()
-      llmForm.resetFields()
     },
     onError: (error) => {
       message.error(`保存失败: ${error.response?.data?.detail || error.message}`)
@@ -269,111 +260,217 @@ export default function ConfigCenter() {
             </Form>
           </Card>
         </Col>
-
-        {/* LLM API Credentials */}
-        <Col xs={24} lg={12}>
-          <Card 
-            className="glass-card"
-            title={
-              <Space>
-                <ApiOutlined style={{ color: '#00d4ff' }} />
-                <span>LLM API 配置</span>
-              </Space>
-            }
-          >
-            <Alert
-              message="大语言模型 API"
-              description="支持 OpenAI、DeepSeek、智谱等兼容 OpenAI 协议的 API 服务。"
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-            />
-
-            {credentialsLoading ? (
-              <Spin />
-            ) : (
-              <div style={{ marginBottom: 24 }}>
-                <Title level={5}>当前状态</Title>
-                {renderCredentialStatus('openai_api_key', 'API Key')}
-                {renderCredentialStatus('openai_base_url', 'Base URL')}
-                {renderCredentialStatus('openai_model', '模型')}
-              </div>
-            )}
-
-            <Divider />
-
-            <Title level={5}>更新配置</Title>
-            <Form
-              form={llmForm}
-              layout="vertical"
-              initialValues={{
-                baseUrl: 'https://api.deepseek.com/v1',
-                model: 'deepseek-chat'
-              }}
-              onFinish={(values) => {
-                saveLLMCredentialsMutation.mutate({
-                  apiKey: values.apiKey,
-                  baseUrl: values.baseUrl,
-                  model: values.model
-                })
-              }}
-            >
-              <Form.Item
-                name="apiKey"
-                label="API Key"
-                rules={[{ required: true, message: '请输入 API Key' }]}
-              >
-                <Input.Password 
-                  prefix={<KeyOutlined />}
-                  placeholder="sk-xxxxxxxxxxxxxxxx"
-                  iconRender={(visible) => (visible ? <EyeTwoTone /> : <EyeInvisibleOutlined />)}
-                />
-              </Form.Item>
-
-              <Form.Item
-                name="baseUrl"
-                label="Base URL"
-                rules={[{ required: true, message: '请输入 Base URL' }]}
-              >
-                <Input 
-                  placeholder="https://api.deepseek.com/v1" 
-                />
-              </Form.Item>
-
-              <Form.Item
-                name="model"
-                label="模型名称"
-                rules={[{ required: true, message: '请输入模型名称' }]}
-              >
-                <Input 
-                  placeholder="deepseek-chat" 
-                />
-              </Form.Item>
-
-              <Form.Item>
-                <Button 
-                  type="primary" 
-                  htmlType="submit"
-                  icon={<SaveOutlined />}
-                  loading={saveLLMCredentialsMutation.isPending}
-                >
-                  保存配置
-                </Button>
-              </Form.Item>
-            </Form>
-
-            <Paragraph type="secondary" style={{ marginTop: 16 }}>
-              <Text strong>常用 API 地址:</Text>
-              <ul style={{ marginTop: 8 }}>
-                <li>DeepSeek: https://api.deepseek.com/v1</li>
-                <li>OpenAI: https://api.openai.com/v1</li>
-                <li>智谱: https://open.bigmodel.cn/api/paas/v4</li>
-                <li>Moonshot: https://api.moonshot.cn/v1</li>
-              </ul>
-            </Paragraph>
-          </Card>
-        </Col>
       </Row>
+    )
+  }
+
+  // LLM Providers tab — named endpoint+key registry consumed by the ops
+  // LLM-Routing console (routing entries reference a provider by name).
+  const LLMProvidersTab = () => {
+    const queryClient = useQueryClient()
+    const [providerForm] = Form.useForm()
+    const [modalOpen, setModalOpen] = useState(false)
+    const [editing, setEditing] = useState(null) // null=add, else provider name
+
+    const { data: providers = [], isLoading } = useQuery({
+      queryKey: ['llm-providers'],
+      queryFn: api.listLLMProviders,
+    })
+
+    const saveMutation = useMutation({
+      mutationFn: api.saveLLMProvider,
+      onSuccess: (res) => {
+        message.success(res?.message || '厂商已保存')
+        queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
+        setModalOpen(false)
+        providerForm.resetFields()
+        setEditing(null)
+      },
+      onError: (error) => {
+        message.error(`保存失败: ${error.response?.data?.detail || error.message}`)
+      },
+    })
+
+    const deleteMutation = useMutation({
+      mutationFn: api.deleteLLMProvider,
+      onSuccess: (res) => {
+        message.success(res?.message || '厂商已删除')
+        queryClient.invalidateQueries({ queryKey: ['llm-providers'] })
+      },
+      onError: (error) => {
+        message.error(`删除失败: ${error.response?.data?.detail || error.message}`)
+      },
+    })
+
+    const openAdd = () => {
+      setEditing(null)
+      providerForm.resetFields()
+      providerForm.setFieldsValue({ sdk: 'openai' })
+      setModalOpen(true)
+    }
+
+    const openEdit = (row) => {
+      setEditing(row.name)
+      providerForm.setFieldsValue({
+        name: row.name,
+        label: row.label,
+        sdk: row.sdk,
+        base_url: row.base_url,
+        api_key: '', // blank = keep existing secret
+      })
+      setModalOpen(true)
+    }
+
+    const handleSubmit = () => {
+      providerForm.validateFields().then((vals) => {
+        saveMutation.mutate({
+          name: vals.name,
+          label: vals.label || vals.name,
+          sdk: vals.sdk,
+          baseUrl: vals.base_url || '',
+          apiKey: vals.api_key || '',
+        })
+      })
+    }
+
+    const columns = [
+      {
+        title: '厂商标识',
+        dataIndex: 'name',
+        width: 160,
+        render: (v) => <Text code style={{ fontFamily: 'monospace' }}>{v}</Text>,
+      },
+      { title: '展示名', dataIndex: 'label', width: 160 },
+      {
+        title: 'SDK',
+        dataIndex: 'sdk',
+        width: 110,
+        render: (v) => <Tag color={v === 'anthropic' ? 'purple' : 'geekblue'}>{v}</Tag>,
+      },
+      {
+        title: 'Endpoint',
+        dataIndex: 'base_url',
+        ellipsis: true,
+        render: (v) => v
+          ? <Text type="secondary" style={{ fontFamily: 'monospace', fontSize: 12 }}>{v}</Text>
+          : <Text type="secondary">（SDK 默认）</Text>,
+      },
+      {
+        title: '密钥',
+        dataIndex: 'has_key',
+        width: 100,
+        render: (has) => has
+          ? <Tag color="success" icon={<CheckCircleOutlined />}>已配置</Tag>
+          : <Tag color="error" icon={<CloseCircleOutlined />}>缺失</Tag>,
+      },
+      {
+        title: '操作',
+        width: 130,
+        render: (_, row) => (
+          <Space>
+            <Button size="small" type="link" icon={<EditOutlined />} onClick={() => openEdit(row)}>
+              编辑
+            </Button>
+            <Popconfirm
+              title={`删除厂商「${row.name}」？`}
+              description="路由表中引用此厂商的条目将回退到全局默认。"
+              onConfirm={() => deleteMutation.mutate(row.name)}
+            >
+              <Button size="small" type="link" danger icon={<DeleteOutlined />} />
+            </Popconfirm>
+          </Space>
+        ),
+      },
+    ]
+
+    return (
+      <Card
+        className="glass-card"
+        title={
+          <Space>
+            <ClusterOutlined />
+            <span>LLM 厂商注册表</span>
+          </Space>
+        }
+        extra={
+          <Button type="primary" icon={<PlusOutlined />} onClick={openAdd}>
+            新增厂商
+          </Button>
+        }
+      >
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message="预配置厂商 endpoint + 密钥，路由表按名称引用"
+          description={
+            <span>
+              在这里登记不同 LLM 厂商（endpoint + 密钥，密钥加密存库）。随后到{' '}
+              <Text code>Ops → LLM 路由控制台</Text> 为每个功能块选择厂商并填模型。
+              密钥永不回显；编辑时留空表示保留原密钥。anthropic SDK 的 Endpoint 留空即用官方默认。
+            </span>
+          }
+        />
+        <Table
+          rowKey="name"
+          size="small"
+          loading={isLoading}
+          columns={columns}
+          dataSource={providers}
+          pagination={false}
+          locale={{ emptyText: '暂无厂商，点『新增厂商』开始配置' }}
+        />
+
+        <Modal
+          title={editing ? `编辑厂商：${editing}` : '新增 LLM 厂商'}
+          open={modalOpen}
+          onOk={handleSubmit}
+          confirmLoading={saveMutation.isPending}
+          onCancel={() => { setModalOpen(false); setEditing(null); providerForm.resetFields() }}
+          okText="保存"
+          cancelText="取消"
+        >
+          <Form form={providerForm} layout="vertical" requiredMark>
+            <Form.Item
+              name="name"
+              label="厂商标识 (slug)"
+              tooltip="唯一标识，仅字母/数字/下划线/连字符，如 moonshot、aliyun_maas"
+              rules={[
+                { required: true, message: '请输入厂商标识' },
+                { pattern: /^[A-Za-z0-9_-]+$/, message: '仅允许字母/数字/下划线/连字符' },
+              ]}
+            >
+              <Input placeholder="moonshot" disabled={!!editing} style={{ fontFamily: 'monospace' }} />
+            </Form.Item>
+            <Form.Item name="label" label="展示名">
+              <Input placeholder="Moonshot 官方" />
+            </Form.Item>
+            <Form.Item name="sdk" label="SDK 类型" rules={[{ required: true }]}>
+              <Select
+                options={[
+                  { value: 'openai', label: 'openai (OpenAI 兼容：DeepSeek/Qwen/Kimi/GLM/Moonshot…)' },
+                  { value: 'anthropic', label: 'anthropic (Claude 原生)' },
+                ]}
+              />
+            </Form.Item>
+            <Form.Item
+              name="base_url"
+              label="API Base URL"
+              tooltip="anthropic SDK 留空=官方 api.anthropic.com；openai 兼容厂商必填"
+            >
+              <Input placeholder="https://api.moonshot.cn/v1" />
+            </Form.Item>
+            <Form.Item
+              name="api_key"
+              label="API 密钥"
+              tooltip="加密存储，永不回显。编辑时留空=保留原密钥"
+              rules={editing ? [] : [{ required: true, message: '新增厂商必须填写密钥' }]}
+            >
+              <Input.Password placeholder={editing ? '留空保留原密钥' : 'sk-...'} autoComplete="new-password" />
+            </Form.Item>
+          </Form>
+        </Modal>
+      </Card>
     )
   }
 
@@ -387,6 +484,16 @@ export default function ConfigCenter() {
         </Space>
       ),
       children: <CredentialsTab />,
+    },
+    {
+      key: 'llm-providers',
+      label: (
+        <Space>
+          <ClusterOutlined />
+          LLM 厂商
+        </Space>
+      ),
+      children: <LLMProvidersTab />,
     },
     {
       key: 'thresholds',

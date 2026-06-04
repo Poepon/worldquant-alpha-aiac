@@ -1006,9 +1006,22 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         flag_type="json",
         group="LLM-Routing",
         description=(
-            "node_key → {model, provider, base_url?, api_key_ref?, thinking_effort?} "
-            "路由映射。前端编辑此 json;resolve_model_for 直读 _flag_override_cache。"
-            "畸形 entry(非 dict/缺 model/provider 非法)自动回退该 node 默认,不影响其它。"
+            "node_key → {model, provider_ref?, provider?, base_url?, api_key_ref?, "
+            "thinking_effort?} 路由映射。前端编辑此 json;resolve_model_for 直读 "
+            "_flag_override_cache。provider_ref 指向 LLM_PROVIDERS 里的命名厂商,resolve "
+            "时展开成 provider/base_url/api_key_ref(内联字段仍兼容旧 JSON)。畸形 entry "
+            "(非 dict/缺 model/provider 非法)自动回退该 node 默认,不影响其它。"
+        ),
+    ),
+    "LLM_PROVIDERS": FlagSpec(
+        name="LLM_PROVIDERS",
+        flag_type="json",
+        group="LLM-Routing",
+        description=(
+            "命名 LLM 厂商注册表 name → {label, sdk(openai/anthropic), base_url}。"
+            "预配置 endpoint;密钥不在此处,走加密 CredentialsService(凭证键 "
+            "llm_provider_<name>)。路由表用 provider_ref 引用。前端配置中心「LLM 厂商」"
+            "tab 编辑(经 /config/llm-providers 端点)。resolve_model_for 直读缓存。"
         ),
     ),
     "LLM_AVAILABLE_MODELS": FlagSpec(
