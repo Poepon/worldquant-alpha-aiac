@@ -1481,6 +1481,25 @@ async def _run_flat_iteration(db, task, run, celery_task_id, *, lock_key, lock_t
         # inherit a copy — enables single-task single-node A/B (Phase C). Empty /
         # missing → set(None) → no routing change (byte-for-byte legacy).
         _llm_ov_token = set_task_function_overrides((task.config or {}).get("llm_overrides"))
+        # Close the read-only SETUP transaction BEFORE the long concurrent run.
+        # Per the docstring the injected ``db`` is "used only for read-only setup +
+        # finalization, never during the concurrent run" — but the setup SELECTs
+        # (datasets / operators / category / bandit) autobegin a transaction that,
+        # left open, spans the whole multi-minute/hour pipeline. That idle-in-
+        # transaction session pins a snapshot + any row lock (e.g. an autoflushed
+        # dirty ``task``) on mining_tasks for the ENTIRE session — which on
+        # 2026-06-04 blocked graceful STOP (the intervene endpoint timed out) AND
+        # the persister's own ``UPDATE mining_tasks`` (self-block), and leaked for
+        # 25-34 min when a worker was killed mid-run. rollback (not commit): setup
+        # is read-only, so this discards nothing intended and the run holds no lock.
+        # The closures (next_round_inputs etc.) use a FRESH ``task_p`` on the
+        # producer session, never the outer ``task``; finalization re-fetches via
+        # ``db.refresh(task/run)`` below — so expiring them here is safe.
+        try:
+            await db.rollback()
+        except Exception:  # noqa: BLE001 — never fail the run on a txn-close hiccup
+            logger.debug(
+                "[flat-pipeline] pre-run db.rollback() failed/no-op", exc_info=True)
         try:
             stats = await run_flat_pipeline_session(
                 session_factory=AsyncSessionLocal,
