@@ -163,3 +163,34 @@ curl -X POST  http://localhost:8001/api/v1/ops/flags/refresh-all -H "X-Ops-Actor
 
 **复用提示**：菜单换模型 / 新增 provider 时，重跑 §3 的 `--verify-catalog` + `--smoke` + 全量筛查，按 §4 决策规则取 top-1/top-2，
 热点或新模型按 §6 串行 A/B，按 §7 审计落地 + seed reconcile。**核心心法**：离线测可用性+成本（确定信号），质量交在线否决（别用离线噪声决定质量）。
+
+---
+
+## 附录 A — 切换 LLM provider（例：切回 Token Plan）
+
+路由是 **`provider_ref` 驱动、provider-agnostic** 的：切换套餐 = 改路由 map 里的 `provider_ref`（+ 两套餐菜单不同的 model id），**不改架构**。
+provider profile（endpoint）在 `_load_llm_providers` 注册表，secret key 在 `CredentialsService` 的 `credential:llm_provider_<name>`。
+
+### 前提
+- 目标套餐**已充值/可达**（Token Plan 当年退役=预算耗尽，非技术故障；其 `credential:llm_provider_aliyun_maas` 仍在 vault，重新充值即可，不必重配 key）。
+- **两套餐菜单不同**（守卫 `test_llm_provider_catalog` 要求每 node 的 model ∈ 其 provider 的 `_PROVIDER_MODEL_CATALOG`）：
+  - 共有：`qwen3.6-plus / glm-5 / kimi-k2.5 / MiniMax-M2.5`（**`kimi-k2.5` 两边都有 → 最省事：保 model 只翻 provider_ref**）
+  - Token Plan(`aliyun_maas`) 独有：`qwen3.7-max / qwen3.6-flash / deepseek-v4-pro·flash / kimi-k2.6 / glm-5.1`
+  - Coding Plan(`aliyun_coding_plan`) 独有：`qwen3.5-plus / qwen3-max-2026-01-23 / qwen3-coder-next·plus / glm-4.7`
+
+### 步骤
+1. **运行时热切（可逆、无需重启、审计路径）**：读当前 `_flag_override_cache["LLM_FUNCTION_MODEL_MAP"]`，把每个 node 的
+   `provider_ref` 改 `aliyun_maas`（model 保持 kimi-k2.5，或换 maas 独有模型），`PATCH /ops/flags/LLM_FUNCTION_MODEL_MAP` + `refresh-all`（见 §7）。
+2. **启动 seed 硬化（durable，需 commit）**：`config.py` 的 `_load_llm_function_model_map` 把 `_CP = "aliyun_maas"`，
+   `_ACTIVE_LLM_PROVIDER = "aliyun_maas"`（驱动 ops dropdown 默认 → `LLM_AVAILABLE_MODELS` 取 maas 目录）；跑 `test_llm_provider_catalog` 确认 map 符合 maas 目录。
+   否则 override 被清 / cache-cold 会落回 seed（=当前 Coding Plan）。
+3. **验证 +（可选）重新选型**：`benchmark_llm_per_node.py` 的 **`CODING_PLAN_PROVIDER`（:51）是硬编码 `aliyun_coding_plan`** →
+   要对 Token Plan 跑 `--verify-catalog`/筛查，先改该常量（或参数化）。Token Plan 有 `kimi-k2.6`（另一非推理便宜款）→ 值得重跑 §3+§4 重选；
+   **推理溢价结论 model-intrinsic，大概率仍成立**（reasoning 仍贵），只是非推理便宜款变成 kimi-k2.5/k2.6 之选。
+
+### 回退（对称、可逆）
+- 热翻回：同步骤 1 把 `provider_ref` 改回 `aliyun_coding_plan`；
+- 或 `DELETE /ops/flags/LLM_FUNCTION_MODEL_MAP/override` 清 override → 落回 config seed（seed 现是 Coding Plan，故清 override = 回 Coding Plan）。
+  这正是「**seed 决定 cache-cold / override-cleared 落点**」的意义 — 切套餐时务必同步 seed（步骤 2）。
+
+> 一句话：切套餐 = **改 `provider_ref`（运行时审计热翻）+ 对齐 config seed（durable）**；endpoint profile 与 key 都已在注册表/vault。
