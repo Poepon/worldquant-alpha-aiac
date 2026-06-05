@@ -99,6 +99,17 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="P2-B",
         description="hypothesis 节点根据 deficit 给出 pillar nudge",
     ),
+    "ENABLE_ORTHOGONAL_PROMPT_STEERING": FlagSpec(
+        name="ENABLE_ORTHOGONAL_PROMPT_STEERING",
+        flag_type="bool",
+        group="Orthogonality-Steering",
+        description=(
+            "Phase A 正交导向探索:把 SUBMITTED 池的 pillar 覆盖画像作软 NUDGE 注入 "
+            "hypothesis prompt,引导 LLM 探索与已提交池正交的机制(负向知识)。OFF → "
+            "submitted_pool_profile 不调用 + PromptContext.submitted_pool_profile=None → "
+            "字节不变。shadow-first 再 A/B。见 orthogonality_steered_exploration_plan_2026-06-05.md"
+        ),
+    ),
     # --- P2-C 市场体制 (Consolidated 2026-05-19: single switch + stage str) ---
     "ENABLE_REGIME": FlagSpec(
         name="ENABLE_REGIME",

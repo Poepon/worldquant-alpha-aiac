@@ -1311,6 +1311,14 @@ class Settings(BaseSettings):
     # 检查 + prompt nudge,diversity_tracker 走 5 维重归一化加权。
     # 1-2 周观察 docs/pillar_balance/<sh-date>.json 后再切换。
     ENABLE_PILLAR_AWARE_SELECTION: bool = False
+    # Orthogonality-steered exploration Phase A (2026-06-05, plan
+    # docs/orthogonality_steered_exploration_plan_2026-06-05.md): inject the
+    # SUBMITTED-pool pillar-coverage profile as a SOFT NUDGE into the hypothesis
+    # prompt so the LLM explores mechanisms orthogonal to what's already submitted
+    # (negative-knowledge steering). OFF → backend.submitted_pool_profile is never
+    # called + PromptContext.submitted_pool_profile stays None → byte-for-byte
+    # legacy prompt. ENABLE_ prefix → hot-flippable. Shadow-first, then A/B.
+    ENABLE_ORTHOGONAL_PROMPT_STEERING: bool = False
     # 6 桶 + other 的目标分布 — pillar_balance_check 报告内 deficit 计算基准。
     PILLAR_TARGET_DISTRIBUTION: dict = {
         "momentum":   0.25,
