@@ -1770,6 +1770,16 @@ class Settings(BaseSettings):
     ENABLE_POOL_PIPELINE: bool = False
     # How many hyp_intent rows the pool scheduler beat inserts per firing.
     POOL_SCHEDULER_BATCH: int = 5
+    # Pool sizing (§6 #6 decision): USER=3 BRAIN slots → 2 S workers + 1 E + leave
+    # 1 slot for opt/auto-submit; 1 HG worker (LLM-bound, fans out N/intent). The
+    # supervisor launches these counts. CONSULTANT(80) upgrade scales via formula.
+    POOL_K_S: int = 2          # S (simulate) workers — hold BRAIN slots
+    POOL_K_E: int = 1          # E (evaluate) workers — compute-bound
+    POOL_N_HG: int = 1         # HG (hypothesis+generation) workers — LLM-bound
+    # Claim/lease tunables.
+    POOL_LEASE_MAX_ATTEMPTS: int = 3       # attempts before poison-pill
+    POOL_SUPERVISOR_POLL_SEC: float = 5.0  # supervisor liveness poll interval
+    POOL_RESPAWN_BACKOFF_SEC: float = 10.0 # min gap between respawns of one slot
 
     # ----- G2 Phase A — per-call LLM cost telemetry (2026-05-19) -----
     # Light wiring per [[feedback_light_wiring_deferred_gate]]: Phase A logs

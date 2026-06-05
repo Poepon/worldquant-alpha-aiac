@@ -6016,3 +6016,55 @@ async def get_orchestrator_status(
         effective_region_weights=effective_weights,
         recent_decisions=decisions,
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 1b pool pipeline — drain (STOP) / resume / status
+# ---------------------------------------------------------------------------
+
+@router.post("/pools/{name}/drain")
+async def pool_drain(name: str, _token: str = Depends(_require_ops_token)):
+    """Soft-STOP a pool (name ∈ hg|s|e): SET ``pool:{name}:drain`` so its workers
+    finish the in-flight candidate then idle (no new claims). Queued PENDING rows
+    are PRESERVED (use the lease-recycle / a manual purge_pending for a hard stop).
+    Process liveness is the supervisor's job, not this flag."""
+    from backend.pool.drain import POOL_NAMES, set_drain
+    if name not in POOL_NAMES:
+        raise HTTPException(status_code=400, detail=f"unknown pool '{name}' (hg|s|e)")
+    set_drain(name)
+    return {"pool": name, "draining": True}
+
+
+@router.post("/pools/{name}/resume")
+async def pool_resume(name: str, _token: str = Depends(_require_ops_token)):
+    """RESUME a drained pool: clear ``pool:{name}:drain``."""
+    from backend.pool.drain import POOL_NAMES, clear_drain
+    if name not in POOL_NAMES:
+        raise HTTPException(status_code=400, detail=f"unknown pool '{name}' (hg|s|e)")
+    clear_drain(name)
+    return {"pool": name, "draining": False}
+
+
+@router.get("/pools/status")
+async def pool_status(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pool health: per-pool drain state + queue depth by stage (the退出判据
+    surface — watch for rows stuck SIMULATING/EVALUATING past their lease)."""
+    from sqlalchemy import select, func
+    from backend.config import settings as _s
+    from backend.models import CandidateQueue, HypothesisIntent
+    from backend.pool.drain import POOL_NAMES, is_draining
+
+    async def _counts(model):
+        rows = (await db.execute(
+            select(model.stage, func.count()).group_by(model.stage))).all()
+        return {str(stage): int(c) for stage, c in rows}
+
+    return {
+        "enabled": bool(getattr(_s, "ENABLE_POOL_PIPELINE", False)),
+        "drain": {n: is_draining(n) for n in POOL_NAMES},
+        "hyp_intent": await _counts(HypothesisIntent),
+        "candidate_queue": await _counts(CandidateQueue),
+    }
