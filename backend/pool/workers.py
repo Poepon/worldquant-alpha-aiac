@@ -29,7 +29,7 @@ from backend.agents.services.llm_service import (
 )
 from backend.models import CandidateQueue, HypothesisIntent
 from backend.pool import stages as st
-from backend.pool.budget import sims_budget_exceeded, tokens_budget_exceeded
+from backend.pool.budget import sims_budget_exceeded, tokens_budget_exceeded, incr_sims
 from backend.pool.drain import is_draining
 from backend.pool.hydrate import hydrate_candidate_state, hydrate_hg_state, hg_run_config
 from backend.pool.queue import claim_one, complete, fail_or_retry
@@ -173,6 +173,12 @@ async def s_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 1800
                         "trace_records": list(row.trace_records or []) + out["trace"],
                     },
                 )
+                # Count the BRAIN sim ONLY after a confirmed successful POST
+                # (终审 #6: is_simulated != BRAIN-truth — never count pre-POST /
+                # slot-timeout / 429). Pool-sim count; the brain_adapter global
+                # hook (incl opt/auto-submit) is a later refinement.
+                if out["sim_result"].get("simulation_success"):
+                    incr_sims(1)
             except Exception as ex:  # noqa: BLE001
                 logger.warning(f"[pool.s] candidate {row.id} sim failed: {ex}")
                 await fail_or_retry(CandidateQueue, row.id, st.SIM_PENDING, max_attempts, error=str(ex))

@@ -62,9 +62,26 @@ def _reset_brain_sim_slot_counter(**_kwargs):  # pragma: no cover - signal hook
     """
     try:
         from backend.tasks.redis_pool import get_redis_client
-        # Literal key mirrors BrainAdapter._SLOT_COUNTER_KEY (avoid importing the
-        # adapter — heavy — at signal time).
-        get_redis_client().delete("brain:concurrent_sims")
+        _r = get_redis_client()
+        # Guarded reset (Phase 1b 终审 #5): under the resident HG/S/E pool, sibling
+        # S workers may legitimately hold brain:concurrent_sims when ONE pool
+        # process restarts — clearing it then would zero a shared counter that
+        # other workers' in-flight sims still own, letting the pool exceed the
+        # BRAIN cap → 429/wedge. Only clear when NO pool worker is registered
+        # alive (the supervisor SADD/SREMs pool:workers:alive in B6). In the
+        # FLAT-only world the registry is never written → scard()==0 → clears
+        # exactly as before. Literal key mirrors BrainAdapter._SLOT_COUNTER_KEY.
+        try:
+            _alive = int(_r.scard("pool:workers:alive") or 0)
+        except Exception:
+            _alive = 0
+        if _alive == 0:
+            _r.delete("brain:concurrent_sims")
+        else:
+            from loguru import logger
+            logger.info(
+                f"[celery_app] {_alive} pool worker(s) alive — skip brain:concurrent_sims reset"
+            )
     except Exception as e:
         from loguru import logger
         logger.warning(f"[celery_app] BRAIN sim slot counter reset failed: {e}")
@@ -106,6 +123,18 @@ celery_app.conf.update(
 
 # Scheduled tasks (Celery Beat)
 celery_app.conf.beat_schedule = {
+    # Phase 1b B5 (four-pool decoupling): pool scheduler + lease-recycle. Both
+    # gate on ENABLE_POOL_PIPELINE (default OFF) → these fire but no-op until
+    # 1c-flip, so registration here is inert. Scheduler feeds hyp_intent every
+    # 5 min; lease-recycle reclaims dead-worker rows every 2 min.
+    "pool-scheduler": {
+        "task": "backend.tasks.run_pool_scheduler",
+        "schedule": crontab(minute="*/5"),
+    },
+    "pool-lease-recycle": {
+        "task": "backend.tasks.run_pool_lease_recycle",
+        "schedule": crontab(minute="*/2"),
+    },
     # Daily feedback analysis at 23:00
     "daily-feedback-analysis": {
         "task": "backend.tasks.run_daily_feedback",

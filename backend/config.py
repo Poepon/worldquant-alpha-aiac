@@ -1762,6 +1762,14 @@ class Settings(BaseSettings):
         "self_correct": 5100,     # p95 3765 / p99 5034
         "__default__": 5000,      # any unmapped LLM node
     }
+    # Master gate for the resident HG/S/E pool pipeline (four-pool decoupling).
+    # Default OFF — the pool beats no-op and the supervisor starts no workers
+    # until this flips (Phase 1c-flip). ENABLE_-prefixed so it is hot-flippable
+    # via FeatureFlagOverride (it gates claim/dispatch; process liveness is the
+    # supervisor + drain key, NOT this flag — plan §4 1c-flip runbook).
+    ENABLE_POOL_PIPELINE: bool = False
+    # How many hyp_intent rows the pool scheduler beat inserts per firing.
+    POOL_SCHEDULER_BATCH: int = 5
 
     # ----- G2 Phase A — per-call LLM cost telemetry (2026-05-19) -----
     # Light wiring per [[feedback_light_wiring_deferred_gate]]: Phase A logs

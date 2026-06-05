@@ -107,6 +107,13 @@ from backend.tasks.auto_submit_tasks import (  # noqa: F401
     run_can_submit_refresh,
 )
 
+# Phase 1b B5 (four-pool decoupling): pool scheduler + lease-recycle beats.
+# Both gate on ENABLE_POOL_PIPELINE (default OFF) → inert until 1c-flip.
+from backend.tasks.pool_tasks import (  # noqa: F401
+    run_pool_scheduler,
+    run_pool_lease_recycle,
+)
+
 __all__ = [
     # Utilities
     "run_async",
@@ -164,4 +171,7 @@ __all__ = [
     "run_dataset_weight_refresh",
     "reconcile_r1b_outcomes",
     "prune_invalid_datafields",
+    # Phase 1b B5: pool scheduler + lease-recycle beats (gated on ENABLE_POOL_PIPELINE)
+    "run_pool_scheduler",
+    "run_pool_lease_recycle",
 ]
