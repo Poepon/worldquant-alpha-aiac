@@ -116,17 +116,37 @@ def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
         return defaults
 
 
-def _load_llm_available_models() -> list:
-    """Candidate model list for the ops-console dropdown (PR4). Override via
-    LLM_AVAILABLE_MODELS env (JSON array). Fault-tolerant; never crashes."""
-    # Coding Plan supported roster (2026-06-05, per the订阅套餐 model list):
-    # only these resolve on aliyun_coding_plan. qwen3.6-flash / kimi-k2.6 /
-    # deepseek-* / qwen3.7-max / glm-5.1 are NOT on the plan and 401/fail.
-    defaults = [
+# Per-provider supported-model catalog (2026-06-05). SINGLE SOURCE OF TRUTH for
+# which models each Alibaba-Cloud plan actually serves — routing a node to a model
+# NOT in its provider's list 401s/fails (the qwen3.6-flash-on-coding-plan incident,
+# task 3981). Keep LLM_FUNCTION_MODEL_MAP entries within their provider's list.
+# Test guard: test_llm_provider_catalog asserts the startup routing map conforms.
+_PROVIDER_MODEL_CATALOG: Dict[str, list] = {
+    # aliyun_coding_plan — coding.dashscope.aliyuncs.com — ACTIVE since 2026-06-04.
+    # Authoritative: from the Coding Plan 订阅套餐 model page (2026-06-05).
+    "aliyun_coding_plan": [
         "qwen3.6-plus", "qwen3.5-plus", "qwen3-max-2026-01-23",
         "qwen3-coder-next", "qwen3-coder-plus", "glm-5", "glm-4.7",
         "kimi-k2.5", "MiniMax-M2.5",
-    ]
+    ],
+    # aliyun_maas — token-plan.cn-beijing.maas.aliyuncs.com — OUT OF BUDGET 2026-06-04.
+    # Reconstructed from the pre-coding-switch config roster; VERIFY against the
+    # Token Plan model page before reactivating token-plan.
+    "aliyun_maas": [
+        "kimi-k2.6", "kimi-k2.5", "deepseek-v4-pro", "deepseek-v4-flash",
+        "qwen3.7-max", "qwen3.6-plus", "qwen3.6-flash", "glm-5.1", "glm-5",
+    ],
+}
+
+# The currently-active provider (drives the ops-console model dropdown default).
+_ACTIVE_LLM_PROVIDER = "aliyun_coding_plan"
+
+
+def _load_llm_available_models() -> list:
+    """Candidate model list for the ops-console dropdown (PR4). Defaults to the
+    ACTIVE provider's catalog (_PROVIDER_MODEL_CATALOG). Override via
+    LLM_AVAILABLE_MODELS env (JSON array). Fault-tolerant; never crashes."""
+    defaults = list(_PROVIDER_MODEL_CATALOG.get(_ACTIVE_LLM_PROVIDER, []))
     env_val = os.getenv("LLM_AVAILABLE_MODELS")
     if not env_val:
         return defaults
