@@ -216,6 +216,14 @@ class AlphaFailure(SQLAlchemyBase):
     # NULL when ENABLE_RAG_CATEGORY_AB is OFF / legacy rows.
     rag_ab_arm = Column(String(40), nullable=True, index=True)
 
+    # Pool pipeline (four-pool decoupling, 2026-06-05): the E pool persists FAIL
+    # rows here with their full signal payload — verdict_signals + BRAIN sim
+    # metrics (sharpe/fitness/turnover/...) — symmetric with Alpha.metrics on the
+    # PASS path, so forensic / B5-attribution analytics span PASS + FAIL via one
+    # shape. none_as_null avoids the JSON-null footgun (None → JSONB scalar
+    # 'null' breaks jsonb_* reads). NULL for legacy rows and any non-pool path.
+    metrics = Column(JSONB(none_as_null=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 

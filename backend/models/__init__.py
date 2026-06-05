@@ -137,6 +137,14 @@ from backend.models.cognitive_layer_bandit import CognitiveLayerBanditState
 # Phase 16-A optimization closure (Stage A, 2026-05-28) — one row per cycle.
 from backend.models.optimization import OptimizationRun
 
+# Mining pipeline queues (four-pool decoupling Phase 0, 2026-06-05) — DB-persistent
+# claim/lease queues for the resident HG / Simulate / Evaluate pools. INERT until
+# Phase 1b wires the pools; see docs/four_pool_decoupling_plan_2026-06-05.md.
+from backend.models.pipeline import (
+    HypothesisIntent,
+    CandidateQueue,
+)
+
 __all__ = [
     # Enums
     "MiningStatus",
@@ -192,4 +200,7 @@ __all__ = [
     "FeatureFlagAudit",
     # Optimization closure
     "OptimizationRun",
+    # Mining pipeline queues (four-pool decoupling Phase 0)
+    "HypothesisIntent",
+    "CandidateQueue",
 ]

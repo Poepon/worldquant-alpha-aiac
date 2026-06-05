@@ -1737,6 +1737,32 @@ class Settings(BaseSettings):
     MAX_SIMULATIONS_PER_DAY: int = 100
     MAX_TOKENS_PER_DAY: int = 500000
 
+    # ----- Pool pipeline budgets (four-pool decoupling) — Phase 0 calibration.
+    # INERT in Phase 0 (nothing reads these yet); consumed by the HG/S/E pools'
+    # three-segment token reserve/correct gate in Phase 1b. Kept SEPARATE from
+    # MAX_TOKENS_PER_DAY (macro_narrative_extract.py:101 still owns that — do NOT
+    # repurpose it). Full standing of the numbers:
+    # docs/pool_token_calibration_2026-06-05.md (measured from llm_call_log,
+    # 11,301 calls / 17d). See plan §2 (cost single-source).
+    #
+    # Provisional daily LLM-token ceiling for the pools (~8x current ~1M/day
+    # burn) as a runaway backstop; recalibrate in Phase 1b against observed
+    # continuous burn. Enforced as a Redis budget:tokens:YYYYMMDD counter that
+    # SETs the pool drain key when exceeded (NOT a DB pause).
+    POOL_TOKEN_BUDGET_PER_DAY: int = 8_000_000
+    # p95/p99-per-node pessimistic pre-reserve for the token gate. Heavy nodes
+    # (code_gen, hypothesis) saturate near their ~17k output cap → reserve at
+    # p99; light nodes round up p99. Feedback-cluster nodes (r1b_*/r5_*/
+    # attribution/llm_crossover) are EXCLUDED — removed in Phase 1c (pure-forward
+    # Phase 1). __default__ catches any unmapped LLM node.
+    POOL_NODE_TOKEN_RESERVE: dict = {
+        "code_gen": 17000,        # p95 12568 / p99 16921 — saturates output cap
+        "hypothesis": 14000,      # p95 9836 / p99 13780 (7d p99 ~17.2k)
+        "distill_context": 4500,  # p95 3262 / p99 4513
+        "self_correct": 5100,     # p95 3765 / p99 5034
+        "__default__": 5000,      # any unmapped LLM node
+    }
+
     # ----- G2 Phase A — per-call LLM cost telemetry (2026-05-19) -----
     # Light wiring per [[feedback_light_wiring_deferred_gate]]: Phase A logs
     # every LLMService.call to llm_call_log table (task_id / round_idx /
