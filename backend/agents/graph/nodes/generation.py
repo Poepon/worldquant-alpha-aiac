@@ -45,6 +45,7 @@ def _failed_llm_response(error: str) -> _FailedLLMResponse:
 
 from backend.agents.graph.state import MiningState, AlphaCandidate
 from backend.agents.graph.nodes.base import record_trace, _debug_log, resolve_db
+from backend.agents.graph.nodes.prompt_enrichers import HypothesisEnricherOrchestrator
 from backend.agents.services import LLMService, RAGService
 from backend.agents.prompts import (
     ALPHA_GENERATION_SYSTEM,
@@ -481,573 +482,24 @@ async def node_hypothesis(
 
     target_fields = state.focused_fields if state.focused_fields else state.fields[:20]
 
-    # P2-B (2026-05-15): Five Pillars balance nudge — opt-in via
-    # ``ENABLE_PILLAR_AWARE_SELECTION``. When OFF (default) the entire block
-    # is skipped so prompt rendering is byte-for-byte legacy. When ON we
-    # compute per-pillar shares of the last 7d alpha pool in this region,
-    # check whether the most-deficient pillar exceeds a threshold, and pass
-    # that pillar to PromptContext.pillar_hint so build_hypothesis_prompt
-    # renders an extra nudge block. Failure of the SQL / Redis path is
-    # non-fatal: pillar_hint stays None and the node continues normally.
-    pillar_hint: Optional[str] = None
-    _pillar_aware = bool(getattr(
-        _gen_settings, "ENABLE_PILLAR_AWARE_SELECTION", False,
-    ))
-    if _pillar_aware:
-        try:
-            # M9 fix: Redis 60s TTL cache keyed by (region, utc-date) so the
-            # per-round JOIN doesn't fire on every node_hypothesis invocation.
-            # `redis_pool` is lazy-imported because backend.tasks ↔
-            # backend.agents has a known cycle (commit 4ec6e8f message).
-            from backend.tasks.redis_pool import get_redis_client
-            _p2b_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            _p2b_cache_key = f"aiac:pillar_deficit:{state.region}:{_p2b_today}"
-            _p2b_redis = None
-            try:
-                _p2b_redis = get_redis_client()
-            except Exception:
-                _p2b_redis = None
-            counts = None
-            if _p2b_redis is not None:
-                try:
-                    _p2b_cached = _p2b_redis.get(_p2b_cache_key)
-                    if _p2b_cached is not None:
-                        counts = json.loads(_p2b_cached)
-                except Exception:
-                    counts = None
-
-            if counts is None:
-                # M3 fix: LEFT JOIN from Alpha — legacy alphas where
-                # ``hypothesis_id IS NULL`` must NOT be silently dropped.
-                # They land in the ``unknown`` bucket and are excluded from
-                # share computation (so they don't dilute deficits).
-                # alphas.created_at is TIMESTAMP WITHOUT TIME ZONE — use a
-                # naive UTC cutoff so asyncpg accepts the WHERE clause.
-                _p2b_cutoff = (
-                    datetime.now(timezone.utc) - timedelta(days=7)
-                ).replace(tzinfo=None)
-                async with resolve_db(config) as _p2b_db:
-                    _p2b_stmt = (
-                        _sa_select(
-                            Hypothesis.pillar,
-                            _sa_func.count(Alpha.id),
-                        )
-                        .select_from(Alpha)
-                        .outerjoin(
-                            Hypothesis,
-                            Alpha.hypothesis_id == Hypothesis.id,
-                        )
-                        .where(
-                            Alpha.region == state.region,
-                            Alpha.created_at >= _p2b_cutoff,
-                        )
-                        .group_by(Hypothesis.pillar)
-                    )
-                    _p2b_rows = (await _p2b_db.execute(_p2b_stmt)).all()
-                counts = {(p or "unknown"): int(c) for p, c in _p2b_rows}
-                if _p2b_redis is not None:
-                    try:
-                        _p2b_redis.setex(
-                            _p2b_cache_key, 60, json.dumps(counts),
-                        )
-                    except Exception:
-                        pass  # cache failure must not break the node
-
-            # Compute pillar deficits — ``unknown`` (legacy NULL) is excluded
-            # from the denominator so legacy backlog doesn't dilute fresh
-            # shares. Threshold is deficit relative to target.
-            _p2b_target = getattr(
-                _gen_settings, "PILLAR_TARGET_DISTRIBUTION", {},
-            ) or {}
-            pillared_total = sum(
-                c for p, c in counts.items() if p in _p2b_target
-            ) or 1
-            shares = {
-                p: counts.get(p, 0) / pillared_total for p in _p2b_target
-            }
-            deficits = {
-                p: max(0.0, _p2b_target[p] - shares.get(p, 0.0))
-                for p in _p2b_target
-            }
-            if deficits:
-                top_pillar, top_def = max(
-                    deficits.items(), key=lambda kv: kv[1],
-                )
-                _p2b_skew_t = float(getattr(
-                    _gen_settings, "PILLAR_BALANCE_SKEW_THRESHOLD", 0.4,
-                ))
-                # Trigger when the deficit exceeds threshold * target.
-                if top_def > _p2b_skew_t * _p2b_target.get(top_pillar, 0.2):
-                    pillar_hint = top_pillar
-                    logger.info(
-                        f"[{node_name}] P2-B pillar nudge | shares={shares} "
-                        f"hint={top_pillar} deficit={top_def:.3f}"
-                    )
-        except Exception as _p2b_ex:
-            logger.warning(
-                f"[{node_name}] P2-B pillar nudge failed (non-fatal): "
-                f"{_p2b_ex}"
-            )
-            pillar_hint = None
-
-    # P2-D (2026-05-15): Negative-knowledge nudge — opt-in via
-    # ``ENABLE_NEGATIVE_KNOWLEDGE_NUDGE``. When OFF (default) the entire
-    # block is skipped so prompt rendering is byte-for-byte legacy —
-    # PromptContext.failure_pitfalls = state.pitfalls[:5] unchanged. When
-    # ON, top-K pitfalls (filtered by region + min_fail_count + 14d
-    # recency + non-UNKNOWN skeleton, see negative_knowledge_service.py
-    # fetch_top_pitfalls SQL) are prepended to state.pitfalls. Result is
-    # capped at 5 to match the legacy slice. Failure of the Redis / DB
-    # path is non-fatal: ``neg_kb_pitfalls`` stays empty and the prompt
-    # falls back to legacy.
-    neg_kb_pitfalls: List[Dict] = []
-    neg_kb_keys_seen: List[str] = []
-    _neg_kb_enabled = bool(getattr(
-        _gen_settings, "ENABLE_NEGATIVE_KNOWLEDGE_NUDGE", False,
-    ))
-    if _neg_kb_enabled:
-        try:
-            # Lazy import — backend.services.negative_knowledge_service ↔
-            # backend.tasks has the same known cycle as P2-B (see M9 fix
-            # commentary above for redis_pool). Mirror that pattern.
-            from backend.tasks.redis_pool import get_redis_client
-            from backend.services.negative_knowledge_service import (
-                NegativeKnowledgeService,
-            )
-            _p2d_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            _p2d_cache_key = (
-                f"aiac:neg_knowledge:{state.region}:{_p2d_today}"
-            )
-            _p2d_redis = None
-            try:
-                _p2d_redis = get_redis_client()
-            except Exception:
-                _p2d_redis = None
-            cached_pitfalls = None
-            if _p2d_redis is not None:
-                try:
-                    _p2d_cached = _p2d_redis.get(_p2d_cache_key)
-                    if _p2d_cached is not None:
-                        cached_pitfalls = json.loads(_p2d_cached)
-                except Exception:
-                    cached_pitfalls = None
-
-            if cached_pitfalls is None:
-                _top_k = int(getattr(
-                    _gen_settings, "NEGATIVE_KNOWLEDGE_TOP_K", 5,
-                ))
-                _min_fc = int(getattr(
-                    _gen_settings, "NEGATIVE_KNOWLEDGE_MIN_FAIL_COUNT", 3,
-                ))
-                async with resolve_db(config) as _p2d_db:
-                    _nks = NegativeKnowledgeService(_p2d_db)
-                    cached_pitfalls = await _nks.fetch_top_pitfalls(
-                        region=state.region,
-                        limit=_top_k,
-                        min_fail_count=_min_fc,
-                    )
-                if _p2d_redis is not None:
-                    try:
-                        _p2d_redis.setex(
-                            _p2d_cache_key, 300,
-                            json.dumps(cached_pitfalls, default=str),
-                        )
-                    except Exception:
-                        pass  # cache failure must not break the node
-
-            neg_kb_pitfalls = list(cached_pitfalls or [])
-            neg_kb_keys_seen = [
-                p.get("signature_key", "") for p in neg_kb_pitfalls
-                if isinstance(p, dict) and p.get("signature_key")
-            ]
-            if neg_kb_pitfalls:
-                logger.info(
-                    f"[{node_name}] P2-D nudge | n={len(neg_kb_pitfalls)} "
-                    f"region={state.region} "
-                    f"keys={neg_kb_keys_seen}"
-                )
-        except Exception as _p2d_ex:
-            logger.warning(
-                f"[{node_name}] P2-D negative-knowledge nudge failed "
-                f"(non-fatal): {_p2d_ex}"
-            )
-            neg_kb_pitfalls = []
-            neg_kb_keys_seen = []
-
-    # P2-A (2026-05-16): Macro-narrative RAG nudge — opt-in via
-    # ``ENABLE_MACRO_NARRATIVE_GUIDANCE``. When OFF (default) the entire
-    # block is skipped so prompt rendering is byte-for-byte legacy —
-    # PromptContext.macro_narratives = [] → build_macro_context_block returns
-    # "" → build_hypothesis_prompt template splice produces an empty string
-    # at the insertion point. When ON, top-K narratives (≤5, blended over
-    # field / dataset / category scopes by MacroNarrativeService with field
-    # +0.1 confidence bonus, S4) are attached to PromptContext. Failure of
-    # Redis / DB path is non-fatal: ``macro_narratives`` stays empty and the
-    # prompt falls back to legacy.
-    macro_narratives: List[Dict] = []
-    macro_keys_seen: List[str] = []
-    _macro_enabled = bool(getattr(
-        _gen_settings, "ENABLE_MACRO_NARRATIVE_GUIDANCE", False,
-    ))
-    if _macro_enabled:
-        try:
-            from backend.tasks.redis_pool import get_redis_client  # lazy (M10)
-            from backend.services.macro_narrative_service import (  # lazy (M10)
-                MacroNarrativeService,
-            )
-            _p2a_today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-            _p2a_cache_key = (
-                f"aiac:macro_narrative:{state.dataset_id}:"
-                f"{state.region}:{_p2a_today}"
-            )
-            _p2a_redis = None
-            try:
-                _p2a_redis = get_redis_client()
-            except Exception:
-                _p2a_redis = None
-            cached = None
-            if _p2a_redis is not None:
-                try:
-                    _p2a_cached = _p2a_redis.get(_p2a_cache_key)
-                    if _p2a_cached is not None:
-                        cached = json.loads(_p2a_cached)
-                except Exception:
-                    cached = None
-
-            if cached is None:
-                # M7: candidate key extraction with the double-key pattern.
-                # state.focused_fields elements may use ``field_id`` (Phase-1
-                # union path) OR ``id`` (distillation path) — extract both.
-                _candidate_keys: List[str] = []
-                for f in (state.focused_fields or state.fields or [])[:10]:
-                    if isinstance(f, dict):
-                        fid = f.get("field_id") or f.get("id")
-                        if fid:
-                            _candidate_keys.append(str(fid))
-                _ttl = int(getattr(
-                    _gen_settings, "MACRO_NARRATIVE_CACHE_TTL_SECONDS", 600,
-                ))
-                _top_k = int(getattr(
-                    _gen_settings, "MACRO_NARRATIVE_FIELD_TOP_K", 3,
-                ))
-                async with resolve_db(config) as _p2a_db:
-                    _mns = MacroNarrativeService(_p2a_db)
-                    cached = await _mns.fetch_macro_narratives(
-                        dataset_id=state.dataset_id,
-                        region=state.region,
-                        key_fields=_candidate_keys,
-                        limit_field=_top_k,
-                        limit_dataset=1,
-                        limit_category=1,
-                    )
-                if _p2a_redis is not None:
-                    try:
-                        _p2a_redis.setex(
-                            _p2a_cache_key, _ttl,
-                            json.dumps(cached, default=str),
-                        )
-                    except Exception:
-                        pass
-
-            macro_narratives = list(cached or [])[:5]
-            macro_keys_seen = [
-                (n.get("field_id") or n.get("dataset_category") or "")
-                for n in macro_narratives
-                if isinstance(n, dict)
-            ]
-            if macro_narratives:
-                logger.info(
-                    f"[{node_name}] P2-A macro nudge | "
-                    f"n={len(macro_narratives)} "
-                    f"dataset={state.dataset_id} region={state.region} "
-                    f"keys={macro_keys_seen}"
-                )
-        except Exception as _p2a_ex:
-            logger.warning(
-                f"[{node_name}] P2-A macro nudge failed (non-fatal): "
-                f"{_p2a_ex}"
-            )
-            macro_narratives = []
-            macro_keys_seen = []
-
-    # P2-C (2026-05-16): regime-aware style preset injection — opt-in via
-    # ``ENABLE_STYLE_PRESET_GUIDANCE``. The preset itself is injected into
-    # ``strategy`` by mining_agent.run_mining_iteration BEFORE the workflow
-    # starts; here we just read it out of config["configurable"]["strategy"]
-    # and forward it to PromptContext.
-    #
-    # MF4 byte-for-byte invariant: flag=False → ``style_preset`` stays None
-    # in PromptContext + ``_regime_style_seen`` is never stamped on
-    # primary_h, even if strategy.regime was already set (e.g. the AWARE
-    # flag was on but STYLE flag was off, see S2).
-    style_preset: Optional[Dict] = None
-    _p2c_regime: Optional[str] = None
-    _style_enabled = bool(getattr(
-        _gen_settings, "ENABLE_STYLE_PRESET_GUIDANCE", False,
-    ))
-    if _style_enabled:
-        try:
-            _strat_blob = (
-                (config.get("configurable", {}) or {}).get("strategy", {})
-                if config else {}
-            )
-            if isinstance(_strat_blob, dict):
-                _p2c_regime = _strat_blob.get("regime")
-                _preset_blob = _strat_blob.get("style_preset")
-                if _p2c_regime and isinstance(_preset_blob, dict):
-                    style_preset = dict(_preset_blob)
-                    logger.info(
-                        f"[{node_name}] P2-C style preset attached | "
-                        f"regime={_p2c_regime}"
-                    )
-        except Exception as _p2c_ex:
-            logger.warning(
-                f"[{node_name}] P2-C style preset attach failed: {_p2c_ex}"
-            )
-            style_preset = None
-            _p2c_regime = None
-
-    # G8 Phase A (2026-05-19): cross-task hypothesis-forest reference —
-    # opt-in via ``ENABLE_HYPOTHESIS_FOREST_REUSE``. When OFF (default) the
-    # entire block is skipped so prompt rendering is byte-for-byte legacy
-    # (cross_task_hypotheses stays []). When ON, top-K PROMOTED/ACTIVE
-    # hypotheses in this region (filtered by pillar_hint when P2-B fires,
-    # and by min_pass_count + min_sharpe_avg thresholds) are attached so
-    # the LLM can reference proven directions. Failure of the SQL path is
-    # non-fatal: ``cross_task_hyps`` stays empty and prompt falls back to
-    # legacy. Note: we deliberately query AFTER P2-B (pillar_hint may be
-    # set) AND AFTER P2-C (experiment_variant resolution via cfg) so the
-    # filter is well-informed.
-    cross_task_hyps: List[Dict] = []
-    # F-A3 fix (2026-05-19 review): Unconditionally reset on every node
-    # entry so a 2nd fire of node_hypothesis within the same workflow.run()
-    # (e.g. R1b CoSTEER retry/mutate cycle) cannot carry stale forest_ids
-    # from a previous fire's G8 fetch when this fire's fetch returns 0 hits.
-    # LangGraph's MiningState IS shared across nodes within one run; only a
-    # fresh workflow.run() builds a new state instance.
-    state.g8_forest_referenced_ids = []
-    _forest_enabled = bool(getattr(
-        _gen_settings, "ENABLE_HYPOTHESIS_FOREST_REUSE", False,
-    ))
-    if _forest_enabled:
-        try:
-            from backend.database import AsyncSessionLocal as _g8_session
-            from backend.services.hypothesis_service import (
-                HypothesisService as _G8HypService,
-            )
-            _g8_min_pass = int(getattr(
-                _gen_settings, "HYPOTHESIS_FOREST_MIN_PASS_COUNT", 2,
-            ))
-            _g8_min_sharpe = float(getattr(
-                _gen_settings, "HYPOTHESIS_FOREST_MIN_SHARPE_AVG", 1.0,
-            ))
-            _g8_top_k = int(getattr(
-                _gen_settings, "HYPOTHESIS_FOREST_TOP_K", 5,
-            ))
-            _g8_variant = (
-                (config.get("configurable", {}) or {}).get("experiment_variant")
-                if config else None
-            )
-            async with _g8_session() as _g8_db:
-                _g8_svc = _G8HypService(_g8_db)
-                _g8_rows = await _g8_svc.fetch_cross_task_promoted(
-                    region=state.region,
-                    pillar=pillar_hint,
-                    experiment_variant=_g8_variant,
-                    min_pass_count=_g8_min_pass,
-                    min_sharpe_avg=_g8_min_sharpe,
-                    limit=_g8_top_k,
-                )
-            cross_task_hyps = [
-                {
-                    "hypothesis_id": h.id,
-                    "statement": h.statement,
-                    "rationale": h.rationale or "",
-                    "pillar": h.pillar,
-                    "sharpe_avg": h.sharpe_avg,
-                    "pass_count": h.pass_count,
-                    "alpha_count": h.alpha_count,
-                }
-                for h in _g8_rows
-            ]
-            if cross_task_hyps:
-                logger.info(
-                    f"[{node_name}] G8 forest reference | n={len(cross_task_hyps)} "
-                    f"region={state.region} pillar_filter={pillar_hint} "
-                    f"ids={[h['hypothesis_id'] for h in cross_task_hyps]}"
-                )
-                # Phase 4 PR0.6 (Sprint 0, 2026-05-19): expose the referenced
-                # hypothesis ids on the state so evaluation.py can stamp
-                # alpha.metrics["_hypothesis_forest_reference"]=True for the
-                # alphas produced under these referenced hypotheses. The field
-                # `g8_forest_referenced_ids` (List[int]) is already declared on
-                # MiningState (state.py:182) — direct assignment, not setattr.
-                try:
-                    state.g8_forest_referenced_ids = [
-                        int(h["hypothesis_id"]) for h in cross_task_hyps
-                    ]
-                except Exception:  # noqa: BLE001 — state assign never breaks round
-                    pass
-        except Exception as _g8_ex:
-            logger.warning(
-                f"[{node_name}] G8 hypothesis-forest fetch failed "
-                f"(non-fatal): {_g8_ex}"
-            )
-            cross_task_hyps = []
-
-    # B5 R8-v3 (Sprint 3, 2026-05-20): cognitive-layer selection. Pick
-    # one of 7 research lenses (macro / behavioral / technical / value /
-    # microstructure / cross_sectional / time_series_mean_reversion) per
-    # ENABLE_COGNITIVE_LAYER_PROMPT + COGNITIVE_LAYER_SELECT_MODE; the
-    # chosen layer's prompt block splices into the hypothesis prompt to
-    # bias the LLM's direction of search. Default OFF → cognitive_layer_
-    # block stays empty → byte-for-byte legacy. Soft-fail: any error
-    # leaves both block + id empty.
-    _r8v3_block = ""
-    _r8v3_layer_id = ""
-    # NB: state.cognitive_layer_id_used was already reset at function entry
-    # (line ~422, F4 review fix); the in-place mutation here is a defense-
-    # in-depth alongside the dict return below (F6 review fix — LangGraph
-    # state-merge contract requires returning the field for guaranteed
-    # propagation across nodes).
-    if bool(getattr(_gen_settings, "ENABLE_COGNITIVE_LAYER_PROMPT", False)):
-        try:
-            from backend.services import cognitive_layer_service as _r8v3_svc
-            _r8v3_strategy = str(getattr(
-                _gen_settings, "COGNITIVE_LAYER_SELECT_MODE", "round_robin",
-            ))
-            # F8 review fix (Sprint 3 R1): MiningState has no `round_index`
-            # field. Without a real counter, round_robin permanently picked
-            # layer[0] (macro_top_down) every round. Use experiment_trace
-            # length as a monotonic proxy — increments naturally each round
-            # via the LangGraph workflow. Combined with task_id hash as
-            # entropy so two concurrent tasks don't synchronize on the
-            # same layer.
-            _r8v3_trace_len = int(len(experiment_trace) if experiment_trace else 0)
-            _r8v3_task_seed = int(abs(hash(str(getattr(state, "task_id", "") or ""))) % 7)
-            _r8v3_round = _r8v3_trace_len + _r8v3_task_seed
-            # Tier E E1: load per-layer Beta-Bernoulli posterior from
-            # cognitive_layer_bandit_state (written by the weekly cron) so
-            # COGNITIVE_LAYER_SELECT_MODE='bandit'/'deficit_aware' sample
-            # real reward — round_robin ignores stats so the load is only
-            # paid for the data-driven modes. Soft-fall to {} (uniform
-            # prior) on any error.
-            _r8v3_stats: Dict[str, Any] = {}
-            if _r8v3_strategy in ("bandit", "deficit_aware"):
-                try:
-                    from backend.database import AsyncSessionLocal as _bandit_session
-                    from backend.models.cognitive_layer_bandit import (
-                        CognitiveLayerBanditState as _CLBandit,
-                    )
-                    from sqlalchemy import select as _bsel
-                    async with _bandit_session() as _bandit_db:
-                        _brows = (await _bandit_db.execute(_bsel(_CLBandit))).scalars().all()
-                    _r8v3_stats = {
-                        r.layer_id: _r8v3_svc.BanditArmStats(
-                            layer_id=r.layer_id,
-                            pass_count=int(r.pass_count or 0),
-                            fail_count=int(r.fail_count or 0),
-                        )
-                        for r in _brows
-                    }
-                except Exception as _bandit_ex:  # noqa: BLE001
-                    logger.debug(
-                        f"[{node_name}] R8-v3 bandit state load failed "
-                        f"(uniform prior): {_bandit_ex}"
-                    )
-                    _r8v3_stats = {}
-            _r8v3_layer = _r8v3_svc.select_layer(
-                strategy=_r8v3_strategy,
-                stats=_r8v3_stats,
-                round_index=_r8v3_round,
-                pillar_hint=pillar_hint,
-            )
-            if _r8v3_layer is not None:
-                _r8v3_block = _r8v3_svc.build_cognitive_layer_block(_r8v3_layer)
-                _r8v3_layer_id = _r8v3_layer.layer_id
-                state.cognitive_layer_id_used = _r8v3_layer_id
-                logger.info(
-                    f"[{node_name}] R8-v3 cognitive layer | "
-                    f"strategy={_r8v3_strategy} layer={_r8v3_layer_id} "
-                    f"pillar_hint={pillar_hint}"
-                )
-        except Exception as _r8v3_ex:
-            logger.warning(
-                f"[{node_name}] R8-v3 cognitive layer failed (non-fatal): {_r8v3_ex}"
-            )
-            _r8v3_block = ""
-            _r8v3_layer_id = ""
-
-    # A5.2 G10 PR2 (Sprint 4, 2026-05-20): distilled-logic injection.
-    # Fetch active distilled_logic_library entries for (region, pillar)
-    # and render into a markdown block. Default OFF → block stays "" →
-    # byte-for-byte legacy. Soft-fail: any error logged + block empty.
-    _g10_block = ""
-    _g10_entries_n = 0
-    state.g10_injected_entries_n = 0
-    if bool(getattr(_gen_settings, "ENABLE_G10_LOGIC_INJECT", False)):
-        try:
-            from backend.database import AsyncSessionLocal as _g10_session
-            from backend.services.logic_distill_service import (
-                fetch_active_logic_entries as _g10_fetch,
-                build_distilled_logic_block as _g10_render,
-            )
-            _g10_top_k = int(getattr(_gen_settings, "G10_LOGIC_INJECT_TOP_K", 5))
-            async with _g10_session() as _g10_db:
-                _g10_entries = await _g10_fetch(
-                    _g10_db,
-                    region=state.region,
-                    pillar=pillar_hint,
-                    limit=_g10_top_k,
-                )
-            if _g10_entries:
-                _g10_block = _g10_render(_g10_entries, max_entries=_g10_top_k)
-                _g10_entries_n = len(_g10_entries)
-                # F14 review fix (Sprint 4 R3): stamp injected count on
-                # state so node_code_gen can mark each candidate's metrics
-                # (these candidates ARE persisted, unlike the dropped G3-v2
-                # ones) → /ops + canary SOP can observe G10 inject coverage.
-                state.g10_injected_entries_n = _g10_entries_n
-                logger.info(
-                    f"[{node_name}] G10 inject | n={_g10_entries_n} "
-                    f"region={state.region} pillar_filter={pillar_hint}"
-                )
-        except Exception as _g10_ex:  # noqa: BLE001
-            logger.warning(
-                f"[{node_name}] G10 inject failed (non-fatal): {_g10_ex}"
-            )
-            _g10_block = ""
-
-    # Orthogonality-steered exploration Phase A (2026-06-05): compute the
-    # submitted-pool pillar-coverage NUDGE ONLY when the flag is ON. OFF →
-    # _orth_steer_block stays "" → PromptContext.submitted_pool_profile=None →
-    # build_hypothesis_prompt splices "" → byte-for-byte legacy. Own session +
-    # fully defensive (any failure → "" → legacy); 13-row + infer_pillar cost is
-    # negligible. Plan: docs/orthogonality_steered_exploration_plan_2026-06-05.md
-    _orth_steer_block = ""
-    if getattr(_gen_settings, "ENABLE_ORTHOGONAL_PROMPT_STEERING", False):
-        try:
-            from backend.submitted_pool_profile import (
-                compute_submitted_pool_profile,
-                render_profile_block,
-            )
-            from backend.database import AsyncSessionLocal
-            _orth_prof = await compute_submitted_pool_profile(
-                AsyncSessionLocal, state.region)
-            _orth_steer_block = render_profile_block(_orth_prof)
-            if _orth_steer_block:
-                logger.info(
-                    "[%s] orthogonality nudge injected | region=%s pillars=%s "
-                    "block_chars=%d",
-                    node_name, state.region,
-                    list((_orth_prof.get("pillars") or {}).keys()),
-                    len(_orth_steer_block),
-                )
-        except Exception as _orth_ex:  # noqa: BLE001
-            logger.warning(
-                "[%s] orthogonality steering profile failed (non-fatal): %s",
-                node_name, _orth_ex)
-            _orth_steer_block = ""
+    # ------------------------------------------------------------------
+    # Prompt-context enrichment (Phase 1a-E): the 8 former inline nudge blocks
+    # (P2-B pillar / P2-D neg-kb / P2-A macro / P2-C style / G8 forest /
+    # R8-v3 cognitive / G10 distilled / orthogonality) now live as
+    # PromptContextEnricher strategies. The orchestrator runs the enabled ones
+    # in source order over ONE shared session (P2-B first -> its pillar_hint
+    # feeds G8/R8-v3/G10). Flag-OFF enrichers leave acc fields at their legacy
+    # defaults -> byte-for-byte legacy prompt. See nodes/prompt_enrichers.py.
+    # ------------------------------------------------------------------
+    enrichment = await HypothesisEnricherOrchestrator().run(state, config)
+    # State mutations (were set inside the G8 / R8-v3 / G10 blocks). The
+    # function-entry reset of state.cognitive_layer_id_used (above, for the R1b
+    # inject early-return path) is followed here by an unconditional (re)assign
+    # of all three from enrichment -- the defaults ([] / "" / 0) reproduce the
+    # former per-round resets; a fired enricher supplies the real value.
+    state.g8_forest_referenced_ids = enrichment.g8_referenced_ids
+    state.cognitive_layer_id_used = enrichment.cognitive_layer_id_used
+    state.g10_injected_entries_n = enrichment.g10_injected_entries_n
 
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
@@ -1072,39 +524,39 @@ async def node_hypothesis(
         # test_node_hypothesis_negative_knowledge.test_flag_off_byte_for_byte
         # _legacy).
         failure_pitfalls=(
-            (neg_kb_pitfalls + (state.pitfalls or []))[:5]
-            if _neg_kb_enabled and neg_kb_pitfalls
+            (enrichment.neg_kb_pitfalls + (state.pitfalls or []))[:5]
+            if enrichment.neg_kb_pitfalls
             else state.pitfalls[:5]
         ),
         exploration_weight=exploration_weight,
         available_dataset_pool=getattr(state, "available_dataset_pool", []) or [],
-        pillar_hint=pillar_hint,
+        pillar_hint=enrichment.pillar_hint,
         # Orthogonality Phase A (2026-06-05): None when flag OFF / empty pool →
         # byte-for-byte legacy. render_profile_block ensures "" → None here.
-        submitted_pool_profile=(_orth_steer_block or None),
+        submitted_pool_profile=(enrichment.orth_steer_block or None),
         # P2-A (2026-05-16): only attach when the flag is ON AND we fetched
         # ≥1 row. Off / fetch-failed paths set macro_narratives=[] so the
         # template splice produces the empty-string byte-for-byte legacy
         # render (field assertion in
         # test_node_hypothesis_macro.test_flag_off_byte_for_byte_legacy, M8).
-        macro_narratives=(macro_narratives if _macro_enabled else []),
+        macro_narratives=enrichment.macro_narratives,
         # P2-C (2026-05-16): only attach when the flag is ON AND we have
         # a regime injection. Off path: style_preset = None → builder
         # returns "" → byte-for-byte legacy.
-        style_preset=(style_preset if _style_enabled else None),
+        style_preset=enrichment.style_preset,
         # G8 Phase A (2026-05-19): only attach when the flag is ON AND we
         # fetched ≥1 row. Off / fetch-failed paths set cross_task_hypotheses=[]
         # so build_cross_task_hypotheses_block returns "" → template splice
         # produces the empty-string byte-for-byte legacy render.
-        cross_task_hypotheses=(cross_task_hyps if _forest_enabled else []),
+        cross_task_hypotheses=enrichment.cross_task_hyps,
         # B5 R8-v3 (Sprint 3, 2026-05-20): pre-rendered cognitive-layer
         # block (str). "" = OFF / no layer fired → template splice yields
         # empty (byte-for-byte legacy).
-        cognitive_layer_block=_r8v3_block,
-        cognitive_layer_id=_r8v3_layer_id,
+        cognitive_layer_block=enrichment.cognitive_layer_block,
+        cognitive_layer_id=enrichment.cognitive_layer_id,
         # A5.2 G10 PR2 (Sprint 4, 2026-05-20): pre-rendered distilled-
         # logic block (str). "" = OFF / no rows → splice yields empty.
-        distilled_logic_block=_g10_block,
+        distilled_logic_block=enrichment.distilled_logic_block,
     )
     
     # Use new hypothesis builder with experiment trace
@@ -1417,23 +869,23 @@ async def node_hypothesis(
                     # N2: stamp ``_pillar_nudged`` when the LLM actually
                     # honoured the nudge. Cheap, non-persisted audit hook —
                     # mirrors the existing ``_v22_13_reused`` pattern.
-                    if pillar_hint and resolved_pillar == pillar_hint:
-                        primary_h["_pillar_nudged"] = pillar_hint
+                    if enrichment.pillar_hint and resolved_pillar == enrichment.pillar_hint:
+                        primary_h["_pillar_nudged"] = enrichment.pillar_hint
                     # P2-D N4: stamp which signature_keys were shown to
                     # the LLM. Independent of whether LLM acted on them —
                     # used by ops to track nudge surface area / pickup
                     # rate. Non-persisted; lives only on the in-memory
                     # ``hypotheses`` list returned to state.
-                    if neg_kb_keys_seen:
+                    if enrichment.neg_kb_keys_seen:
                         primary_h["_negative_knowledge_pitfalls_seen"] = (
-                            list(neg_kb_keys_seen)
+                            list(enrichment.neg_kb_keys_seen)
                         )
                     # P2-A N4: stamp the field_id / dataset_category keys
                     # of macro narratives that were shown to the LLM.
                     # Non-persisted audit hook (same pattern as P2-D N4).
-                    if macro_keys_seen:
+                    if enrichment.macro_keys_seen:
                         primary_h["_macro_narratives_seen"] = (
-                            list(macro_keys_seen)
+                            list(enrichment.macro_keys_seen)
                         )
                     # P2-C (2026-05-16) N4 stamp: record the regime label
                     # the LLM actually saw via the style preset block.
@@ -1441,8 +893,8 @@ async def node_hypothesis(
                     # (b) we attached a real preset above. MF4 invariant:
                     # this key MUST NOT appear when flag=False, even if
                     # strategy.regime was set by an effect-flag-only run.
-                    if style_preset and _p2c_regime:
-                        primary_h["_regime_style_seen"] = _p2c_regime
+                    if enrichment.style_preset and enrichment.p2c_regime:
+                        primary_h["_regime_style_seen"] = enrichment.p2c_regime
 
                     data = HypothesisCreateData(
                         statement=statement,
@@ -1481,9 +933,9 @@ async def node_hypothesis(
     # the parser came back with no valid hypothesis (LLM-side failure).
     # Surfaces "nudge shown / no LLM signal" cases for ops without blocking
     # the node.
-    if _neg_kb_enabled and neg_kb_keys_seen and current_hypothesis_id is None:
+    if enrichment.neg_kb_keys_seen and current_hypothesis_id is None:
         logger.warning(
-            f"[{node_name}] P2-D nudge shown ({len(neg_kb_keys_seen)} "
+            f"[{node_name}] P2-D nudge shown ({len(enrichment.neg_kb_keys_seen)} "
             f"pitfalls) but LLM returned no valid hypothesis "
             f"(region={state.region})"
         )
@@ -1503,7 +955,7 @@ async def node_hypothesis(
         # persistence can stamp them onto alpha.metrics for reverse
         # attribution (empty when flag OFF / no rows).
         "g8_forest_referenced_ids": [
-            int(h["hypothesis_id"]) for h in cross_task_hyps
+            int(h["hypothesis_id"]) for h in enrichment.cross_task_hyps
             if h.get("hypothesis_id") is not None
         ],
         # F6 review fix (Sprint 3 R3): explicitly return cognitive_layer_
@@ -1511,7 +963,7 @@ async def node_hypothesis(
         # nodes (node_evaluate reads it via getattr). In-place mutation
         # at line ~900 is defense-in-depth but the dict-return is the
         # documented LangGraph contract.
-        "cognitive_layer_id_used": _r8v3_layer_id,
+        "cognitive_layer_id_used": enrichment.cognitive_layer_id_used,
         **trace_update
     }
 

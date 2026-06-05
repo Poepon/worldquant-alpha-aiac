@@ -139,11 +139,18 @@ def test_f5_inject_path_return_dict_clears_cognitive_layer():
 
 def test_f6_main_path_return_dict_propagates_layer_id():
     """Main node_hypothesis return dict must include cognitive_layer_
-    id_used so LangGraph state-merge sends it to downstream nodes."""
+    id_used so LangGraph state-merge sends it to downstream nodes.
+
+    Phase 1a-E (2026-06-06): the R8-v3 cognitive-layer selection moved into
+    CognitiveLayerEnricher (nodes/prompt_enrichers.py); node_hypothesis now
+    propagates the value via ``enrichment.cognitive_layer_id_used`` (which the
+    enricher sets to the chosen layer_id). Same return-dict contract, refactored
+    source expression — behaviour covered by the test_node_hypothesis_* suite.
+    """
     import inspect
     from backend.agents.graph.nodes import generation as gen
     src = inspect.getsource(gen.node_hypothesis)
-    assert '"cognitive_layer_id_used": _r8v3_layer_id' in src
+    assert '"cognitive_layer_id_used": enrichment.cognitive_layer_id_used' in src
 
 
 # ---------------------------------------------------------------------------
