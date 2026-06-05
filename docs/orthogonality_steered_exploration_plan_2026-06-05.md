@@ -1,6 +1,6 @@
-# 正交导向自动探索（Orthogonality-Steered Exploration）设计 plan **v2**
+# 正交导向自动探索（Orthogonality-Steered Exploration）设计 plan **v3**
 
-> v1 生成 2026-06-05 · **v2 = 应用 3-镜头 fresh-agent review(correctness/feasibility/design)的全部 fix**(2× GO_WITH_FIXES + 1× REVISE)。
+> v1 生成 2026-06-05 · v2 = 应用 3-镜头 fresh-agent review(2× GO_WITH_FIXES + 1× REVISE)全部 fix · **v3 = 2-镜头收敛复审(两镜头均 GO_WITH_MINOR = 收敛)后应用 MUST**:①反 gaming 护栏(§4)②OS PnL 新鲜度升硬 gate(§5-9)③SD 是假设须 shadow 验 ④infer_pillar momentum-46% ship 前人工审(§5-12)⑤orthogonality_score 接线为第一 build 步(§3)。**plan 至此收敛,可建 Phase A。**
 > 起源:用户「当务之急是挖掘新 alpha」→「应该 LLM 自动探索正交源」。映射 4 子系统收敛:正交信号已存在且可算,但与挖掘环脱节。
 > **用户决策(2026-06-05)**:范围 A+B / 接受 sim 成本 / 现在做 / **粒度改用既有 pillar(review 推翻 v1 的 mechanism_family,见 §6)** / 推进 Phase A。
 > 状态:**design-locked,ship Phase A shadow。未改生产代码前本 plan 为准。**
@@ -55,6 +55,8 @@
 - **稀疏诚实(review must-fix)**:13/5 ≈ 每 pillar 2-3 个。注入文案**标样本量 + 宽 CI**(「momentum: 4/13, sharpe 1.8±0.4」),`n<2` 的 pillar **不进强 NUDGE**(标「样本不足」),`n=1` 从 NUDGE 移除。避免据小样本过度排斥。**survivor-bias 警示**:13 是「被选出的」非「能选的全部」→ prompt 措辞为「这些已覆盖,**探索其它**」非「这些是好的/坏的」。
 - **接线**:`PromptContext.submitted_pool_profile` 新字段;`build_hypothesis_prompt()` 在 **Single-mechanism discipline 段后、investment philosophy 前**插「Portfolio Breadth Principle」块(≤120 token,留 30 安全 margin)。flag OFF 时 `getattr(ctx,'submitted_pool_profile',None)` soft-skip → **字节不变**。
 - **telemetry(必须,先于 A/B)**:每 hypothesis 记 ① profile 块实际 token ② 注入了哪些 pillar/字段 ③ 该候选 post-sim 的 `orthogonality_score`(见 §4)④ JSON 解析成功/截断标志。
+- **orthogonality_score 接线(第一 build 步,v2-rereview must)**:`node_evaluate` 里 self_corr 已在 `evaluation.py:696` 算出 → 加 `orth = 1.0 − min(max(self_corr,0),1)` 落 `metrics['orthogonality_score']`,供 A/B / interim 读。**这是 dense 主指标的实现,先于一切 A/B。**
+- **ship 前必做审计**:人工核 13 个已提交 expression 的 infer_pillar 赋值(见 §5-12,防 momentum 46% 是归类 artifact)。
 - **文件**:`prompts/base.py`(PromptContext 字段)、`prompts/hypothesis.py:34-101`、`prompts/generation.py:1-116`、`graph/nodes/generation.py`(注入点)、新 helper `submitted_pool_profile.py`(聚合,短事务读,遵守 [[reference_flat_idle_in_txn_lock_leak_2026_06_04]])。
 - **flag**:`ENABLE_ORTHOGONAL_PROMPT_STEERING`(default OFF,可热翻)。
 - **风险**:**LOW**(纯 prompt + 既有 pillar;OFF 字节不变)。**回归测(review must)**:5 个固定 (expr,hypothesis) 对,flag ON/OFF 跑 code_gen,断言 JSON 解析成功 + alphas 数组**顺序无关相等**(防 OFF 时行为漂移)。
@@ -78,10 +80,10 @@
 **v2 修复 — 主指标改连续 dense 量**:
 - **PRIMARY(shadow + A/B)**:`mean orthogonality_score` per 模拟 alpha = `1 − max_self_corr_to_submitted_pool`(post-sim 在 node_evaluate 用 marginal_drain 本地缓存算;**每个模拟 alpha 都有值** = 密集,N≈30/臂 即有统计力)。次辅:生成 alpha 落 **0.4-0.7 正交带**的比例。
 - **SECONDARY(推迟,需累积)**:二值 `正交 can_submit 率`。当前基率 0.86% → 需 ~400/臂才有力 → **推迟到累积 50+ 可提交后再做**,现在只记录不作 gate。
-- **功率(review must:预注册)**:orthogonality_score 是连续量,SD~0.2 → N=30/臂 可检 ~0.1 效应(80% power)。明确**最小可检效应 MDE = +0.08 orthogonality_score**。
-- **流程**:① shadow ≥5d:flag ON 只记 telemetry + counterfactual,不改 bandit/选择;**人工复核 SOP**(谁评/标准:抽 10 个 steered hypothesis,看注入块是否合理、有无据 1-样本误排斥;离谱但数据支持的不拒)。② A/B ≥2w:带/不带 steering,**interim 在 N=40、N=80/臂**(Welch t 双边 p<0.05 on orthogonality_score)。
-- **STOP gate(review must:双条件 + 统计)**:`(orthogonality_score: steered ≤ control, 无正趋势, Welch t 不显著) AND (正交 can_submit 率与基线无显著差)` 二者同时 → STOP 转 L1。**单条件不 STOP**(避免据稀疏 can_submit 误判)。
-- **GO**:orthogonality_score 显著 ↑(MDE 达标)且 mean sharpe 无显著 ↓ → 进 Phase C(用 marginal steering 把正交带推过 0.7 门)。
+- **功率**:orthogonality_score 连续量,**假设 SD~0.2 → MDE=+0.08 在 N=30/臂 ~80% power**(`(0.08/(0.2/√30))²≈4.8`)。**⚠ SD 是假设非事实(v2-rereview must)**:shadow 期实测 SD;若 SD≥0.3,N=30 power 跌破 60% → 须延长 A/B 或加大 MDE。
+- **🛡 反 gaming 护栏(v2-rereview MUST①)**:orthogonality_score 可被「正交但 sharpe 垃圾」alpha 刷高。所以 **GO 需同时满足**:(1) orthogonality_score 显著 ↑(MDE 达标);(2) mean sharpe 无显著 ↓;(3) **sharpe-pass 率(sharpe≥`EVAL_SHARPE_MIN`)无显著 ↓** ← 防「用正交垃圾换好货」;(4) **interim N40 黄旗**:steered 臂至少比 control 多 ≥1 个「正交带(0.4-0.7)且 sharpe 过门」的 alpha;若 orthogonality_score ↑ 却 0 个正交-且-过门 → 收紧 MDE 到 0.12 再进 N80。
+- **流程**:① shadow ≥5d:flag ON 只记 telemetry + counterfactual(含 SD 实测),不改 bandit/选择;**人工复核 SOP**(抽 5-10 steered vs control hypothesis,审注入块是否合理 + **NUDGE 是否真改了 pillar/字段选择**(防软注入是 phlogiston 不起效));② A/B ≥2w:带/不带 steering,**interim N=40 与 N=80/臂**。**interim 决策树**:N40 若 p<0.05 且 Δorth>0.05 → 报告 + 等用户批准早停/继续;N80 若 p<0.05 → 自动执行 GO/STOP gate。
+- **STOP gate(双条件)**:`(orthogonality_score steered ≤ control, 无正趋势, Welch t 不显著) AND (正交-且-过门 alpha 率与基线无显著差)` 二者同时 → STOP 转 L1。**单条件不 STOP**。
 
 ---
 
@@ -95,8 +97,10 @@
 6. **flag hook footgun**:非-ENABLE_ 配置(权重)直读 `_flag_override_cache`(见 [[reference_feature_flag_hook_enable_prefix_only]])。
 7. **idle-in-txn**:profile/corr 读用短事务别跨 await(见 [[reference_flat_idle_in_txn_lock_leak_2026_06_04]])。
 8. **survivor bias(review)**:13 样本是「已选出」非「能选全部」→ 注入措辞中性「已覆盖,探索其它」。
-9. **OS PnL 失鲜(review)**:开工前核最近刷新;失鲜则 A/B 风险升级。
+9. **OS PnL 失鲜 = single-point-of-failure(v2-rereview MUST②,升为硬 gate)**:`correlation_service` 缓存 TTL 24h;若 ≥7d 失鲜,所有 self_corr = 旧组合噪声 → 整个 A/B 失效。**硬 pre-flight gate(非 caveat)**:启 flag 前查缓存戳(`correlation_service.py:206` `_save_cache('saved_at')`)+ 确认 ≥50 submitted OS alpha 已缓存;失鲜则先手动跑 `refresh_os_correlation_cache` beat 等完成,否则**不启 A/B**。
 10. **A+B 同期建归因**:A/B 时 A(prompt)与 B(novelty 记录)分开 telemetry,避免谁起效混淆。
+11. **gaming(v2-rereview MUST①,已入 §4 护栏)**:orthogonality_score 可被正交垃圾 alpha 刷高 → §4 GO 加 sharpe-pass 率不降 + interim N40 正交-且-过门黄旗。
+12. **infer_pillar 归类 artifact(v2-rereview SHOULD)**:momentum 46% 可能是「`returns` 字段普遍 + PILLAR_VALUES tuple 里 momentum 排第一的 tie-break」人为高估,非真过度集中。**ship 前必做**:人工审 13 个已提交 expression 的 pillar 赋值(尤其 6 个 momentum 是否真重价量、`ts_std_dev(returns)` 类是否被误投 momentum)。审计结果写进本 plan 或单独 doc。NUDGE 用中性「探索其它」措辞兜底 survivor-bias。
 
 ---
 
