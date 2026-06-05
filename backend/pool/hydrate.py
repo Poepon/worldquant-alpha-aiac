@@ -15,6 +15,7 @@ when evaluated by a User-role E worker.
 """
 from typing import Any, Dict, Optional
 
+from backend.database import AsyncSessionLocal
 from backend.agents.graph.state import MiningState, AlphaCandidate
 
 
@@ -100,3 +101,48 @@ def hg_run_config(trace_service: Any = None) -> Dict[str, Any]:
     rows itself via the persister, not through a live TraceService).
     """
     return {"configurable": {"trace_service": trace_service}}
+
+
+async def hydrate_hg_state(intent: Any, *, session_factory: Any = None) -> MiningState:
+    """Build the initial round MiningState for the HG pool from a hyp_intent row.
+
+    Mirrors the FLAT round build (mining_tasks.py:576-595): scope from the intent
+    + role-snapshot from config_snapshot["brain_role_snapshot"] + a fresh
+    fields/operators fetch (reusing _get_dataset_fields / _get_operators). RAG /
+    distill / hypothesis context is produced by run_hypothesis itself, not
+    hydrated here.
+
+    available_dataset_pool defaults to [] (legacy single-anchor) — the Phase-1
+    cross-dataset complementary pool (_build_dataset_pool) is a follow-up; empty
+    = the byte-for-byte legacy code-gen path.
+    """
+    # Lazy import: backend.tasks.mining_tasks is heavy (Celery) and is gutted in
+    # Phase 1c — these two fetch helpers MUST survive 1c (or move to pool/).
+    from backend.tasks.mining_tasks import _get_dataset_fields, _get_operators
+
+    factory = session_factory or AsyncSessionLocal
+    snap: Dict[str, Any] = dict(intent.config_snapshot or {})
+    role: Dict[str, Any] = dict(snap.get("brain_role_snapshot", {}) or {})
+    region = intent.region
+    universe = intent.universe or "TOP3000"
+    delay = intent.delay if intent.delay is not None else 1
+    dataset_id = intent.dataset_id or ""
+
+    async with factory() as s:
+        fields = await _get_dataset_fields(s, dataset_id, region, universe, delay) if dataset_id else []
+        operators = await _get_operators(s)
+
+    return MiningState(
+        task_id=int(intent.task_id) if intent.task_id is not None else 0,
+        region=region,
+        universe=universe,
+        delay=delay,
+        dataset_id=dataset_id,
+        fields=fields or [],
+        operators=operators or [],
+        num_alphas_target=int(intent.fanout) if intent.fanout else 3,
+        available_dataset_pool=[],  # legacy single-anchor (Phase-1 pool = follow-up)
+        brain_consultant_mode_at_start=role.get("brain_consultant_mode_at_start"),
+        effective_default_test_period=role.get("effective_default_test_period"),
+        effective_sharpe_submit_min=role.get("effective_sharpe_submit_min"),
+    )

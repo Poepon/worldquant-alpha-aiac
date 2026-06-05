@@ -23,11 +23,15 @@ from backend.database import AsyncSessionLocal
 from backend.agents.graph.workflow import MiningWorkflow
 from backend.agents.pipeline.types import Candidate, SimResult
 from backend.agents.pipeline.persister import build_persister
+from backend.agents.services.llm_service import (
+    set_task_function_overrides,
+    clear_task_function_overrides,
+)
 from backend.models import CandidateQueue, HypothesisIntent
 from backend.pool import stages as st
-from backend.pool.budget import sims_budget_exceeded
+from backend.pool.budget import sims_budget_exceeded, tokens_budget_exceeded
 from backend.pool.drain import is_draining
-from backend.pool.hydrate import hydrate_candidate_state, hg_run_config
+from backend.pool.hydrate import hydrate_candidate_state, hydrate_hg_state, hg_run_config
 from backend.pool.queue import claim_one, complete, fail_or_retry
 
 
@@ -198,3 +202,110 @@ async def e_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 600,
             except Exception as ex:  # noqa: BLE001
                 logger.warning(f"[pool.e] candidate {row.id} eval failed: {ex}")
                 await fail_or_retry(CandidateQueue, row.id, st.EVAL_PENDING, max_attempts, error=str(ex))
+
+
+# =============================================================================
+# HG (hypothesis + generation, fused) pool worker
+# =============================================================================
+
+def _resolve_hyp_id(state: Any) -> Optional[int]:
+    """Scalar current_hypothesis_id, else first of the per-round list (mirrors
+    persister._resolve_hypothesis_id — LangGraph scalar-drop resilience)."""
+    hid = _attr(state, "current_hypothesis_id", None)
+    if hid is None:
+        hids = _attr(state, "current_hypothesis_ids", None) or []
+        hid = hids[0] if hids else None
+    return hid
+
+
+def _candidate_row_kwargs(final: Any, ac: Any, intent: Any,
+                          gen_trace: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Map one post-codegen is_valid AlphaCandidate → candidate_queue INSERT kwargs.
+
+    CRITICAL (B4 gotcha #1): the full RAG/distill/hypothesis context lives on the
+    post-codegen state, NOT on Candidate.context. The pool persists it into
+    candidate_queue.context so S/E (separate processes) can re-hydrate it.
+    """
+    ctx = {
+        "hypothesis": getattr(ac, "hypothesis", None),
+        "patterns": _attr(final, "patterns", []) or [],
+        "pitfalls": _attr(final, "pitfalls", []) or [],
+        "focused_fields": _attr(final, "focused_fields", []) or [],
+        "distilled_concepts": _attr(final, "distilled_concepts", []) or [],
+        "hypotheses": _attr(final, "hypotheses", []) or [],
+        "cognitive_layer_id_used": _attr(final, "cognitive_layer_id_used", "") or "",
+        "g8_forest_referenced_ids": _attr(final, "g8_forest_referenced_ids", []) or [],
+    }
+    _delay = _attr(final, "delay", None)
+    return dict(
+        hyp_intent_id=intent.id,
+        task_id=_attr(final, "task_id", intent.task_id),
+        current_hypothesis_id=_resolve_hyp_id(final),
+        stage=st.SIM_PENDING,
+        expression=getattr(ac, "expression", "") or "",
+        region=_attr(final, "region", intent.region),
+        universe=_attr(final, "universe", intent.universe),
+        delay=_delay if _delay is not None else (intent.delay if intent.delay is not None else 1),
+        dataset_id=_attr(final, "dataset_id", intent.dataset_id),
+        dataset_category=_attr(final, "dataset_category", "") or "",
+        effective_default_test_period=_attr(final, "effective_default_test_period", None),
+        effective_sharpe_submit_min=_attr(final, "effective_sharpe_submit_min", None),
+        rag_ab_arm=_attr(final, "rag_ab_arm", "") or "",
+        context=ctx,
+        trace_records=gen_trace,
+        attempts=0,
+    )
+
+
+async def hg_process_one(workflow: Any, intent: Any, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Run rag→distill→hypothesis→codegen→validate→[self_correct] for one intent;
+    return candidate_queue INSERT kwargs for each is_valid candidate."""
+    state = await hydrate_hg_state(intent)
+    hyp_state = await workflow.run_hypothesis(state, config)
+    final = await workflow.run_codegen(hyp_state, config)
+    pending = _attr(final, "pending_alphas", []) or []
+    gen_trace = _serialize_trace(_attr(final, "trace_steps", []))
+    return [
+        _candidate_row_kwargs(final, ac, intent, gen_trace)
+        for ac in pending
+        if getattr(ac, "is_valid", None)
+    ]
+
+
+async def emit_candidates(rows_kwargs: List[Dict[str, Any]], *, session_factory: Any = None) -> int:
+    """INSERT the candidate_queue rows (PENDING_SIM) in one transaction."""
+    if not rows_kwargs:
+        return 0
+    factory = session_factory or AsyncSessionLocal
+    async with factory() as s:
+        async with s.begin():
+            s.add_all([CandidateQueue(**kw) for kw in rows_kwargs])
+    return len(rows_kwargs)
+
+
+async def hg_loop(*, worker_id: str, poll_sec: float = 3.0, lease_sec: int = 1800,
+                  max_attempts: int = 3, should_stop: Any = None) -> None:
+    config = hg_run_config()
+    while not (should_stop and should_stop()):
+        if is_draining("hg") or tokens_budget_exceeded():
+            await asyncio.sleep(poll_sec)
+            continue
+        intent = await claim_one(HypothesisIntent, st.INTENT_PENDING, worker_id, lease_sec)
+        if intent is None:
+            await asyncio.sleep(poll_sec)
+            continue
+        # Per-intent LLM routing: bind the frozen llm_overrides on the contextvar
+        # around the whole generation, reset in finally (no cross-intent leak).
+        token = set_task_function_overrides((intent.config_snapshot or {}).get("llm_overrides"))
+        try:
+            async with AsyncSessionLocal() as wdb:
+                workflow = build_workflow(wdb)
+                rows = await hg_process_one(workflow, intent, config)
+            n = await emit_candidates(rows)
+            await complete(HypothesisIntent, intent.id, st.INTENT_DONE)
+            logger.info(f"[pool.hg] intent {intent.id} → {n} candidates")
+        except Exception as ex:  # noqa: BLE001
+            logger.warning(f"[pool.hg] intent {intent.id} failed: {ex}")
+            await fail_or_retry(HypothesisIntent, intent.id, st.INTENT_PENDING, max_attempts, error=str(ex))
+        finally:
+            clear_task_function_overrides(token)
