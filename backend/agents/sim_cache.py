@@ -105,11 +105,18 @@ async def get_cached(
         row = (await db.execute(
             select(SimulationCache).where(SimulationCache.cache_key == cache_key)
         )).scalar_one_or_none()
-        if row is None:
-            return None
-        if row.cached_at and row.cached_at < cutoff:
-            # Expired — treat as miss but leave row for forensic / re-warm
-            return None
+        if row is None or (row.cached_at and row.cached_at < cutoff):
+            # MISS / EXPIRED: the SELECT autobegan a read transaction. Without
+            # this rollback the read txn lingers idle-in-transaction on the
+            # caller's session until it's next committed/closed — one of the
+            # idle-in-txn leak sources surfaced 2026-06-05 (see
+            # reference_flat_idle_in_txn_lock_leak). rollback is safe (read-only
+            # on this path) and releases the connection promptly.
+            try:
+                await db.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+            return None  # expired rows left on disk for forensic / re-warm
         # Update access stats (best-effort)
         try:
             row.accessed_at = datetime.now(timezone.utc)
