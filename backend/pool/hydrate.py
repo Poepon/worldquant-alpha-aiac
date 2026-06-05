@@ -34,16 +34,21 @@ def hydrate_candidate_state(
     snap: Dict[str, Any] = dict(intent_config_snapshot or {})
     role_snap: Dict[str, Any] = dict(snap.get("brain_role_snapshot", {}) or {})
 
-    sim_result = row.sim_result or {}
+    # candidate_queue.sim_result wire format (S writes, E reads): the structured
+    # post-sim outcome {metrics, simulation_success, simulation_error, alpha_id}.
+    # None/{} = S has not simulated yet (S path).
+    sr: Dict[str, Any] = row.sim_result if isinstance(row.sim_result, dict) else {}
+    metrics = sr.get("metrics", {}) or {}
     candidate = AlphaCandidate(
         expression=row.expression,
         is_valid=True,  # HG already validated before emitting the row
         hypothesis=ctx.get("hypothesis"),
         explanation=ctx.get("explanation"),
-        metrics=dict(sim_result),  # {} on the S path; BRAIN metrics on the E path
-        is_simulated=bool(sim_result),
-        simulation_success=(bool(sim_result) or None),
-        alpha_id=(sim_result.get("alpha_id") if isinstance(sim_result, dict) else None),
+        metrics=dict(metrics),  # {} on the S path; BRAIN metrics on the E path
+        is_simulated=bool(sr),
+        simulation_success=sr.get("simulation_success"),
+        simulation_error=sr.get("simulation_error"),
+        alpha_id=sr.get("alpha_id"),
         quality_status=(row.verdict or "PENDING"),
     )
 

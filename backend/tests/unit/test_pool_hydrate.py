@@ -39,14 +39,17 @@ def test_hydrate_s_path_empty_sim_result():
 
 
 def test_hydrate_e_path_sim_result_becomes_candidate_metrics():
+    # structured wire format S writes for E (metrics + success + error + alpha_id)
     row = CandidateQueue(
         task_id=42, region="USA", expression="x",
-        sim_result={"sharpe": 1.4, "fitness": 0.9, "alpha_id": "ABC123"},
+        sim_result={"metrics": {"sharpe": 1.4, "fitness": 0.9},
+                    "simulation_success": True, "simulation_error": None,
+                    "alpha_id": "ABC123"},
         verdict=None,
     )
     st = hydrate_candidate_state(row, None)
     c = st.pending_alphas[0]
-    assert c.metrics == {"sharpe": 1.4, "fitness": 0.9, "alpha_id": "ABC123"}
+    assert c.metrics == {"sharpe": 1.4, "fitness": 0.9}
     assert c.is_simulated is True
     assert c.simulation_success is True
     assert c.alpha_id == "ABC123"
