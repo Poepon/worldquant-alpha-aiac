@@ -698,34 +698,21 @@ async def _evaluate_single_alpha(
                 logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
                 self_corr_source = CorrSource.UNKNOWN
 
-            # Orthogonality Phase A — DENSE A/B signal (plan v4, 2026-06-05).
-            # self_corr MEASURED → 1 - self_corr. UNKNOWN (the COMMON case for
-            # FRESH mined candidates — the local cache lacks their PnL and BRAIN
-            # SELF is async-PENDING, so the shadow run recorded 0 scores) → FETCH
-            # the candidate's PnL post-sim + correlate vs the cached pool
-            # (compute_max_corr_vs_pool), but ONLY when the orthogonality flag is
-            # ON and the alpha clears sharpe_min: cost = 1 BRAIN PnL fetch/alpha,
-            # anti-gaming = orthogonality among PROMISING alphas not garbage.
-            # Flag OFF → only the measured-self_corr path → byte-for-byte legacy.
-            _orth = None
+            # Orthogonality Phase A — record the dense signal (1 - measured
+            # self_corr to the submitted/OS pool) for the A/B. get_with_fallback's
+            # LOCAL tier (calc_self_corr) already FETCHES a fresh candidate's PnL +
+            # correlates it vs the pool, so this covers freshly-mined alphas
+            # whenever their PnL is fetchable (no separate helper needed — that was
+            # redundant; the live path was confirmed via _self_corr_source=local).
+            # UNKNOWN → skip (the 0.0 default would falsely read as fully
+            # orthogonal; UNKNOWN = PnL-not-ready / stale cache, not fixable here).
+            # MUST write into the `metrics` LOCAL: the function rebuilds
+            # alpha.metrics = {**metrics, ...} at the end (:895), so a stamp on a
+            # fresh alpha.metrics copy here is CLOBBERED — that clobber is why the
+            # prior wiring never persisted a score.
             if self_corr_source != CorrSource.UNKNOWN:
-                _orth = 1.0 - min(max(float(self_corr), 0.0), 1.0)
-            elif (
-                correlation_service is not None and alpha.alpha_id
-                and getattr(settings, "ENABLE_ORTHOGONAL_PROMPT_STEERING", False)
-                and sharpe >= sharpe_min
-            ):
-                _mc = await correlation_service.compute_max_corr_vs_pool(
-                    alpha.alpha_id, state.region)
-                if _mc is not None:
-                    _orth = 1.0 - min(max(_mc, 0.0), 1.0)
-            # Write into the `metrics` LOCAL — it is spread at the end
-            # (``alpha.metrics = {**metrics, ...}``), so anything stamped on a
-            # fresh alpha.metrics copy here would be CLOBBERED by that rebuild.
-            # (That clobber is why even the prior 1-self_corr wiring never
-            # persisted a score.)
-            if _orth is not None:
-                metrics["orthogonality_score"] = round(_orth, 4)
+                metrics["orthogonality_score"] = round(
+                    1.0 - min(max(float(self_corr), 0.0), 1.0), 4)
 
             if self_corr_source == CorrSource.LOCAL:
                 try:

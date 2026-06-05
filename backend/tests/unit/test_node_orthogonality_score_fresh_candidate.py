@@ -1,23 +1,21 @@
-"""node_evaluate (_evaluate_single_alpha) orthogonality_score wiring for FRESH
-mined candidates — orthogonality-steered exploration Phase A (plan v4,
-2026-06-05).
+"""node_evaluate (_evaluate_single_alpha) orthogonality_score persistence —
+orthogonality-steered exploration Phase A (plan v4, 2026-06-05).
 
-The shadow run recorded ZERO orthogonality scores because the only writer was
-``1 - measured self_corr`` and ``get_with_fallback`` is UNKNOWN for every fresh
-alpha (not in the local cache; BRAIN SELF async-PENDING). Redesign: when
-self_corr is UNKNOWN, the flag is ON, and the alpha clears ``sharpe_min``, FETCH
-the candidate PnL + correlate vs the cached pool (``compute_max_corr_vs_pool``)
-and record ``orthogonality_score = 1 - max|corr|``.
+The ONLY real bug the redesign fixed: orthogonality_score was stamped on a fresh
+``alpha.metrics`` copy and then CLOBBERED by the end-of-function rebuild
+``alpha.metrics = {**metrics, ...}`` (evaluation.py:895) — so it never persisted,
+even when self_corr was measured. The fix writes into the ``metrics`` LOCAL that
+the rebuild spreads. (The earlier ``compute_max_corr_vs_pool`` helper was removed
+as redundant: get_with_fallback's LOCAL tier / calc_self_corr already fetches a
+fresh candidate's PnL + correlates it vs the pool — confirmed live via
+``_self_corr_source=local`` on a real sharpe-2.01 candidate.)
 
-Drives ``_evaluate_single_alpha`` directly with a fake brain + fake
-correlation_service (this path is DB-free) to pin: (1) flag ON + UNKNOWN +
-sharpe-pass → score recorded from the pool-corr helper; (2) flag OFF + UNKNOWN →
-NOT recorded (byte-for-byte legacy); (3) below sharpe_min → helper not called
-(cost + anti-gaming gate).
+These tests drive the REAL _evaluate_single_alpha with a fake corr_service to
+pin: (1) measured self_corr → orthogonality_score = 1 - self_corr SURVIVES the
+:895 rebuild into the final alpha.metrics; (2) UNKNOWN self_corr → not recorded.
 """
 import pytest
 
-from backend.agents.graph.nodes import evaluation as ev
 from backend.agents.graph.nodes.evaluation import (
     _evaluate_single_alpha,
     _EvalCtx,
@@ -32,16 +30,15 @@ class _FakeBrain:
 
 
 class _FakeCorrSvc:
-    def __init__(self, max_corr=0.4):
-        self._max_corr = max_corr
-        self.calls = []
+    """Returns a fixed (corr, source) from get_with_fallback — mimics the LOCAL
+    tier (calc_self_corr) having measured the candidate vs the pool."""
+
+    def __init__(self, corr, source):
+        self._corr = corr
+        self._source = source
 
     async def get_with_fallback(self, alpha_id, region="USA"):
-        return (None, CorrSource.UNKNOWN)  # fresh candidate → never measured
-
-    async def compute_max_corr_vs_pool(self, alpha_id, region, *, min_overlap_days=60):
-        self.calls.append((alpha_id, region))
-        return self._max_corr
+        return (self._corr, self._source)
 
 
 def _mk_alpha(sharpe=1.8, fitness=1.5, turnover=0.2, alpha_id="fresh-1"):
@@ -62,13 +59,13 @@ def _mk_alpha(sharpe=1.8, fitness=1.5, turnover=0.2, alpha_id="fresh-1"):
     return a
 
 
-def _mk_ctx(corr_svc, *, sharpe_min=1.5):
+def _mk_ctx(corr_svc):
     state = MiningState(task_id=1, region="USA", universe="TOP3000",
                         dataset_id="ds1", pending_alphas=[], hypotheses=[], fields=[])
     return _EvalCtx(
         state=state, brain=_FakeBrain(), correlation_service=corr_svc,
         node_name="evaluate",
-        sharpe_min=sharpe_min, fitness_min=1.2, turnover_min=0.01, turnover_max=0.7,
+        sharpe_min=1.5, fitness_min=1.2, turnover_min=0.01, turnover_max=0.7,
         max_correlation=0.7, check_self_corr=True, check_concentrated=False,
         prov_sharpe_min=1.25, prov_fitness_min=1.0, prov_turnover_min=0.01,
         prov_turnover_max=0.7, score_pass_threshold=0.8,
@@ -76,45 +73,24 @@ def _mk_ctx(corr_svc, *, sharpe_min=1.5):
     )
 
 
-@pytest.fixture
-def _flag(monkeypatch):
-    def _set(val):
-        monkeypatch.setattr(
-            ev.settings, "ENABLE_ORTHOGONAL_PROMPT_STEERING", val, raising=False)
-    return _set
-
-
 @pytest.mark.asyncio
-async def test_flag_on_unknown_self_corr_records_score_from_pool(_flag):
-    """The shadow-run fix: flag ON + UNKNOWN self_corr + sharpe-pass → the helper
-    runs and orthogonality_score = 1 - max|corr| lands on the fresh candidate."""
-    _flag(True)
-    svc = _FakeCorrSvc(max_corr=0.4)
+async def test_measured_self_corr_persists_through_metrics_rebuild():
+    """The clobber-fix regression guard: a MEASURED self_corr (LOCAL) →
+    orthogonality_score = 1 - self_corr must SURVIVE the end-of-function
+    alpha.metrics = {**metrics, ...} rebuild (:895). Before the fix it was
+    written to a soon-clobbered copy and never persisted."""
+    svc = _FakeCorrSvc(corr=0.3, source=CorrSource.LOCAL)
     alpha = _mk_alpha()
     await _evaluate_single_alpha(alpha, _mk_ctx(svc))
-    assert svc.calls == [("fresh-1", "USA")], "helper must run for the fresh candidate"
-    assert alpha.metrics.get("orthogonality_score") == pytest.approx(0.6, abs=1e-6)
+    # 1 - 0.3 = 0.7 — present on the FINAL (rebuilt) alpha.metrics, not clobbered
+    assert alpha.metrics.get("orthogonality_score") == pytest.approx(0.7, abs=1e-6)
 
 
 @pytest.mark.asyncio
-async def test_flag_off_unknown_self_corr_records_nothing(_flag):
-    """Flag OFF → only the measured-self_corr writer → UNKNOWN records nothing
-    (byte-for-byte legacy; the helper is never called)."""
-    _flag(False)
-    svc = _FakeCorrSvc(max_corr=0.4)
+async def test_unknown_self_corr_records_nothing():
+    """UNKNOWN (PnL-not-ready / stale cache) → no orthogonality_score (the 0.0
+    default would falsely read as fully orthogonal)."""
+    svc = _FakeCorrSvc(corr=None, source=CorrSource.UNKNOWN)
     alpha = _mk_alpha()
     await _evaluate_single_alpha(alpha, _mk_ctx(svc))
-    assert svc.calls == [], "helper must NOT run when flag OFF"
-    assert "orthogonality_score" not in (alpha.metrics or {})
-
-
-@pytest.mark.asyncio
-async def test_flag_on_below_sharpe_min_skips_helper(_flag):
-    """Flag ON but sharpe < sharpe_min → helper not called: orthogonality is
-    measured only among PROMISING alphas (cost + anti-gaming)."""
-    _flag(True)
-    svc = _FakeCorrSvc(max_corr=0.4)
-    alpha = _mk_alpha(sharpe=1.0)  # < sharpe_min 1.5
-    await _evaluate_single_alpha(alpha, _mk_ctx(svc, sharpe_min=1.5))
-    assert svc.calls == [], "helper must be gated on sharpe>=sharpe_min"
     assert "orthogonality_score" not in (alpha.metrics or {})
