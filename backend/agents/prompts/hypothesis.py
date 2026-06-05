@@ -298,6 +298,18 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
         f"\n{distilled_logic_text}\n" if distilled_logic_text else ""
     )
 
+    # Orthogonality-steered exploration Phase A (2026-06-05): submitted-pool
+    # pillar-coverage NUDGE. Pre-rendered by node_hypothesis (submitted_pool_
+    # profile.render_profile_block) ONLY when ENABLE_ORTHOGONAL_PROMPT_STEERING is
+    # ON and the submitted pool is non-empty. "" when OFF / empty → the splice
+    # below yields "" → byte-for-byte legacy. Plan:
+    # docs/orthogonality_steered_exploration_plan_2026-06-05.md
+    orth_steer_text = getattr(ctx, "submitted_pool_profile", None) or ""
+    orth_steer_block_with_leading_newline = (
+        f"\n## Portfolio Breadth (orthogonality nudge)\n\n{orth_steer_text}\n"
+        if orth_steer_text else ""
+    )
+
     def _assemble(macro_nl: str, cross_task_nl: str) -> str:
         return f"""## Research Context
 
@@ -313,7 +325,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 {patterns_block}
 {trace_section}
 {strategy_section}
-{pillar_nudge_block}
+{pillar_nudge_block}{orth_steer_block_with_leading_newline}
 ## Task
 
 Generate 3-5 investment hypotheses for this dataset.

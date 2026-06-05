@@ -698,6 +698,18 @@ async def _evaluate_single_alpha(
                 logger.warning(f"[{node_name}] correlation_service failed for {alpha.alpha_id}: {e}")
                 self_corr_source = CorrSource.UNKNOWN
 
+            # Orthogonality-steered exploration Phase A (2026-06-05): store the
+            # DENSE orthogonality signal (= 1 − measured self_corr to the
+            # submitted/OS pool) — the A/B primary metric. Only when self_corr was
+            # MEASURED (LOCAL/BRAIN); UNKNOWN → skip (the 0.0 default would falsely
+            # read as fully orthogonal). Always recorded (independent of the
+            # ENABLE_ORTHOGONAL_PROMPT_STEERING flag) so shadow/A/B can compare
+            # steered vs control. Plan: orthogonality_steered_exploration_plan_2026-06-05.
+            if self_corr_source != CorrSource.UNKNOWN:
+                alpha.metrics = dict(alpha.metrics) if isinstance(alpha.metrics, dict) else {}
+                alpha.metrics["orthogonality_score"] = round(
+                    1.0 - min(max(float(self_corr), 0.0), 1.0), 4)
+
             if self_corr_source == CorrSource.LOCAL:
                 try:
                     crisis_by_window = await correlation_service.calc_self_corr_by_window(

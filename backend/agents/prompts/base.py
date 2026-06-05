@@ -48,6 +48,14 @@ class PromptContext:
     # renders byte-for-byte legacy.
     pillar_hint: Optional[str] = None
 
+    # Orthogonality-steered exploration Phase A (2026-06-05): pre-rendered
+    # submitted-pool pillar-coverage NUDGE block (str). node_hypothesis sets it
+    # only when ENABLE_ORTHOGONAL_PROMPT_STEERING is ON and the profile is non-
+    # empty. None / "" → build_hypothesis_prompt splices the empty string →
+    # byte-for-byte legacy (asserted in test_node_hypothesis_orthogonal_steering).
+    # Plan: docs/orthogonality_steered_exploration_plan_2026-06-05.md
+    submitted_pool_profile: Optional[str] = None
+
     # P2-A (2026-05-16): Macro narratives — RAG-fetched economic mechanism
     # anchors for the current (dataset, region) + top-K focused fields.
     # node_hypothesis fills this when ENABLE_MACRO_NARRATIVE_GUIDANCE is on

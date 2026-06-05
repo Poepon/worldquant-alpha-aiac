@@ -1018,6 +1018,37 @@ async def node_hypothesis(
             )
             _g10_block = ""
 
+    # Orthogonality-steered exploration Phase A (2026-06-05): compute the
+    # submitted-pool pillar-coverage NUDGE ONLY when the flag is ON. OFF →
+    # _orth_steer_block stays "" → PromptContext.submitted_pool_profile=None →
+    # build_hypothesis_prompt splices "" → byte-for-byte legacy. Own session +
+    # fully defensive (any failure → "" → legacy); 13-row + infer_pillar cost is
+    # negligible. Plan: docs/orthogonality_steered_exploration_plan_2026-06-05.md
+    _orth_steer_block = ""
+    if getattr(settings, "ENABLE_ORTHOGONAL_PROMPT_STEERING", False):
+        try:
+            from backend.submitted_pool_profile import (
+                compute_submitted_pool_profile,
+                render_profile_block,
+            )
+            from backend.database import AsyncSessionLocal
+            _orth_prof = await compute_submitted_pool_profile(
+                AsyncSessionLocal, state.region)
+            _orth_steer_block = render_profile_block(_orth_prof)
+            if _orth_steer_block:
+                logger.info(
+                    "[%s] orthogonality nudge injected | region=%s pillars=%s "
+                    "block_chars=%d",
+                    node_name, state.region,
+                    list((_orth_prof.get("pillars") or {}).keys()),
+                    len(_orth_steer_block),
+                )
+        except Exception as _orth_ex:  # noqa: BLE001
+            logger.warning(
+                "[%s] orthogonality steering profile failed (non-fatal): %s",
+                node_name, _orth_ex)
+            _orth_steer_block = ""
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -1048,6 +1079,9 @@ async def node_hypothesis(
         exploration_weight=exploration_weight,
         available_dataset_pool=getattr(state, "available_dataset_pool", []) or [],
         pillar_hint=pillar_hint,
+        # Orthogonality Phase A (2026-06-05): None when flag OFF / empty pool →
+        # byte-for-byte legacy. render_profile_block ensures "" → None here.
+        submitted_pool_profile=(_orth_steer_block or None),
         # P2-A (2026-05-16): only attach when the flag is ON AND we fetched
         # ≥1 row. Off / fetch-failed paths set macro_narratives=[] so the
         # template splice produces the empty-string byte-for-byte legacy
