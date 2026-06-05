@@ -1025,7 +1025,7 @@ async def node_hypothesis(
     # fully defensive (any failure → "" → legacy); 13-row + infer_pillar cost is
     # negligible. Plan: docs/orthogonality_steered_exploration_plan_2026-06-05.md
     _orth_steer_block = ""
-    if getattr(settings, "ENABLE_ORTHOGONAL_PROMPT_STEERING", False):
+    if getattr(_gen_settings, "ENABLE_ORTHOGONAL_PROMPT_STEERING", False):
         try:
             from backend.submitted_pool_profile import (
                 compute_submitted_pool_profile,
