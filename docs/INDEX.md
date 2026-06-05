@@ -39,6 +39,7 @@
 | [dataset_bandit_acceptance_runbook.md](dataset_bandit_acceptance_runbook.md) | `ENABLE_DATASET_VALUE_BANDIT` 验收 / 运维 |
 | [r12_obs_rollout_checklist.md](r12_obs_rollout_checklist.md) | R12 决策（约 2026-07-04±5d）前的观测 checklist |
 | [sprint5_r12_decision_runbook.md](sprint5_r12_decision_runbook.md) | R12 三路条件清理 runbook |
+| [llm_per_node_model_selection_2026-06-05.md](llm_per_node_model_selection_2026-06-05.md) | **per-node LLM 选型重设计**：基线 v2（可用性+成本筛）用法 + 推理 token 溢价发现 + 串行 A/B runbook + 审计落地。结论=全节点 kimi-k2.5 |
 | [phase_c_llm_routing_ab_runbook_2026-05-30.md](phase_c_llm_routing_ab_runbook_2026-05-30.md) | 单 node LLM A/B 流程（⚠ 示例模型选型已被 commit `7034050` 回退 kimi-k2.6,以 config.py 为准） |
 | [flag_lifecycle.md](flag_lifecycle.md) | feature flag 生命周期约定（框架准确;flag 清单待追加 2026-05-20 后新批次） |
 | [production_canary_sop_2026_05_18.md](production_canary_sop_2026_05_18.md) | 生产灰度 / 回滚 SOP（⚠ §1 含已退役的 `ENABLE_DAG_TRACE` / tier 期措辞,机制本体仍可用） |
