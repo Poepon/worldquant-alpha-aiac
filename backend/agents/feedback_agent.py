@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_, update
 
 from backend.models import AlphaFailure, ClassifierCallLog, KnowledgeEntry, Alpha
-from backend.agents.prompts import FAILURE_ANALYSIS_SYSTEM, FAILURE_ANALYSIS_USER
+from backend.agents.prompts.analysis import FAILURE_ANALYSIS_SYSTEM, FAILURE_ANALYSIS_USER
 from backend.config import settings
 from backend.agents.services.llm_service import LLMService, get_llm_service
 from backend.protocols import LLMProtocol
@@ -856,7 +856,11 @@ class FeedbackAgent:
         Returns:
             Dict with learned stats
         """
-        from backend.agents.prompts import ROUND_ANALYSIS_SYSTEM, ROUND_ANALYSIS_USER
+        # ROUND_ANALYSIS_SYSTEM lives in prompts.analysis; ROUND_ANALYSIS_USER in
+        # prompts.legacy. Import each from its defining submodule (Phase 1a) so
+        # feedback_agent doesn't depend on the package re-export surface.
+        from backend.agents.prompts.analysis import ROUND_ANALYSIS_SYSTEM
+        from backend.agents.prompts.legacy import ROUND_ANALYSIS_USER
         
         # Skip if too little data to learn
         if not successes and not failures:

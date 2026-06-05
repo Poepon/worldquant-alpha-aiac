@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from backend.genetic_optimizer import enumerate_window_perturbations
+from backend.window_perturbation import enumerate_window_perturbations
 from backend.multi_fidelity_eval import RobustnessGate, RobustnessResult
 
 
@@ -69,7 +69,7 @@ class TestEnumerateWindowPerturbations:
             assert "ts_rank(close," in new_expr
             assert "22 ->" in desc
         # First entry should be the absolute-nearest by |w - 22|
-        from backend.genetic_optimizer import WINDOW_VALUES
+        from backend.window_perturbation import WINDOW_VALUES
         nearest = min((w for w in WINDOW_VALUES if w != 22), key=lambda w: (abs(w - 22), w))
         assert f"ts_rank(close, {nearest})" == variants[0][0]
 
@@ -122,7 +122,7 @@ class TestEnumerateWindowPerturbations:
         # P3 fix: ternary ts_co_skewness(x, y, 20) — last positional digit
         # arg (= window) is now correctly identified by the balanced-paren
         # parser. Pre-fix the flat regex returned [].
-        from backend.genetic_optimizer import WINDOW_VALUES
+        from backend.window_perturbation import WINDOW_VALUES
         variants = enumerate_window_perturbations(
             "ts_co_skewness(close, returns, 20)", n=4,
         )
@@ -143,7 +143,7 @@ class TestEnumerateWindowPerturbations:
         # P3 fix: ts_corr(rank(close), rank(returns), 20) — inner () would
         # break the flat-regex `[^,]+` second-arg match; balanced-paren
         # parser handles it.
-        from backend.genetic_optimizer import WINDOW_VALUES
+        from backend.window_perturbation import WINDOW_VALUES
         variants = enumerate_window_perturbations(
             "ts_corr(rank(close), rank(returns), 20)", n=2,
         )
@@ -163,7 +163,7 @@ class TestEnumerateWindowPerturbations:
         variants = enumerate_window_perturbations("ts_rank(close, 7)", n=4)
         assert len(variants) == 4
         # First variant must be the closest WINDOW_VALUES element to 7.
-        from backend.genetic_optimizer import WINDOW_VALUES
+        from backend.window_perturbation import WINDOW_VALUES
         nearest = min(WINDOW_VALUES, key=lambda w: (abs(w - 7), w))
         assert f"ts_rank(close, {nearest})" == variants[0][0]
 

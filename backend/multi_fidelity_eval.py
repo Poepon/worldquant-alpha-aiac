@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from loguru import logger
 
-from backend.genetic_optimizer import enumerate_window_perturbations
+from backend.window_perturbation import enumerate_window_perturbations
 
 
 class FidelityLevel(Enum):
