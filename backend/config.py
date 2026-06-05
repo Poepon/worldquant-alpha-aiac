@@ -130,11 +130,13 @@ _PROVIDER_MODEL_CATALOG: Dict[str, list] = {
         "kimi-k2.5", "MiniMax-M2.5",
     ],
     # aliyun_maas — token-plan.cn-beijing.maas.aliyuncs.com — OUT OF BUDGET 2026-06-04.
-    # Reconstructed from the pre-coding-switch config roster; VERIFY against the
-    # Token Plan model page before reactivating token-plan.
+    # From the Token Plan 订阅套餐 model page (2026-06-05), text-generation models
+    # only. EXCLUDED: image-gen (qwen-image-2.0/-pro, wan2.7-image/-pro — not LLMs)
+    # and deepseek-v3.2 (stale — superseded by deepseek-v4-pro/-flash).
     "aliyun_maas": [
-        "kimi-k2.6", "kimi-k2.5", "deepseek-v4-pro", "deepseek-v4-flash",
-        "qwen3.7-max", "qwen3.6-plus", "qwen3.6-flash", "glm-5.1", "glm-5",
+        "qwen3.7-max", "qwen3.6-plus", "qwen3.6-flash",
+        "deepseek-v4-pro", "deepseek-v4-flash",
+        "kimi-k2.6", "kimi-k2.5", "glm-5.1", "glm-5", "MiniMax-M2.5",
     ],
 }
 
