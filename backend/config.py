@@ -91,12 +91,12 @@ def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
     defaults: Dict[str, Dict[str, str]] = {
         "hypothesis":          {"model": "qwen3.6-plus",  "provider_ref": _CP},
         "code_gen":            {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "self_correct":        {"model": "qwen3.6-flash",  "provider_ref": _CP},
-        "r1b_retry":           {"model": "qwen3.6-flash",  "provider_ref": _CP},
+        "self_correct":        {"model": "kimi-k2.5",      "provider_ref": _CP},
+        "r1b_retry":           {"model": "kimi-k2.5",      "provider_ref": _CP},
         "llm_mutate_alpha":    {"model": "kimi-k2.5",      "provider_ref": _CP},
         "llm_crossover_alpha": {"model": "kimi-k2.5",      "provider_ref": _CP},
         "r1b_mutate":          {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "r5_alignment_c1":     {"model": "qwen3.6-flash",  "provider_ref": _CP},
+        "r5_alignment_c1":     {"model": "kimi-k2.5",      "provider_ref": _CP},
         "r5_alignment_c2":     {"model": "kimi-k2.5",      "provider_ref": _CP},
         "attribution":         {"model": "kimi-k2.5",      "provider_ref": _CP},
         "__default__":         {"model": "qwen3.6-plus",  "provider_ref": _CP},
@@ -119,9 +119,13 @@ def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
 def _load_llm_available_models() -> list:
     """Candidate model list for the ops-console dropdown (PR4). Override via
     LLM_AVAILABLE_MODELS env (JSON array). Fault-tolerant; never crashes."""
+    # Coding Plan supported roster (2026-06-05, per the订阅套餐 model list):
+    # only these resolve on aliyun_coding_plan. qwen3.6-flash / kimi-k2.6 /
+    # deepseek-* / qwen3.7-max / glm-5.1 are NOT on the plan and 401/fail.
     defaults = [
-        "deepseek-v4-pro", "deepseek-v4-flash", "kimi-k2.6", "kimi-k2.5",
-        "qwen3.7-max", "qwen3.6-plus", "qwen3.6-flash", "glm-5.1", "glm-5",
+        "qwen3.6-plus", "qwen3.5-plus", "qwen3-max-2026-01-23",
+        "qwen3-coder-next", "qwen3-coder-plus", "glm-5", "glm-4.7",
+        "kimi-k2.5", "MiniMax-M2.5",
     ]
     env_val = os.getenv("LLM_AVAILABLE_MODELS")
     if not env_val:
