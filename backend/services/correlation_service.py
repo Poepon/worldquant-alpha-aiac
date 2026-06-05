@@ -321,6 +321,49 @@ class CorrelationService:
         self._pnl_cache[alpha_id] = empty
         return empty
 
+    async def compute_max_corr_vs_pool(
+        self, alpha_id: str, region: str, *, min_overlap_days: int = 60,
+    ) -> Optional[float]:
+        """Max |Pearson corr| of a FRESH candidate's daily returns vs each alpha
+        in ``region``'s cached submitted/OS pool. THE candidate-vs-pool signal
+        for orthogonality-steered exploration Phase A (plan v4, 2026-06-05).
+
+        Unlike ``get_with_fallback`` (whose LOCAL path needs the candidate
+        ALREADY in the cache → ``UNKNOWN`` for a freshly-mined alpha; its BRAIN
+        path is async-PENDING) this FETCHES the candidate's PnL post-sim and
+        correlates against the cached pool. ``orthogonality_score = 1 - this``.
+        Returns ``None`` when candidate PnL is unreachable / pool cache empty /
+        overlap < ``min_overlap_days``. Cost: 1 BRAIN PnL fetch (per-round
+        cached); call only when the orthogonality flag is on + for sharpe-pass
+        candidates (cost + anti-gaming)."""
+        try:
+            cand_pnl = await self._fetch_pnl_series(alpha_id, max_attempts=2)
+            if cand_pnl is None or cand_pnl.empty:
+                return None
+            cache = self._load_cache(region)
+            pool_pnls = (cache or {}).get("pnls")
+            if pool_pnls is None or pool_pnls.empty:
+                return None
+            cand_ret = _series_to_returns(cand_pnl).dropna()
+            pool_ret = _pnls_to_returns_df(pool_pnls)
+            if alpha_id in pool_ret.columns:  # never correlate vs itself
+                pool_ret = pool_ret.drop(columns=[alpha_id])
+            if cand_ret.empty or pool_ret.empty:
+                return None
+            common = cand_ret.index.intersection(pool_ret.index)
+            if len(common) < min_overlap_days:
+                return None
+            corrs = pool_ret.corrwith(cand_ret).dropna()
+            if corrs.empty:
+                return None
+            return float(corrs.abs().max())
+        except Exception as e:  # noqa: BLE001 — never break the eval node
+            logger.debug(
+                f"[CorrelationService] compute_max_corr_vs_pool failed for "
+                f"{alpha_id}: {e}"
+            )
+            return None
+
     async def refresh_os_alpha_cache(
         self,
         region: str = "USA",

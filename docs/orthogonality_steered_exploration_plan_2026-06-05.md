@@ -1,9 +1,10 @@
-# 正交导向自动探索（Orthogonality-Steered Exploration）设计 plan **v3**
+# 正交导向自动探索（Orthogonality-Steered Exploration）设计 plan **v4**
 
-> v1 生成 2026-06-05 · v2 = 应用 3-镜头 fresh-agent review(2× GO_WITH_FIXES + 1× REVISE)全部 fix · **v3 = 2-镜头收敛复审(两镜头均 GO_WITH_MINOR = 收敛)后应用 MUST**:①反 gaming 护栏(§4)②OS PnL 新鲜度升硬 gate(§5-9)③SD 是假设须 shadow 验 ④infer_pillar momentum-46% ship 前人工审(§5-12)⑤orthogonality_score 接线为第一 build 步(§3)。**plan 至此收敛,可建 Phase A。**
+> v1 生成 2026-06-05 · v2 = 应用 3-镜头 fresh-agent review(2× GO_WITH_FIXES + 1× REVISE)全部 fix · v3 = 2-镜头收敛复审(两镜头均 GO_WITH_MINOR = 收敛)后应用 MUST:①反 gaming 护栏(§4)②OS PnL 新鲜度升硬 gate(§5-9)③SD 是假设须 shadow 验 ④infer_pillar momentum-46% ship 前人工审(§5-12)⑤orthogonality_score 接线为第一 build 步(§3)。
+> **v4 = orthogonality_score 指标重设计(shadow 实跑暴露 v3 接线 DOA)**。shadow run(任务 3964/3981/3982)记 0 个 orthogonality_score,根因两条:(a) v3 用 `1 − self_corr`,而 `get_with_fallback` 对**新挖候选恒 UNKNOWN**(本地缓存无其 PnL + BRAIN SELF 异步 PENDING)→ fresh 候选永无值;(b) 即便有值也会被 `evaluation.py:895` 的 `alpha.metrics = {**metrics, …}` 重建**覆盖**(原 ba65ac7 写法 reassign 一个 alpha.metrics 副本,从未进 895 的 spread)。**v4 修复**:新增 `CorrelationService.compute_max_corr_vs_pool(alpha_id, region)` —— post-sim **拉候选 PnL 一次**(per-round 缓存)再 vs 已提交池逐列算 `max|Pearson|`,`orthogonality_score = 1 − max_corr`,**对 fresh 候选可算**;写进 `metrics` 局部(被 895 spread,真落库);**flag-gated + 仅 sharpe≥sharpe_min 候选**(省成本 + 反 gaming)。详见 §3/§4。**plan 收敛,Phase A 指标可真跑。**
 > 起源:用户「当务之急是挖掘新 alpha」→「应该 LLM 自动探索正交源」。映射 4 子系统收敛:正交信号已存在且可算,但与挖掘环脱节。
 > **用户决策(2026-06-05)**:范围 A+B / 接受 sim 成本 / 现在做 / **粒度改用既有 pillar(review 推翻 v1 的 mechanism_family,见 §6)** / 推进 Phase A。
-> 状态:**design-locked,ship Phase A shadow。未改生产代码前本 plan 为准。**
+> 状态:**Phase A 代码已建(foundation + 热路径 + v4 指标重设计),全 flag-OFF 字节等价;待 flag-ON shadow 跑出非零 orthogonality_score 再进 A/B。** 未改 plan 外行为前本 plan 为准。
 
 ---
 
@@ -55,7 +56,7 @@
 - **稀疏诚实(review must-fix)**:13/5 ≈ 每 pillar 2-3 个。注入文案**标样本量 + 宽 CI**(「momentum: 4/13, sharpe 1.8±0.4」),`n<2` 的 pillar **不进强 NUDGE**(标「样本不足」),`n=1` 从 NUDGE 移除。避免据小样本过度排斥。**survivor-bias 警示**:13 是「被选出的」非「能选的全部」→ prompt 措辞为「这些已覆盖,**探索其它**」非「这些是好的/坏的」。
 - **接线**:`PromptContext.submitted_pool_profile` 新字段;`build_hypothesis_prompt()` 在 **Single-mechanism discipline 段后、investment philosophy 前**插「Portfolio Breadth Principle」块(≤120 token,留 30 安全 margin)。flag OFF 时 `getattr(ctx,'submitted_pool_profile',None)` soft-skip → **字节不变**。
 - **telemetry(必须,先于 A/B)**:每 hypothesis 记 ① profile 块实际 token ② 注入了哪些 pillar/字段 ③ 该候选 post-sim 的 `orthogonality_score`(见 §4)④ JSON 解析成功/截断标志。
-- **orthogonality_score 接线(第一 build 步,v2-rereview must)**:`node_evaluate` 里 self_corr 已在 `evaluation.py:696` 算出 → 加 `orth = 1.0 − min(max(self_corr,0),1)` 落 `metrics['orthogonality_score']`,供 A/B / interim 读。**这是 dense 主指标的实现,先于一切 A/B。**
+- **orthogonality_score 接线(v4 重设计,已建)**:`node_evaluate` 的 `_evaluate_single_alpha`(`evaluation.py:~701`):self_corr **MEASURED**(LOCAL/BRAIN)→ `orth = 1 − self_corr`;**UNKNOWN**(fresh 候选常态)+ flag ON + `sharpe ≥ sharpe_min` → 调 `correlation_service.compute_max_corr_vs_pool(alpha_id, region)`(post-sim 拉候选 PnL vs 已提交池 `max|corr|`,per-round PnL 缓存)→ `orth = 1 − max_corr`。**落 `metrics` 局部**(被 `:895` 的 `{**metrics,…}` spread 真持久化 —— v3 的 reassign-alpha.metrics-副本写法会被该重建覆盖,DOA)。flag OFF → 仅 measured 路径 = 与上一 commit 字节等价。`compute_max_corr_vs_pool` 见 `correlation_service.py:324`(7 单测),节点接线见 `test_node_orthogonality_score_fresh_candidate.py`(3 单测:flag ON 记录 / flag OFF 不记录 / sharpe 不过门不调 helper)。**这是 dense 主指标的实现,先于一切 A/B。**
 - **ship 前必做审计**:人工核 13 个已提交 expression 的 infer_pillar 赋值(见 §5-12,防 momentum 46% 是归类 artifact)。
 - **文件**:`prompts/base.py`(PromptContext 字段)、`prompts/hypothesis.py:34-101`、`prompts/generation.py:1-116`、`graph/nodes/generation.py`(注入点)、新 helper `submitted_pool_profile.py`(聚合,短事务读,遵守 [[reference_flat_idle_in_txn_lock_leak_2026_06_04]])。
 - **flag**:`ENABLE_ORTHOGONAL_PROMPT_STEERING`(default OFF,可热翻)。
@@ -78,7 +79,7 @@
 **问题(review 3 镜头收敛 must-fix)**:v1 主指标「正交 can_submit 率」基率 0.86% → N=30/臂 期望 <1 → 检出力 <5%(重蹈 `reference_routing_reasoning_models` n=28 噪声)。
 
 **v2 修复 — 主指标改连续 dense 量**:
-- **PRIMARY(shadow + A/B)**:`mean orthogonality_score` per 模拟 alpha = `1 − max_self_corr_to_submitted_pool`(post-sim 在 node_evaluate 用 marginal_drain 本地缓存算;**每个模拟 alpha 都有值** = 密集,N≈30/臂 即有统计力)。次辅:生成 alpha 落 **0.4-0.7 正交带**的比例。
+- **PRIMARY(shadow + A/B)**:`mean orthogonality_score` per 模拟 alpha = `1 − max_corr_to_submitted_pool`(post-sim 在 node_evaluate 经 `compute_max_corr_vs_pool` 拉候选 PnL vs 已提交池本地缓存算)。**v4 校正密度口径**:仅 **sharpe-pass 候选**有值(flag-gated + sharpe gate,见 §3),非「每个模拟 alpha」——故密度由 sharpe-pass 率决定,N≈30/臂 指 **30 个 sharpe-pass 候选**。次辅:sharpe-pass 候选落 **0.4-0.7 正交带**的比例。⚠ 若 sharpe-pass 率太低致 N 累积慢,shadow 期需相应延长(原 SD 未知问题叠加)。
 - **SECONDARY(推迟,需累积)**:二值 `正交 can_submit 率`。当前基率 0.86% → 需 ~400/臂才有力 → **推迟到累积 50+ 可提交后再做**,现在只记录不作 gate。
 - **功率**:orthogonality_score 连续量,**假设 SD~0.2 → MDE=+0.08 在 N=30/臂 ~80% power**(`(0.08/(0.2/√30))²≈4.8`)。**⚠ SD 是假设非事实(v2-rereview must)**:shadow 期实测 SD;若 SD≥0.3,N=30 power 跌破 60% → 须延长 A/B 或加大 MDE。
 - **🛡 反 gaming 护栏(v2-rereview MUST①)**:orthogonality_score 可被「正交但 sharpe 垃圾」alpha 刷高。所以 **GO 需同时满足**:(1) orthogonality_score 显著 ↑(MDE 达标);(2) mean sharpe 无显著 ↓;(3) **sharpe-pass 率(sharpe≥`EVAL_SHARPE_MIN`)无显著 ↓** ← 防「用正交垃圾换好货」;(4) **interim N40 黄旗**:steered 臂至少比 control 多 ≥1 个「正交带(0.4-0.7)且 sharpe 过门」的 alpha;若 orthogonality_score ↑ 却 0 个正交-且-过门 → 收紧 MDE 到 0.12 再进 N80。
