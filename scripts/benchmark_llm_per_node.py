@@ -1,28 +1,43 @@
-"""Per-node LLM benchmark — pick the best model for EACH pipeline node_key.
+"""Per-node LLM USABILITY + COST screen for the Aliyun Coding Plan (v2, 2026-06-05).
 
-Unlike benchmark_llm_alpha_quality.py (one end-to-end alpha-gen scenario), this
-drives **each real node_key's own production prompt builder** with a
-representative fixture, parses its real output schema, and scores it with a
-node-specific offline metric. Output → a per-node ranking + a ready-to-paste
-`LLM_FUNCTION_MODEL_MAP` recommendation for the routing plan
-(docs/per_function_llm_routing_plan_2026-05-29.md).
+REDESIGN (post adversarial review). The previous version tried to RANK model
+QUALITY offline — but valid_rate/diversity saturate at 1.0, the only varying term
+(p_pass) is online-non-transferring noise, and the online A/B already settled that
+reasoning models don't beat kimi (and cost ~48% more). So offline does NOT decide
+quality. It screens each node's candidate models on the NEW coding.dashscope
+endpoint for what offline CAN validly measure:
 
-Coverage (core objective-scorable subset, per plan §3):
-  expression-producing  → code_gen, self_correct, r1b_retry, llm_mutate_alpha,
-                          llm_crossover_alpha   (semantic-validity + p_pass + diversity)
-  semi-structured       → hypothesis, r1b_mutate (JSON schema + pillar + diversity)
-  judge / consistency   → r5_alignment_c1, r5_alignment_c2, attribution
-                          (verdict stability over K runs + correctness + schema)
+  - reachability   (catalog intersection / per-model probe)
+  - usability      (parse-rate, a real op+arity+group validity SCREEN, and
+                    truncation-rate at PRODUCTION max_tokens — a screen, not a ranker)
+  - cost           (quota-token consumption incl. the discarded-reasoning premium;
+                    Coding Plan is a fixed-quota subscription so total tokens = cost)
+  - reliability    (API call success rate; timeouts are MISSING DATA, not score 0)
 
-Proxy-only, no BRAIN. Run:
-    venv/Scripts/python.exe scripts/benchmark_llm_per_node.py
-    venv/Scripts/python.exe scripts/benchmark_llm_per_node.py --nodes code_gen,self_correct --runs 2
-Writes docs/llm_per_node_benchmark_<date>_x<runs>.json + prints ranked tables.
+Quality decisions defer to the online A/B harness (scripts/phase_c_llm_routing_ab.py).
+p_pass / diversity are kept as DIAGNOSTIC columns only — never in the ranking.
+
+SAFETY — this shares the PRODUCTION Coding-Plan key / quota / Redis circuits:
+  * Run ONLY with production mining paused (stop FLAT sessions + worker) OR a
+    separate key. A full run can exhaust the shared subscription and starve live
+    mining via shared-key 429s.
+  * Hard call/token budget + abort; concurrency=1 + inter-call sleep; a 429 HALTS
+    the run (does not let the SDK @retry keep burning quota).
+  * `llm_circuits_clear_all()` is NOT called unless --reset-circuits (default OFF),
+    so the benchmark never wipes production's shared circuit state.
+
+Usage:
+    venv/Scripts/python.exe scripts/benchmark_llm_per_node.py --verify-catalog
+    venv/Scripts/python.exe scripts/benchmark_llm_per_node.py --smoke
+    venv/Scripts/python.exe scripts/benchmark_llm_per_node.py --i-understand-quota
+Writes docs/llm_per_node_benchmark_<date>_x<runs>.json + prints per-node scorecards.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
+import re
 import statistics
 import sys
 import time
@@ -31,59 +46,203 @@ from datetime import date
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-# Allow `python scripts/benchmark_llm_per_node.py` from any cwd — put repo root
-# (parent of scripts/) on the path so `import backend...` resolves.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# ---------------------------------------------------------------------------
-# Candidate models — the exact 9 that produced the 2026-05-29 FINAL decision
-# (docs/llm_per_node_benchmark_2026-05-29_FINAL.json + config.py defaults).
-# Keep this list == the benchmarked population so a bare re-run reproduces the
-# committed per-node picks; override a subset via --models. (All 9 verified
-# available on Aliyun DashScope, zero fail → plan 放行条件 #1.)
-# ---------------------------------------------------------------------------
-MODELS = [
-    "qwen3.7-max", "qwen3.6-plus", "qwen3.6-flash",
-    "deepseek-v4-pro", "deepseek-v4-flash",
-    "kimi-k2.6", "kimi-k2.5", "glm-5.1", "glm-5",
-]
-RUNS_DEFAULT = 3
-TEMPERATURE = 0.8
-JUDGE_TEMPERATURE = 0.2   # judge/consistency nodes run cooler (match production)
-CONSISTENCY_REPEATS = 4   # how many times to re-ask the same judge fixture
+CODING_PLAN_PROVIDER = "aliyun_coding_plan"
+CODING_PLAN_API_KEY_REF = "llm_provider_aliyun_coding_plan"
 
 # ---------------------------------------------------------------------------
-# Representative fixtures (static → fair + reproducible across models)
+# Coding Plan authoritative catalog (2026-06-05, user-confirmed screenshot).
+# reasoning class is MEASURED empirically (reasoning_share) at run time; the
+# catalog "纯文本生成" coder models are the non-reasoning prior.
 # ---------------------------------------------------------------------------
+CATALOG = [
+    "qwen3.6-plus", "qwen3.5-plus", "qwen3-max-2026-01-23",
+    "qwen3-coder-next", "qwen3-coder-plus",
+    "glm-5", "glm-4.7", "kimi-k2.5", "MiniMax-M2.5",
+]
+NONREASONING_PRIOR = {"qwen3-coder-next", "qwen3-coder-plus"}  # catalog: text-gen only
+
+# Focused per-kind candidate matrices (control shared quota — NOT 9×all-nodes).
+# The node's live incumbent is always appended if missing.
+EXPR_CANDIDATES = ["kimi-k2.5", "qwen3-coder-next", "qwen3-coder-plus", "qwen3.6-plus"]
+STRUCT_CANDIDATES = ["qwen3.6-plus", "kimi-k2.5", "qwen3-coder-plus", "glm-5"]
+JUDGE_CANDIDATES = ["kimi-k2.5", "qwen3.6-plus"]
+
+TEMPERATURE = 0.8
+JUDGE_TEMPERATURE = 0.2
+CONSISTENCY_REPEATS = 4
+PILLARS = {"momentum", "value", "quality", "volatility", "sentiment", "other"}
+
+
+# ===========================================================================
+# Safety: shared-quota guard (Phase A)
+# ===========================================================================
+class QuotaHalt(RuntimeError):
+    pass
+
+
+class QuotaGuard:
+    """Hard call/token budget + 429 kill-switch for the shared Coding-Plan key."""
+
+    def __init__(self, max_calls: int, max_tokens: int, sleep_s: float):
+        self.max_calls = max_calls
+        self.max_tokens = max_tokens
+        self.sleep_s = sleep_s
+        self.calls = 0
+        self.tokens = 0
+        self.halted = False
+        self.reason: Optional[str] = None
+
+    def check(self):
+        if self.halted:
+            raise QuotaHalt(f"HALT: {self.reason}")
+        if self.calls >= self.max_calls:
+            self._halt(f"max_calls={self.max_calls} reached")
+        if self.tokens >= self.max_tokens:
+            self._halt(f"max_tokens={self.max_tokens} reached")
+
+    def record(self, tokens: int, resp_error: Optional[str]):
+        self.calls += 1
+        self.tokens += int(tokens or 0)
+        if resp_error and re.search(r"(429|rate.?limit|too many requests)", resp_error, re.I):
+            self._halt(f"429 / rate-limit seen — refusing to burn shared production quota ({resp_error[:80]})")
+
+    def _halt(self, reason: str):
+        self.halted = True
+        self.reason = reason
+        raise QuotaHalt(f"HALT: {reason}")
+
+
+# ===========================================================================
+# Endpoint re-pointing (Phase C) — deterministic, flag/DB-state independent
+# ===========================================================================
+async def point_at_coding_plan(svc) -> str:
+    """Point svc.client at coding.dashscope. MUST run after _ensure_credentials_
+    loaded() (which flips the idempotent guard) so the next call()'s guard is a
+    no-op and won't overwrite our client (root cause of the dead-endpoint bug:
+    the standalone process is flag-OFF with no OPENAI_* creds → legacy path →
+    api.openai.com)."""
+    import backend.config as cfg
+    await svc._ensure_credentials_loaded()  # flip guard first
+    providers = cfg._flag_override_cache.get("LLM_PROVIDERS") or cfg._LLM_PROVIDERS_CACHE
+    prof = providers.get(CODING_PLAN_PROVIDER)
+    if not prof or not prof.get("base_url"):
+        raise RuntimeError(f"provider {CODING_PLAN_PROVIDER} has no base_url in LLM_PROVIDERS")
+    base_url = prof["base_url"]
+    key = await svc._resolve_api_key_ref(CODING_PLAN_API_KEY_REF)
+    if not key:
+        raise RuntimeError(f"cannot resolve credential:{CODING_PLAN_API_KEY_REF} (CredentialsService + env)")
+    svc.api_key = key
+    svc.base_url = base_url
+    svc.clear_client_cache()
+    svc.client = svc._get_client("openai", base_url, api_key=key)
+    actual = str(getattr(svc.client, "base_url", ""))
+    if "coding.dashscope" not in actual:
+        raise RuntimeError(f"repoint failed: client.base_url={actual!r}")
+    return base_url
+
+
+async def probe_catalog(svc, candidates: List[str]) -> Dict[str, Any]:
+    """Verify which candidates the LIVE coding.dashscope endpoint serves.
+    models.list() best-effort; on failure fall back to a max_tokens=1 probe per
+    model (authoritative). Returns {served, reachable, unreachable, method}."""
+    served: Optional[List[str]] = None
+    method = "models.list"
+    try:
+        listing = await svc.client.models.list()
+        served = sorted({getattr(m, "id", None) for m in getattr(listing, "data", []) if getattr(m, "id", None)})
+    except Exception as e:  # noqa: BLE001
+        print(f"[catalog] models.list() unavailable ({type(e).__name__}: {str(e)[:80]}) → per-model probe", flush=True)
+        method = "per-model-probe"
+
+    reachable, unreachable = [], []
+    if served is not None:
+        served_set = set(served)
+        for m in candidates:
+            (reachable if m in served_set else unreachable).append(m)
+        # models.list can under-report aliases → probe the ones it omitted
+        for m in list(unreachable):
+            if await _probe_one(svc, m):
+                unreachable.remove(m)
+                reachable.append(m)
+                method = "models.list+probe"
+    else:
+        for m in candidates:
+            (reachable if await _probe_one(svc, m) else unreachable).append(m)
+
+    return {"method": method, "served_listing": served, "reachable": reachable, "unreachable": unreachable}
+
+
+async def _probe_one(svc, model: str) -> bool:
+    try:
+        r = await svc.call("ping", "Return the single token: ok", temperature=0.0,
+                           json_mode=False, max_tokens=1, model=model, provider="openai")
+        return bool(getattr(r, "success", False)) or bool((getattr(r, "content", "") or "").strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+# ===========================================================================
+# Incumbent (live map) — Phase E. Read the DB feature-flag override, NOT settings.
+# ===========================================================================
+async def load_live_map() -> Dict[str, Dict[str, str]]:
+    import backend.config as cfg
+    try:
+        from backend.database import AsyncSessionLocal
+        from backend.services.feature_flag_service import FeatureFlagService
+        async with AsyncSessionLocal() as db:
+            await FeatureFlagService(db).load_overrides_into_cache()
+    except Exception as e:  # noqa: BLE001
+        print(f"[incumbent] flag-cache warm failed ({e}) → config startup seed", flush=True)
+    return cfg._flag_override_cache.get("LLM_FUNCTION_MODEL_MAP") or cfg._LLM_FUNCTION_MODEL_MAP_CACHE
+
+
+def incumbent_for(node_key: str, live_map: Dict[str, Dict[str, str]]) -> Optional[str]:
+    entry = live_map.get(node_key) or live_map.get("__default__")
+    return (entry or {}).get("model") if isinstance(entry, dict) else None
+
+
+# ===========================================================================
+# Fixtures (typed fields so the group-as-value guard fires; static = reproducible)
+# ===========================================================================
 FIELDS_FIXTURE: List[Dict] = [
-    {"id": "close", "type": "MATRIX"}, {"id": "open", "type": "MATRIX"},
-    {"id": "high", "type": "MATRIX"}, {"id": "low", "type": "MATRIX"},
-    {"id": "volume", "type": "MATRIX"}, {"id": "vwap", "type": "MATRIX"},
-    {"id": "returns", "type": "MATRIX"}, {"id": "cap", "type": "MATRIX"},
-    {"id": "sharesout", "type": "MATRIX"}, {"id": "assets", "type": "MATRIX"},
-    {"id": "revenue", "type": "MATRIX"}, {"id": "debt", "type": "MATRIX"},
-    {"id": "sector", "type": "GROUP"}, {"id": "industry", "type": "GROUP"},
-    {"id": "subindustry", "type": "GROUP"},
+    {"id": "close", "type": "MATRIX", "category": "Price Volume"},
+    {"id": "open", "type": "MATRIX", "category": "Price Volume"},
+    {"id": "high", "type": "MATRIX", "category": "Price Volume"},
+    {"id": "low", "type": "MATRIX", "category": "Price Volume"},
+    {"id": "volume", "type": "MATRIX", "category": "Price Volume"},
+    {"id": "vwap", "type": "MATRIX", "category": "Price Volume"},
+    {"id": "returns", "type": "MATRIX", "category": "Price Volume"},
+    {"id": "cap", "type": "MATRIX", "category": "Fundamental"},
+    {"id": "sharesout", "type": "MATRIX", "category": "Fundamental"},
+    {"id": "assets", "type": "MATRIX", "category": "Fundamental"},
+    {"id": "revenue", "type": "MATRIX", "category": "Fundamental"},
+    {"id": "debt", "type": "MATRIX", "category": "Fundamental"},
+    {"id": "eps", "type": "MATRIX", "category": "Analyst"},
+    {"id": "sector", "type": "GROUP", "category": "Classifier"},
+    {"id": "industry", "type": "GROUP", "category": "Classifier"},
+    {"id": "subindustry", "type": "GROUP", "category": "Classifier"},
 ]
 FIELD_NAMES: List[str] = [f["id"] for f in FIELDS_FIXTURE]
+FIELD_CATEGORIES = sorted({f["category"] for f in FIELDS_FIXTURE})
 
 HYP_FIXTURE: Dict[str, Any] = {
     "statement": "Stocks with strong recent price momentum relative to their sector "
                  "continue to outperform over the next month",
     "rationale": "Underreaction to firm-specific news creates persistent momentum; "
                  "sector-relative framing strips out beta",
-    "expected_signal": "momentum",
-    "pillar": "momentum",
+    "expected_signal": "momentum", "pillar": "momentum",
     "key_fields": ["close", "returns", "volume"],
 }
-
-# Seed / parents for mutate & crossover — valid momentum/value expressions.
 SEED_EXPR = "group_neutralize(ts_rank(ts_delta(close, 5), 20), sector)"
-PARENT_A = "group_rank(ts_mean(returns, 20), industry)"          # momentum-ish
-PARENT_B = "rank(divide(revenue, cap))"                          # value-ish
+PARENT_A = "group_rank(ts_mean(returns, 20), industry)"
+PARENT_B = "rank(divide(revenue, cap))"
+GOOD_EXPRS = [SEED_EXPR, PARENT_A, PARENT_B, "rank(ts_zscore(close, 20))",
+              "group_zscore(ts_decay_linear(returns, 10), sector)"]
 
-# Failing expressions + their real error category — used by self_correct / r1b_retry.
-# Each targets a real FASTEXPR failure mode (hallucinated op, arity, GROUP-as-value, …).
+# Failing expressions + real error category — drives self_correct / r1b_retry and
+# PINS the validity screen (these MUST be judged invalid).
 BAD_EXPRS: List[Tuple[str, str, str]] = [
     ("neg_ts_rank(close, 20)", "hallucinated_operator",
      "Operator 'neg_ts_rank' does not exist; sign-flip with multiply(-1, ...)"),
@@ -93,54 +252,54 @@ BAD_EXPRS: List[Tuple[str, str, str]] = [
      "There is no vec_ts_* operator; reduce VECTOR first then ts_*"),
     ("rank(industry)", "group_as_value",
      "GROUP field 'industry' cannot be a value input to rank()"),
-    ("ts_mean(close)", "arity",
-     "ts_mean needs 2 inputs (x, d); got 1"),
+    ("ts_mean(close)", "arity", "ts_mean needs 2 inputs (x, d); got 1"),
 ]
 
-# Judge/consistency fixtures: (label, payload, expected_aligned)
 R5_C1_FIXTURES = [
-    ("aligned",
-     {"hyp": "Earnings surprise drives short-term price momentum",
-      "desc": "Signal captures post-earnings-announcement drift driven by earnings surprise momentum"},
-     True),
-    ("misaligned",
-     {"hyp": "Analyst-sentiment revisions predict reversal",
-      "desc": "Signal based on trading volume and realized volatility"},
-     False),
+    ("aligned", {"hyp": "Earnings surprise drives short-term price momentum",
+                 "desc": "Signal captures post-earnings-announcement drift driven by earnings surprise momentum"}, True),
+    ("misaligned", {"hyp": "Analyst-sentiment revisions predict reversal",
+                    "desc": "Signal based on trading volume and realized volatility"}, False),
+    ("aligned2", {"hyp": "Low-volatility stocks earn higher risk-adjusted returns",
+                  "desc": "Cross-sectional rank of inverse realized volatility captures the low-vol anomaly"}, True),
+    ("misaligned2", {"hyp": "Sector-relative value predicts mean reversion",
+                     "desc": "Signal ranks stocks by 5-day price momentum within sector"}, False),
 ]
 R5_C2_FIXTURES = [
-    ("aligned",
-     {"desc": "Rank stocks cross-sectionally by 20-day price momentum",
-      "expr": "rank(ts_delta(close, 20))", "ops": ["rank", "ts_delta"]},
-     True),
-    ("misaligned",
-     {"desc": "Mean-revert on abnormal trading volume",
-      "expr": "ts_rank(close, 60)", "ops": ["ts_rank"]},
-     False),
+    ("aligned", {"desc": "Rank stocks cross-sectionally by 20-day price momentum",
+                 "expr": "rank(ts_delta(close, 20))", "ops": ["rank", "ts_delta"]}, True),
+    ("misaligned", {"desc": "Mean-revert on abnormal trading volume",
+                    "expr": "ts_rank(close, 60)", "ops": ["ts_rank"]}, False),
+    ("aligned2", {"desc": "Sector-neutral value rank using earnings yield",
+                  "expr": "group_rank(divide(eps, close), sector)", "ops": ["group_rank", "divide"]}, True),
+    ("misaligned2", {"desc": "Capture short-term reversal in returns",
+                     "expr": "ts_mean(volume, 20)", "ops": ["ts_mean"]}, False),
 ]
-# (label, kwargs for graph.attribution._build_user_prompt, expected_attribution)
 ATTRIBUTION_FIXTURES = [
     ("implementation",
      dict(hypothesis_statement="Sector-relative price momentum predicts next-month returns",
           alpha_count=5, pass_count=0, syntax_fail=3, simulate_fail=2, quality_fail=0,
           samples=["'neg_ts_rank(close,20)' -> SYNTAX_FAIL (no operator neg_ts_rank)",
                    "'vec_ts_rank(returns,10)' -> SYNTAX_FAIL (no vec_ts_*)",
-                   "'ts_regression(close,volume)' -> SIMULATE_FAIL (arity 2 vs 3)"]),
-     "implementation"),
+                   "'ts_regression(close,volume)' -> SIMULATE_FAIL (arity 2 vs 3)"]), "implementation"),
     ("hypothesis",
      dict(hypothesis_statement="A lottery-style random field predicts cross-sectional returns",
           alpha_count=5, pass_count=0, syntax_fail=0, simulate_fail=0, quality_fail=5,
           samples=["'rank(ts_mean(returns,20))' -> QUALITY_FAIL (sharpe=0.10)",
-                   "'group_rank(ts_delta(close,5),sector)' -> QUALITY_FAIL (sharpe=-0.20)"]),
-     "hypothesis"),
+                   "'group_rank(ts_delta(close,5),sector)' -> QUALITY_FAIL (sharpe=-0.20)"]), "hypothesis"),
 ]
 
-PILLARS = {"momentum", "value", "quality", "volatility", "sentiment", "other"}
+# distill_context fixture (multi-category so grounding discriminates)
+DISTILL_FIXTURE = dict(
+    dataset_id="pv1", description="US equity price-volume and fundamental dataset",
+    category="Price Volume", success_patterns="- ts_rank momentum on close\n- group_neutralize by sector",
+    field_categories="\n".join(f"- {c}" for c in FIELD_CATEGORIES),
+)
 
 
-# ---------------------------------------------------------------------------
-# JSON parsing (markdown-fence tolerant — mirrors benchmark_llm_alpha_quality)
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# JSON parsing + expr extraction (markdown-fence tolerant)
+# ===========================================================================
 def _parse_json(content: str) -> Optional[Any]:
     c = (content or "").strip()
     if c.startswith("```"):
@@ -156,7 +315,6 @@ def _parse_json(content: str) -> Optional[Any]:
 
 
 def _extract_exprs(data: Any, keys=("alphas", "expressions", "variants", "offspring")) -> List[str]:
-    """Pull a list of expression strings out of varied node output schemas."""
     if data is None:
         return []
     seq = None
@@ -168,8 +326,6 @@ def _extract_exprs(data: Any, keys=("alphas", "expressions", "variants", "offspr
                 seq = data[k]
                 break
     if seq is None:
-        # Single-object outputs: r1b_retry returns top-level {"fixed_expression"};
-        # self_correct nests it under {"fix": {"fixed_expression": ...}}.
         if isinstance(data, dict):
             top = data.get("fixed_expression") or data.get("expression")
             if not top and isinstance(data.get("fix"), dict):
@@ -188,68 +344,152 @@ def _extract_exprs(data: Any, keys=("alphas", "expressions", "variants", "offspr
     return [e for e in out if e]
 
 
-# ---------------------------------------------------------------------------
-# Shared offline scorers
-# ---------------------------------------------------------------------------
-def _score_expressions(exprs: List[str], known_ops) -> Dict[str, float]:
-    """valid_rate × p_pass × (0.5+0.5·diversity) — same composite as the
-    end-to-end bench, applied to whatever a node produced."""
-    from backend.alpha_semantic_validator import validate_alpha_semantically
-    from backend.agents.services.pre_simulate_filter import predict_pass_probability
-    from backend.knowledge_extraction import expression_to_skeleton
+# ===========================================================================
+# Validity SCREEN — real ops (reject_unknown_operators) + arity (parse the
+# operator `definition` string; param_count is 0 for all live ops) + group-as-value
+# (typed fields). A SCREEN that catches a broken model, NOT a quality ranker.
+# ===========================================================================
+def build_arity_map(operators: List[Dict]) -> Dict[str, Tuple[int, int]]:
+    """op_name -> (min_required, max_allowed) parsed from the definition string,
+    e.g. 'ts_regression(y, x, d, lag = 0, rettype = 0)' -> (3, 5);
+    'ts_mean(x, d)' -> (2, 2); 'rank(x, rate=2)' -> (1, 2)."""
+    arity: Dict[str, Tuple[int, int]] = {}
+    for op in operators or []:
+        name = (op.get("name") or "").strip().lower()
+        defn = op.get("definition") or ""
+        if not name or "(" not in defn:
+            continue
+        inside = defn[defn.find("(") + 1: defn.rfind(")")] if ")" in defn else defn[defn.find("(") + 1:]
+        params = [p for p in _split_top_level(inside) if p.strip()]
+        if not params:
+            arity[name] = (0, 0)
+            continue
+        required = sum(1 for p in params if "=" not in p)
+        arity[name] = (required, len(params))
+    return arity
 
-    n = len(exprs)
-    if n == 0:
-        return {"n": 0, "valid_rate": 0.0, "p_pass": 0.0, "diversity": 0.0, "score": 0.0}
 
-    valid = 0
-    for e in exprs:
-        try:
-            if validate_alpha_semantically(e, fields=[], operators=list(known_ops), strict=False).get("valid"):
-                valid += 1
-        except Exception:  # noqa: BLE001
-            pass
-    valid_rate = valid / n
+def _split_top_level(s: str) -> List[str]:
+    out, depth, cur = [], 0, []
+    for ch in s:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        out.append("".join(cur))
+    return out
+
+
+_CALL_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+
+def _arity_violations(expr: str, arity: Dict[str, Tuple[int, int]]) -> bool:
+    """True if any operator call in expr has an out-of-window arg count."""
+    for m in _CALL_RE.finditer(expr):
+        name = m.group(1).lower()
+        win = arity.get(name)
+        if not win:
+            continue  # unknown op handled by the semantic validator, not here
+        open_idx = m.end() - 1
+        depth, j = 0, open_idx
+        while j < len(expr):
+            if expr[j] in "([{":
+                depth += 1
+            elif expr[j] in ")]}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        inner = expr[open_idx + 1:j]
+        nargs = 0 if not inner.strip() else len([p for p in _split_top_level(inner) if p.strip()])
+        lo, hi = win
+        if nargs < lo or nargs > hi:
+            return True
+    return False
+
+
+def expr_usable(expr: str, validator, arity: Dict[str, Tuple[int, int]]) -> bool:
+    """The validity screen: semantic-valid (real ops + group-as-value, hard) AND
+    arity within window."""
     try:
-        probas = predict_pass_probability(exprs)
-        p_pass = statistics.mean(probas) if probas else 0.0
+        if not validator.validate(expr).valid:
+            return False
     except Exception:  # noqa: BLE001
-        p_pass = 0.0
-    skels = set()
-    for e in exprs:
-        try:
-            skels.add(expression_to_skeleton(e, max_depth=3))
-        except Exception:  # noqa: BLE001
-            skels.add(e)
-    diversity = len(skels) / n
-    score = valid_rate * p_pass * (0.5 + 0.5 * diversity)
-    return {"n": n, "valid_rate": round(valid_rate, 3), "p_pass": round(p_pass, 3),
-            "diversity": round(diversity, 3), "score": round(score, 4)}
+        return False
+    return not _arity_violations(expr, arity)
 
 
 # ===========================================================================
-# Node bench definitions — each returns a list of (system, user) prompts to
-# run, plus a scorer over the parsed outputs.
+# Diagnostic-only (NOT in ranking): p_pass + skeleton diversity
+# ===========================================================================
+def _diag_p_pass(exprs: List[str]) -> float:
+    try:
+        from backend.agents.services.pre_simulate_filter import predict_pass_probability
+        probas = predict_pass_probability(exprs)
+        return round(statistics.mean(probas), 3) if probas else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _diag_diversity(exprs: List[str]) -> float:
+    try:
+        from backend.knowledge_extraction import expression_to_skeleton
+        skels = set()
+        for e in exprs:
+            try:
+                skels.add(expression_to_skeleton(e, max_depth=3))
+            except Exception:  # noqa: BLE001
+                skels.add(e)
+        return round(len(skels) / len(exprs), 3) if exprs else 0.0
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+# ===========================================================================
+# NodeBench — per-node real prompt + production max_tokens + usability scorer
 # ===========================================================================
 class NodeBench:
     def __init__(self, node_key: str, kind: str,
                  build_calls: Callable[[], List[Tuple[str, str]]],
-                 score: Callable[[List[Any]], Dict[str, float]],
-                 temperature: float = TEMPERATURE, repeats: int = 1,
-                 max_tokens: int = 4096):
+                 usability: Callable[[List[Any], "ScreenCtx"], Dict[str, float]],
+                 max_tokens: int, temperature: float = TEMPERATURE,
+                 repeats: int = 1, runs: int = 2):
         self.node_key = node_key
-        self.kind = kind                 # 'expr' | 'struct' | 'consistency'
-        self.build_calls = build_calls   # () -> [(system,user), ...] (one per fixture)
-        self.score = score               # (list of parsed outputs) -> metrics dict
+        self.kind = kind            # 'expr' | 'struct' | 'judge'
+        self.build_calls = build_calls
+        self.usability = usability
+        self.max_tokens = max_tokens
         self.temperature = temperature
-        self.repeats = repeats           # extra repeats per call (consistency nodes)
-        self.max_tokens = max_tokens     # per-node output budget (code_gen needs ~6k)
+        self.repeats = repeats
+        self.runs = runs
 
 
-def _build_registry(known_ops) -> Dict[str, NodeBench]:
+class ScreenCtx:
+    def __init__(self, validator, arity):
+        self.validator = validator
+        self.arity = arity
+
+
+def _expr_usability(exprs: List[str], ctx: ScreenCtx) -> Dict[str, float]:
+    n = len(exprs)
+    if n == 0:
+        return {"n": 0, "validity_rate": None, "p_pass_diag": None, "diversity_diag": None}
+    usable = sum(1 for e in exprs if expr_usable(e, ctx.validator, ctx.arity))
+    return {"n": n, "validity_rate": round(usable / n, 3),
+            "p_pass_diag": _diag_p_pass(exprs), "diversity_diag": _diag_diversity(exprs)}
+
+
+def build_registry(known_ops, operators) -> Dict[str, NodeBench]:
     from backend.agents.prompts.base import PromptContext
     from backend.agents.prompts.generation import ALPHA_GENERATION_SYSTEM, build_alpha_generation_prompt
-    from backend.agents.prompts.hypothesis import HYPOTHESIS_SYSTEM, build_hypothesis_prompt
+    from backend.agents.prompts.hypothesis import HYPOTHESIS_SYSTEM, build_hypothesis_prompt, DISTILL_SYSTEM
+    from backend.agents.prompts.legacy import DISTILL_USER
     from backend.agents.prompts.validation import SELF_CORRECT_SYSTEM, build_self_correct_prompt
     from backend.agents.prompts.r1b_retry import build_r1b_retry_prompt
     from backend.agents.prompts.r1b_mutate import build_r1b_mutate_prompt
@@ -257,114 +497,92 @@ def _build_registry(known_ops) -> Dict[str, NodeBench]:
         R5_C1_SYSTEM, R5_C2_SYSTEM, build_r5_c1_prompt, build_r5_c2_prompt)
     from backend.agents.llm_mutate_alpha import MUTATE_SYSTEM, build_mutate_prompt
     from backend.agents.llm_crossover_alpha import CROSSOVER_SYSTEM, build_crossover_prompt
+    from backend.config import settings
 
-    operators = _OPERATORS_CACHE  # populated in main()
+    hyp_mt = getattr(settings, "HYPOTHESIS_MAX_TOKENS", 6000)
+    cg_per = getattr(settings, "CODE_GEN_MAX_TOKENS_PER_ALPHA", 512)
+    cg_ceil = getattr(settings, "CODE_GEN_MAX_TOKENS_CEILING", 8000)
+    code_gen_mt = min(cg_ceil, max(4096, 1024 + cg_per * 5))  # production formula @ N=5
 
-    def ctx(num_alphas=10):
+    def ctx(num_alphas=5):
         return PromptContext(dataset_id="pv1", dataset_description="price-volume",
                              region="USA", universe="TOP3000",
-                             fields=FIELDS_FIXTURE, operators=operators,
-                             num_alphas=num_alphas)
+                             fields=FIELDS_FIXTURE, operators=operators, num_alphas=num_alphas)
 
     reg: Dict[str, NodeBench] = {}
 
     # --- expression-producing -------------------------------------------------
     reg["code_gen"] = NodeBench(
         "code_gen", "expr",
-        lambda: [(ALPHA_GENERATION_SYSTEM,
-                  build_alpha_generation_prompt(ctx(5), target_hypothesis=HYP_FIXTURE))],
-        lambda outs: _score_expressions(_extract_exprs(outs[0]), known_ops),
-        max_tokens=6000,   # 5 alphas × full schema (hypothesis/velocity/turnover/expr) is long
-    )
+        lambda: [(ALPHA_GENERATION_SYSTEM, build_alpha_generation_prompt(ctx(5), target_hypothesis=HYP_FIXTURE))],
+        lambda outs, c: _expr_usability(_extract_exprs(outs[0]), c),
+        max_tokens=code_gen_mt, runs=3)
 
     def _selfcorrect_calls():
-        calls = []
-        for bad, etype, emsg in BAD_EXPRS:
-            calls.append((SELF_CORRECT_SYSTEM, build_self_correct_prompt(
-                expression=bad, error_message=emsg, error_type=etype,
-                available_fields=FIELD_NAMES, operators=operators)))
-        return calls
+        return [(SELF_CORRECT_SYSTEM, build_self_correct_prompt(
+            expression=bad, error_message=emsg, error_type=etype,
+            available_fields=FIELD_NAMES, operators=operators)) for bad, etype, emsg in BAD_EXPRS]
 
-    def _fix_score(outs):
+    def _fix_usability(outs, c):
         fixed = [_extract_exprs(o)[0] for o in outs if _extract_exprs(o)]
-        m = _score_expressions(fixed, known_ops)
-        m["fix_rate"] = round(len(fixed) / max(1, len(BAD_EXPRS)), 3)  # did it return a fix at all
+        m = _expr_usability(fixed, c)
+        m["fix_rate"] = round(len(fixed) / max(1, len(BAD_EXPRS)), 3)
         return m
 
-    reg["self_correct"] = NodeBench("self_correct", "expr", _selfcorrect_calls, _fix_score,
-                                    max_tokens=1200)
+    reg["self_correct"] = NodeBench("self_correct", "expr", _selfcorrect_calls, _fix_usability,
+                                    max_tokens=1200, runs=3)
 
     def _r1b_retry_calls():
-        calls = []
-        for bad, etype, emsg in BAD_EXPRS:
-            calls.append(build_r1b_retry_prompt(
-                original_expression=bad, original_hypothesis=HYP_FIXTURE["statement"],
-                failure_metrics={"sharpe": 0.3, "fitness": 0.2, "turnover": 0.4},
-                r1a_evidence=[emsg], r5_c2_reason=emsg,
-                allowed_fields=FIELD_NAMES, operators=operators))
-        return calls
+        return [build_r1b_retry_prompt(
+            original_expression=bad, original_hypothesis=HYP_FIXTURE["statement"],
+            failure_metrics={"sharpe": 0.3, "fitness": 0.2, "turnover": 0.4},
+            r1a_evidence=[emsg], r5_c2_reason=emsg,
+            allowed_fields=FIELD_NAMES, operators=operators) for bad, etype, emsg in BAD_EXPRS]
 
-    reg["r1b_retry"] = NodeBench("r1b_retry", "expr", _r1b_retry_calls, _fix_score,
-                                 max_tokens=1200)
+    reg["r1b_retry"] = NodeBench("r1b_retry", "expr", _r1b_retry_calls, _fix_usability,
+                                 max_tokens=1200, runs=3)
 
     reg["llm_mutate_alpha"] = NodeBench(
         "llm_mutate_alpha", "expr",
-        lambda: [(MUTATE_SYSTEM, build_mutate_prompt(
-            seed_expression=SEED_EXPR, region="USA",
-            failure_context="", decay_context="", top_k=5))],
-        lambda outs: _score_expressions(
-            [e.replace("<SEED>", SEED_EXPR) for e in _extract_exprs(outs[0])], known_ops),
-        max_tokens=2048,
-    )
+        lambda: [(MUTATE_SYSTEM, build_mutate_prompt(seed_expression=SEED_EXPR, region="USA",
+                                                     failure_context="", decay_context="", top_k=5))],
+        lambda outs, c: _expr_usability([e.replace("<SEED>", SEED_EXPR) for e in _extract_exprs(outs[0])], c),
+        max_tokens=2048, runs=2)
 
     reg["llm_crossover_alpha"] = NodeBench(
         "llm_crossover_alpha", "expr",
         lambda: [(CROSSOVER_SYSTEM, build_crossover_prompt(
             PARENT_A, PARENT_B, parent_a_pillar="momentum", parent_b_pillar="value",
             parent_a_metrics={"sharpe": 1.4}, parent_b_metrics={"sharpe": 1.3}, top_k=3))],
-        lambda outs: _score_expressions(
-            [e.replace("<A>", PARENT_A).replace("<B>", PARENT_B)
-             for e in _extract_exprs(outs[0])], known_ops),
-        max_tokens=2048,
-    )
+        lambda outs, c: _expr_usability(
+            [e.replace("<A>", PARENT_A).replace("<B>", PARENT_B) for e in _extract_exprs(outs[0])], c),
+        max_tokens=2048, runs=2)
 
     # --- semi-structured ------------------------------------------------------
-    def _hyp_score(outs):
+    def _hyp_usability(outs, c):
         data = outs[0] or {}
         hyps = data.get("hypotheses") if isinstance(data, dict) else None
         hyps = hyps if isinstance(hyps, list) else []
         n = len(hyps)
         if n == 0:
-            return {"n": 0, "schema_ok": 0.0, "pillar_div": 0.0, "concise": 0.0, "score": 0.0}
-        ok = sum(1 for h in hyps if isinstance(h, dict)
-                 and h.get("statement") and h.get("pillar") and h.get("expected_signal"))
+            return {"n": 0, "schema_ok": None, "pillar_div_diag": None}
+        ok = sum(1 for h in hyps if isinstance(h, dict) and h.get("statement")
+                 and h.get("pillar") and h.get("expected_signal"))
         pillars = [h.get("pillar") for h in hyps if isinstance(h, dict) and h.get("pillar") in PILLARS]
-        pillar_div = len(set(pillars)) / n if n else 0.0
-        concise = sum(1 for h in hyps if isinstance(h, dict)
-                      and len(str(h.get("statement", ""))) <= 180) / n
-        schema_ok = ok / n
-        score = schema_ok * (0.5 + 0.5 * pillar_div) * (0.5 + 0.5 * concise)
-        return {"n": n, "schema_ok": round(schema_ok, 3), "pillar_div": round(pillar_div, 3),
-                "concise": round(concise, 3), "score": round(score, 4)}
+        return {"n": n, "schema_ok": round(ok / n, 3),
+                "pillar_div_diag": round(len(set(pillars)) / n, 3)}
 
-    reg["hypothesis"] = NodeBench(
-        "hypothesis", "struct",
-        lambda: [(HYPOTHESIS_SYSTEM, build_hypothesis_prompt(ctx(5)))],
-        _hyp_score,
-        max_tokens=5000,   # 5 hypotheses × full schema + analysis block
-    )
+    reg["hypothesis"] = NodeBench("hypothesis", "struct",
+                                  lambda: [(HYPOTHESIS_SYSTEM, build_hypothesis_prompt(ctx(5)))],
+                                  _hyp_usability, max_tokens=hyp_mt, runs=3)
 
-    def _r1b_mutate_score(outs):
+    def _r1b_mutate_score(outs, c):
         data = outs[0] or {}
         nh = data.get("new_hypothesis") if isinstance(data, dict) else None
         if not isinstance(nh, dict):
-            return {"n": 0, "pillar_keep": 0.0, "schema_ok": 0.0, "novel": 0.0, "score": 0.0}
-        pillar_keep = 1.0 if nh.get("pillar") == "momentum" else 0.0   # fixture pillar
-        schema_ok = 1.0 if (nh.get("statement") and nh.get("expected_signal")) else 0.0
-        novel = 1.0 if str(nh.get("statement", "")).strip().lower() != HYP_FIXTURE["statement"].lower() else 0.0
-        score = pillar_keep * schema_ok * (0.5 + 0.5 * novel)
-        return {"n": 1, "pillar_keep": pillar_keep, "schema_ok": schema_ok,
-                "novel": novel, "score": round(score, 4)}
+            return {"n": 0, "schema_ok": None}
+        ok = 1.0 if (nh.get("statement") and nh.get("expected_signal")) else 0.0
+        return {"n": 1, "schema_ok": ok}
 
     reg["r1b_mutate"] = NodeBench(
         "r1b_mutate", "struct",
@@ -372,66 +590,65 @@ def _build_registry(known_ops) -> Dict[str, NodeBench]:
             original_hypothesis=HYP_FIXTURE["statement"],
             original_alpha_outcomes=[{"expression": PARENT_A, "sharpe": 0.4, "fitness": 0.3}],
             r5_c1_reason="hypothesis too broad", pillar="momentum", region="USA")],
-        _r1b_mutate_score,
-        max_tokens=1536,
-    )
+        _r1b_mutate_score, max_tokens=1536, runs=2)
+
+    def _distill_usability(outs, c):
+        data = outs[0] or {}
+        if not isinstance(data, dict):
+            return {"n": 0, "schema_ok": None, "grounding": None, "count_ok": None}
+        concepts = data.get("selected_concepts")
+        if not isinstance(concepts, list) or not concepts:
+            return {"n": 0, "schema_ok": 0.0, "grounding": 0.0, "count_ok": 0.0}
+        schema_ok = 1.0 if (concepts and data.get("reasoning")) else 0.0
+        cats = {x.lower() for x in FIELD_CATEGORIES}
+        grounded = sum(1 for x in concepts if isinstance(x, str) and x.strip().lower() in cats)
+        grounding = round(grounded / len(concepts), 3)
+        count_ok = 1.0 if 3 <= len(concepts) <= 5 else 0.0
+        return {"n": len(concepts), "schema_ok": schema_ok, "grounding": grounding, "count_ok": count_ok}
+
+    reg["distill_context"] = NodeBench(
+        "distill_context", "struct",
+        lambda: [(DISTILL_SYSTEM, DISTILL_USER.format(**DISTILL_FIXTURE))],
+        _distill_usability, max_tokens=4096, runs=3)
 
     # --- judge / consistency --------------------------------------------------
-    def _verdict_score(fixtures_expected: List[bool]):
-        """Build a scorer over a flat list of parsed verdicts, grouped by fixture.
-        Each fixture is asked CONSISTENCY_REPEATS times consecutively."""
-        def _scorer(outs):
+    def _verdict_score(fixtures_expected: List[bool], key: str = "aligned"):
+        def _scorer(outs, c):
             k = CONSISTENCY_REPEATS
             groups = [outs[i * k:(i + 1) * k] for i in range(len(fixtures_expected))]
             correct, stable, schema = [], [], []
             for verdicts, expected in zip(groups, fixtures_expected):
-                aligned = []
+                vals = []
                 for v in verdicts:
-                    if isinstance(v, dict) and isinstance(v.get("aligned"), bool):
-                        aligned.append(v["aligned"])
-                        reason = str(v.get("reason", ""))
-                        schema.append(1.0 if (isinstance(v.get("confidence"), (int, float))
-                                              and 0 < len(reason) <= 220) else 0.0)
+                    if isinstance(v, dict) and isinstance(v.get(key), bool):
+                        vals.append(v[key]); schema.append(1.0)
                     else:
                         schema.append(0.0)
-                if aligned:
-                    mode, cnt = Counter(aligned).most_common(1)[0]
-                    stable.append(cnt / len(aligned))
-                    correct.append(1.0 if mode == expected else 0.0)
+                if vals:
+                    mode, cnt = Counter(vals).most_common(1)[0]
+                    stable.append(cnt / len(vals)); correct.append(1.0 if mode == expected else 0.0)
                 else:
                     stable.append(0.0); correct.append(0.0)
-            c = statistics.mean(correct) if correct else 0.0
-            s = statistics.mean(stable) if stable else 0.0
-            sc = statistics.mean(schema) if schema else 0.0
-            return {"n": len(outs), "correct": round(c, 3), "stability": round(s, 3),
-                    "schema_ok": round(sc, 3), "score": round(0.5 * c + 0.3 * s + 0.2 * sc, 4)}
+            return {"n": len(outs), "correct": round(statistics.mean(correct), 3) if correct else 0.0,
+                    "stability": round(statistics.mean(stable), 3) if stable else 0.0,
+                    "schema_ok": round(statistics.mean(schema), 3) if schema else 0.0}
         return _scorer
 
     reg["r5_alignment_c1"] = NodeBench(
-        "r5_alignment_c1", "consistency",
-        lambda: [(R5_C1_SYSTEM, build_r5_c1_prompt(fx["hyp"], fx["desc"]))
-                 for _, fx, _ in R5_C1_FIXTURES],
+        "r5_alignment_c1", "judge",
+        lambda: [(R5_C1_SYSTEM, build_r5_c1_prompt(fx["hyp"], fx["desc"])) for _, fx, _ in R5_C1_FIXTURES],
         _verdict_score([exp for _, _, exp in R5_C1_FIXTURES]),
-        temperature=JUDGE_TEMPERATURE, repeats=CONSISTENCY_REPEATS, max_tokens=600,
-    )
+        max_tokens=600, temperature=JUDGE_TEMPERATURE, repeats=CONSISTENCY_REPEATS, runs=1)
     reg["r5_alignment_c2"] = NodeBench(
-        "r5_alignment_c2", "consistency",
-        lambda: [(R5_C2_SYSTEM, build_r5_c2_prompt(fx["desc"], fx["expr"], fx["ops"]))
-                 for _, fx, _ in R5_C2_FIXTURES],
+        "r5_alignment_c2", "judge",
+        lambda: [(R5_C2_SYSTEM, build_r5_c2_prompt(fx["desc"], fx["expr"], fx["ops"])) for _, fx, _ in R5_C2_FIXTURES],
         _verdict_score([exp for _, _, exp in R5_C2_FIXTURES]),
-        temperature=JUDGE_TEMPERATURE, repeats=CONSISTENCY_REPEATS, max_tokens=600,
-    )
+        max_tokens=600, temperature=JUDGE_TEMPERATURE, repeats=CONSISTENCY_REPEATS, runs=1)
 
-    # attribution: real node_key="attribution" path is graph/attribution.py
-    # (short {attribution, confidence, reasoning} verdict). Guarded so a
-    # signature drift skips this node rather than killing the whole run.
     try:
         from backend.agents.graph.attribution import _SYSTEM as ATTR_SYSTEM, _build_user_prompt as _attr_user
 
-        def _attr_calls():
-            return [(ATTR_SYSTEM, _attr_user(**fx)) for _, fx, _ in ATTRIBUTION_FIXTURES]
-
-        def _attr_score(outs):
+        def _attr_score(outs, c):
             k = CONSISTENCY_REPEATS
             expected = [exp for _, _, exp in ATTRIBUTION_FIXTURES]
             groups = [outs[i * k:(i + 1) * k] for i in range(len(ATTRIBUTION_FIXTURES))]
@@ -447,194 +664,352 @@ def _build_registry(known_ops) -> Dict[str, NodeBench]:
                         schema.append(0.0)
                 if labels:
                     mode, cnt = Counter(labels).most_common(1)[0]
-                    stable.append(cnt / len(labels))
-                    correct.append(1.0 if mode == exp else 0.0)
+                    stable.append(cnt / len(labels)); correct.append(1.0 if mode == exp else 0.0)
                 else:
                     stable.append(0.0); correct.append(0.0)
-            c = statistics.mean(correct) if correct else 0.0
-            s = statistics.mean(stable) if stable else 0.0
-            sc = statistics.mean(schema) if schema else 0.0
-            return {"n": len(outs), "correct": round(c, 3), "stability": round(s, 3),
-                    "schema_ok": round(sc, 3), "score": round(0.5 * c + 0.3 * s + 0.2 * sc, 4)}
+            return {"n": len(outs), "correct": round(statistics.mean(correct), 3) if correct else 0.0,
+                    "stability": round(statistics.mean(stable), 3) if stable else 0.0,
+                    "schema_ok": round(statistics.mean(schema), 3) if schema else 0.0}
 
-        reg["attribution"] = NodeBench("attribution", "consistency", _attr_calls,
-                                       _attr_score, temperature=JUDGE_TEMPERATURE,
-                                       repeats=CONSISTENCY_REPEATS, max_tokens=800)
+        reg["attribution"] = NodeBench(
+            "attribution", "judge",
+            lambda: [(ATTR_SYSTEM, _attr_user(**fx)) for _, fx, _ in ATTRIBUTION_FIXTURES],
+            _attr_score, max_tokens=800, temperature=JUDGE_TEMPERATURE, repeats=CONSISTENCY_REPEATS, runs=1)
     except Exception as e:  # noqa: BLE001
-        print(f"[bench] attribution node skipped (builder import failed: {e})", flush=True)
+        print(f"[bench] attribution node skipped (import failed: {e})", flush=True)
 
     return reg
 
 
-_OPERATORS_CACHE: List[Dict] = []
+KIND_CANDIDATES = {"expr": EXPR_CANDIDATES, "struct": STRUCT_CANDIDATES, "judge": JUDGE_CANDIDATES}
 
 
-# ---------------------------------------------------------------------------
-# Runner
-# ---------------------------------------------------------------------------
-async def _run_node_for_model(svc, model: str, bench: NodeBench) -> Dict[str, Any]:
-    svc.model = model
-    if getattr(svc, "provider", "openai") == "anthropic":
-        svc.anthropic_model = model
-    else:
-        svc.openai_model = model
-
+# ===========================================================================
+# Runner (serial, quota-guarded)
+# ===========================================================================
+async def run_node_model(svc, model: str, bench: NodeBench, ctx: ScreenCtx,
+                         guard: QuotaGuard) -> Dict[str, Any]:
     try:
         base_calls = bench.build_calls()
     except Exception as e:  # noqa: BLE001
-        return {"model": model, "error": f"build_failed: {type(e).__name__}: {e}"[:160], "score": 0.0}
-
-    # expand each call by `repeats` (consistency nodes re-ask the same fixture)
+        return {"model": model, "error": f"build_failed: {type(e).__name__}: {e}"[:160]}
     calls: List[Tuple[str, str]] = []
     for c in base_calls:
         calls.extend([c] * bench.repeats)
 
     parsed: List[Any] = []
-    latencies, tokens, call_fail = [], 0, 0
+    lat, total_tok, comp_tok, reason_tok = [], 0, 0, 0
+    call_fail, truncated = 0, 0
     last_err = None
     for system, user in calls:
+        guard.check()
         t = time.time()
         try:
-            # Pass model/provider EXPLICITLY so call()'s per-node router is
-            # bypassed (resolve_model_for only kicks in when both are None). Else
-            # if ENABLE_PER_FUNCTION_LLM_ROUTING is ON in this process, every
-            # candidate would be silently benchmarked as the map's fixed model.
-            eff_provider = getattr(svc, "provider", "openai")
-            r = await svc.call(system, user, temperature=bench.temperature,
-                               json_mode=True, max_tokens=bench.max_tokens,
-                               node_key=bench.node_key, model=model, provider=eff_provider)
+            r = await svc.call(system, user, temperature=bench.temperature, json_mode=True,
+                               max_tokens=bench.max_tokens, node_key=bench.node_key,
+                               model=model, provider="openai")
         except Exception as e:  # noqa: BLE001
-            call_fail += 1; last_err = f"{type(e).__name__}: {e}"[:120]; parsed.append(None); continue
-        latencies.append(time.time() - t)
-        tokens += getattr(r, "tokens_used", 0) or 0
+            guard.record(0, str(e))
+            call_fail += 1; last_err = f"{type(e).__name__}: {e}"[:120]; parsed.append(None)
+            await asyncio.sleep(guard.sleep_s); continue
+        guard.record(getattr(r, "tokens_used", 0) or 0, getattr(r, "error", None))
+        lat.append(time.time() - t)
+        total_tok += getattr(r, "tokens_used", 0) or 0
+        comp_tok += getattr(r, "completion_tokens", 0) or 0
+        reason_tok += getattr(r, "reasoning_tokens", 0) or 0
+        if getattr(r, "truncated", False):
+            truncated += 1
         if not getattr(r, "success", False):
-            call_fail += 1; last_err = (getattr(r, "error", "") or "")[:120]; parsed.append(None); continue
+            call_fail += 1; last_err = (getattr(r, "error", "") or "")[:120]; parsed.append(None)
+            await asyncio.sleep(guard.sleep_s); continue
         parsed.append(_parse_json(r.content or ""))
+        await asyncio.sleep(guard.sleep_s)
 
+    n_calls = len(calls)
+    n_ok = sum(1 for p in parsed if p is not None)
     try:
-        metrics = bench.score(parsed)
+        usab = bench.usability(parsed, ctx)
     except Exception as e:  # noqa: BLE001
-        metrics = {"score": 0.0, "score_error": f"{type(e).__name__}: {e}"[:120]}
+        usab = {"usability_error": f"{type(e).__name__}: {e}"[:120]}
 
-    metrics.update({
-        "model": model, "calls": len(calls), "call_fail": call_fail, "last_err": last_err,
-        "avg_latency_s": round(statistics.mean(latencies), 1) if latencies else None,
-        "tokens": tokens,
-    })
-    return metrics
-
-
-def _agg(vals):
-    vals = [v for v in vals if v is not None]
-    if not vals:
-        return None, None
-    m = statistics.mean(vals)
-    s = statistics.stdev(vals) if len(vals) > 1 else 0.0
-    return round(m, 4), round(s, 4)
+    reasoning_share = round(reason_tok / comp_tok, 3) if comp_tok else 0.0
+    out = {
+        "model": model,
+        "reliability": round(1 - call_fail / n_calls, 3) if n_calls else 0.0,
+        "parse_rate": round(n_ok / max(1, n_calls - call_fail), 3) if (n_calls - call_fail) > 0 else 0.0,
+        "truncation_rate": round(truncated / n_calls, 3) if n_calls else 0.0,
+        "quota_tokens": round(total_tok / max(1, n_calls - call_fail), 1) if (n_calls - call_fail) > 0 else None,
+        "reasoning_share": reasoning_share,
+        "avg_latency_s": round(statistics.mean(lat), 1) if lat else None,
+        "calls": n_calls, "call_fail": call_fail, "last_err": last_err,
+    }
+    out.update(usab)
+    return out
 
 
-async def main(runs: int = RUNS_DEFAULT, models: Optional[List[str]] = None,
-               nodes: Optional[List[str]] = None) -> int:
-    global _OPERATORS_CACHE
-    from backend.agents.services.llm_service import LLMService, llm_circuits_clear_all
-    from backend.alpha_semantic_validator import load_operators_from_db
+async def main(argv=None) -> int:
+    import backend.config as cfg
+    from backend.agents.services.llm_service import LLMService
+    from backend.alpha_semantic_validator import AlphaSemanticValidator, load_operators_from_db
     from backend.database import AsyncSessionLocal
     from backend.tasks.mining_tasks import _get_operators
 
-    try:
-        # Clear ALL per-scope LLM circuits (2026-05-31): a candidate model's
-        # scope circuit left OPEN from a prior run would fast-fail it here.
-        n = llm_circuits_clear_all(reason="per_node_bench_start")
-        print(f"[bench] LLM circuits cleared ({n})", flush=True)
-    except Exception as e:  # noqa: BLE001
-        print(f"[bench] circuit clear failed: {e}", flush=True)
+    p = argparse.ArgumentParser()
+    p.add_argument("--verify-catalog", action="store_true", help="only probe which catalog models are reachable")
+    p.add_argument("--smoke", action="store_true", help="1 model × 1 node, runs=1, then estimate + stop")
+    p.add_argument("--i-understand-quota", action="store_true",
+                   help="REQUIRED for a full run — acknowledges shared production-quota burn")
+    p.add_argument("--reset-circuits", action="store_true",
+                   help="clear the shared Redis LLM circuits at start (DANGER: affects production)")
+    p.add_argument("--nodes", type=str, default=None, help="comma node_key subset")
+    p.add_argument("--max-calls", type=int, default=4000)
+    p.add_argument("--max-tokens-budget", type=int, default=25_000_000)
+    p.add_argument("--sleep", type=float, default=0.4, help="inter-call sleep (QPS guard)")
+    args = p.parse_args(argv)
 
-    models = models or MODELS
-    known_ops = await load_operators_from_db()
-    async with AsyncSessionLocal() as db:
-        _OPERATORS_CACHE = await _get_operators(db)
-    print(f"loaded {len(known_ops)} known ops, {len(_OPERATORS_CACHE)} operator defs | "
-          f"runs={runs} | models={models}", flush=True)
-
-    registry = _build_registry(known_ops)
-    node_keys = nodes or list(registry.keys())
-    node_keys = [n for n in node_keys if n in registry]
-    print(f"benchmarking nodes: {node_keys}\n", flush=True)
+    if args.reset_circuits:
+        try:
+            from backend.agents.services.llm_service import llm_circuits_clear_all
+            print(f"[bench] WARNING reset shared circuits ({llm_circuits_clear_all(reason='bench')})", flush=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[bench] circuit reset failed: {e}", flush=True)
 
     svc = LLMService(provider="openai")
-    await svc._ensure_credentials_loaded()
-    svc_anthropic = None
+    base_url = await point_at_coding_plan(svc)
+    print(f"[bench] repointed → {base_url}", flush=True)
 
-    def _pick(m):
-        nonlocal svc_anthropic
-        if m.startswith("claude-"):
-            if svc_anthropic is None:
-                svc_anthropic = LLMService(provider="anthropic")
-            return svc_anthropic
-        return svc
+    live_map = await load_live_map()
 
-    # results[node][model] = list of per-run metric dicts
-    results: Dict[str, Dict[str, List[Dict]]] = {nk: {m: [] for m in models} for nk in node_keys}
+    # ---- catalog verification (always) ----
+    cat = await probe_catalog(svc, CATALOG)
+    print(f"[bench] catalog method={cat['method']} reachable={cat['reachable']} unreachable={cat['unreachable']}", flush=True)
+    # incumbent reachability — flags the qwen3.6-flash live-routing problem
+    incumbents = {nk: incumbent_for(nk, live_map) for nk in
+                  ["code_gen", "hypothesis", "self_correct", "r1b_retry", "r5_alignment_c1",
+                   "llm_mutate_alpha", "llm_crossover_alpha", "r1b_mutate", "r5_alignment_c2",
+                   "attribution", "distill_context", "__default__"]}
+    incumbent_unreachable = {}
+    for nk, m in incumbents.items():
+        if m and m not in cat["reachable"]:
+            reachable_now = await _probe_one(svc, m)
+            if not reachable_now:
+                incumbent_unreachable[nk] = m
+    if incumbent_unreachable:
+        print(f"[bench] ⚠ BROKEN INCUMBENTS (model not on Coding Plan): {incumbent_unreachable}", flush=True)
+    # config drift
+    stale_avail = [m for m in cfg._LLM_AVAILABLE_MODELS_CACHE if m not in CATALOG]
+    catalog_report = {"endpoint": base_url, **cat, "incumbents": incumbents,
+                      "incumbent_unreachable": incumbent_unreachable,
+                      "config_LLM_AVAILABLE_MODELS_stale": stale_avail}
 
-    for run_i in range(runs):
-        print(f"===== RUN {run_i + 1}/{runs} @ {time.strftime('%H:%M:%S')} =====", flush=True)
+    if args.verify_catalog:
+        out = Path(__file__).resolve().parent.parent / "docs" / f"coding_plan_catalog_{date.today()}.json"
+        out.write_text(json.dumps(catalog_report, indent=2, default=str), encoding="utf-8")
+        print(json.dumps(catalog_report, indent=2, default=str))
+        print(f"\nwrote {out}")
+        return 0
+
+    # ---- screen setup ----
+    known_ops = await load_operators_from_db()
+    async with AsyncSessionLocal() as db:
+        operators = await _get_operators(db)
+    arity = build_arity_map(operators)
+    validator = AlphaSemanticValidator(fields=FIELDS_FIXTURE, operators=list(known_ops),
+                                       strict_field_check=False, strict_type_check=False,
+                                       reject_unknown_operators=True)
+    screen = ScreenCtx(validator, arity)
+    # PIN: the validity screen must reject every BAD_EXPR and accept the good ones.
+    _assert_screen(screen)
+    print(f"[bench] validity screen PINNED (BAD_EXPRS rejected, GOOD accepted) | {len(arity)} arity ops", flush=True)
+
+    registry = build_registry(known_ops, operators)
+    node_keys = [n.strip() for n in args.nodes.split(",")] if args.nodes else list(registry.keys())
+    node_keys = [n for n in node_keys if n in registry]
+
+    guard = QuotaGuard(max_calls=args.max_calls, max_tokens=args.max_tokens_budget, sleep_s=args.sleep)
+
+    if args.smoke:
+        nk = node_keys[0]
+        bench = registry[nk]
+        cand = (incumbents.get(nk) or KIND_CANDIDATES[bench.kind][0])
+        print(f"[bench] SMOKE {nk} × {cand} runs=1 (max_tokens={bench.max_tokens})", flush=True)
+        res = await run_node_model(svc, cand, bench, screen, guard)
+        print(json.dumps(res, indent=2, default=str))
+        per_call = guard.tokens / max(1, guard.calls)
+        est = _estimate(registry, node_keys, incumbents, per_call)
+        print(f"\n[bench] smoke used {guard.calls} calls / {guard.tokens} tokens "
+              f"(~{per_call:.0f} tok/call). FULL-RUN ESTIMATE: ~{est['calls']} calls / "
+              f"~{est['tokens']:,} tokens. Re-run with --i-understand-quota to proceed.", flush=True)
+        return 0
+
+    if not args.i_understand_quota:
+        print("[bench] REFUSING full run without --i-understand-quota (shared production quota). "
+              "Pause mining or use a separate key, then re-run with the flag. Try --smoke first.", flush=True)
+        return 2
+
+    # ---- full screen ----
+    results: Dict[str, Dict[str, List[Dict]]] = {}
+    halted = None
+    try:
         for nk in node_keys:
             bench = registry[nk]
-            for m in models:
-                res = await _run_node_for_model(_pick(m), m, bench)
-                results[nk][m].append(res)
-                print(f"  [{nk:<20}] {m:<22} score={res.get('score')} "
-                      f"lat={res.get('avg_latency_s')} tok={res.get('tokens')} "
-                      f"fail={res.get('call_fail')} err={res.get('last_err')}", flush=True)
+            cands = list(KIND_CANDIDATES[bench.kind])
+            inc = incumbents.get(nk)
+            if inc and inc not in cands:
+                cands.append(inc)
+            cands = [m for m in cands if (m in cat["reachable"]) or (m == inc)]
+            results[nk] = {m: [] for m in cands}
+            for run_i in range(bench.runs):
+                for m in cands:
+                    res = await run_node_model(svc, m, bench, screen, guard)
+                    results[nk][m].append(res)
+                    print(f"  [{nk:<18}] run{run_i+1} {m:<22} valid={res.get('validity_rate')} "
+                          f"parse={res.get('parse_rate')} trunc={res.get('truncation_rate')} "
+                          f"qtok={res.get('quota_tokens')} rshare={res.get('reasoning_share')} "
+                          f"rel={res.get('reliability')} lat={res.get('avg_latency_s')}", flush=True)
+    except QuotaHalt as e:
+        halted = str(e)
+        print(f"[bench] {halted} — stopping, writing partial report", flush=True)
 
-    # aggregate + rank per node
-    report: Dict[str, Any] = {"runs": runs, "models": models, "nodes": {}}
-    recommendation: Dict[str, str] = {}
-    for nk in node_keys:
-        rows = []
-        for m in models:
-            runs_list = results[nk][m]
-            score_mean, score_std = _agg([r.get("score", 0) for r in runs_list])
-            lat_mean, _ = _agg([r.get("avg_latency_s") for r in runs_list])
-            tok_mean, _ = _agg([r.get("tokens") for r in runs_list])
-            rows.append({"model": m, "score_mean": score_mean, "score_std": score_std,
-                         "avg_latency_s": lat_mean, "tokens": tok_mean,
-                         "sample": runs_list[-1] if runs_list else {}})
-        rows.sort(key=lambda r: (r["score_mean"] or 0), reverse=True)
-        report["nodes"][nk] = {"kind": registry[nk].kind, "ranking": rows}
-        if rows and (rows[0]["score_mean"] or 0) > 0:
-            recommendation[nk] = rows[0]["model"]
-
-    report["recommendation_LLM_FUNCTION_MODEL_MAP"] = {
-        nk: {"model": m, "provider": "openai"} for nk, m in recommendation.items()
-    }
-
-    tag = f"x{runs}" + ("" if len(models) == len(MODELS) else f"_{len(models)}m")
+    report = synthesize(results, registry, incumbents, catalog_report, halted, guard)
+    tag = "partial" if halted else "full"
     out = Path(__file__).resolve().parent.parent / "docs" / f"llm_per_node_benchmark_{date.today()}_{tag}.json"
     out.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
-
-    # print ranked tables
-    for nk in node_keys:
-        print(f"\n=== {nk} ({registry[nk].kind}) — ranked by score (mean±std over {runs} runs) ===")
-        print(f"{'model':<24}{'score':>16}{'lat_s':>8}{'tokens':>9}")
-        for r in report["nodes"][nk]["ranking"]:
-            sc = f"{r['score_mean']}±{r['score_std']}"
-            print(f"{r['model']:<24}{sc:>16}{str(r['avg_latency_s']):>8}{str(r['tokens']):>9}")
-    print("\n=== RECOMMENDED LLM_FUNCTION_MODEL_MAP (paste into routing plan) ===")
-    print(json.dumps(report["recommendation_LLM_FUNCTION_MODEL_MAP"], indent=2))
-    print(f"\nwrote {out}")
+    _print_report(report)
+    print(f"\nwrote {out}  (calls={guard.calls} tokens={guard.tokens})")
     return 0
 
 
+def _assert_screen(screen: ScreenCtx):
+    # HARD: every BAD_EXPR must be rejected (the plan's pinned invariant).
+    for bad, _, _ in BAD_EXPRS:
+        assert not expr_usable(bad, screen.validator, screen.arity), f"validity screen FAILED to reject {bad!r}"
+    # SOFT: GOOD acceptance guards against an over-aggressive screen, but a GOOD
+    # op merely missing from the live registry must not abort the whole run.
+    rejected_good = [g for g in GOOD_EXPRS if not expr_usable(g, screen.validator, screen.arity)]
+    if rejected_good:
+        print(f"[bench] WARN validity screen rejected GOOD exprs (op missing from registry?): {rejected_good}", flush=True)
+
+
+def _estimate(registry, node_keys, incumbents, per_call):
+    calls = 0
+    for nk in node_keys:
+        b = registry[nk]
+        cands = set(KIND_CANDIDATES[b.kind]) | ({incumbents.get(nk)} if incumbents.get(nk) else set())
+        calls += b.runs * len(cands) * len(b.build_calls()) * b.repeats
+    return {"calls": calls, "tokens": int(calls * per_call)}
+
+
+# ===========================================================================
+# Decision (Phase E) — default KEEP INCUMBENT; flag only forced/genuine candidates
+# ===========================================================================
+def _agg(rows: List[Dict], key: str):
+    vals = [r.get(key) for r in rows if isinstance(r.get(key), (int, float))]
+    if not vals:
+        return None
+    return round(statistics.mean(vals), 3)
+
+
+def synthesize(results, registry, incumbents, catalog_report, halted, guard) -> Dict[str, Any]:
+    nodes_out = {}
+    overrides_payloads = {}
+    for nk, by_model in results.items():
+        kind = registry[nk].kind
+        inc = incumbents.get(nk)
+        scorecard = {}
+        for m, rows in by_model.items():
+            scorecard[m] = {
+                "reliability": _agg(rows, "reliability"),
+                "validity_rate": _agg(rows, "validity_rate"),
+                "parse_rate": _agg(rows, "parse_rate"),
+                "schema_ok": _agg(rows, "schema_ok"),
+                "grounding": _agg(rows, "grounding"),
+                "correct": _agg(rows, "correct"),
+                "stability": _agg(rows, "stability"),
+                "truncation_rate": _agg(rows, "truncation_rate"),
+                "quota_tokens": _agg(rows, "quota_tokens"),
+                "reasoning_share": _agg(rows, "reasoning_share"),
+                "avg_latency_s": _agg(rows, "avg_latency_s"),
+                "p_pass_diag": _agg(rows, "p_pass_diag"),
+                "diversity_diag": _agg(rows, "diversity_diag"),
+            }
+        decision, rationale, challenger = _decide(nk, kind, inc, scorecard, catalog_report)
+        nodes_out[nk] = {"kind": kind, "incumbent": inc, "decision": decision,
+                         "rationale": rationale, "challenger": challenger, "scorecard": scorecard}
+        if decision in ("FORCE_SWITCH", "ONLINE_AB") and challenger and challenger != inc:
+            overrides_payloads[nk] = {nk: {"model": challenger, "provider_ref": CODING_PLAN_PROVIDER}}
+
+    return {"date": str(date.today()), "halted": halted,
+            "budget_used": {"calls": guard.calls, "tokens": guard.tokens},
+            "catalog": catalog_report, "nodes": nodes_out,
+            "online_ab_payloads": overrides_payloads,
+            "note": "Offline screens usability+cost only. Quality decisions → online A/B "
+                    "(scripts/phase_c_llm_routing_ab.py). Apply map via LLMRoutingConsole audit path, not DB."}
+
+
+def _usable(sc: Dict[str, Any]) -> bool:
+    """A model is 'usable' on a node when it parses, doesn't truncate badly, and
+    (for expr nodes) clears the validity screen."""
+    if (sc.get("reliability") or 0) < 0.8:
+        return False
+    if (sc.get("truncation_rate") or 0) > 0.2:
+        return False
+    if sc.get("validity_rate") is not None and (sc.get("validity_rate") or 0) < 0.8:
+        return False
+    if sc.get("parse_rate") is not None and (sc.get("parse_rate") or 0) < 0.8:
+        return False
+    return True
+
+
+def _decide(nk, kind, inc, scorecard, catalog_report):
+    # ① forced switch: incumbent unreachable / broken on the Coding Plan
+    if nk in catalog_report.get("incumbent_unreachable", {}):
+        usable_alts = [m for m, sc in scorecard.items() if m != inc and _usable(sc)]
+        usable_alts.sort(key=lambda m: scorecard[m].get("quota_tokens") or 1e9)
+        pick = usable_alts[0] if usable_alts else None
+        return "FORCE_SWITCH", (f"incumbent {inc!r} not on Coding Plan catalog → must switch to a "
+                                f"reachable usable model"), pick
+    inc_sc = scorecard.get(inc)
+    if inc_sc is None:
+        return "REVIEW", f"incumbent {inc!r} not benchmarked here", None
+    # ② / ③ genuine online-A/B candidate: a usable challenger materially cheaper
+    inc_cost = inc_sc.get("quota_tokens") or 0
+    best = None
+    for m, sc in scorecard.items():
+        if m == inc or not _usable(sc):
+            continue
+        cost = sc.get("quota_tokens") or 0
+        if inc_cost and cost and cost <= 0.8 * inc_cost:  # >20% cheaper
+            if best is None or cost < (scorecard[best].get("quota_tokens") or 1e9):
+                best = m
+    if best:
+        reason = (f"usable challenger {best!r} is >20% cheaper in quota tokens "
+                  f"({scorecard[best].get('quota_tokens')} vs incumbent {inc_cost}); "
+                  f"reasoning_share inc={inc_sc.get('reasoning_share')} chal={scorecard[best].get('reasoning_share')}")
+        return "ONLINE_AB", reason, best
+    return "KEEP", f"incumbent {inc!r} usable; no usable challenger materially cheaper — keep (quality is online-settled)", None
+
+
+def _print_report(report):
+    print("\n=== PER-NODE SCREEN (usability+cost; quality → online A/B) ===")
+    for nk, nd in report["nodes"].items():
+        print(f"\n# {nk} [{nd['kind']}] incumbent={nd['incumbent']} → {nd['decision']}")
+        print(f"  {nd['rationale']}")
+        hdr = f"  {'model':<22}{'rel':>5}{'valid':>7}{'parse':>7}{'sok':>6}{'trunc':>7}{'qtok':>9}{'rshare':>8}{'lat':>7}"
+        print(hdr)
+        for m, sc in nd["scorecard"].items():
+            mark = "*" if m == nd["incumbent"] else (">" if m == nd["challenger"] else " ")
+            print(f" {mark}{m:<22}{_f(sc['reliability']):>5}{_f(sc['validity_rate']):>7}{_f(sc['parse_rate']):>7}"
+                  f"{_f(sc['schema_ok']):>6}{_f(sc['truncation_rate']):>7}{_f(sc['quota_tokens']):>9}"
+                  f"{_f(sc['reasoning_share']):>8}{_f(sc['avg_latency_s']):>7}")
+    if report["online_ab_payloads"]:
+        print("\n=== ONLINE A/B payloads (POST /ops/start-flat-session llm_overrides) ===")
+        print(json.dumps(report["online_ab_payloads"], indent=2))
+
+
+def _f(v):
+    return "-" if v is None else (f"{v:g}")
+
+
 if __name__ == "__main__":
-    import argparse
-    import sys
-    p = argparse.ArgumentParser()
-    p.add_argument("--runs", type=int, default=RUNS_DEFAULT)
-    p.add_argument("--models", type=str, default=None, help="comma-separated subset")
-    p.add_argument("--nodes", type=str, default=None,
-                   help="comma-separated node_key subset (default: all registered)")
-    args = p.parse_args()
-    _models = [m.strip() for m in args.models.split(",")] if args.models else None
-    _nodes = [n.strip() for n in args.nodes.split(",")] if args.nodes else None
-    sys.exit(asyncio.run(main(runs=args.runs, models=_models, nodes=_nodes)))
+    sys.exit(asyncio.run(main()))

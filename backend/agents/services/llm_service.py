@@ -454,6 +454,17 @@ class LLMResponse(BaseModel):
     parsed: Optional[Dict] = None
     model: str
     tokens_used: int = 0
+    # Token split + truncation (2026-06-05): tokens_used stays the flat total
+    # (prompt+completion, and on OpenAI-compat completion already INCLUDES
+    # reasoning) for back-compat. These expose the breakdown so the discarded-
+    # reasoning premium and truncation can be measured by the per-node LLM
+    # benchmark. Service-layer ONLY — deliberately NOT added to the append-only
+    # LLMResponseProtocol (to_protocol_response) or the test mocks.
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    reasoning_tokens: int = 0
+    finish_reason: Optional[str] = None
+    truncated: bool = False
     latency_ms: int = 0
     success: bool = True
     error: Optional[str] = None
@@ -941,6 +952,13 @@ class LLMService:
         parsed = None
         content = ""
         tokens_used = 0
+        # Per-call token split accumulators (2026-06-05). Accumulate with += in
+        # the parse-retry loop, EXACTLY like tokens_used, so a retried call's
+        # split stays consistent with the total (a divergent numerator/denominator
+        # would corrupt reasoning_share).
+        prompt_tokens = 0
+        completion_tokens = 0
+        reasoning_tokens = 0
         finish_reason: Optional[str] = None
 
         try:
@@ -1055,6 +1073,8 @@ class LLMService:
                     # reflects total cost.
                     u = resp.usage
                     tokens_used += (u.input_tokens or 0) + (u.output_tokens or 0)
+                    prompt_tokens += u.input_tokens or 0
+                    completion_tokens += u.output_tokens or 0
                     cache_read = getattr(u, "cache_read_input_tokens", 0) or 0
                     cache_create = getattr(u, "cache_creation_input_tokens", 0) or 0
                     if cache_read or cache_create:
@@ -1129,7 +1149,19 @@ class LLMService:
                         if reasoning_content:
                             extra = (extra + " | reasoning_content_present=True").strip()
                         raise ValueError(f"Empty content in LLM response ({extra})")
-                    tokens_used += response.usage.total_tokens if response.usage else 0
+                    if response.usage:
+                        _u = response.usage
+                        # getattr-defensive: some OpenAI-compatible gateways
+                        # return a partial usage object (only total_tokens).
+                        tokens_used += getattr(_u, "total_tokens", 0) or 0
+                        prompt_tokens += getattr(_u, "prompt_tokens", 0) or 0
+                        completion_tokens += getattr(_u, "completion_tokens", 0) or 0
+                        # DashScope / OpenAI-compat fold reasoning tokens INTO
+                        # completion_tokens; surface them so the discarded-
+                        # reasoning premium is measurable. Absent / None on
+                        # non-reasoning models (e.g. kimi) → 0.
+                        _ctd = getattr(_u, "completion_tokens_details", None)
+                        reasoning_tokens += (getattr(_ctd, "reasoning_tokens", 0) or 0) if _ctd else 0
 
                 # Parse JSON if requested; retry once on JSONDecodeError.
                 if not json_mode:
@@ -1193,6 +1225,8 @@ class LLMService:
                     provider=eff_provider,
                     effort=effort_active,
                     node_key=node_key,
+                    prompt_tokens=prompt_tokens or None,
+                    completion_tokens=completion_tokens or None,
                     tokens_total=tokens_used,
                     latency_ms=latency_ms,
                     success=success_final,
@@ -1207,6 +1241,11 @@ class LLMService:
                 parsed=parsed,
                 model=eff_model,
                 tokens_used=tokens_used,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                reasoning_tokens=reasoning_tokens,
+                finish_reason=finish_reason,
+                truncated=(finish_reason in ("length", "max_tokens")),
                 latency_ms=latency_ms,
                 success=success_final,
                 error=(f"JSON parse failed: {parse_error}" if parse_error else None),
