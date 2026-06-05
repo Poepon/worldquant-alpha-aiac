@@ -59,9 +59,9 @@ _THINKING_EFFORT_OVERRIDES_CACHE: Dict[str, str] = _load_thinking_overrides()
 def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
     """Load the per-functional-block (node_key) → {model, provider, ...} routing map.
 
-    Default is the per-node benchmark recommendation (2026-05-29 — code_gen/
-    self_correct/r1b_retry finalized at runs=3, others runs=1; see
-    docs/llm_per_node_benchmark_2026-05-29_FINAL.json).
+    Default mirrors the live all-kimi override (2026-06-05 redesigned per-node
+    benchmark + hypothesis serial A/B; see docs/llm_per_node_benchmark_2026-06-05_
+    full.json + docs/phase_c_hypothesis_ab_2026-06-05.json).
     This is only the STARTUP default — the ops console writes overrides into
     ``_flag_override_cache["LLM_FUNCTION_MODEL_MAP"]`` (a json feature-flag) which
     ``resolve_model_for`` consults FIRST. The whole map is consulted only when
@@ -82,24 +82,30 @@ def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
     # back to it. Mirroring live here + the __default__ catch-all (captures
     # unmapped node_keys AND untagged node_key=None calls) + the routing flag
     # defaulting ON (below) keeps every fallback path on a LIVE provider.
-    # NOTE: the per-model picks are constrained by the coding-plan menu, NOT the
-    # 2026-06-01 kimi-vs-reasoning A/B preference — that conclusion
-    # (reference_routing_reasoning_models_no_online_edge_2026_06_01) is moot once
-    # token-plan's kimi-k2.6 is no longer reachable. Secret keys stay in
-    # CredentialsService (credential:llm_provider_aliyun_coding_plan).
+    # NOTE: ALL nodes route to non-reasoning kimi-k2.5 (2026-06-05). The
+    # redesigned per-node usability+cost benchmark + a hypothesis serial A/B
+    # showed the reasoning model qwen3.6-plus costs 1.8–5.1× quota tokens
+    # (reasoning_share 0.79–0.97) for USABILITY-IDENTICAL output (parse/schema_ok/
+    # grounding/correct all 1.0) with no significant online edge — consistent with
+    # reference_routing_reasoning_models_no_online_edge_2026_06_01. kimi-k2.5 is
+    # the cheap, fast, online-validated workhorse, so it's also the __default__
+    # catch-all (unmapped node_keys + untagged node_key=None calls). Secret keys
+    # stay in CredentialsService (credential:llm_provider_aliyun_coding_plan).
     _CP = "aliyun_coding_plan"
+    _K = "kimi-k2.5"
     defaults: Dict[str, Dict[str, str]] = {
-        "hypothesis":          {"model": "qwen3.6-plus",  "provider_ref": _CP},
-        "code_gen":            {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "self_correct":        {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "r1b_retry":           {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "llm_mutate_alpha":    {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "llm_crossover_alpha": {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "r1b_mutate":          {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "r5_alignment_c1":     {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "r5_alignment_c2":     {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "attribution":         {"model": "kimi-k2.5",      "provider_ref": _CP},
-        "__default__":         {"model": "qwen3.6-plus",  "provider_ref": _CP},
+        "hypothesis":          {"model": _K, "provider_ref": _CP},
+        "code_gen":            {"model": _K, "provider_ref": _CP},
+        "self_correct":        {"model": _K, "provider_ref": _CP},
+        "r1b_retry":           {"model": _K, "provider_ref": _CP},
+        "llm_mutate_alpha":    {"model": _K, "provider_ref": _CP},
+        "llm_crossover_alpha": {"model": _K, "provider_ref": _CP},
+        "r1b_mutate":          {"model": _K, "provider_ref": _CP},
+        "r5_alignment_c1":     {"model": _K, "provider_ref": _CP},
+        "r5_alignment_c2":     {"model": _K, "provider_ref": _CP},
+        "attribution":         {"model": _K, "provider_ref": _CP},
+        "distill_context":     {"model": _K, "provider_ref": _CP},
+        "__default__":         {"model": _K, "provider_ref": _CP},
     }
     env_val = os.getenv("LLM_FUNCTION_MODEL_MAP")
     if not env_val:
