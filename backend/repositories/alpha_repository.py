@@ -344,7 +344,14 @@ class AlphaRepository(BaseRepository[Alpha]):
             )
             return []
 
-        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+        # date_created is the alpha's BRAIN backtest-creation time, stored
+        # naive-BEIJING (sync_tasks._parse_to_beijing: BRAIN-UTC +8h, tz stripped).
+        # The lookback cutoff must be in the SAME Beijing-naive convention — a
+        # naive-UTC utcnow() cutoff would skew this window's boundary by 8h.
+        # (Do NOT swap to created_at: that is the local-DB-insert time, a DIFFERENT
+        # thing — this query samples a cell by BRAIN-creation recency.)
+        beijing_now = datetime.utcnow() + timedelta(hours=8)
+        cutoff = beijing_now - timedelta(days=lookback_days)
 
         query = (
             select(metric_attr)

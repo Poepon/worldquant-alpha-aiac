@@ -80,6 +80,15 @@ class Alpha(SQLAlchemyBase):
     metrics = Column(JSONB, default={})
     
     # Dates
+    # TIMEZONE CONVENTION (footgun — see [[reference_alpha_dual_timezone]]):
+    # these three are naive-BEIJING, NOT UTC. date_created / date_submitted are the
+    # alpha's BRAIN backtest creation / submission times, converted BRAIN-UTC → +8h
+    # Beijing and tz-stripped by sync_tasks._parse_to_beijing; date_modified is a
+    # local datetime.now(). They are kept Beijing on purpose (the frontend displays
+    # them as local time) and are only ever used as presence flags (IS NULL),
+    # self-consistent ORDER BY, or display. For any UTC date math / "today" / daily-
+    # quota boundary use `created_at` (naive-UTC, server_default=func.now()) — NEVER
+    # cross-compare these Beijing columns against a naive-UTC value (8h skew).
     date_created = Column(DateTime)
     date_modified = Column(DateTime)
     date_submitted = Column(DateTime)
