@@ -16,9 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update, func
 
 from backend.services.base import BaseService
-from backend.repositories.task_repository import TaskRepository, ExperimentRunRepository
+from backend.repositories.task_repository import TaskRepository
 from backend.repositories.alpha_repository import AlphaRepository
-from backend.models import MiningTask, TraceStep, Alpha, ExperimentRun
+from backend.models import MiningTask, TraceStep, Alpha
 
 logger = logging.getLogger("services.task")
 
@@ -138,7 +138,6 @@ class TaskService(BaseService):
     def __init__(self, db: AsyncSession):
         super().__init__(db)
         self.task_repo = TaskRepository(db)
-        self.run_repo = ExperimentRunRepository(db)
         self.alpha_repo = AlphaRepository(db)
     
     # =========================================================================
@@ -276,66 +275,11 @@ class TaskService(BaseService):
     # Create Operations
     # =========================================================================
 
-    async def create_task(self, data: TaskCreateData) -> TaskSummary:
-        """Create a new mining task (post tier-system removal, 2026-05-18).
-
-        Args:
-            data: Task creation data
-
-        Returns:
-            Created TaskSummary
-        """
-        # Plan v5+ §F-5 50/50 A/B variant assignment.
-        config = dict(data.config or {})
-        if "hypothesis_centric_variant" not in config:
-            from backend.config import settings as _hge
-            level = int(_hge.HYPOTHESIS_CENTRIC_LEVEL or 0)
-            candidate = int(_hge.HYPOTHESIS_CENTRIC_CANDIDATE or 0)
-            if candidate > level:
-                import random
-                assigned = random.choice([level, candidate])
-                config["hypothesis_centric_variant"] = assigned
-                logger.info(
-                    f"[task_service] F-5 A/B variant assigned: {assigned} "
-                    f"(level={level} candidate={candidate})"
-                )
-
-        schedule = (data.schedule or "ONESHOT").upper()
-
-        task = MiningTask(
-            task_name=data.name,
-            region=data.region,
-            universe=data.universe,
-            dataset_strategy=data.dataset_strategy,
-            target_datasets=data.target_datasets,
-            daily_goal=data.daily_goal,
-            config=config,
-            status="PENDING",
-            schedule=schedule,
-        )
-
-        created = await self.task_repo.create(task)
-        await self.commit()
-
-        return self._to_summary(created)
     
     # =========================================================================
     # Lifecycle Operations
     # =========================================================================
     
-    async def start_task(self, task_id: int) -> Dict[str, Any]:
-        """ONESHOT task dispatch was retired in Phase 1c-delete.
-
-        The FLAT/ONESHOT ``run_mining_task`` Celery task no longer exists — all
-        mining now runs through the resident HG/S/E pool (fed by the scheduler
-        beat). Manual one-off task starts will be re-homed onto the pool in
-        Phase 1d (runs.py rework); until then this raises a clear error rather
-        than dispatching a deleted Celery task.
-        """
-        raise ValueError(
-            "ONESHOT task start was retired in Phase 1c-delete; mining now runs "
-            "through the HG/S/E pool (run_mining_task no longer exists)."
-        )
 
     async def intervene_task(
         self,
@@ -442,38 +386,6 @@ class TaskService(BaseService):
     # Run Operations
     # =========================================================================
     
-    async def list_task_runs(self, task_id: int) -> List[ExperimentRunInfo]:
-        """
-        Get all experiment runs for a task.
-        
-        Args:
-            task_id: Task ID
-            
-        Returns:
-            List of ExperimentRunInfo
-            
-        Raises:
-            ValueError if task not found
-        """
-        task = await self.task_repo.get_by_id(task_id)
-        if not task:
-            raise ValueError(f"Task {task_id} not found")
-        
-        result = await self.run_repo.get_by_task_id(task_id)
-        
-        return [
-            ExperimentRunInfo(
-                id=run.id,
-                task_id=run.task_id,
-                status=run.status,
-                trigger_source=run.trigger_source,
-                celery_task_id=run.celery_task_id,
-                started_at=run.started_at,
-                finished_at=run.finished_at,
-                error_message=run.error_message,
-            )
-            for run in result.items
-        ]
 
     # =========================================================================
     # Persistent Mining Service (flat sessions, post tier-system removal)

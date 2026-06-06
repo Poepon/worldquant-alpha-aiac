@@ -55,10 +55,10 @@ post-1c 已坏(调已删/neuter 端点):
 
 > **schedule / last_alpha_persisted_at 不在本次 DROP** —— 需先(a)把 last_alpha_persisted_at 心跳迁到 candidate_queue/新表 +(b)换 schedule 判别 + 前端去分支,作为 Phase 1d-2(单独窗口)。
 
-## 5. 开工前必决(产品决策,需用户拍板)
-1. **runs / experiment_runs**:选项 A 退役(简单,丢历史 run 视图)vs B 重写映射 hyp_intent(保 TaskDetail runs tab,工作量大)。**推荐 A**(池世界没有 per-run 概念;TaskDetail runs tab 在池下意义不大)。
-2. **task 创建/启动 UI**:池自治运行,手动建/启动任务已无意义。去整个 create 模态 + start 按钮(推荐)vs 留作弃用提示。
-3. **TaskDetail/TaskManagement 在池世界的定位**:还要不要 per-task 详情页?池任务都挂常驻 `__pool_resident__`,真实工作单元是 hyp_intent/candidate_queue。可能整个 task-management UI 该换成 pool-pipeline 视图(已有 `/ops/pool-pipeline`)。
+## 5. 产品必决 —— 已拍板 2026-06-06(全选清洁/激进路径)
+1. **runs / experiment_runs** → **A 退役**:删 routers/runs.py + run_service.py + ExperimentRunRepository + /tasks/{id}/runs;DROP experiment_runs 表。
+2. **task 创建/启动 UI** → **整个去掉**:删 create 模态 + start 按钮 + POST /tasks + /tasks/{id}/start + api.startTask/createTask。(「以 alpha 为蓝本优化」是独立 trigger,不动。)
+3. **Tasks 页定位** → **整体退役**:删 TaskManagement/TaskDetail;`/tasks` + `/tasks/:id` 重定向 `/ops/pool-pipeline`;AppSidebar 去 /tasks 菜单。实时挖掘看 /ops/pool-pipeline,alpha 浏览看 /alphas。
 
 ## 6. 风险
 - run_id 链在 live 持久化热路径 → 改后必隔离测 persistence/pool + 重启验证池产出。

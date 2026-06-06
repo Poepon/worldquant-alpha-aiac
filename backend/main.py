@@ -11,7 +11,7 @@ from backend.config import settings
 from backend.database import init_db
 
 # Import all routers
-from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, runs, correlation, ops
+from backend.routers import dashboard, tasks, alphas, knowledge, config, datasets, operators, correlation, ops
 
 
 @asynccontextmanager
@@ -91,7 +91,7 @@ app.add_middleware(
 app.include_router(dashboard.router, prefix=settings.API_V1_STR)
 app.include_router(tasks.router, prefix=settings.API_V1_STR)
 app.include_router(alphas.router, prefix=settings.API_V1_STR)
-app.include_router(runs.router, prefix=settings.API_V1_STR)
+# runs router retired in Phase 1d (experiment_runs / per-run view — pool has no per-run concept)
 app.include_router(knowledge.router, prefix=settings.API_V1_STR)
 app.include_router(config.router, prefix=settings.API_V1_STR)
 app.include_router(datasets.router, prefix=settings.API_V1_STR)
@@ -107,13 +107,9 @@ app.include_router(correlation.router, prefix=settings.API_V1_STR)
 # P3 (2026-05-16): ops console — feature flags + manual task triggers + monitoring dashboards
 app.include_router(ops.router, prefix=settings.API_V1_STR)
 
-# Keep existing routers if needed
-try:
-    from backend.routers import mining, analysis
-    app.include_router(mining.router, prefix=settings.API_V1_STR)
-    app.include_router(analysis.router, prefix=settings.API_V1_STR)
-except ImportError:
-    pass  # These routers might need updates
+# mining router retired in Phase 1d (ONESHOT create/start; pool is autonomous).
+# analysis router (legacy /analysis/*) is unused by the frontend (superseded by
+# dashboard + alphas routers) and was already dropped post-1c — left orphaned.
 
 
 @app.get("/")

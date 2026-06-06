@@ -646,18 +646,7 @@ const CoverageTab = () => {
     refetchInterval: 60_000,
   })
 
-  const forceMine = useMutation({
-    mutationFn: (datasetId) =>
-      api.startFlatSession({ region, universe, datasets: [datasetId], delay }),
-    onSuccess: (_res, datasetId) => {
-      message.success(`已启动 FLAT 会话强制挖掘 ${datasetId}（${region}/${universe}/delay${delay}）`, 6)
-      qc.invalidateQueries({ queryKey: ['ops/datasets-coverage'] })
-    },
-    onError: (e) => {
-      const detail = e?.response?.data?.detail || e?.message || e
-      message.error(`强制挖掘启动失败：${detail}（需 ENABLE_FLAT_CONTINUOUS 开启 + worker 在线）`)
-    },
-  })
+  // forceMine (api.startFlatSession) retired in Phase 1d — FLAT sessions removed.
 
   const items = data?.items || []
   const summary = [
@@ -720,31 +709,7 @@ const CoverageTab = () => {
       width: 130,
       render: (v) => (v ? String(v).replace('T', ' ').slice(0, 16) : '—'),
     },
-    {
-      title: '操作',
-      key: 'action',
-      width: 120,
-      render: (_, r) => (
-        <Tooltip
-          title={
-            r.in_rotation
-              ? '立即启动 MANUAL FLAT 会话挖此数据集（绕开加权选择器，不等 bandit 发现）'
-              : '该数据集在此 cell 无活跃字段，无法挖掘（需先同步/激活字段）'
-          }
-        >
-          <Button
-            size="small"
-            type={r.is_untapped || r.is_new ? 'primary' : 'default'}
-            icon={<ThunderboltOutlined />}
-            disabled={!r.in_rotation}
-            loading={forceMine.isPending && forceMine.variables === r.dataset_id}
-            onClick={() => forceMine.mutate(r.dataset_id)}
-          >
-            强制挖掘
-          </Button>
-        </Tooltip>
-      ),
-    },
+    // 「强制挖掘」操作列 retired in Phase 1d (FLAT session 已退役;挖矿走 HG/S/E 池)
   ]
 
   return (

@@ -266,11 +266,7 @@ async def dashboard_service(db_session):
     return DashboardService(db_session)
 
 
-@pytest_asyncio.fixture
-async def mining_service(db_session, mock_brain_adapter):
-    """Get a MiningService instance with mock brain adapter."""
-    from backend.services import MiningService
-    return MiningService(db_session, brain=mock_brain_adapter)
+# mining_service fixture retired in Phase 1d (MiningService deleted; unused by any test)
 
 
 # =============================================================================

@@ -20,7 +20,7 @@ from backend.services.base import BaseService, transactional
 # Core Services
 from backend.services.alpha_service import AlphaService, AlphaListFilters
 from backend.services.dashboard_service import DashboardService
-from backend.services.mining_service import MiningService
+# mining_service retired in Phase 1d (dead ONESHOT executor)
 from backend.services.task_service import TaskService, TaskCreateData
 from backend.services.analysis_service import AnalysisService
 from backend.services.credentials_service import CredentialsService
@@ -39,12 +39,7 @@ from backend.services.knowledge_service import (
     KnowledgeUpdateData,
     KnowledgeEntryInfo,
 )
-from backend.services.run_service import (
-    RunService,
-    RunDetailInfo,
-    TraceStepInfo,
-    AlphaListItem,
-)
+# run_service retired in Phase 1d (experiment_runs / per-run view)
 from backend.services.operator_service import (
     OperatorService,
     OperatorListFilters,
@@ -70,7 +65,6 @@ __all__ = [
     "AlphaService",
     "AlphaListFilters",
     "DashboardService",
-    "MiningService",
     "TaskService",
     "TaskCreateData",
     "AnalysisService",
@@ -86,11 +80,7 @@ __all__ = [
     "KnowledgeCreateData",
     "KnowledgeUpdateData",
     "KnowledgeEntryInfo",
-    # Run Service
-    "RunService",
-    "RunDetailInfo",
-    "TraceStepInfo",
-    "AlphaListItem",
+    # Run Service retired in Phase 1d
     # Operator Service
     "OperatorService",
     "OperatorListFilters",

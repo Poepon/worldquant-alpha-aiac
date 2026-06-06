@@ -14,7 +14,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.repositories.base_repository import BaseRepository
 from backend.protocols.repository_protocol import PaginationParams, PaginatedResult
-from backend.models import MiningTask, ExperimentRun, TraceStep, MiningStatus
+from backend.models import MiningTask, TraceStep, MiningStatus
 
 logger = logging.getLogger("repositories.task")
 
@@ -252,86 +252,3 @@ class TaskRepository(BaseRepository[MiningTask]):
         
         result = await self.db.execute(query)
         return {row.region: row.count for row in result.all()}
-
-
-class ExperimentRunRepository(BaseRepository[ExperimentRun]):
-    """
-    Repository for ExperimentRun entity.
-    
-    Provides methods for tracking experiment runs within tasks.
-    """
-    
-    def __init__(self, db: AsyncSession):
-        super().__init__(db, ExperimentRun)
-    
-    async def get_by_task_id(
-        self,
-        task_id: int,
-        pagination: Optional[PaginationParams] = None,
-    ) -> PaginatedResult[ExperimentRun]:
-        """
-        Get experiment runs for a task.
-        
-        Args:
-            task_id: The task ID
-            pagination: Pagination parameters
-            
-        Returns:
-            Paginated result of experiment runs
-        """
-        return await self.find_by({"task_id": task_id}, pagination)
-    
-    async def get_latest_by_task(self, task_id: int) -> Optional[ExperimentRun]:
-        """
-        Get the latest experiment run for a task.
-        
-        Args:
-            task_id: The task ID
-            
-        Returns:
-            The latest run, or None
-        """
-        query = (
-            select(ExperimentRun)
-            .where(ExperimentRun.task_id == task_id)
-            .order_by(ExperimentRun.started_at.desc())
-            .limit(1)
-        )
-        result = await self.db.execute(query)
-        return result.scalar_one_or_none()
-    
-    async def update_status(
-        self,
-        run_id: int,
-        status: str,
-        error_message: Optional[str] = None,
-    ) -> bool:
-        """
-        Update run status.
-        
-        Args:
-            run_id: The run ID
-            status: New status
-            error_message: Optional error message
-            
-        Returns:
-            True if updated, False if not found
-        """
-        values = {"status": status}
-        if error_message is not None:
-            values["error_message"] = error_message
-        if status in ["COMPLETED", "FAILED"]:
-            values["finished_at"] = datetime.utcnow()
-        
-        return await self.update_by_id(run_id, values)
-    
-    async def get_running_runs(self) -> List[ExperimentRun]:
-        """
-        Get all currently running experiment runs.
-        
-        Returns:
-            List of running runs
-        """
-        query = select(ExperimentRun).where(ExperimentRun.status == "RUNNING")
-        result = await self.db.execute(query)
-        return list(result.scalars().all())

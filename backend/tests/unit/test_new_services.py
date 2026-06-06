@@ -4,7 +4,6 @@ Unit tests for newly created services.
 Tests cover:
 - DatasetService
 - KnowledgeService
-- RunService
 - OperatorService
 - ConfigService
 """
@@ -24,7 +23,6 @@ from backend.services.knowledge_service import (
     KnowledgeCreateData,
     KnowledgeUpdateData,
 )
-from backend.services.run_service import RunService
 from backend.services.operator_service import (
     OperatorService,
     OperatorListFilters,
@@ -188,38 +186,6 @@ class TestKnowledgeService:
 # Run Service Tests
 # =============================================================================
 
-class TestRunService:
-    """Tests for RunService."""
-    
-    @pytest.mark.asyncio
-    async def test_get_run_not_found(self, db_session):
-        """Test getting a non-existent run."""
-        service = RunService(db_session)
-        
-        result = await service.get_run(99999)
-        
-        assert result is None
-    
-    @pytest.mark.asyncio
-    async def test_get_run_trace_not_found(self, db_session):
-        """Test getting trace for non-existent run."""
-        service = RunService(db_session)
-        
-        with pytest.raises(ValueError, match="not found"):
-            await service.get_run_trace(99999)
-    
-    @pytest.mark.asyncio
-    async def test_get_run_alphas_not_found(self, db_session):
-        """Test getting alphas for non-existent run."""
-        service = RunService(db_session)
-        
-        with pytest.raises(ValueError, match="not found"):
-            await service.get_run_alphas(99999)
-
-
-# =============================================================================
-# Operator Service Tests
-# =============================================================================
 
 class TestOperatorService:
     """Tests for OperatorService."""

@@ -3,8 +3,7 @@ import { Layout } from 'antd'
 import AppSidebar from './components/AppSidebar'
 import AppHeader from './components/AppHeader'
 import Dashboard from './pages/Dashboard'
-import TaskManagement from './pages/TaskManagement'
-import TaskDetail from './pages/TaskDetail'
+// TaskManagement / TaskDetail retired in Phase 1d (pool is autonomous; /tasks → /ops/pool-pipeline)
 import AlphaList from './pages/AlphaList'
 import AlphaDetail from './pages/AlphaDetail'
 import CrisisStressTest from './pages/CrisisStressTest'
@@ -24,8 +23,10 @@ function App() {
           <Routes>
             <Route path="/" element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<Dashboard />} />
-            <Route path="/tasks" element={<TaskManagement />} />
-            <Route path="/tasks/:id" element={<TaskDetail />} />
+            {/* Tasks pages retired in Phase 1d — pool runs autonomously; the live
+                mining view is /ops/pool-pipeline, alpha browsing is /alphas. */}
+            <Route path="/tasks" element={<Navigate to="/ops/pool-pipeline" replace />} />
+            <Route path="/tasks/:id" element={<Navigate to="/ops/pool-pipeline" replace />} />
             {/* /factor-library retired post tier-system removal (2026-05-18).
                 /alphas is now a flat list view (no tier filter); detail page
                 stays at /alphas/:id. */}

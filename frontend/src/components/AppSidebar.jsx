@@ -37,11 +37,6 @@ const menuItems = [
     label: '仪表盘',
   },
   {
-    key: '/tasks',
-    icon: <ThunderboltOutlined />,
-    label: '任务管理',
-  },
-  {
     key: '/alphas',
     icon: <FunctionOutlined />,
     label: 'Alpha 列表',

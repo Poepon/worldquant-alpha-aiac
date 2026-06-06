@@ -111,38 +111,10 @@ const api = {
     return data
   },
 
-  createTask: async (taskData) => {
-    const { data } = await client.post('/tasks', taskData)
-    return data
-  },
-
-  startTask: async (id) => {
-    const { data } = await client.post(`/tasks/${id}/start`)
-    return data
-  },
-
+  // createTask / startTask / getTaskRuns / getRun{,Trace,Alphas} retired in
+  // Phase 1d (ONESHOT create/start + per-run view; pool is autonomous).
   interveneTask: async (id, action, parameters = {}) => {
     const { data } = await client.post(`/tasks/${id}/intervene`, { action, parameters })
-    return data
-  },
-
-  getTaskRuns: async (taskId) => {
-    const { data } = await client.get(`/tasks/${taskId}/runs`)
-    return data
-  },
-
-  getRun: async (runId) => {
-    const { data } = await client.get(`/runs/${runId}`)
-    return data
-  },
-
-  getRunTrace: async (runId) => {
-    const { data } = await client.get(`/runs/${runId}/trace`)
-    return data
-  },
-
-  getRunAlphas: async (runId, params = {}) => {
-    const { data } = await client.get(`/runs/${runId}/alphas`, { params })
     return data
   },
 
@@ -682,29 +654,8 @@ const api = {
     return data
   },
 
-  // flat-F1 advanced kickoff (2026-05-18). Gated server-side by
-  // ENABLE_FLAT_CONTINUOUS — flag OFF returns HTTP 400 with detail string.
-  startFlatSession: async ({ region, universe, datasets = [], delay = 1, dailyGoal = null }) => {
-    const { data } = await client.post('/ops/start-flat-session', {
-      region,
-      universe,
-      datasets,
-      delay,
-      // null/absent → backend falls back to the global FLAT_CONTINUOUS_DAILY_GOAL.
-      ...(dailyGoal != null ? { daily_goal: dailyGoal } : {}),
-    })
-    return data
-  },
-
-  resumeFlatSession: async (taskId) => {
-    const { data } = await client.post(`/ops/flat-sessions/${taskId}/resume`)
-    return data
-  },
-
-  pauseFlatSession: async (taskId) => {
-    const { data } = await client.post(`/ops/flat-sessions/${taskId}/pause`)
-    return data
-  },
+  // startFlatSession / resume / pauseFlatSession retired in Phase 1c-delete +
+  // 1d (FLAT sessions removed; mining runs through the HG/S/E pool).
 
   // ---- Phase 4 Sprint 3-5 + Tier B/C telemetry ----
   // R8-v3 cognitive layer per-layer fire + PASS rate (Sprint 3 B5).

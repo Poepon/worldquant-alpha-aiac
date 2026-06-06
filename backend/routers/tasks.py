@@ -12,7 +12,7 @@ from datetime import datetime
 from celery.result import AsyncResult
 
 from backend.database import get_db
-from backend.services.task_service import TaskService, TaskCreateData
+from backend.services.task_service import TaskService
 from backend.celery_app import celery_app
 
 router = APIRouter(
@@ -35,21 +35,6 @@ def get_task_service(db: AsyncSession = Depends(get_db)) -> TaskService:
 # REQUEST/RESPONSE MODELS
 # =============================================================================
 
-class TaskCreateRequest(BaseModel):
-    name: str
-    region: str = "USA"
-    universe: str = "TOP3000"
-    dataset_strategy: str = "AUTO"
-    target_datasets: List[str] = []
-    schedule: Optional[str] = None      # ONESHOT | FLAT
-    daily_goal: int = 4
-    config: dict = {}
-
-    class Config:
-        # Accept legacy agent_mode / starting_tier / mining_mode / current_tier
-        # from stale clients (e.g. cached frontend bookmarks) without 422 —
-        # they're silently dropped post tier-system removal (2026-05-18).
-        extra = "ignore"
 
 
 class TaskResponse(BaseModel):
@@ -92,18 +77,6 @@ class TaskDetailResponse(TaskResponse):
     alphas_count: int = 0
 
 
-class ExperimentRunResponse(BaseModel):
-    id: int
-    task_id: int
-    status: str
-    trigger_source: Optional[str] = None
-    celery_task_id: Optional[str] = None
-    started_at: datetime
-    finished_at: Optional[datetime] = None
-    error_message: Optional[str] = None
-
-    class Config:
-        from_attributes = True
 
 
 class InterventionRequest(BaseModel):
@@ -145,43 +118,6 @@ async def list_tasks(
     ]
 
 
-@router.post("", response_model=TaskResponse)
-async def create_task(
-    request: TaskCreateRequest,
-    service: TaskService = Depends(get_task_service),
-):
-    """Create a new mining task."""
-    data = TaskCreateData(
-        name=request.name,
-        region=request.region,
-        universe=request.universe,
-        dataset_strategy=request.dataset_strategy,
-        target_datasets=request.target_datasets,
-        daily_goal=request.daily_goal,
-        config=request.config,
-        schedule=request.schedule,
-    )
-
-    try:
-        task = await service.create_task(data)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-    return TaskResponse(
-        id=task.id,
-        task_name=task.task_name,
-        region=task.region,
-        universe=task.universe,
-        dataset_strategy=task.dataset_strategy,
-        status=task.status,
-        daily_goal=task.daily_goal,
-        progress_current=task.progress_current,
-        current_iteration=task.current_iteration,
-        max_iterations=task.max_iterations,
-        created_at=task.created_at,
-        updated_at=task.updated_at,
-        schedule=getattr(task, "schedule", None),
-    )
 
 
 @router.get("/{task_id}", response_model=TaskDetailResponse)
@@ -256,48 +192,8 @@ async def get_task_trace(
     ]
 
 
-@router.post("/{task_id}/start")
-async def start_task(
-    task_id: int,
-    service: TaskService = Depends(get_task_service),
-):
-    """Start a mining task."""
-    try:
-        result = await service.start_task(task_id)
-        return {
-            "message": "Task started",
-            "task_id": task_id,
-            "run_id": result["run_id"],
-            "celery_task_id": result["celery_task_id"],
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/{task_id}/runs", response_model=List[ExperimentRunResponse])
-async def list_task_runs(
-    task_id: int,
-    service: TaskService = Depends(get_task_service),
-):
-    """List all experiment runs for a task."""
-    try:
-        runs = await service.list_task_runs(task_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    
-    return [
-        ExperimentRunResponse(
-            id=r.id,
-            task_id=r.task_id,
-            status=r.status,
-            trigger_source=r.trigger_source,
-            celery_task_id=r.celery_task_id,
-            started_at=r.started_at,
-            finished_at=r.finished_at,
-            error_message=r.error_message,
-        )
-        for r in runs
-    ]
 
 
 @router.post("/{task_id}/intervene")
