@@ -105,30 +105,47 @@
 
 ## 7. 分阶段实施(每阶段 INERT/DARK + gate)
 
-**Phase 1a — 接 FK 脊柱(INERT,无行为变更,无迁移)**
-删 hge_level gate;lift generation.py:832-930 在 HG 无条件跑(保 soft-fail try/except;只 lift INSERT,删 V-22.13 739-812;加 intent dedup key)。`current_hypothesis_id` 每候选非 NULL,已接的 persister 开始写 alpha.hypothesis_id。
-**Gate:** 24-48h soak,alpha/日持平,hypotheses 行累积,current_hypothesis_id 非 NULL 率→100%。
-> ⚠️ LB1:**1a 不能单发** —— 同 Phase 必须有消费者(否则僵尸 PROPOSED),故 1a 与 1c 的 beat **打包**或紧随。
+> **v3 修订裁决(workflow④ `wn9mnw7ws`,4 critic 对 live 代码压力测试)= TARGETED 修订,非推倒重设计。** 骨架(1b → 1a+1c → 1d → Phase 2 gated)全部存活、确认 sound + 非回归。但 §9 引出的「anti-crowding 提到 Phase 1 作最高 ROI 新轨」被**三条 live 证据驳回**(§7.0),只存活一个小得多、诚实定范围的切片。
 
-**Phase 1b — 闭合 KB 写对称(Tactical,无生命周期)**
-把 record_success_pattern 从死 node_save_results 抽进 persister 每-alpha 循环,带 3 门(alpha_id/非 robustness_failed/PASS|PROV),soft-fail,自开 session。SUCCESS_PATTERN 重新增长。stamp meta_data.hypothesis_id。
-**Gate:** SUCCESS_PATTERN 计数回升,零 alpha-persist 因 KB 写失败被丢,F1 单 session 不变。
-> LB3 是唯一全过对抗审查的决策 → **可最先独立 ship**(不依赖 1a)。
+### 7.0 被驳回的再排序(institutional memory — 别再第三次重 derive)
+「anti-crowding 禁用表 = 单点最高 ROI、hook 已存在」三条独立证据驳回:
+1. **hook 假**:`recent_dedup_skeletons` 在池生成路 **0 读**(state.py FIFO,post-sim 写,只被退役 FLAT 的 `t1_strategy_select`/`tier_seed` 消费,池 `_build_generation_graph`〔workflow.py:257〕从不接);唯一 live 黑名单槽 `avoid_patterns` 只吃 `strategy_dict`,池 hg_run_config 无 'strategy' 键 → 恒 `[]`。
+2. **已 live、且故意更粗**:anti-crowding 已由 `OrthogonalitySteeringEnricher`→`submitted_pool_profile`(generation.py:494/536,`ENABLE_ORTHOGONAL_PROMPT_STEERING` ON since 2026-06-05)在**经济-pillar 粒度**实现;`docs/orthogonality_steered_exploration_plan_2026-06-05.md §6` **明确弃用 skeleton 粒度**(survivor-bias)+ 选 soft-nudge 非 hard-filter。R1a 在重 derive 一个被推翻的设计。
+3. **数据驳 + C2 未证**:top skeleton 116/4000 同时是 #1「crowded」+ 13 提交赢家之一 + backlog 5× → submitted-pool-keyed 禁用表会 **ban 掉已证过门配方**;13 提交 = 13 个**不同** skeleton(零池内 crowding);真正杀的门 self_corr<0.7 是 **PnL-序列级非 skeleton-字符串级**。C2 转化(更正交生成→更多 SUBMITTED)是 orthogonality 计划 §1.2 自承的**核心未测 A/B**,非已知。
+→ **正确下一步:让已 live 的 pillar nudge 累积 orthogonality_score 分布、跑它既定 A/B,再决定要不要加新生成先验轨。**
 
-**Phase 1c — 加列迁移 + 认知 beat(SHIP DARK)**
-Alembic:hypotheses.can_submit_count/submitted_count。建 `run_pool_cognitive_reconcile`(gate `ENABLE_POOL_COGNITIVE_RECONCILE`=OFF,注册 beat,fire 但 no-op)。它**按 watermark 只扫近窗** candidate_queue(DONE)+ alphas/failures JOIN hypothesis_id,驱动 auto_activate + refresh_stats(PROMOTE Phase A)+ 归因(early_stop.classify_attribution)。删现已安全孤儿的 in-graph 死路(node_save_results / _process_hypothesis_feedback round-keying / in-graph r1b 边)。
-**Gate:** shadow 翻 ON,验生命周期 transition fire、watermark 单调推进、重扫幂等(无双 promote)、无 idle-in-txn。**PROMOTE 判据先别用 pass_count>0**(会 promote on PROVISIONAL)。
+### Phase 1 — 4 条并行轨
 
-**Phase 1d — submit-gate 仪表(SHIP DARK,非 reward 改动)**
-扩 refresh_can_submit_for_alpha 算 + stamp `_submit_yield_label`(marginal + self_corr_vs_pool + margin_bps)——dense label,可立即 backfill 67 积压。**这是仪表,不是 §5 驳回的 reward 改动。** ABANDON(Phase B,round-less,N 连续 0-can_submit,单独 flag)。
-**Gate:** backfill 67 行;观察 backlog 燃尽 + per-dataset orthogonal-yield(**非 PASS 率**)。orthogonal reward **不在此启用**(§5)。
+**Track A(最先,完全独立):1b** —— `record_success_pattern` 移进池 E-persister(LB3,唯一全 sound)。RAG 已读 SUCCESS_PATTERN(1596 行,注入 code_gen generation.py:1037/1095)但池从不建。纯写对称,不碰生命周期,无迁移。是 R1b/AWM 的语料前置。
+**Gate:** `--all` + 回归 0 漂移;live 池一轮后 SUCCESS_PATTERN 行数升;code_gen `[:5]` 注入字节不变。
 
-**Phase 2 — 自进化(数据驱动 gate)**
-- retry/mutate 作队列行:reconcile-beat INSERT 新 candidate(retry,depth+1,context 计数器)/ hyp_intent(mutate,seed_parent,depth 走 Hypothesis 链)。**gate 在 1c 归因数据显示 implementation-FAIL >~15%** + canary 单区 + yield-kill(非 raw PASS)+ 预算化(别挤新发现)。
-- 表达式感知 RAG(L0/L2/L3):codegen 后**第二跳** retrieval 传 current_expression,带 token-budget + idle-in-txn re-rollback 守卫 + **新专用 flag**。先 A/B 证 lift 再 flip(先验:只 L1 firing 过、pillar 从不动 PASS)。
-- 归因升级:classify_attribution_llm 聚合 per-hypothesis(LLM 成本可接受,离热路径)。
+**Track B(并行 A,KB+prompt 侧只读):R1a-v1 ONLY** —— frequency-based **SOFT 降权**(非硬禁用表),从 `expression_to_skeleton` 挖近窗 KB,**re-anchor 到 live 注入点**(node_rag_query→build_hypothesis_prompt generation.py:520-563),非死的 recent_dedup_skeletons。必须:soft、sample-size-gated、field-aware(复用 portfolio_skeletons 两因子 skeleton+fields+params±20%)、复用 `[:5]` cap、**新专用 flag**(非复用 RAG_CATEGORY_AB)。**丢弃**:hook-exists 前提 / 最高-ROI 宣称 / hard-forbidden / submitted-pool keying(→R1a-v2 gated)。R1b/AWM **不在 Phase 1**(demote Phase 2 prompt-format tweak,gated on 1b)。
+**Gate:** soak 时 HG code_gen **token 截断遥测钉 0**(镜像 `6d303b1` schema 膨胀);throughput 持平**且 skeleton 多样性分布不收窄**(breadth-collapse = 隐形回归);flag 默认 OFF 直到 soak 过 + **live pillar nudge 自己的 A/B 报告前不升级**。
 
-**每阶段独立可逆**(flag OFF 或 revert 单改动);live ~207 alpha/日的池从不被未证实的认知改动 gate。
+**Track C(1a+1c 打包,R3 作硬实现约束):**
+1a:删 hge_level gate,HG 无条件建 hypotheses 行(只 lift INSERT 832-930,删 V-22.13 739-812,加 intent dedup key;FK 0/2442→填充,零迁移);**必须和 1c 同发**(LB1:单发→僵尸 PROPOSED)。
+1c:新异步 `run_pool_cognitive_reconcile` beat(今确缺,gate `ENABLE_POOL_COGNITIVE_RECONCILE`=OFF),驱动 auto_activate/refresh_stats/PROMOTE + 廉价归因(early_stop.classify_attribution)。删现安全孤儿的 in-graph 死路(node_save_results / _process_hypothesis_feedback round-keying / in-graph r1b 边)。
+**R3 纪律 baked in(非 Phase 2):**(i) **watermark on `alphas.created_at` + GRACE PERIOD**(≥2× 30s can_submit refresh 倒计时),复用 `cognitive_layer_bandit_tasks.py:80-85`/`dataset_weight_refresh.py:138-141` 既证幂等模式 —— **丢弃「双时态 point-in-time JOIN」黑话**(无 sim-landed 列:candidate_queue.updated_at 每跳 bump、alphas dual-tz);真要 point-in-time correctness 才加一个 `label_landed_at` 列。(ii) 幂等 watermark upsert = 每 hypothesis_id 每窗一写(atomic emit 已在 workers.py:453-485,别承诺修 E-persist 多 commit 残留)。(iii) **censored-not-negative**:can_submit IS NULL → CENSORED(排除、不扣 pull),绝不 beta=0。**PROMOTE 判据先别用 pass_count>0**(会 promote on PROVISIONAL)。
+**Gate:** beat 离热路径(只读 DONE 行,K_E=1 不碰,LB2);幂等重跑 stats 一致;1a+1c 同落后僵尸 PROPOSED=0;grace 经验证(新落 alpha 在 can_submit 标签落前不被扫)。
+
+**Track D(1d dark + bandit censoring 回填):**
+1d:扩 refresh_can_submit_for_alpha stamp `_submit_yield_label`(marginal/self_corr_vs_pool/margin_bps)进 alpha.metrics —— **仅仪表**(LB4:reward 保持 binary)。可立即 backfill 67 积压。
+**PLUS 真正可立即 ship 的修正(R3 揪出的 LIVE bug):** `dataset_weight_refresh._classify`(:82-90)今天对 NULL can_submit 返 `(real=True, reward=0.0)`,把 67 backlog + 在飞 sim 折进 beta=0 作真 pull,**正在腐蚀 7 天窗 dataset bandit**。修:NULL/未刷=censored(drop、不扣 pull)。**独立于整个重设计,应作独立热修先上。**
+**重锚:** `compute_max_corr_vs_pool` 已删(`b53b65a`)→ 全部引用改 `calc_self_corr`(correlation_service.py:389,候选 PnL vs OS 池,PnL 未就绪返 UNKNOWN)。
+**Gate:** `_submit_yield_label` 出现在新刷 alpha;dataset-bandit 对 NULL-can_submit 行停止 incr T_d(纯 `_classify` 单测断言);binary reward 不变。
+
+### Phase 1 TAIL(gated on 1d 标签落地,acyclic 非同相)
+**R2(收窄)→ R1a-v2。** R2 第三归因桶**收窄到 self_corr ONLY**(eval-time evaluation.py:891-896 `_self_corr` / :714 orthogonality_score):「PASS-band 独立指标 ∧ `_self_corr`≥max → skeleton 多样性惩罚」。**排除 marginal≥5bps**(归因时不可得,只 post-can_submit async IQC refresh_tasks.py:386-395,且 recon killswitch 可能死 proxy);marginal 留 1d 仪表。第三桶→惩罚边**必须 count-thresholded reconcile 聚合**(K≥3-5 个 hash 级 self_corr-fail 才惩罚)+ **跳过 `_self_corr` UNKNOWN 行**(PnL 未就绪 evaluation.py:706-715)→ 防 n=1 早禁。然后 R1a-v2:把 v1 频率表升级成 crowding-weighted,读 1d 的 self_corr_vs_pool。3 跳链(v1 频率[P1] → 1d 标签+R2[tail] → v2 crowding)解 R1a↔R2 鸡生蛋。
+**Gate:** R2 只在 K≥3-5 hash 级 fail 触发;UNKNOWN 排除;R1a-v2 只读已落 1d 标签(HG 路无即时 PnL pull);多样性持续监控。
+
+### Phase 2(数据 gated)
+R5(**DIFF/targeted-edit retry 非从头重生**)作新队列行 + success-gated budget(**起始=1、正交感知 trigger 非 raw fitness running-max、canary 单区**)+ LB5 守卫逐字(canary+shadow+yield-kill)—— **唯一碰 K_S=2 sim 槽的项,守卫强制**。+ 表达式感知 RAG 第二跳(传 current_expression,token-budget + idle-in-txn re-rollback 守卫 + 新专用 flag,先 A/B 证 lift)+ LLM 归因升级(classify_attribution_llm —— **归因-TEXT 语料今天不存在**,只 4 值 heuristic enum,在此 bootstrap,C4 下数月)。R1b/AWM 可选 refinement 落这,gated on 1b 语料。
+**Gate:** R5 canary 单区;sim 槽竞争遥测(K_S=2 不饿);正交感知 trigger;yield-kill if retry 转 SUBMITTED-orthogonal 不超 fresh baseline。
+
+### DEFERRED past Phase 2(不排期)
+**R4 GEPA/DSPy 离线 prompt 编译器** —— 3 个未建前置(reconcile-beat 缺、归因-TEXT 语料缺、**prompt-毕业 seam 缺**:HG 用 module 级 Python 字符串常量 generation.py:51-57,无 prompt_version/compiled_prompt,毕业一个 prompt=改源+重启)+ DSPy/GEPA 未装 + **目标错配**(唯一便宜离线目标是 P(PASS)/多样性,但 C2 说更多 PASS 没用;对的目标 orthogonal-yield 正是被 3× 证死的)。若将来做,首 PR = DB/flag-overridable prompt-resolution seam(镜像 _flag_override_cache 热刷)。
+
+**每阶段独立可逆**(flag OFF 或 revert 单改动);live ~207 alpha/日的池从不被未证认知改动 gate。
 
 ---
 
@@ -145,6 +162,10 @@ Alembic:hypotheses.can_submit_count/submitted_count。建 `run_pool_cognitive_re
 9. **rag_service 已 live,L0/L3 是时序**(LB6):要第二跳 + 专用 flag,别复用 AB flag。
 10. **ABANDON 用 0-can_submit 窗口非 0-PASS**(LB7):67 积压下 0-PASS 是错信号;守住别 prune 在产 cell。
 11. **单测盲区**(workflow①):`test_pool_hg.py` mock 硬编码 current_hypothesis_id=5 掩盖 0/2442 死 FK → 修 LB1 须配真实 config-gate 测。
+12. **breadth-collapse 是最坏隐形回归**(workflow④):即便 soft R1a-v1 也可能在 throughput 持平下静默收窄生成到更少 cell → **必须监控 skeleton-多样性分布非只 throughput**;live pillar nudge 已带此险,加第二个频率先验复合 → R1a-v1 默认 OFF 直到自己 soak + pillar A/B 双过。
+13. **can_submit 标签滞后 censoring bug 今天 LIVE**(workflow④,可独立热修):`dataset_weight_refresh.py:82-90` 对 NULL can_submit 返 reward=0 作真 pull,持续腐蚀 7 天窗 dataset bandit;独立于整个 KB 重设计,1d 的 censored-not-negative 应作**独立热修先上**(并复核 cognitive bandit `:97-100` 的 accidental-correct drop 没静默丢真信号)。
+14. **C2 转化仍未证**(workflow④,决定性):没有任何东西证明更正交生成 → 更多 SUBMITTED(67 vs 13);决定性实验 = 已 live 的 pillar nudge **既定 A/B** → 先跑它,若 steering 不动 submit-yield,R1a-v1/v2/AWM 全失去理由不该 ship。
+15. **R1a-v2/R2 硬依赖 1d backfill 完整性 + grace 经验导出**(workflow④):部分 backfill → crowding 信号偏样本 → R1a-v2 gate 在 backfill-completeness check 非只 1d 代码 ship;reconcile grace 上界须从观测 p95 标签落地延迟导出非硬编码,censored-not-negative 作 grace 失调兜底。
 
 ---
 
