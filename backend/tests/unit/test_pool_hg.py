@@ -192,8 +192,8 @@ async def test_hydrate_hg_state_builds_round_state(monkeypatch):
     async def _fake_ops(s):
         return [{"name": "rank"}]
 
-    monkeypatch.setattr("backend.tasks.mining_tasks._get_dataset_fields", _fake_fields)
-    monkeypatch.setattr("backend.tasks.mining_tasks._get_operators", _fake_ops)
+    monkeypatch.setattr("backend.tasks.fetch_helpers._get_dataset_fields", _fake_fields)
+    monkeypatch.setattr("backend.tasks.fetch_helpers._get_operators", _fake_ops)
 
     eng, sf = await _setup_db()
     try:

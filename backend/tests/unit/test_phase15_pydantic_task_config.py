@@ -131,20 +131,10 @@ class TestBrainRoleSnapshot:
 # ---------------------------------------------------------------------------
 
 class TestContextualBanditState:
-    def test_evolution_strategy_to_dict_round_trips(self):
-        """The shape produced by ContextualDirectionBandit.to_dict
-        (evolution_strategy.py:608) must validate against
-        ContextualBanditState without raising."""
-        from backend.agents.evolution_strategy import ContextualDirectionBandit
-        bandit = ContextualDirectionBandit()
-        bandit.update(("USA", "pv", "hypothesis"), "rag_template", 0.8)
-        bandit.select_arm(("USA", "pv", "hypothesis"))
-        raw = bandit.to_dict()
-        # Should validate cleanly
-        state = ContextualBanditState.model_validate(raw)
-        assert state.v == 1
-        assert "rag_template" in state.arm_names
-        assert state.cold_threshold == 5
+    # test_evolution_strategy_to_dict_round_trips removed in Phase 1c-delete
+    # (ContextualDirectionBandit lived in the now-deleted evolution_strategy).
+    # The ContextualBanditState SCHEMA survives (validates legacy task.config
+    # JSONB), so the empty-state parse test is kept.
 
     def test_empty_state_parses(self):
         state = ContextualBanditState()

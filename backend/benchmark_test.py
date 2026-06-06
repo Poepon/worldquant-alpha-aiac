@@ -257,41 +257,6 @@ def test_diversity_tracker():
         return "ERROR", str(e), {}
 
 
-def test_genetic_optimizer():
-    """测试遗传优化器"""
-    try:
-        from backend.genetic_optimizer import (
-            GeneticOptimizer, 
-            OptimizationConfig,
-            mutate_operator_substitution,
-            mutate_window_parameter
-        )
-        
-        test_expr = "ts_rank(ts_delta(close, 5), 20)"
-        
-        # 测试变异
-        mutated1, desc1 = mutate_operator_substitution(test_expr)
-        mutated2, desc2 = mutate_window_parameter(test_expr)
-        
-        # 初始化优化器
-        config = OptimizationConfig(population_size=10)
-        optimizer = GeneticOptimizer(config)
-        optimizer.initialize(test_expr, {"sharpe": 0.8, "fitness": 0.6, "turnover": 0.5})
-        
-        stats = {
-            "population_size": len(optimizer.population.individuals),
-            "mutation_variants": 2 if (mutated1 != test_expr or mutated2 != test_expr) else 0,
-        }
-        
-        if stats["population_size"] >= 5:
-            return "OK", f"生成 {stats['population_size']} 个变异体", stats
-        else:
-            return "WARNING", "变异体数量偏少", stats
-            
-    except Exception as e:
-        return "ERROR", str(e), {}
-
-
 def test_feedback_agent():
     """测试反馈代理"""
     try:
@@ -590,7 +555,6 @@ async def run_full_benchmark():
         ("RAG Service", test_rag_service),
         ("Adaptive Thresholds", test_adaptive_thresholds),
         ("Diversity Tracker", test_diversity_tracker),
-        ("Genetic Optimizer", test_genetic_optimizer),
         ("Feedback Agent", test_feedback_agent),
         ("Metrics Tracker", test_metrics_tracker),
     ]
@@ -684,7 +648,6 @@ async def run_quick_check():
         ("RAG Service", test_rag_service),
         ("Adaptive Thresholds", test_adaptive_thresholds),
         ("Diversity Tracker", test_diversity_tracker),
-        ("Genetic Optimizer", test_genetic_optimizer),
         ("Feedback Agent", test_feedback_agent),
         ("Metrics Tracker", test_metrics_tracker),
     ]

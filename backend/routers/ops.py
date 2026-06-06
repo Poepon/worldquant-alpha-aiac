@@ -832,50 +832,12 @@ async def macro_rerun(
 # Phase 3 — P2-C Regime endpoints
 # ===========================================================================
 
-@router.get("/regime/current", response_model=RegimeCurrentOut)
-async def regime_current(
-    region: str = Query("USA", min_length=1),
-    _token: str = Depends(_require_ops_token),
-    svc: OpsService = Depends(get_ops_service),
-) -> RegimeCurrentOut:
-    """Live Redis read of current regime for ``region``."""
-    result = await svc.get_regime_current(region=region)
-    return RegimeCurrentOut(**result)
 
 
-@router.get("/regime/snapshot", response_model=RegimeSnapshotOut)
-async def regime_snapshot(
-    region: str = Query("USA", min_length=1),
-    _token: str = Depends(_require_ops_token),
-    svc: OpsService = Depends(get_ops_service),
-) -> RegimeSnapshotOut:
-    """Full inference snapshot from Redis (fall back to today's archive)."""
-    result = await svc.get_regime_snapshot(region=region)
-    return RegimeSnapshotOut(**result)
 
 
-@router.get("/regime/history")
-async def regime_history(
-    region: str = Query("USA", min_length=1),
-    days: int = Query(14, ge=1, le=90),
-    _token: str = Depends(_require_ops_token),
-    svc: OpsService = Depends(get_ops_service),
-) -> List[Dict[str, Any]]:
-    """Per-day regime + pass_rate over ``days``, oldest first."""
-    return await svc.get_regime_history(region=region, days=days)
 
 
-@router.post("/regime/rerun", response_model=TriggerOut)
-async def regime_rerun(
-    region: Optional[str] = Query(None),
-    _token: str = Depends(_require_ops_token),
-    svc: OpsService = Depends(get_ops_service),
-    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
-) -> TriggerOut:
-    """Fire the daily regime-infer task. ``region`` is a hint only —
-    the task iterates over all configured regions regardless."""
-    result = await _run_trigger(svc, _REGIME_TASK, actor or "ops_console")
-    return TriggerOut(**result.__dict__)
 
 
 # ===========================================================================
@@ -1382,88 +1344,6 @@ class FlatSessionOut(BaseModel):
     runtime_state_inherited: bool = False
 
 
-@router.post("/start-flat-session", response_model=FlatSessionOut)
-async def start_flat_session(
-    payload: StartFlatSessionIn,
-    _token: str = Depends(_require_ops_token),
-    svc: TaskService = Depends(get_task_service_ops),
-    db: AsyncSession = Depends(get_db),
-    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
-) -> FlatSessionOut:
-    """Create a new flat mining session and dispatch its worker.
-
-    Gated by ``settings.ENABLE_FLAT_CONTINUOUS`` — returns 400 when flag is
-    OFF so the caller knows to flip the flag first.
-
-    Phase 4 Sprint 1 A3 (2026-05-19): flat-F4 cross-region quota guard.
-    Before dispatching, computes last-N-day region share + checks whether
-    adding this new task would push ``payload.region`` over its
-    FLAT_CROSS_REGION_QUOTA cap. ENFORCE=True → reject with 400; ENFORCE=
-    False (default) → warn-log only and proceed (observation window).
-    Soft-fail: any DB error → skip the check + warn log + proceed.
-    """
-    from backend.config import settings  # local import — settings hot-reads flag overrides
-    if not getattr(settings, "ENABLE_FLAT_CONTINUOUS", False):
-        raise HTTPException(
-            status_code=400,
-            detail="ENABLE_FLAT_CONTINUOUS flag is OFF — flip via PATCH /ops/flags/ENABLE_FLAT_CONTINUOUS first",
-        )
-
-    # ---- A3 flat-F4 cross-region quota guard ----
-    try:
-        from backend.services.flat_region_quota import (
-            compute_region_share as _compute_share,
-            check_quota as _check_quota,
-        )
-        _quota = dict(getattr(settings, "FLAT_CROSS_REGION_QUOTA", {}) or {})
-        _enforce = bool(getattr(settings, "FLAT_CROSS_REGION_ENFORCE", False))
-        _lookback = int(getattr(settings, "FLAT_CROSS_REGION_LOOKBACK_DAYS", 30))
-        # Quota empty → operator hasn't configured caps; nothing to guard against.
-        if _quota:
-            _share_now = await _compute_share(db, lookback_days=_lookback)
-            _decision = _check_quota(
-                new_region=payload.region,
-                current_share=_share_now,
-                quota=_quota,
-            )
-            if _decision.get("would_exceed"):
-                _msg = (
-                    f"flat-F4 quota check: region={payload.region} "
-                    f"projected_share={_decision['projected_share']:.3f} "
-                    f"> quota={_decision['quota']:.3f} "
-                    f"(current_count={_decision['current_count']}, "
-                    f"projected_total={_decision['projected_total']})"
-                )
-                if _enforce:
-                    raise HTTPException(status_code=400, detail=_msg)
-                from loguru import logger as _f4_logger
-                _f4_logger.warning("[flat-F4 warn-only] {}", _msg)
-    except HTTPException:
-        raise  # ENFORCE=True trip propagates
-    except Exception as _f4_ex:  # noqa: BLE001
-        from loguru import logger as _f4_logger
-        _f4_logger.warning(
-            "[flat-F4] quota check failed (non-fatal, proceeding): {}", _f4_ex,
-        )
-
-    try:
-        info = await svc.start_flat_session(
-            region=payload.region,
-            universe=payload.universe,
-            datasets=payload.datasets or None,
-            delay=payload.delay,
-            llm_overrides=payload.llm_overrides,
-            daily_goal=payload.daily_goal,
-        )
-    except ValueError as ex:
-        raise HTTPException(status_code=400, detail=str(ex)) from ex
-    return FlatSessionOut(
-        task_id=info.task_id,
-        region=info.region,
-        universe=info.universe,
-        status=info.status,
-        runtime_state_inherited=False,
-    )
 
 
 # ----- A3 flat-F4 distribution endpoint -----
@@ -1510,48 +1390,8 @@ async def flat_region_distribution(
     )
 
 
-@router.post("/flat-sessions/{task_id}/resume", response_model=FlatSessionOut)
-async def resume_flat_session(
-    task_id: int,
-    _token: str = Depends(_require_ops_token),
-    svc: TaskService = Depends(get_task_service_ops),
-    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
-) -> FlatSessionOut:
-    """Resume a paused flat session (preserves runtime_state['flat_cursor'])."""
-    try:
-        info = await svc.resume_flat_session(task_id)
-    except ValueError as ex:
-        raise HTTPException(status_code=400, detail=str(ex)) from ex
-    return FlatSessionOut(
-        task_id=info.task_id,
-        region=info.region,
-        universe=info.universe,
-        status=info.status,
-        runtime_state_inherited=True,
-    )
 
 
-@router.post("/flat-sessions/{task_id}/pause", response_model=FlatSessionOut)
-async def pause_flat_session(
-    task_id: int,
-    _token: str = Depends(_require_ops_token),
-    svc: TaskService = Depends(get_task_service_ops),
-    actor: Optional[str] = Header(default=None, alias="X-Ops-Actor"),
-) -> FlatSessionOut:
-    """Pause a RUNNING flat session (sets status→PAUSED; worker exits at next
-    round boundary). FLAT counterpart to /tasks/{id}/intervene which refuses
-    FLAT PAUSE because it does not dispatch/manage the flat worker."""
-    try:
-        info = await svc.pause_flat_session(task_id)
-    except ValueError as ex:
-        raise HTTPException(status_code=400, detail=str(ex)) from ex
-    return FlatSessionOut(
-        task_id=info.task_id,
-        region=info.region,
-        universe=info.universe,
-        status=info.status,
-        runtime_state_inherited=True,
-    )
 
 
 # =============================================================================
@@ -5935,87 +5775,6 @@ class OrchestratorStatusOut(BaseModel):
     recent_decisions: List[OrchestratorRecentDecision]
 
 
-@router.get("/orchestrator/status", response_model=OrchestratorStatusOut)
-async def get_orchestrator_status(
-    db: AsyncSession = Depends(get_db),
-    _token: str = Depends(_require_ops_token),
-) -> OrchestratorStatusOut:
-    """Orchestrator 监控看板 — 实时读 flag / 阈值 / pool / 配额 / 历史 PASS rate
-    + 最近 20 个 orchestrator 决策。前端轮询用。
-    """
-    from backend.tasks.orchestrator import (
-        _orchestrator_enabled,
-        _orchestrator_thresholds,
-        _count_orchestrator_running,
-        _count_today_orchestrator_launches,
-        _read_quota_state,
-        _compute_region_pass_rates,
-    )
-    from backend.config import settings
-    from backend.models import MiningTask
-    from sqlalchemy import select as _select, desc
-
-    th = _orchestrator_thresholds()
-    th["lookback_days"] = int(getattr(settings, "ORCHESTRATOR_LOOKBACK_DAYS", 7))
-    th["datasets_per_task"] = int(getattr(settings, "ORCHESTRATOR_DATASETS_PER_TASK", 3))
-
-    running_count = await _count_orchestrator_running(db)
-    today_launches = await _count_today_orchestrator_launches(db)
-    quota_state = await _read_quota_state()
-    region_rates = await _compute_region_pass_rates(db, th["lookback_days"])
-
-    # Fairness-fix 同步显示(2026-06-01):endpoint 也补 prior pool 让 operator
-    # 看到 orchestrator 实际采样空间,不是只显示有数据 region(否则会误以为
-    # 0-data region 不参与 — 实际上它们靠 prior 权重 0.5 主导探索)。
-    from backend.services.task_service import TaskService
-    α = int(getattr(settings, "ORCHESTRATOR_PRIOR_PASSES", 1))
-    β = int(getattr(settings, "ORCHESTRATOR_PRIOR_FAILS", 1))
-    prior_weight = α / (α + β)
-    supported = list(TaskService.SUPPORTED_REGIONS)
-    effective_weights: Dict[str, float] = {}
-    for r in supported:
-        if r in region_rates:
-            effective_weights[r] = float(region_rates[r]["weight"])
-        else:
-            effective_weights[r] = prior_weight
-
-    # 最近 20 个有 orchestrator_processed_at 标的 task(按 updated_at 排)。
-    # MiningTask 模型字段是 `updated_at`(server_default=now()+onupdate=now()),
-    # 没有 `modified_at` — 后者会触发 AttributeError → 500(2026-05-31 fix)。
-    rows = (await db.execute(
-        _select(MiningTask).order_by(desc(MiningTask.updated_at)).limit(200)
-    )).scalars().all()
-    decisions: List[OrchestratorRecentDecision] = []
-    for t in rows:
-        cfg = t.config if isinstance(t.config, dict) else {}
-        proc_at = cfg.get("orchestrator_processed_at")
-        if not proc_at:
-            continue
-        decisions.append(OrchestratorRecentDecision(
-            task_id=t.id,
-            region=t.region,
-            status=t.status,
-            processed_at=proc_at,
-            processed_source=cfg.get("orchestrator_processed_source"),
-            launched_by=cfg.get("launched_by"),
-        ))
-        if len(decisions) >= 20:
-            break
-
-    return OrchestratorStatusOut(
-        enabled=_orchestrator_enabled(),
-        thresholds=th,
-        pool={
-            "orchestrator_running": running_count,
-            "today_orchestrator_launches": today_launches,
-        },
-        quota=quota_state,
-        region_pass_rates_7d=region_rates,
-        supported_regions=supported,
-        prior_weight=prior_weight,
-        effective_region_weights=effective_weights,
-        recent_decisions=decisions,
-    )
 
 
 # ---------------------------------------------------------------------------

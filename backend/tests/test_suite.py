@@ -162,7 +162,6 @@ def run_unit_tests(result: TestSuiteResult):
     test_failure_classification(result)
     
     # Test 5: Mutation operations
-    test_mutation_operations(result)
     
     # Test 6: Diversity scoring
     test_diversity_scoring(result)
@@ -392,64 +391,6 @@ def test_failure_classification(result: TestSuiteResult):
     except Exception as e:
         result.add_test(TestCase(
             name="Failure Classification",
-            category="unit",
-            passed=False,
-            message=f"ERROR: {e}",
-            duration_ms=(time.time() - start) * 1000
-        ))
-
-
-def test_mutation_operations(result: TestSuiteResult):
-    """测试变异操作"""
-    import time
-    start = time.time()
-    
-    try:
-        from backend.genetic_optimizer import (
-            mutate_operator_substitution,
-            mutate_window_parameter,
-            mutate_add_wrapper,
-            mutate_sign_flip,
-        )
-        
-        test_expr = "ts_rank(ts_delta(close, 5), 20)"
-        
-        checks = []
-        
-        # 变异应该产生不同的表达式或返回 no_change
-        mutated1, desc1 = mutate_operator_substitution(test_expr)
-        checks.append(("operator_sub works", mutated1 != test_expr or "no_" in desc1))
-        
-        mutated2, desc2 = mutate_window_parameter(test_expr)
-        checks.append(("window_param works", mutated2 != test_expr or "no_" in desc2))
-        
-        mutated3, desc3 = mutate_add_wrapper(test_expr)
-        checks.append(("add_wrapper works", "wrapper" in desc3 or "already" in desc3))
-        
-        mutated4, desc4 = mutate_sign_flip(test_expr)
-        checks.append(("sign_flip works", "-1" in mutated4 or "negative" in desc4))
-        
-        # 变异后的表达式应该仍然有效（括号匹配）
-        for mutated, desc in [(mutated1, desc1), (mutated2, desc2), (mutated3, desc3), (mutated4, desc4)]:
-            if "no_" not in desc:
-                balanced = mutated.count("(") == mutated.count(")")
-                checks.append((f"balanced parens: {desc[:20]}", balanced))
-        
-        passed_checks = sum(1 for _, ok in checks if ok)
-        
-        result.add_test(TestCase(
-            name="Mutation Operations",
-            category="unit",
-            passed=passed_checks >= len(checks) * 0.8,
-            message=f"{passed_checks}/{len(checks)} checks passed",
-            duration_ms=(time.time() - start) * 1000,
-            details={name: ok for name, ok in checks}
-        ))
-        result.metrics["mutation_validity_rate"] = passed_checks / len(checks)
-        
-    except Exception as e:
-        result.add_test(TestCase(
-            name="Mutation Operations",
             category="unit",
             passed=False,
             message=f"ERROR: {e}",
@@ -871,7 +812,6 @@ async def run_e2e_tests(result: TestSuiteResult):
     await test_knowledge_base_seeding(result)
     
     # Test 3: Genetic optimization cycle (mock)
-    test_genetic_optimization_cycle(result)
 
 
 async def test_database_connectivity(result: TestSuiteResult):
@@ -960,83 +900,6 @@ async def test_knowledge_base_seeding(result: TestSuiteResult):
             duration_ms=(time.time() - start) * 1000
         ))
 
-
-def test_genetic_optimization_cycle(result: TestSuiteResult):
-    """测试遗传优化循环"""
-    import time
-    start = time.time()
-    
-    try:
-        from backend.genetic_optimizer import GeneticOptimizer, OptimizationConfig
-        
-        # 创建优化器
-        config = OptimizationConfig(population_size=20, generations=2)
-        optimizer = GeneticOptimizer(config)
-        
-        # 初始化
-        seed_expr = "ts_rank(ts_delta(close, 5), 20)"
-        seed_metrics = {"sharpe": 0.8, "fitness": 0.6, "turnover": 0.5}
-        optimizer.initialize(seed_expr, seed_metrics)
-        
-        # W2/R3 island-model: total pop across islands, not just island 0.
-        # optimizer.population aliases islands[0] for backward compat.
-        initial_pop = sum(len(isl.individuals) for isl in optimizer.islands)
-
-        # 模拟一些评估结果
-        candidates = optimizer.get_simulation_candidates(batch_size=5)
-        for ind in candidates:
-            # 模拟随机结果
-            import random
-            optimizer.update_individual(ind, {
-                "is": {
-                    "sharpe": 0.5 + random.random(),
-                    "fitness": 0.4 + random.random() * 0.6,
-                    "turnover": 0.3 + random.random() * 0.4,
-                },
-                "os": {"sharpe": 0.3 + random.random() * 0.7}
-            })
-
-        # 进化
-        optimizer.evolve()
-
-        final_pop = sum(len(isl.individuals) for isl in optimizer.islands)
-        
-        checks = [
-            ("initialized population", initial_pop >= 10),
-            ("candidates available", len(candidates) > 0),
-            ("evolution completed", optimizer.population.generation == 1),
-            ("population maintained", final_pop > 0),
-            ("has simulated individuals", optimizer.simulations_used > 0),
-        ]
-        
-        passed_checks = sum(1 for _, ok in checks if ok)
-        
-        result.add_test(TestCase(
-            name="Genetic Optimization Cycle",
-            category="e2e",
-            passed=passed_checks == len(checks),
-            message=f"{passed_checks}/{len(checks)} checks passed",
-            duration_ms=(time.time() - start) * 1000,
-            details={
-                "initial_population": initial_pop,
-                "final_population": final_pop,
-                "simulations_used": optimizer.simulations_used,
-            }
-        ))
-        
-    except Exception as e:
-        result.add_test(TestCase(
-            name="Genetic Optimization Cycle",
-            category="e2e",
-            passed=False,
-            message=f"ERROR: {e}",
-            duration_ms=(time.time() - start) * 1000
-        ))
-
-
-# =============================================================================
-# Report Generation
-# =============================================================================
 
 def print_report(result: TestSuiteResult, baseline: Optional[Dict] = None):
     """打印测试报告"""

@@ -211,54 +211,6 @@ def test_diversity_tracker():
     logger.info("✓ Diversity tracker test passed")
 
 
-def test_genetic_optimizer():
-    """Test genetic optimizer mutations."""
-    from backend.genetic_optimizer import (
-        GeneticOptimizer,
-        OptimizationConfig,
-        mutate_operator_substitution,
-        mutate_window_parameter,
-        mutate_add_wrapper,
-        mutate_sign_flip
-    )
-    
-    # Test individual mutations
-    test_expr = "ts_rank(ts_delta(close, 5), 20)"
-    
-    # Operator substitution
-    mutated, desc = mutate_operator_substitution(test_expr)
-    assert mutated != test_expr or "no_" in desc, "Should mutate or indicate no change"
-    
-    # Window parameter
-    mutated, desc = mutate_window_parameter(test_expr)
-    assert "5" not in mutated or "20" not in mutated or "no_" in desc, "Should change window"
-    
-    # Add wrapper
-    mutated, desc = mutate_add_wrapper(test_expr)
-    assert "wrapper" in desc
-    
-    # Sign flip
-    mutated, desc = mutate_sign_flip(test_expr)
-    assert "-1" in mutated or "negative" in desc.lower()
-    
-    # Test optimizer initialization
-    config = OptimizationConfig(population_size=20)
-    optimizer = GeneticOptimizer(config)
-    
-    optimizer.initialize(
-        seed_expression=test_expr,
-        seed_metrics={"sharpe": 1.0, "fitness": 0.8, "turnover": 0.5}
-    )
-    
-    assert len(optimizer.population.individuals) > 0, "Should have initial population"
-    
-    # Get candidates
-    candidates = optimizer.get_simulation_candidates(batch_size=5)
-    assert len(candidates) > 0, "Should have unsimulated candidates"
-    
-    logger.info("✓ Genetic optimizer test passed")
-
-
 def test_feedback_agent_classification():
     """Test failure classification."""
     from backend.agents.feedback_agent import classify_failure, FAILURE_CATEGORIES
@@ -398,7 +350,6 @@ def run_all_tests():
         ("Adaptive Thresholds", test_adaptive_thresholds),
         ("Alpha Evaluation", test_alpha_evaluation),
         ("Diversity Tracker", test_diversity_tracker),
-        ("Genetic Optimizer", test_genetic_optimizer),
         ("Feedback Agent Classification", test_feedback_agent_classification),
         ("Metrics Tracker", test_metrics_tracker),
         ("External Knowledge Extraction", test_external_knowledge_extraction),

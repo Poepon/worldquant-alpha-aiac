@@ -53,7 +53,7 @@ async def _mk_dataset_with_fields(db, *, dataset_id, region, cells):
 @pytest.mark.asyncio
 class TestGetDatasetFieldsCellJoin:
     async def test_returns_active_cell_fields_with_dict_shape(self, db_session):
-        from backend.tasks.mining_tasks import _get_dataset_fields
+        from backend.tasks.fetch_helpers import _get_dataset_fields
         await _mk_dataset_with_fields(
             db_session, dataset_id="pv1", region="USA",
             cells={"TOP3000": [("close", True), ("volume", False)]},
@@ -66,7 +66,7 @@ class TestGetDatasetFieldsCellJoin:
 
     async def test_per_universe_is_active_independent(self, db_session):
         # Same field, active in TOP1000 but inactive in TOP3000 → universe-scoped.
-        from backend.tasks.mining_tasks import _get_dataset_fields
+        from backend.tasks.fetch_helpers import _get_dataset_fields
         await _mk_dataset_with_fields(
             db_session, dataset_id="pv1", region="USA",
             cells={
@@ -80,7 +80,7 @@ class TestGetDatasetFieldsCellJoin:
 
     async def test_unsynced_universe_returns_empty(self, db_session):
         # A universe with no datafield cells → no fields (graceful, not a crash).
-        from backend.tasks.mining_tasks import _get_dataset_fields
+        from backend.tasks.fetch_helpers import _get_dataset_fields
         await _mk_dataset_with_fields(
             db_session, dataset_id="pv1", region="USA",
             cells={"TOP3000": [("close", True)]},

@@ -152,9 +152,10 @@ async def hydrate_hg_state(intent: Any, *, session_factory: Any = None) -> Minin
     cross-dataset complementary pool (_build_dataset_pool) is a follow-up; empty
     = the byte-for-byte legacy code-gen path.
     """
-    # Lazy import: backend.tasks.mining_tasks is heavy (Celery) and is gutted in
-    # Phase 1c — these two fetch helpers MUST survive 1c (or move to pool/).
-    from backend.tasks.mining_tasks import _get_dataset_fields, _get_operators
+    # Phase 1c-delete: mining_tasks.py was deleted; these two fetch helpers were
+    # extracted verbatim to backend/tasks/fetch_helpers.py (the pool's only dep
+    # on the old FLAT task module).
+    from backend.tasks.fetch_helpers import _get_dataset_fields, _get_operators
 
     factory = session_factory or AsyncSessionLocal
     snap: Dict[str, Any] = dict(intent.config_snapshot or {})

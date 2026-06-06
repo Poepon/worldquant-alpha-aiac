@@ -664,7 +664,7 @@ async def node_hypothesis(
     union_fields: List[Dict] = []
     if chosen_datasets and (len(chosen_datasets) > 1 or chosen_datasets[0] != legacy_anchor):
         try:
-            from backend.tasks.mining_tasks import _get_dataset_fields
+            from backend.tasks.fetch_helpers import _get_dataset_fields
             seen_ids: set = set()
             # V-27.D: pure read — reuse the workflow-injected db_session
             # when present instead of always self-opening a connection.

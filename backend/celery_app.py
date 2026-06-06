@@ -108,17 +108,11 @@ celery_app.conf.update(
     # (no signals/subprocess). Real per-call/per-round deadlines live in-task via
     # asyncio.wait_for (llm_service.call + mining_tasks.pipeline round).
     worker_prefetch_multiplier=1,  # Fair scheduling
-    # 2026-05-21: route the long-running mining task to a dedicated `mining`
-    # queue so a separate solo worker can keep draining the default `celery`
-    # queue (watchdog_revive_dead_sessions / quota_guard / sync). Single-worker
-    # solo pool otherwise starves beat maintenance during a long FLAT session →
-    # a hung mining task could never be revived. Run two solo workers:
-    #   worker -Q mining   (run_mining_task only)
-    #   worker -Q celery   (everything else, incl. beat maintenance)
+    # Phase 1c-delete: the long-running FLAT run_mining_task (and its dedicated
+    # `mining` queue route) was retired — the HG/S/E pool runs as standalone
+    # processes under the supervisor, not as a Celery task. Beat maintenance now
+    # runs on the single default `celery` queue.
     task_default_queue="celery",
-    task_routes={
-        "backend.tasks.run_mining_task": {"queue": "mining"},
-    },
 )
 
 # Scheduled tasks (Celery Beat)
@@ -220,25 +214,9 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_macro_narrative_extract",
         "schedule": crontab(hour=10, minute=0),
     },
-    # P2-C (2026-05-16): daily regime-inference task at 10:30 Asia/Shanghai.
-    # Reads docs/alpha_health_check/<sh-date>.json for the last 7 days per
-    # active region (USA/CHN/EUR/ASI/GLB), EWMA-smooths the GREEN+YELLOW
-    # pass-rate into a 5-bucket regime, and writes the result to Redis
-    # (aiac:current_regime:{region}) + docs/regime_state/<sh-date>.json.
-    # Read-mostly: no DB writes — only Redis SETEX + on-disk archive.
-    # Gated by ENABLE_REGIME_INFERENCE (default OFF, S1). Runs LAST so
-    # all upstream JSON sources have settled.
-    "regime-infer": {
-        "task": "backend.tasks.run_regime_infer",
-        "schedule": crontab(hour=10, minute=30),
-    },
-    # V-19.7: revive dead CONTINUOUS_CASCADE sessions. Detects worker crash /
-    # silent stalls via task.last_alpha_persisted_at < NOW()-15min and
-    # re-dispatches a fresh celery worker. Grace period skips fresh sessions.
-    "watchdog-revive-dead-sessions": {
-        "task": "backend.tasks.watchdog_revive_dead_sessions",
-        "schedule": 300,   # every 5 minutes (in seconds)
-    },
+    # P2-C regime-inference beat retired in Phase 1c-delete (regime cluster removed).
+    # V-19.7 watchdog-revive beat retired in Phase 1c-delete (lease-recycle is the
+    # pool's sole recovery path; double-revive risk eliminated).
     # V-19.7: BRAIN daily simulate quota guard. Counts today's alpha rows;
     # at >= 90% of BRAIN_DAILY_SIMULATE_LIMIT pauses every active
     # CONTINUOUS_CASCADE session to avoid hitting BRAIN rate-limit walls.
@@ -287,17 +265,7 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_q10_layer_telemetry",
         "schedule": crontab(hour=9, minute=0),
     },
-    # P3-R1b.3 review LOW (2026-05-18): weekly 90-day pruner for
-    # FAILURE_PITFALL entries with meta_data->'failure_tree'. R1b.3 writes
-    # one KnowledgeEntry per unique root_skeleton at mining-round boundaries;
-    # at 50 alpha/round × N rounds × multi-root mutations the table grows
-    # linearly with no TTL. Pruner DELETEs rows older than
-    # ``R1B_FAILURE_TREE_RETENTION_DAYS`` (default 90). Sunday 04:00
-    # Asia/Shanghai — off-peak, weekly cadence is fine for a 90-day TTL.
-    "r1b-failure-tree-pruner": {
-        "task": "backend.tasks.run_failure_tree_pruner",
-        "schedule": crontab(hour=4, minute=0, day_of_week=0),
-    },
+    # P3-R1b.3 failure-tree pruner beat retired in Phase 1c-delete (R1b machine removed).
     # P3-R8 query log review LOW (2026-05-18): weekly 90-day pruner for
     # r8_query_log table. Per-query telemetry row written by
     # query_hierarchical when ENABLE_R8_QUERY_LOG flag is ON; with
@@ -351,27 +319,9 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_dataset_weight_refresh",
         "schedule": crontab(hour=5, minute=15),
     },
-    # Orchestrator Sub-phase 1 skeleton (2026-05-29): cron 1h fallback for
-    # the event-driven path (Q7 DECIDED). Main path is
-    # orchestrator_evaluate_after_finalize invoked by _run_flat_iteration
-    # finalize (Sub-phase 2 接);this beat is防丢事件兜底,扫描全 task pool
-    # 补 launch 决策。flag-gated by ENABLE_AUTO_ORCHESTRATOR (default OFF →
-    # task fires but no-ops)。每 1h 一次,与 quota_guard/watchdog 不撞。
-    "orchestrator-periodic-scan": {
-        "task": "backend.tasks.orchestrator_periodic_scan",
-        "schedule": 3600,   # every 1 hour (in seconds)
-    },
-    # R1b CoSTEER outcome reconciliation (Break 2 fix, 2026-05-22): daily
-    # 05:45 SH fill r1b_retry_log.outcome (pass/fail/sharpe) from the alphas
-    # each retry/mutate produced — the feedback half of the loop, previously
-    # never wired (355/355 pending). flag-gated (both R1b flags OFF → no-op).
-    # Idempotent: only touches outcome='pending' rows; alphas not yet
-    # simulated stay pending → reconciled next run. Slot after dataset-weight-
-    # refresh (05:15) on the solo-pool worker.
-    "r1b-outcome-reconcile": {
-        "task": "backend.tasks.reconcile_r1b_outcomes",
-        "schedule": crontab(hour=5, minute=45),
-    },
+    # Orchestrator periodic-scan beat retired in Phase 1c-delete (resident pool
+    # needs no relaunch — supervisor keeps HG/S/E processes alive).
+    # R1b outcome-reconcile beat retired in Phase 1c-delete (R1b machine removed).
     # Self-healing data-field prune (2026-05-22): daily 06:20 SH deactivate
     # datafields BRAIN rejects as "Invalid data field" (stale catalog rows the
     # dataset bandit surfaces by steering onto dormant datasets). Slotted

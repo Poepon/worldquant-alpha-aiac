@@ -48,7 +48,6 @@ _ALLOWED_TRIGGER_NAMES: frozenset[str] = frozenset({
     "backend.tasks.run_pillar_balance_check",
     "backend.tasks.run_negative_knowledge_extract",
     "backend.tasks.run_macro_narrative_extract",
-    "backend.tasks.run_regime_infer",
     "backend.tasks.monitor_llm_op_hallucinations",
     "backend.tasks.run_daily_feedback",
 })
@@ -801,54 +800,7 @@ class OpsService:
 
         return MacroNarrativeService.get_token_usage(utc_date)
 
-    # ==================================================================
-    # Phase 3 — P2-C Regime composers
-    # ==================================================================
 
-    async def get_regime_current(
-        self, region: str = "USA",
-    ) -> Dict[str, Any]:
-        """Live Redis read — what regime is THIS region in right now.
-
-        Best-effort: returns ``{"regime": None}`` on Redis outage or
-        cold-start (no value cached). The frontend renders a "等待 beat"
-        chip in that case.
-        """
-        from backend.services.regime_inference_service import RegimeInferenceService
-
-        svc = RegimeInferenceService(self.db)
-        regime = await svc.get_cached_regime(region=region)
-        return {"region": region, "regime": regime, "source": "service"}
-
-    async def get_regime_snapshot(
-        self, region: str = "USA",
-    ) -> Dict[str, Any]:
-        """Full inference snapshot from Redis (pass_rate / confidence /
-        history). Falls back to today's docs/regime_state archive when
-        Redis is empty (e.g. service just restarted)."""
-        from backend.services.ops_report_reader import OpsReportReader
-
-        try:
-            from backend.tasks.redis_pool import get_redis_client
-            cli = get_redis_client()
-            raw = cli.get(f"aiac:regime_snapshot:{region}")
-            if raw:
-                import json as _json
-                payload = _json.loads(
-                    raw.decode() if isinstance(raw, bytes) else raw
-                )
-                return {"snapshot": payload, "source": "service"}
-        except Exception:
-            pass
-
-        # fallback: read today's archive + extract this region
-        reader = OpsReportReader()
-        archive, source = await reader.get_or_compute("regime_state")
-        regions = archive.get("regions") or {}
-        return {
-            "snapshot": regions.get(region) or {},
-            "source": source,
-        }
 
     # ==================================================================
     # Phase 4 — LLM op hallucination monitor composer
@@ -990,31 +942,3 @@ class OpsService:
             "stale_days": stale_days or None,
             "report_date": date_match.group(1) if date_match else None,
         }
-
-    async def get_regime_history(
-        self, region: str = "USA", *, days: int = 14,
-    ) -> List[Dict[str, Any]]:
-        """Per-day regime + pass_rate for ``region`` over ``days``.
-
-        Each entry: ``{"date", "regime", "pass_rate", "confidence",
-        "cold_start"}``. Missing days skipped, sorted oldest→newest.
-        """
-        from backend.services.ops_report_reader import OpsReportReader
-
-        reader = OpsReportReader()
-        raw_days = await reader.list_recent("regime_state", days=days)
-        out: List[Dict[str, Any]] = []
-        for entry in raw_days:
-            block = (entry.get("regions") or {}).get(region) or {}
-            if not block:
-                continue
-            out.append({
-                "date": entry.get("_date"),
-                "regime": block.get("regime"),
-                "pass_rate": block.get("pass_rate"),
-                "pass_rate_7d_mean": block.get("pass_rate_7d_mean"),
-                "confidence": block.get("confidence"),
-                "cold_start": block.get("cold_start"),
-            })
-        out.sort(key=lambda d: d["date"] or "")
-        return out

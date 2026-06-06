@@ -1117,50 +1117,12 @@ async def _apply_soft_regularizer(
             except Exception:  # noqa: BLE001
                 _dists.append(None)
 
-        # P2 alignment leg (R5 c1/c2). Master switch = W_ALIGNMENT > 0 (default
-        # 0 → leg dormant, no LLM cost). R5 is 2 LLM calls/candidate so only the
-        # most-promising candidates earn it: rank by the cheap 2-leg effective
-        # P(PASS) and judge the top-N (TOPK in soft, SHADOW_SAMPLE in shadow).
+        # P2 alignment leg (R5 LLM judge) retired in Phase 1c-delete. W_ALIGNMENT
+        # defaulted to 0.0 (dormant — the leg never selected any candidate), so
+        # keeping these two collections empty is byte-equivalent. The live
+        # complexity + originality legs below are unchanged.
         _judge_idx: set = set()
-        if _sr_w_a > 0.0:
-            _n_judge = int(
-                getattr(settings, "CODE_GEN_SOFT_REG_ALIGNMENT_TOPK", 3)
-                if _sr_mode == "soft"
-                else getattr(settings, "CODE_GEN_SOFT_REG_ALIGNMENT_SHADOW_SAMPLE", 1)
-            )
-            if _n_judge > 0:
-                _cheap_eff = [
-                    _softreg.evaluate_candidate(
-                        _expr or "", _dists[_li], float(probas[_li]),
-                        w_complexity=_sr_w_c, w_originality=_sr_w_o, w_alignment=0.0,
-                        c0=_sr_c0, cmax=_sr_cmax, lam=_sr_lambda, mode="soft",
-                    ).p_pass_adjusted
-                    for _li, _expr in enumerate(cand_exprs)
-                ]
-                _judge_idx = set(_softreg.select_topk_indices(_cheap_eff, _n_judge))
-
-        # Run the top-N R5 alignment judges concurrently — each is 2 sequential
-        # LLM calls (c1, c2); gathering across the K candidates collapses
-        # K×latency → ~1×. return_exceptions keeps the per-candidate soft-fail:
-        # a failed judge → composite None → 0 alignment penalty.
         _r5_by_idx: dict = {}
-        if _judge_idx:
-            from backend.agents.graph.r5_judge import run_r5_judge
-            from backend.agents.services.llm_service import get_llm_service
-            _r5_llm = get_llm_service()
-            _judge_order = sorted(_judge_idx)
-            _r5_results = await asyncio.gather(*[
-                run_r5_judge(
-                    hypothesis_statement=getattr(
-                        state.pending_alphas[indices_to_simulate[_ji]], "hypothesis", "") or "",
-                    description=getattr(
-                        state.pending_alphas[indices_to_simulate[_ji]], "explanation", "") or "",
-                    expression=cand_exprs[_ji] or "",
-                    llm_service=_r5_llm,
-                )
-                for _ji in _judge_order
-            ], return_exceptions=True)
-            _r5_by_idx = dict(zip(_judge_order, _r5_results))
 
         _sr_adj = list(probas)
         for _li, _expr in enumerate(cand_exprs):
@@ -1965,29 +1927,11 @@ async def node_evaluate(
     except Exception:
         _regime_for_eval = None
 
-    if (
-        getattr(settings, "ENABLE_REGIME_AWARE_THRESHOLDS", False)
-        and _regime_for_eval
-    ):
-        try:
-            from backend.regime_classifier import (  # lazy
-                apply_regime_multipliers as _apply_regime_multipliers,
-            )
-            _old_sharpe = tier_cfg.get("sharpe_min")
-            adjusted_tier_cfg = _apply_regime_multipliers(
-                tier_cfg, _regime_for_eval,
-            )
-            logger.info(
-                f"[{node_name}] P2-C regime gate | regime="
-                f"{_regime_for_eval} sharpe: "
-                f"{_old_sharpe}→{adjusted_tier_cfg.get('sharpe_min')}"
-            )
-            tier_cfg = adjusted_tier_cfg
-        except Exception as _p2c_ex:
-            logger.warning(
-                f"[{node_name}] P2-C regime adjust failed "
-                f"(non-fatal): {_p2c_ex}"
-            )
+    # P2-C regime-aware threshold multiplier retired in Phase 1c-delete
+    # (regime_classifier.py removed; ENABLE_REGIME_AWARE_THRESHOLDS OFF and the
+    # mining_agent injector is gone → _regime_for_eval is always None in the pool
+    # world). tier_cfg is used unscaled; the (always-None) _regime_for_eval is
+    # still threaded into _EvalCtx for the harmless _regime_at_eval stamp.
 
     # Feature 1 (2026-05-24): the 11 numeric verdict thresholds are now unpacked
     # by the shared _unpack_eval_thresholds (single source of truth with sync).
@@ -3149,202 +3093,10 @@ async def node_evaluate(
         "SUCCESS"
     )
 
-    # === R1a hook + R5 LLM judge (Phase 0 v1.6 / Phase 2 R5) ===
-    # R1a writes AttributionType into alpha.metrics + dedicated
-    # r1a_attribution_log table (50× INSERT throughput vs. relying on
-    # alpha persistence — FAIL/OPTIMIZE alphas get GC'd, only 1/round
-    # actually persists). R5 LLM judge runs AFTER R1a heuristic so it
-    # can OVERWRITE R1a verdict per [V1.0-A2-3] conflict-resolution lock.
-    #
-    # Bug-#6 fix (2026-05-18): R5 used to be NESTED under ENABLE_R1A_HOOK
-    # so ENABLE_LLM_JUDGE alone did nothing and turning R1a off silently
-    # killed R5. Now each flag has its own guard; if either is ON we
-    # walk updated_alphas once and apply whichever hooks are enabled. The
-    # r1a_attribution_log row is still written when ANY hook ran so the
-    # R5-only configuration has a place to land its r5_* columns.
-    _r1a_on = bool(getattr(settings, "ENABLE_R1A_HOOK", False))
-    _r5_on = bool(getattr(settings, "ENABLE_LLM_JUDGE", False))
-    if _r1a_on or _r5_on:
-        # Lazy imports: avoid cold-start cost when both flags OFF.
-        import hashlib  # noqa: E402
-        from backend.database import AsyncSessionLocal  # noqa: E402
-        from backend.models.r1a_attribution import R1aAttributionLog  # noqa: E402
-
-        # Only import R1a integration shim when its flag is on — keeps
-        # the legacy "core/ is 3223 LOC DORMANT" cost gate intact.
-        if _r1a_on:
-            from backend.agents.core.integration import enhance_existing_node_evaluate  # noqa: E402
-        if _r5_on:
-            from backend.agents.graph.r5_judge import run_r5_judge  # noqa: E402
-            from backend.agents.services.llm_service import get_llm_service  # noqa: E402
-
-        _r1a_failures = 0
-        _r1a_db_failures = 0  # M1 review fix: count per-row DB-side failures
-                              # (savepoint rollbacks) + whole-batch transaction
-                              # failures, separately from heuristic-side
-                              # _r1a_failures. Surfaced via end-of-round stats
-                              # log so log scrapers / GO gate observer can see
-                              # silent data loss.
-        _r1a_log_rows = []  # collect first, INSERT in one batch after loop
-        _task_id_for_r1a = getattr(state, "task_id", None)
-
-        for _a in updated_alphas:  # _a is AlphaCandidate (Pydantic BaseModel)
-            # V-26.79 detach: rebind to fresh dict before mutating
-            _new_metrics = dict(_a.metrics) if isinstance(_a.metrics, dict) else {}
-            _r1a_log = {
-                "task_id": _task_id_for_r1a,
-                "alpha_id_brain": getattr(_a, "alpha_id", None),
-                "expression": getattr(_a, "expression", "") or "",
-                "expression_hash": hashlib.sha256(
-                    (getattr(_a, "expression", "") or "").encode("utf-8")
-                ).hexdigest()[:64],
-                "quality_status_at_eval": getattr(_a, "quality_status", None),
-                "hook_version": "v1",
-                "attribution": None,
-                "attribution_confidence": None,
-                "attribution_evidence": None,
-                "should_retry_implementation": None,
-                "should_modify_hypothesis": None,
-                "hook_error": None,
-            }
-            # Shared context for both hooks — populated even when R1a flag
-            # is off so the R5-only path still has a hypothesis statement
-            # to feed run_r5_judge.
-            _hyp = {"statement": getattr(_a, "hypothesis", "") or ""}
-
-            if _r1a_on:
-                try:
-                    _sim = {
-                        "sharpe": _new_metrics.get("sharpe"),
-                        "fitness": _new_metrics.get("fitness"),
-                    }
-                    _fb = enhance_existing_node_evaluate(_a, _sim, _hyp, trace=None)
-                    _new_metrics["_r1a_attribution"] = _fb.attribution.value
-                    _new_metrics["_r1a_attribution_confidence"] = _fb.attribution_confidence
-                    if _fb.attribution_evidence:  # skip empty list — saves storage
-                        _new_metrics["_r1a_attribution_evidence"] = list(_fb.attribution_evidence)
-                    _new_metrics["_r1a_should_retry"] = bool(_fb.should_retry_implementation)
-                    _new_metrics["_r1a_should_modify"] = bool(_fb.should_modify_hypothesis)
-                    _new_metrics["_r1a_hook_version"] = "v1"
-                    # log row mirrors metrics
-                    _r1a_log["attribution"] = _fb.attribution.value
-                    _r1a_log["attribution_confidence"] = _fb.attribution_confidence
-                    _r1a_log["attribution_evidence"] = list(_fb.attribution_evidence) if _fb.attribution_evidence else None
-                    _r1a_log["should_retry_implementation"] = "true" if _fb.should_retry_implementation else "false"
-                    _r1a_log["should_modify_hypothesis"] = "true" if _fb.should_modify_hypothesis else "false"
-                except Exception as _r1a_e:  # noqa: BLE001 — must isolate per-alpha failures
-                    _r1a_failures += 1
-                    logger.warning(
-                        "[R1a] hook failed for alpha {}: {}",
-                        getattr(_a, "alpha_id", "?"), _r1a_e
-                    )
-                    _new_metrics["_r1a_attribution"] = None
-                    _new_metrics["_r1a_hook_error"] = str(_r1a_e)[:200]
-                    _new_metrics["_r1a_hook_version"] = "v1"  # mark even on fail so GO denominator includes
-                    _r1a_log["hook_error"] = str(_r1a_e)[:200]
-            # Pydantic field reassignment (AlphaCandidate is Pydantic BaseModel —
-            # no flag_modified needed; persistence.py INSERT path doesn't need dirty marker)
-            _a.metrics = _new_metrics
-
-            # === Phase 2 R5 LLM judge (plan v1.0 §1.2, 2026-05-18) ===
-            # Runs AFTER R1a heuristic (when both enabled) so R5 can
-            # OVERWRITE R1a verdict per [V1.0-A2-3]. R5 None (both PASS
-            # / low conf) preserves R1a verdict. Per-alpha try/except
-            # guard — same as R1a, must not block round.
-            if _r5_on:
-                try:
-                    # AlphaCandidate (Pydantic, agents/graph/state.py:19) has
-                    # field `explanation`; SQLAlchemy Alpha.logic_explanation
-                    # is the DB-persisted name (mapped in persistence.py:270).
-                    # In-loop _a is AlphaCandidate so read `explanation` —
-                    # task 1463 verify showed 100% skip due to reading the
-                    # wrong (DB) name. Same for `hypothesis` (already a
-                    # field on AlphaCandidate, plain attr).
-                    _desc_text = getattr(_a, "explanation", "") or ""
-                    _hyp_text = getattr(_a, "hypothesis", "") or _hyp.get("statement", "") or ""
-                    _r5_payload = await run_r5_judge(
-                        hypothesis_statement=_hyp_text,
-                        description=_desc_text,
-                        expression=getattr(_a, "expression", "") or "",
-                        llm_service=get_llm_service(),
-                        r1a_attribution=_r1a_log.get("attribution"),
-                        operators_used=None,
-                    )
-                    # Merge 10 r5_* columns (pop the internal r5_attribution first)
-                    _r5_override = _r5_payload.pop("r5_attribution", None)
-                    _r1a_log.update(_r5_payload)
-                    # [V1.0-A2-3] R5 wins: overwrite R1a attribution when R5 has verdict
-                    if _r5_override is not None:
-                        _r1a_log["attribution"] = _r5_override
-                        # mirror to metrics for downstream R2/Q7 / R8 readers
-                        _new_metrics["_r1a_attribution"] = _r5_override
-                        _a.metrics = _new_metrics
-                except Exception as _r5_e:  # noqa: BLE001
-                    logger.warning(
-                        "[R5] judge failed for alpha {}: {}",
-                        getattr(_a, "alpha_id", "?"), _r5_e
-                    )
-                    _r1a_log["r5_hook_error"] = str(_r5_e)[:200]
-            # === end R5 judge ===
-
-            _r1a_log_rows.append(_r1a_log)
-
-        # Batch INSERT to r1a_attribution_log — independent of alpha persistence.
-        # M1 review fix (2026-05-18): per-row savepoint isolation. Previously a
-        # single bad row (NOT NULL violation, non-JSON-serializable field,
-        # schema drift) failed the whole batch and lost all 50 rows silently.
-        # Now each row gets its own SAVEPOINT (begin_nested) so one bad row
-        # only rolls back its own savepoint, then we commit the outer txn with
-        # whatever survived. _r1a_db_failures counts the dropped rows; an
-        # outer-transaction failure (pool exhaustion etc.) counts ALL queued
-        # rows as failures so the metric remains conservative.
-        if _r1a_log_rows:
-            try:
-                async with AsyncSessionLocal() as _r1a_db:
-                    for _row in _r1a_log_rows:
-                        try:
-                            async with _r1a_db.begin_nested():
-                                _r1a_db.add(R1aAttributionLog(**_row))
-                                # flush inside savepoint surfaces row-specific
-                                # errors (NOT NULL, type, JSON serialize) HERE
-                                # so the outer commit can still succeed for
-                                # the other rows.
-                                await _r1a_db.flush()
-                        except Exception as _r1a_row_e:  # noqa: BLE001
-                            _r1a_db_failures += 1
-                            logger.error(
-                                "[R1a] log row INSERT failed (savepoint rollback, "
-                                "alpha_id_brain={}): {}",
-                                _row.get("alpha_id_brain"), _r1a_row_e,
-                            )
-                    await _r1a_db.commit()
-            except Exception as _r1a_db_e:  # noqa: BLE001
-                # Outer-transaction failure (e.g. pool exhausted, commit fail):
-                # everything queued is lost — count all rows we tried to write.
-                _r1a_db_failures += len(_r1a_log_rows)
-                logger.error(
-                    "[R1a] log batch INSERT failed (whole-batch loss, rows={}): {}",
-                    len(_r1a_log_rows), _r1a_db_e,
-                )
-
-        if _r1a_failures:
-            logger.warning(
-                "[R1a] {}/{} hook failed this round", _r1a_failures, len(updated_alphas)
-            )
-        # M1 review fix: end-of-round stats line so log scrapers see DB-side
-        # losses even when heuristic-side _r1a_failures is zero. Stash on
-        # state too for downstream readers (no metrics_tracker counter wiring
-        # exists for R1a today — keep this surgical).
-        if _r1a_db_failures:
-            logger.error(
-                "[R1a] {}/{} log rows lost this round (DB-side, see prior ERROR for cause)",
-                _r1a_db_failures, len(_r1a_log_rows),
-            )
-        try:
-            setattr(state, "_r1a_db_failures_last_round", _r1a_db_failures)
-        except Exception:  # noqa: BLE001 — state attr-set must never break round
-            pass
-    # === end R1a + R5 hooks ===
+    # === R1a hook + R5 LLM judge retired in Phase 1c-delete ===
+    # (core/ attribution shim + r5_judge removed; ENABLE_R1A_HOOK / ENABLE_LLM_JUDGE
+    #  flipped OFF in Phase 1b-flip. The block annotated alpha.metrics with
+    #  _r1a_*/_r5_* keys + wrote r1a_attribution_log — both now gone.)
 
     # === Phase 2 R10 Family-cap (Hubble v2, 2026-05-18) ===
     # Apply AFTER R1a/R5 hooks so per-alpha scores (composite_score / sharpe)

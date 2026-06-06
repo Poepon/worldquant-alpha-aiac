@@ -324,64 +324,19 @@ class TaskService(BaseService):
     # =========================================================================
     
     async def start_task(self, task_id: int) -> Dict[str, Any]:
+        """ONESHOT task dispatch was retired in Phase 1c-delete.
+
+        The FLAT/ONESHOT ``run_mining_task`` Celery task no longer exists — all
+        mining now runs through the resident HG/S/E pool (fed by the scheduler
+        beat). Manual one-off task starts will be re-homed onto the pool in
+        Phase 1d (runs.py rework); until then this raises a clear error rather
+        than dispatching a deleted Celery task.
         """
-        Start a mining task.
-        
-        Args:
-            task_id: Task ID
-            
-        Returns:
-            Dict with run_id and celery_task_id
-            
-        Raises:
-            ValueError if task not found or invalid status
-        """
-        task = await self.task_repo.get_by_id(task_id)
-        if not task:
-            raise ValueError(f"Task {task_id} not found")
-        
-        valid_start_statuses = ["PENDING", "PAUSED", "STOPPED", "FAILED", "COMPLETED"]
-        if task.status not in valid_start_statuses:
-            raise ValueError(f"Cannot start task in {task.status} status")
-        
-        # Update status
-        await self.task_repo.update_status(task_id, "RUNNING")
-        
-        # Create experiment run
-        run = ExperimentRun(
-            task_id=task_id,
-            status="RUNNING",
-            trigger_source="API",
-            celery_task_id=None,
-            config_snapshot={
-                "task": {
-                    "region": task.region,
-                    "universe": task.universe,
-                    "dataset_strategy": task.dataset_strategy,
-                    "target_datasets": task.target_datasets,
-                    "daily_goal": task.daily_goal,
-                    "config": task.config,
-                },
-            },
-            strategy_snapshot={},
+        raise ValueError(
+            "ONESHOT task start was retired in Phase 1c-delete; mining now runs "
+            "through the HG/S/E pool (run_mining_task no longer exists)."
         )
-        created_run = await self.run_repo.create(run)
-        await self.commit()
-        
-        # Trigger Celery task
-        from backend.tasks import run_mining_task
-        celery_task = run_mining_task.delay(task_id, created_run.id)
-        
-        # Update run with celery task ID
-        created_run.celery_task_id = celery_task.id
-        await self.commit()
-        
-        return {
-            "task_id": task_id,
-            "run_id": created_run.id,
-            "celery_task_id": celery_task.id,
-        }
-    
+
     async def intervene_task(
         self,
         task_id: int,
@@ -526,208 +481,10 @@ class TaskService(BaseService):
 
     SUPPORTED_REGIONS = ("USA", "CHN", "EUR", "ASI", "GLB")
 
-    async def _dispatch_session_worker(
-        self,
-        task_id: int,
-        *,
-        inherit_runtime_state: bool = False,
-    ) -> str:
-        """Create a new ExperimentRun + dispatch celery worker for the session.
-
-        Each pause/resume cycle gets its own ExperimentRun for traceability.
-
-        flat-F1 v1.5 Q1 Variant V2: when ``inherit_runtime_state=True`` the new
-        run is seeded with the previous (latest) run's ``runtime_state`` so
-        FLAT_CONTINUOUS sessions preserve ``flat_cursor`` (and any future
-        per-session keys) across pause-resume. Cascade callers keep the default
-        ``False`` — each cascade ExperimentRun starts with empty runtime_state,
-        unchanged from pre-v1.5 behavior.
-        """
-        task = await self.task_repo.get_by_id(task_id)
-
-        prev_state: Dict[str, Any] = {}
-        if inherit_runtime_state:
-            prev_run = await self.run_repo.get_latest_by_task(task_id)
-            if prev_run is not None and isinstance(prev_run.runtime_state, dict):
-                prev_state = dict(prev_run.runtime_state)
-
-        run = ExperimentRun(
-            task_id=task_id,
-            status="RUNNING",
-            trigger_source="MINING_SESSION",
-            celery_task_id=None,
-            config_snapshot={
-                "task": {
-                    "region": task.region,
-                    "universe": task.universe,
-                    "schedule": task.schedule,
-                },
-            },
-            strategy_snapshot={},
-            runtime_state=prev_state,
-        )
-        created_run = await self.run_repo.create(run)
-        await self.commit()
-
-        from backend.tasks import run_mining_task
-        celery_task = run_mining_task.delay(task_id, created_run.id)
-        created_run.celery_task_id = celery_task.id
-        await self.commit()
-        return celery_task.id
-
-    # =========================================================================
-    # FLAT_CONTINUOUS session lifecycle (flat-F1 v1.5)
-    # =========================================================================
-    # Restored 2026-05-18 — PR3e accidentally deleted these along with the
-    # cascade-only methods (start_session / stop_session / resume_session etc).
-    # The ops router (POST /api/v1/ops/start-flat-session and
-    # POST /api/v1/ops/flat-sessions/{id}/resume) still calls them. Without
-    # these the only production mining mode (FLAT_CONTINUOUS) is dead.
-    # NOTE: do NOT pass cascade_phase / cascade_round_idx to MiningTask(...) —
-    # those columns were dropped in PR3b (migration c3f9a7d2e4b8).
-
-    async def start_flat_session(
-        self,
-        region: str = "USA",
-        universe: str = "TOP3000",
-        datasets: Optional[List[str]] = None,
-        delay: int = 1,
-        launched_by: str = "manual",
-        llm_overrides: Optional[Dict[str, Any]] = None,
-        daily_goal: Optional[int] = None,
-    ) -> "MiningSessionInfo":
-        """Create a new FLAT_CONTINUOUS task and dispatch its worker.
-
-        Unlike the retired CONTINUOUS_CASCADE.start_session this is NOT
-        singleton-per-region: multiple FLAT tasks may co-exist (different
-        dataset / hypothesis sets). Caller (ops endpoint) is expected to
-        gate on ``settings.ENABLE_FLAT_CONTINUOUS``.
-
-        delay: BRAIN simulation delay (0 or 1). 1 = the established path.
-        delay=0 stamps task.config['delay']=0 so the worker mines the
-        delay-0 field roster and sims at delay-0 (orthogonal axis ②/B);
-        the delay-0 datafield cells must already be synced for the chosen
-        datasets/universe (sync_fields_from_brain delay=0).
-        """
-        if region not in self.SUPPORTED_REGIONS:
-            raise ValueError(
-                f"region={region!r} not supported; choose one of {self.SUPPORTED_REGIONS}"
-            )
-        if delay not in (0, 1):
-            raise ValueError(f"delay={delay!r} not supported; choose 0 or 1")
-
-        # Pin hypothesis_centric level into the task config at CREATION time
-        # (2026-05-22 root-cause fix). _get_active_level falls back to
-        # settings.HYPOTHESIS_CENTRIC_LEVEL only when this key is ABSENT — and
-        # that setting lives in .env (not a refreshable flag), so a Celery
-        # worker started before .env was bumped runs at level 0 forever and
-        # every FLAT alpha persists with hypothesis_id=NULL (verified: explicit
-        # variant=2 tasks link at 98%, absent-variant FLAT at ~5-13%). Stamping
-        # it here in the FastAPI/caller process (which has the correct value)
-        # makes the worker read the pinned level from config, immune to its own
-        # stale .env. assign_variant (ONESHOT A/B) no longer fires once
-        # LEVEL==CANDIDATE, so FLAT must pin explicitly.
-        from backend.config import settings as _hge
-        _level = int(getattr(_hge, "HYPOTHESIS_CENTRIC_LEVEL", 0) or 0)
-
-        # delay-1 omits the key so existing-session config stays byte-identical
-        # (_task_delay falls back to 1 when absent); only delay-0 stamps it.
-        _config = {"flat_cursor": 0, "hypothesis_centric_variant": _level}
-        if delay != 1:
-            _config["delay"] = int(delay)
-        # Orchestrator Sub-phase 1 (Q6 DECIDED 2026-05-29):标记 task 是 manual
-        # 启的还是 orchestrator 启的。orchestrator 让位决策只动自己启的 task,
-        # user 手动启的 task 不被自动化干预。default "manual" 保留向后兼容。
-        _config["launched_by"] = launched_by
-        # Phase C single-node A/B (2026-05-30): stash this task's per-node model
-        # override into config. mining_tasks binds it via set_task_function_overrides
-        # at run entry; resolve_model_for honours it independent of the global
-        # ENABLE_PER_FUNCTION_LLM_ROUTING flag. None/empty → key absent → default
-        # models (byte-for-byte legacy).
-        if isinstance(llm_overrides, dict) and llm_overrides:
-            _config["llm_overrides"] = llm_overrides
-        # Per-session FLAT iteration alpha cap (2026-06-02). Absent → the worker
-        # falls back to the global settings.FLAT_CONTINUOUS_DAILY_GOAL (20). Lets
-        # ops size individual sessions without changing the global tunable.
-        if daily_goal is not None:
-            if int(daily_goal) <= 0:
-                raise ValueError(f"daily_goal={daily_goal!r} must be a positive int")
-            _config["flat_daily_goal"] = int(daily_goal)
-
-        task = MiningTask(
-            task_name=f"flat-session-{region}-{datetime.utcnow().strftime('%Y%m%d-%H%M%S')}",
-            region=region,
-            universe=universe,
-            dataset_strategy="MANUAL" if datasets else "AUTO",
-            target_datasets=list(datasets or []),
-            daily_goal=0,                # 0 = unlimited within FLAT_CONTINUOUS_MAX_ITERATIONS
-            max_iterations=999999,
-            config=_config,
-            status="RUNNING",
-            schedule="FLAT",
-        )
-        created = await self.task_repo.create(task)
-        await self.commit()
-        await self._dispatch_session_worker(created.id, inherit_runtime_state=False)
-        logger.info(
-            f"[start_flat_session] region={region} task_id={created.id} "
-            f"datasets={len(datasets or [])} dispatched"
-        )
-        return self._to_session_info(await self.task_repo.get_by_id(created.id))
-
-    async def resume_flat_session(self, task_id: int) -> "MiningSessionInfo":
-        """Resume a paused FLAT session, preserving runtime_state['flat_cursor']."""
-        task = await self.task_repo.get_by_id(task_id)
-        if not task:
-            raise ValueError(f"task_id={task_id} not found")
-        if (task.schedule or "").upper() != "FLAT":
-            raise ValueError(
-                f"task_id={task_id} is not a FLAT session (schedule={task.schedule})"
-            )
-        if task.status == "RUNNING":
-            return self._to_session_info(task)
-        if task.status != "PAUSED":
-            raise ValueError(
-                f"task_id={task_id} cannot resume from status={task.status}"
-            )
-        await self.task_repo.update_status(task_id, "RUNNING")
-        await self.commit()
-        await self._dispatch_session_worker(task_id, inherit_runtime_state=True)
-        logger.info(
-            f"[resume_flat_session] task_id={task_id} region={task.region} "
-            f"PAUSED→RUNNING (runtime_state inherited)"
-        )
-        return self._to_session_info(await self.task_repo.get_by_id(task_id))
-
-    async def pause_flat_session(self, task_id: int) -> "MiningSessionInfo":
-        """Pause a RUNNING FLAT session by setting status→PAUSED.
-
-        No worker dispatch / kill needed: the running flat worker self-checks
-        task.status at every round boundary (CASCADE_PAUSE_POLL_SEC) and exits
-        cleanly on PAUSED — identical mechanism to quota_guard_pause_at_threshold
-        (session_watchdog.py:439). flat_cursor is preserved in task.config so a
-        later resume_flat_session continues where it left off.
-        """
-        task = await self.task_repo.get_by_id(task_id)
-        if not task:
-            raise ValueError(f"task_id={task_id} not found")
-        if (task.schedule or "").upper() != "FLAT":
-            raise ValueError(
-                f"task_id={task_id} is not a FLAT session (schedule={task.schedule})"
-            )
-        if task.status == "PAUSED":
-            return self._to_session_info(task)
-        if task.status != "RUNNING":
-            raise ValueError(
-                f"task_id={task_id} cannot pause from status={task.status}"
-            )
-        await self.task_repo.update_status(task_id, "PAUSED")
-        await self.commit()
-        logger.info(
-            f"[pause_flat_session] task_id={task_id} region={task.region} "
-            f"RUNNING→PAUSED (worker exits at next round boundary)"
-        )
-        return self._to_session_info(await self.task_repo.get_by_id(task_id))
+    # _dispatch_session_worker / start_flat_session / resume_flat_session /
+    # pause_flat_session were retired in Phase 1c-delete (FLAT path removed;
+    # mining runs through the HG/S/E pool). _to_session_info is kept as the
+    # MiningSessionInfo projector (still referenced by surviving serializers).
 
     def _to_session_info(self, task: MiningTask) -> MiningSessionInfo:
         return MiningSessionInfo(

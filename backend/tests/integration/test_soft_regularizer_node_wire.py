@@ -39,9 +39,10 @@ def _state(pending):
 
 
 @contextmanager
-def _patched(settings_overrides: dict, dist_map: dict, r5_mock=None):
-    """Patch settings + OriginalityChecker + run_r5_judge/get_llm_service for
-    one helper call."""
+def _patched(settings_overrides: dict, dist_map: dict):
+    """Patch settings + OriginalityChecker + get_llm_service for one helper call.
+    (The R5 alignment leg was retired in Phase 1c-delete; only the live
+    complexity + originality legs remain.)"""
     _FakeChecker.dist_map = dist_map
     patches = [patch(f"backend.config.settings.{k}", v) for k, v in settings_overrides.items()]
     patches.append(patch("backend.alpha_originality.OriginalityChecker", _FakeChecker))
@@ -49,8 +50,6 @@ def _patched(settings_overrides: dict, dist_map: dict, r5_mock=None):
         "backend.agents.services.llm_service.get_llm_service",
         return_value=SimpleNamespace(),
     ))
-    if r5_mock is not None:
-        patches.append(patch("backend.agents.graph.r5_judge.run_r5_judge", r5_mock))
     for p in patches:
         p.start()
     try:
@@ -104,51 +103,8 @@ def test_soft_p1_downweights_and_moves_to_skip():
     assert out_probas[0] == pytest.approx(0.9)  # original → 0 penalty → unchanged
 
 
-def test_topk_judges_highest_effp_and_index_keying():
-    # Non-trivial global indices: candidates live at pending[5],[2],[8].
-    pending = [_alpha("dummy", "hd") for _ in range(9)]
-    pending[5] = _alpha("rank(close)", "HYP_A")    # local 0 — highest eff-P
-    pending[2] = _alpha("rank(volume)", "HYP_B")   # local 1
-    pending[8] = _alpha("rank(returns)", "HYP_C")  # local 2 — lowest
-    state = _state(pending)
-    indices = [5, 2, 8]
-    cand_exprs = [pending[i].expression for i in indices]
-    probas = [0.9, 0.5, 0.2]
-    r5 = AsyncMock(return_value={"r5_composite_score": 0.5, "r5_cost_usd": 0.001})
-    with _patched({"CODE_GEN_SOFT_REG_MODE": "soft", "CODE_GEN_SOFT_REG_W_ALIGNMENT": 1.0,
-                   "CODE_GEN_SOFT_REG_W_COMPLEXITY": 1.0, "CODE_GEN_SOFT_REG_W_ORIGINALITY": 1.0,
-                   "CODE_GEN_SOFT_REG_ALIGNMENT_TOPK": 1, "CODE_GEN_SOFT_REG_LAMBDA": 0.5},
-                  {"rank(close)": 0.9, "rank(volume)": 0.1, "rank(returns)": 1.0},
-                  r5_mock=r5):
-        _call(state, indices, cand_exprs, probas)
-    # Exactly the top-1 (local 0 → global 5) is judged, with its OWN hypothesis.
-    assert r5.await_count == 1
-    _, kw = r5.call_args
-    assert kw["hypothesis_statement"] == "HYP_A"   # read from pending[5], not [0]
-    assert kw["expression"] == "rank(close)"
-    assert pending[5].metrics["_soft_reg_alignment_judged"] is True
-    assert pending[5].metrics["_soft_reg_r5_composite"] == pytest.approx(0.5)
-    assert pending[2].metrics["_soft_reg_alignment_judged"] is False
-    assert pending[8].metrics["_soft_reg_alignment_judged"] is False
-    # un-judged candidates never carry R5 detail keys
-    assert "_soft_reg_r5_composite" not in pending[2].metrics
-
-
-def test_r5_failure_soft_fails_to_zero_alignment():
-    pending = [_alpha("rank(close)", "HYP_A"), _alpha("rank(volume)", "HYP_B")]
-    state = _state(pending)
-    r5 = AsyncMock(side_effect=RuntimeError("LLM down"))
-    with _patched({"CODE_GEN_SOFT_REG_MODE": "soft", "CODE_GEN_SOFT_REG_W_ALIGNMENT": 1.0,
-                   "CODE_GEN_SOFT_REG_ALIGNMENT_TOPK": 1},
-                  {"rank(close)": 0.9, "rank(volume)": 0.1},
-                  r5_mock=r5):
-        # gather(return_exceptions=True) → the helper must not raise
-        keep, skip, out_probas = _call(state, [0, 1], [a.expression for a in pending], [0.9, 0.5])
-    judged = pending[0] if pending[0].metrics["_soft_reg_alignment_judged"] else pending[1]
-    # judged-but-failed → composite None → alignment leg contributes 0 penalty
-    assert judged.metrics["_soft_reg_alignment_judged"] is True
-    assert judged.metrics["_soft_reg_r5_composite"] is None
-    assert judged.metrics["_soft_reg_alignment_pen"] == 0.0
+# test_topk_judges_highest_effp_and_index_keying + test_r5_failure_soft_fails_to_zero_alignment
+# removed in Phase 1c-delete (the R5 alignment leg they exercised was retired).
 
 
 def test_mode_off_returns_inputs_untouched():

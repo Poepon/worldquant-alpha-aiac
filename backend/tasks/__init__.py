@@ -24,7 +24,7 @@ def run_async(coro):
 
 
 # Re-export all tasks for backward compatibility
-from backend.tasks.mining_tasks import run_mining_task
+# Phase 1c-delete: mining_tasks.py (run_mining_task / FLAT / ONESHOT) deleted.
 from backend.tasks.feedback_tasks import (
     run_daily_feedback,
     update_operator_stats,
@@ -46,9 +46,9 @@ from backend.tasks.refresh_tasks import audit_iqc_marginal_for_alpha
 # V-22.12.1: beat fallback sweep — backfills audits missed by the
 # refresh_can_submit_for_alpha hook (BRAIN sync paths, broker outages, etc.)
 from backend.tasks.refresh_tasks import iqc_audit_backfill_sweep
-# V-19.7: persistent mining service watchdog + BRAIN quota guard
+# V-19.7: BRAIN quota guard (Phase 1c-delete: watchdog_revive_dead_sessions
+# retired — lease-recycle is the pool's sole recovery path).
 from backend.tasks.session_watchdog import (
-    watchdog_revive_dead_sessions,
     quota_guard_pause_at_threshold,
 )
 # V-22.3 long-term: daily LLM-op-hallucination monitor
@@ -63,12 +63,10 @@ from backend.tasks.pillar_balance_check import run_pillar_balance_check
 from backend.tasks.negative_knowledge_extract import run_negative_knowledge_extract
 # P2-A (2026-05-16): daily macro-narrative extract task
 from backend.tasks.macro_narrative_extract import run_macro_narrative_extract
-# P2-C (2026-05-16): daily regime-inference task
-from backend.tasks.regime_infer import run_regime_infer
+# P2-C regime-inference task retired in Phase 1c-delete (regime cluster removed).
 # P3-Q10 PR2d (2026-05-18): daily Q10 telemetry report beat task
 from backend.tasks.q10_tasks import run_q10_layer_telemetry
-# P3-R1b.3 review LOW (2026-05-18): weekly 90-day failure_tree pruner
-from backend.tasks.r1b_tasks import run_failure_tree_pruner
+# P3-R1b.3 failure_tree pruner retired in Phase 1c-delete (R1b machine removed).
 # P3-R8 query log review LOW (2026-05-18): weekly 90-day r8_query_log pruner
 from backend.tasks.r8_tasks import run_r8_query_log_pruner
 # Canary monitoring (2026-05-18): every-6h red-flag check post v1.3 ship
@@ -79,14 +77,8 @@ from backend.tasks.logic_distill_tasks import run_weekly_logic_distill  # noqa: 
 from backend.tasks.cognitive_layer_bandit_tasks import run_cognitive_layer_bandit_update  # noqa: F401
 # Breadth (2026-05-22): daily dataset-steering value-bandit mining_weight refresh
 from backend.tasks.dataset_weight_refresh import run_dataset_weight_refresh  # noqa: F401
-# Orchestrator Sub-phase 1 skeleton (2026-05-29): event-driven evaluate +
-# cron 1h fallback scan. flag-gated by ENABLE_AUTO_ORCHESTRATOR (default OFF).
-from backend.tasks.orchestrator import (  # noqa: F401
-    orchestrator_evaluate_after_finalize,
-    orchestrator_periodic_scan,
-)
-# R1b CoSTEER (2026-05-22): outcome reconciliation — fills r1b_retry_log.outcome
-from backend.tasks.r1b_outcome_reconcile import reconcile_r1b_outcomes  # noqa: F401
+# Orchestrator retired in Phase 1c-delete (resident pool needs no relaunch).
+# R1b outcome-reconcile retired in Phase 1c-delete (R1b machine removed).
 # Data quality (2026-05-22): self-heal invalid (BRAIN-rejected) data fields
 from backend.tasks.datafield_prune import prune_invalid_datafields  # noqa: F401
 # Phase 16-A optimization closure Stage A (2026-05-28) — 6h beat task
@@ -118,8 +110,6 @@ __all__ = [
     # Utilities
     "run_async",
     "celery_app",
-    # Mining
-    "run_mining_task",
     # Feedback
     "run_daily_feedback",
     "update_operator_stats",
@@ -139,8 +129,7 @@ __all__ = [
     "audit_iqc_marginal_for_alpha",
     # V-22.12.1: IQC audit beat fallback sweep
     "iqc_audit_backfill_sweep",
-    # V-19.7: persistent mining service watchdog
-    "watchdog_revive_dead_sessions",
+    # V-19.7: BRAIN quota guard (watchdog_revive retired Phase 1c-delete)
     "quota_guard_pause_at_threshold",
     # V-22.3 long-term: LLM op hallucination monitor
     "monitor_llm_op_hallucinations",
@@ -154,12 +143,8 @@ __all__ = [
     "run_negative_knowledge_extract",
     # P2-A: daily macro-narrative extract
     "run_macro_narrative_extract",
-    # P2-C: daily regime inference
-    "run_regime_infer",
     # P3-Q10 PR2d: daily Q10 telemetry report
     "run_q10_layer_telemetry",
-    # P3-R1b.3 review LOW: weekly failure_tree pruner
-    "run_failure_tree_pruner",
     # P3-R8 query log review LOW: weekly r8_query_log pruner
     "run_r8_query_log_pruner",
     # Canary monitoring: every-6h red-flag check
@@ -169,7 +154,6 @@ __all__ = [
     # Phase 4 Tier E E1: Sunday 04:45 SH cognitive-layer bandit reward
     "run_cognitive_layer_bandit_update",
     "run_dataset_weight_refresh",
-    "reconcile_r1b_outcomes",
     "prune_invalid_datafields",
     # Phase 1b B5: pool scheduler + lease-recycle beats (gated on ENABLE_POOL_PIPELINE)
     "run_pool_scheduler",

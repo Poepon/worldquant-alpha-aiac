@@ -3,7 +3,8 @@ AIAC 2.0 Agents Package
 Contains Mining Agent, Feedback Agent, and LangGraph components
 """
 
-from backend.agents.mining_agent import MiningAgent, create_mining_agent
+# Phase 1c-delete: MiningAgent (FLAT/ONESHOT executor) retired. FeedbackAgent
+# survives — consumed by the daily-feedback beat (tasks/feedback_tasks.py).
 from backend.agents.feedback_agent import FeedbackAgent
 from backend.agents.graph import (
     MiningWorkflow,
@@ -12,9 +13,7 @@ from backend.agents.graph import (
 )
 
 __all__ = [
-    # Main Agents
-    "MiningAgent",
-    "create_mining_agent",
+    # Feedback agent (daily beat)
     "FeedbackAgent",
     # LangGraph
     "MiningWorkflow",
