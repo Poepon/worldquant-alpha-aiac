@@ -62,6 +62,22 @@ async def _noop_flush(session, task_id, run_id, iteration, steps):
 
 
 @pytest.mark.asyncio
+async def test_persist_threads_candidate_queue_id_from_context():
+    """Pool: candidate_queue_id flows from Candidate.context → save_failures_fn so
+    the alpha_failures partial-unique index can dedup a crash-window re-persist;
+    FLAT candidates (no context key) → None (unconstrained NULL)."""
+    fails = _RecordingFailures()
+    persist = build_persister(run_id=1, save_fn=_RecordingSave(), save_failures_fn=fails)
+    # pool-style: candidate carries candidate_queue_id in its context
+    await persist(None, [SimResult(candidate=SimpleNamespace(context={"candidate_queue_id": 4242}),
+                                   ok=False, state=_state())])
+    assert fails.calls[-1].get("candidate_queue_id") == 4242
+    # FLAT-style: no context attribute → None
+    await persist(None, [SimResult(candidate=SimpleNamespace(), ok=False, state=_state())])
+    assert fails.calls[-1].get("candidate_queue_id") is None
+
+
+@pytest.mark.asyncio
 async def test_persist_calls_save_per_result_with_context():
     save = _RecordingSave(returns=1)
     persist = build_persister(run_id=99, save_fn=save, save_failures_fn=_noop_failures)

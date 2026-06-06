@@ -131,6 +131,9 @@ def build_persister(
                     except Exception:  # noqa: BLE001 — one bad result ≠ dropped batch
                         logger.exception("[pipeline] persist of one result failed (skipped)")
                     # Failure log (non-PASS) — separate write, never blocks PASS.
+                    # candidate_queue_id (pool E path) flows via the Candidate.context
+                    # so the partial-unique index dedups a crash-window re-persist;
+                    # FLAT candidates have no such key → None → unconstrained NULL.
                     try:
                         await save_failures_fn(
                             session,
@@ -139,6 +142,7 @@ def build_persister(
                             pending_alphas=pending,
                             hypothesis_id=hypothesis_id,
                             rag_ab_arm=_attr(st, "rag_ab_arm", None),
+                            candidate_queue_id=(getattr(cand, "context", None) or {}).get("candidate_queue_id"),
                         )
                     except Exception:  # noqa: BLE001
                         logger.exception("[pipeline] failure-log write failed (skipped)")

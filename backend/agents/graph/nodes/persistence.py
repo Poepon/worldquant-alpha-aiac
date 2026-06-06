@@ -759,11 +759,17 @@ async def _incremental_save_failures(
     pending_alphas: List,
     hypothesis_id: Optional[int] = None,
     rag_ab_arm: Optional[str] = None,
+    candidate_queue_id: Optional[int] = None,
 ) -> int:
     """Write AlphaFailure rows for non-PASS pending alphas — the pipeline
     persister's equivalent of node_save_results' failure path (which writes via
     run_with_persistence). Per-row savepoint so one bad row never drops the
     batch; commits once at the end. Returns the number of failure rows written.
+
+    ``candidate_queue_id`` (pool E path only; None for FLAT) stamps the
+    candidate_queue PK so the uq_alpha_failures_candidate_queue_id partial-unique
+    index dedups a crash-window re-persist — a duplicate INSERT raises
+    IntegrityError, which the per-row savepoint below already swallows.
     """
     from backend.config import settings as _persist_settings
     from backend.models import AlphaFailure
@@ -787,6 +793,7 @@ async def _incremental_save_failures(
                 hypothesis_id=hypothesis_id,
                 bandit_arm_recommended=bandit_arm,
                 rag_ab_arm=rag_ab_arm,
+                candidate_queue_id=candidate_queue_id,
             )
             async with db_session.begin_nested():
                 db_session.add(rec)

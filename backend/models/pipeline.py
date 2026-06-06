@@ -193,7 +193,9 @@ class CandidateQueue(SQLAlchemyBase):
     delay = Column(Integer, nullable=False, server_default="1")
     dataset_id = Column(String(50), nullable=True, index=True)
     # RAG-derived category; node-read, projected to a column for attribution.
-    dataset_category = Column(String(80), nullable=True)
+    # 200 (was 80): inferred values are <20 chars today, but BRAIN category strings
+    # can reach ~203 — widened for headroom (zero FLAT impact; FLAT never writes it).
+    dataset_category = Column(String(200), nullable=True)
     sim_settings = Column(JSONB(none_as_null=True), nullable=True)
 
     # --- role-snapshot first-class columns (终审 #7) ---

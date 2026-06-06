@@ -4,7 +4,10 @@ Alpha Models - Alpha entities and related models
 Contains Alpha, AlphaFailure, and AlphaPnl models.
 """
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Float, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import (
+    Column, Integer, String, Boolean, DateTime, Float, Text, ForeignKey,
+    UniqueConstraint, Index, text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, ARRAY
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -173,8 +176,21 @@ class AlphaFailure(SQLAlchemyBase):
     Used by Feedback Agent to learn and improve.
     """
     __tablename__ = "alpha_failures"
-    __table_args__ = {'extend_existing': True}
-    
+    __table_args__ = (
+        # Pool dedup backstop: a PARTIAL UNIQUE index (WHERE NOT NULL) makes the
+        # E-pool failure write idempotent per candidate_queue PK — the DB backstop
+        # behind the best-effort Redis persist-marker. NULLs are distinct, so FLAT/
+        # legacy rows (candidate_queue_id=NULL) are unconstrained. On SQLite the
+        # postgresql_where is dropped → a plain UNIQUE index (NULLs still distinct).
+        Index(
+            "uq_alpha_failures_candidate_queue_id",
+            "candidate_queue_id",
+            unique=True,
+            postgresql_where=text("candidate_queue_id IS NOT NULL"),
+        ),
+        {"extend_existing": True},
+    )
+
     id = Column(Integer, primary_key=True, index=True)
     task_id = Column(Integer, ForeignKey("mining_tasks.id"), nullable=True)
     trace_step_id = Column(Integer, ForeignKey("trace_steps.id"), nullable=True)
@@ -223,6 +239,16 @@ class AlphaFailure(SQLAlchemyBase):
     # shape. none_as_null avoids the JSON-null footgun (None → JSONB scalar
     # 'null' breaks jsonb_* reads). NULL for legacy rows and any non-pool path.
     metrics = Column(JSONB(none_as_null=True), nullable=True)
+
+    # Pool pipeline dedup link (2026-06-06): the candidate_queue PK the E pool
+    # persisted this FAIL row from — backs the uq_alpha_failures_candidate_queue_id
+    # partial-unique index above (closes the B2 crash-window double-write on the
+    # load-bearing alpha_failures denominator). NO ForeignKey: candidate_queue rows
+    # are purged but failure rows are a permanent audit log — an ON DELETE SET NULL
+    # would silently un-dedup on purge, a NOT NULL FK would block purges. So a weak
+    # foreign-key-less link, integrity by the partial unique index. NULL for FLAT /
+    # legacy / any non-pool path.
+    candidate_queue_id = Column(Integer, nullable=True)
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

@@ -83,6 +83,35 @@ def test_alpha_failure_metrics_column(sqlite_session):
     assert af.metrics["verdict_signals"]["turnover"] == 0.9
 
 
+def test_alpha_failure_candidate_queue_id_partial_unique(sqlite_session):
+    """Pool dedup backstop: two FAIL rows with the SAME candidate_queue_id violate
+    the partial-unique index; many NULLs (FLAT/legacy) are allowed (NULLs distinct)."""
+    from sqlalchemy.exc import IntegrityError
+    s = sqlite_session
+    # many NULLs OK (FLAT / legacy path — candidate_queue_id unconstrained)
+    s.add(AlphaFailure(expression="flat1", error_type="X", candidate_queue_id=None))
+    s.add(AlphaFailure(expression="flat2", error_type="X", candidate_queue_id=None))
+    s.commit()
+    # first pool row OK
+    s.add(AlphaFailure(expression="pool1", error_type="X", candidate_queue_id=777))
+    s.commit()
+    # duplicate candidate_queue_id → IntegrityError (the crash-window re-persist
+    # backstop behind the Redis persist-marker)
+    s.add(AlphaFailure(expression="pool1dup", error_type="X", candidate_queue_id=777))
+    with pytest.raises(IntegrityError):
+        s.commit()
+    s.rollback()
+    # the partial-unique index is declared on the model
+    assert "uq_alpha_failures_candidate_queue_id" in {
+        i.name for i in AlphaFailure.__table__.indexes
+    }
+
+
+def test_candidate_queue_dataset_category_widened():
+    """dataset_category widened 80→200 (BRAIN categories can reach ~203)."""
+    assert CandidateQueue.__table__.columns["dataset_category"].type.length == 200
+
+
 def test_index_sets_and_lineage_anchor():
     """Index names must match the migration exactly; lineage anchors on
     hypotheses.id, never run_id (no run_id column on either queue table)."""

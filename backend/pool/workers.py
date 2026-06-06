@@ -165,7 +165,9 @@ async def e_process_one(
     e_trace = _serialize_trace(_attr(eval_state, "trace_steps", []))
     candidate = Candidate(
         expression=row.expression,
-        context={"dataset_id": row.dataset_id},
+        # candidate_queue_id flows to the persister so a FAIL row carries it for the
+        # partial-unique dedup index (the DB backstop behind the persist-marker).
+        context={"dataset_id": row.dataset_id, "candidate_queue_id": row.id},
         # HG + S trace already buffered on the row; E trace is on SimResult.
         trace_records=list(row.trace_records or []),
         payload=eval_state,
