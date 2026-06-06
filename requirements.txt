@@ -57,4 +57,6 @@ loguru>=0.7.2
 # Security
 cryptography>=41.0.0
 
+# Expression parsing / grammar validation
 ply
+lark>=1.0  # ENABLE_GRAMMAR_VALIDATOR grammar parser (graceful regex fallback if absent)
