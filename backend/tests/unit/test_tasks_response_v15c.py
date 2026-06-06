@@ -79,17 +79,5 @@ def test_task_response_schedule_defaults_to_none():
     assert resp.schedule is None
 
 
-def test_task_create_request_extra_ignore_accepts_stale_agent_mode():
-    """Per Round 5 B2 fix: TaskCreateRequest has Config.extra='ignore' so
-    cached frontend clients sending agent_mode/starting_tier don't 422."""
-    from backend.routers.tasks import TaskCreateRequest
-
-    req = TaskCreateRequest(
-        name="t", region="USA", universe="TOP3000",
-        agent_mode="AUTONOMOUS_TIER2",        # stale field
-        starting_tier=2,                       # stale field
-    )
-    assert req.name == "t"
-    # The stale fields are silently dropped.
-    assert not hasattr(req, "agent_mode")
-    assert not hasattr(req, "starting_tier")
+# test_task_create_request_extra_ignore_* removed in Phase 1d (TaskCreateRequest +
+# the POST /tasks create endpoint were retired — ONESHOT task creation is gone).

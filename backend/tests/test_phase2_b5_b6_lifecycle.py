@@ -215,7 +215,7 @@ async def _mk_test_task(s, suffix: str):
     from backend.models import MiningTask
     t = MiningTask(
         task_name=f"{_TAG}task-{suffix}", region="USA", universe="TOP3000",
-        dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, max_iterations=2,
+        dataset_strategy="AUTO",        status="RUNNING", daily_goal=4, 
     )
     s.add(t)
     await s.flush()

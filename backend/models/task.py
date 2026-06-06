@@ -4,7 +4,7 @@ Task Models - Mining tasks and experiment tracking
 Contains MiningTask, ExperimentRun, and TraceStep models.
 """
 
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, text
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -31,11 +31,8 @@ class MiningTask(SQLAlchemyBase):
 
     status = Column(String(50), default="PENDING")
     daily_goal = Column(Integer, default=4)
-    progress_current = Column(Integer, default=0)
-
-    # Evolution tracking
-    current_iteration = Column(Integer, default=0)
-    max_iterations = Column(Integer, default=10)
+    # progress_current / current_iteration / max_iterations dropped in Phase 1d-2
+    # (never written post-pool; the pool tracks progress via candidate_queue/alphas).
 
     config = Column(JSONB, default={})
 
@@ -53,12 +50,7 @@ class MiningTask(SQLAlchemyBase):
         server_default="ONESHOT",
         nullable=False,
     )
-    generation_strategy = Column(
-        JSONB,
-        default=lambda: ["llm"],
-        server_default=text("'[\"llm\"]'::jsonb"),
-        nullable=False,
-    )
+    # generation_strategy dropped in Phase 1d-2 (0 readers/writers post-pool).
 
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())

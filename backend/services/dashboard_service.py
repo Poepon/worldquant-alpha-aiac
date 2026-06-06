@@ -99,7 +99,10 @@ class DashboardService(BaseService):
         tasks = tasks_result.scalars().all()
 
         total_goal = sum(t.daily_goal for t in tasks) if tasks else 4
-        total_current = sum(t.progress_current for t in tasks) if tasks else 0
+        # progress_current column dropped in Phase 1d-2 (never written post-pool) —
+        # "current" now = today's alphas produced (real progress).
+        total_sims = await self._count_alphas_in_range(start_of_day, end_of_day)
+        total_current = total_sims
 
         # Get today's passed alphas. task_id IS NOT NULL excludes BRAIN-synced
         # historical alphas (sync_user_alphas in tasks/sync_tasks.py inserts
@@ -114,8 +117,7 @@ class DashboardService(BaseService):
         alphas_result = await self.db.execute(alphas_query)
         alphas = alphas_result.scalars().all()
         
-        # Calculate metrics
-        total_sims = await self._count_alphas_in_range(start_of_day, end_of_day)
+        # Calculate metrics (total_sims computed above as total_current)
         total_failures = await self._count_failures_in_range(start_of_day, end_of_day)
         
         success_rate = len(alphas) / total_sims if total_sims > 0 else 0.0
@@ -216,14 +218,19 @@ class DashboardService(BaseService):
             current_dataset = None
             if latest_step and latest_step.input_data:
                 current_dataset = latest_step.input_data.get("dataset_id")
-            
+
+            # progress_current column dropped in Phase 1d-2 → count this task's alphas
+            _alpha_count = (await self.db.execute(
+                select(func.count(Alpha.id)).where(Alpha.task_id == task.id)
+            )).scalar() or 0
+
             summaries.append(
                 TaskStatusSummary(
                     id=task.id,
                     task_name=task.task_name,
                     region=task.region,
                     status=task.status,
-                    progress=f"{task.progress_current}/{task.daily_goal}",
+                    progress=f"{_alpha_count}/{task.daily_goal}",
                     current_step=current_step,
                     current_dataset=current_dataset,
                 )

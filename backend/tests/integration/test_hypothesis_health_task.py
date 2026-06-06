@@ -115,7 +115,7 @@ async def seeded_task(pg_session):
         universe="TOP3000",
         dataset_strategy="AUTO",        status="RUNNING",
         daily_goal=4,
-        max_iterations=2,
+        
         config={},
     )
     pg_session.add(t)

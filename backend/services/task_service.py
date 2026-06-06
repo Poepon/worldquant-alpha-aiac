@@ -99,19 +99,8 @@ class TaskDetail:
                                      # endpoint (FLAT uses /ops/flat-sessions/*)
 
 
-@dataclass
-class MiningSessionInfo:
-    """Mining session DTO returned by start_flat_session / resume_flat_session."""
-    task_id: int
-    task_name: str
-    region: str
-    universe: str
-    status: str           # RUNNING / PAUSED
-    progress_current: int
-    last_alpha_persisted_at: Optional[datetime]
-    started_at: Optional[datetime]   # task.created_at
-    paused_at: Optional[datetime]    # task.updated_at when status moved to PAUSED
-    schedule: Optional[str] = None   # ONESHOT / FLAT
+# MiningSessionInfo DTO retired in Phase 1d-2 (flat sessions removed; projector
+# _to_session_info gone, no caller).
 
 
 @dataclass
@@ -183,14 +172,16 @@ class TaskService(BaseService):
             dataset_strategy=task.dataset_strategy,
             status=task.status,
             daily_goal=task.daily_goal,
-            progress_current=task.progress_current,
-            current_iteration=task.current_iteration,
-            max_iterations=task.max_iterations,
+            # progress_current/current_iteration/max_iterations columns dropped in
+            # Phase 1d-2 (never written post-pool) — fields kept at 0 for API shape.
+            progress_current=0,
+            current_iteration=0,
+            max_iterations=0,
             created_at=task.created_at,
             updated_at=task.updated_at,
             schedule=getattr(task, "schedule", None),
         )
-    
+
     # =========================================================================
     # Get Operations
     # =========================================================================
@@ -245,9 +236,10 @@ class TaskService(BaseService):
             target_datasets=task.target_datasets or [],
             status=task.status,
             daily_goal=task.daily_goal,
-            progress_current=task.progress_current,
-            current_iteration=task.current_iteration,
-            max_iterations=task.max_iterations,
+            # columns dropped in Phase 1d-2 — fields kept at 0 for API shape.
+            progress_current=0,
+            current_iteration=0,
+            max_iterations=0,
             config=task.config or {},
             created_at=task.created_at,
             updated_at=task.updated_at,
@@ -394,20 +386,6 @@ class TaskService(BaseService):
     SUPPORTED_REGIONS = ("USA", "CHN", "EUR", "ASI", "GLB")
 
     # _dispatch_session_worker / start_flat_session / resume_flat_session /
-    # pause_flat_session were retired in Phase 1c-delete (FLAT path removed;
-    # mining runs through the HG/S/E pool). _to_session_info is kept as the
-    # MiningSessionInfo projector (still referenced by surviving serializers).
-
-    def _to_session_info(self, task: MiningTask) -> MiningSessionInfo:
-        return MiningSessionInfo(
-            task_id=task.id,
-            task_name=task.task_name,
-            region=task.region,
-            universe=task.universe,
-            status=task.status,
-            progress_current=task.progress_current,
-            last_alpha_persisted_at=task.last_alpha_persisted_at,
-            started_at=task.created_at,
-            paused_at=task.updated_at if task.status == "PAUSED" else None,
-            schedule=getattr(task, "schedule", None),
-        )
+    # pause_flat_session retired in Phase 1c-delete (FLAT path removed).
+    # _to_session_info + MiningSessionInfo retired in Phase 1d-2 (orphaned after
+    # flat-session removal; read progress_current/last_alpha_persisted_at).

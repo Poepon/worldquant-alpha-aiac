@@ -88,7 +88,7 @@ async def _make_state(maker, region="USA"):
             task_name=f"{_TAG}_task_{uuid.uuid4().hex[:5]}",
             region=region, universe="TOP3000",
             dataset_strategy="AUTO",            status="RUNNING",
-            daily_goal=4, max_iterations=2,
+            daily_goal=4, 
             config={},
         )
         s.add(t)

@@ -100,7 +100,7 @@ async def _make_state(maker, region="USA"):
             universe="TOP3000",
             dataset_strategy="AUTO",            status="RUNNING",
             daily_goal=4,
-            max_iterations=2,
+            
             config={},
         )
         s.add(t)
@@ -291,7 +291,7 @@ class TestNodeHypothesisPillar:
                 universe="TOP3000",
                 dataset_strategy="AUTO",                status="RUNNING",
                 daily_goal=4,
-                max_iterations=2,
+                
                 config={},
             )
             s.add(t)
@@ -334,7 +334,7 @@ class TestNodeHypothesisPillar:
                 universe="TOP3000",
                 dataset_strategy="AUTO",                status="RUNNING",
                 daily_goal=4,
-                max_iterations=2,
+                
                 config={},
             )
             s.add(t)

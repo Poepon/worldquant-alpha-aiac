@@ -193,9 +193,6 @@ async def sample_task(db_session):
         target_datasets=[],
         status="PENDING",
         daily_goal=4,
-        progress_current=0,
-        current_iteration=0,
-        max_iterations=10,
         config={},
     )
     db_session.add(task)

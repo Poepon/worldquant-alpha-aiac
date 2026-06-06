@@ -113,7 +113,7 @@ async def _make_state(maker, region="USA", focused_fields=None):
             universe="TOP3000",
             dataset_strategy="AUTO",            status="RUNNING",
             daily_goal=4,
-            max_iterations=2,
+            
             config={},
         )
         s.add(t)

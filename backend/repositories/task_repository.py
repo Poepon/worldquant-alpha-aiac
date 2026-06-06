@@ -101,47 +101,9 @@ class TaskRepository(BaseRepository[MiningTask]):
         """
         return await self.update_by_id(task_id, {"status": status})
     
-    async def update_progress(
-        self,
-        task_id: int,
-        progress_current: int,
-        status: Optional[str] = None,
-    ) -> bool:
-        """
-        Update task progress.
-        
-        Args:
-            task_id: The task ID
-            progress_current: Current progress count
-            status: Optional new status
-            
-        Returns:
-            True if updated, False if not found
-        """
-        values = {"progress_current": progress_current}
-        if status is not None:
-            values["status"] = status
-        
-        return await self.update_by_id(task_id, values)
-    
-    async def increment_iteration(self, task_id: int) -> bool:
-        """
-        Increment the current iteration counter.
-        
-        Args:
-            task_id: The task ID
-            
-        Returns:
-            True if updated, False if not found
-        """
-        stmt = (
-            update(MiningTask)
-            .where(MiningTask.id == task_id)
-            .values(current_iteration=MiningTask.current_iteration + 1)
-        )
-        result = await self.db.execute(stmt)
-        return result.rowcount > 0
-    
+    # update_progress / increment_iteration retired in Phase 1d-2 (progress_current
+    # / current_iteration columns dropped; no live caller post-ONESHOT removal).
+
     async def mark_completed(self, task_id: int) -> bool:
         """
         Mark a task as completed.
