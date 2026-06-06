@@ -191,6 +191,68 @@ async def persist_eval(result: SimResult, *, persister: Any = None,
         return await p(s, [result])
 
 
+# --- per-candidate persist idempotency (P1: NARROW the B2 stale/crash double-write)
+# The persister's alpha_failures + trace_steps writes are NOT idempotent (only
+# alphas is, via ON CONFLICT on alpha_id). If an E worker persists then dies before
+# complete(), lease-recycle re-claims the row and a second worker re-evaluates +
+# re-persists → duplicate failure/trace rows. A cross-process Redis marker keyed on
+# the candidate_queue PK narrows that: set AFTER a successful persist (so a crash
+# BEFORE persist never suppresses the real write — no lost candidate), checked
+# before persist (a re-claimed row whose prior attempt already persisted is
+# skipped). Fail-open: a redis blip degrades to the prior persist-every-time
+# behaviour (at worst a duplicate, never a loss). TTL > E lease + re-eval so the
+# marker outlives the recycle window.
+#
+# RESIDUAL (acknowledged, not closed — non-load-bearing): persist_eval is the
+# shared multi-commit persister (alphas / failures / trace are SEPARATE commits),
+# so "set marker AFTER persist" = after the LAST commit. A hard crash in the narrow
+# window between that final commit and the redis SET — or two concurrent stale-lapse
+# workers both passing the check-then-act with no NX lock — still re-dups the
+# failure/trace rows. The heartbeat (P0) makes both rare; the dup'd rows feed only
+# statistical failure-learning + dashboards (no submit/eval gate keys off exact
+# counts). FULL closure would need a DB unique key on alpha_failures(cand_id) — a
+# schema change deferred to its own migration.
+_PERSIST_MARKER_TTL = 2 * 3600
+
+
+def _persist_marker_key(cand_id: int) -> str:
+    return f"pool:e:persisted:{cand_id}"
+
+
+def _already_persisted(cand_id: int) -> bool:
+    try:
+        from backend.tasks.redis_pool import get_redis_client
+        return get_redis_client().get(_persist_marker_key(cand_id)) is not None
+    except Exception as ex:  # noqa: BLE001 — fail-open (persist again, never skip-on-error)
+        logger.debug(f"[pool.e] persist-marker get {cand_id} failed (fail-open): {ex}")
+        return False
+
+
+def _mark_persisted(cand_id: int) -> None:
+    try:
+        from backend.tasks.redis_pool import get_redis_client
+        get_redis_client().set(_persist_marker_key(cand_id), "1", ex=_PERSIST_MARKER_TTL)
+    except Exception as ex:  # noqa: BLE001 — non-fatal (a missed mark only risks a dup)
+        logger.debug(f"[pool.e] persist-marker set {cand_id} failed: {ex}")
+
+
+async def persist_eval_once(result: SimResult, cand_id: int, *, persister: Any = None,
+                            session_factory: Any = None) -> bool:
+    """Persist a candidate's eval result, skipping the non-idempotent failure/trace
+    write if a prior attempt already persisted this cand_id. Returns True if it
+    persisted, False if skipped. The marker is set only AFTER persist succeeds, so a
+    persist exception (caught by the caller → fail_or_retry) leaves the marker unset
+    and the retry re-persists — NO lost candidate. NOTE persist_eval is multi-commit,
+    so "after persist" is after its LAST commit; a crash in the commit→mark gap (or a
+    concurrent stale-lapse, no NX lock) still re-dups — narrowed, not closed (see the
+    _PERSIST_MARKER_TTL block)."""
+    if _already_persisted(cand_id):
+        return False
+    await persist_eval(result, persister=persister, session_factory=session_factory)
+    _mark_persisted(cand_id)
+    return True
+
+
 # =============================================================================
 # Resident loops (thin; started by the supervisor in B6, INERT until then)
 # =============================================================================
@@ -267,20 +329,15 @@ async def e_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 1800
                     CandidateQueue, row.id, lease_sec, worker_id,
                     e_process_one(workflow, row, snap, config),
                 )
-                # Persist FIRST, then advance the stage guarded by worker_id. This
-                # ordering is deliberate: a crash BETWEEN the two leaves the row
-                # EVAL_INFLIGHT → lease-recycle re-evaluates it → the candidate
-                # outcome is never LOST (vs complete-first, which would mark a row
-                # DONE then lose the persist on a crash). The stage is never
-                # clobbered (complete()'s worker_id guard NO-OPs a stale advance).
-                # Residual (rare, heartbeat-gated): on a recycle race a duplicate
-                # persist can occur — the alphas table is idempotent (ON CONFLICT
-                # DO NOTHING on alpha_id, persistence.py), but alpha_failures /
-                # trace_steps have no per-candidate idempotency, so a duplicate FAIL
-                # row + trace can land. Full failure-write idempotency is a P1
-                # follow-up; accepted here because losing a PASS is worse than a
-                # duplicate FAIL and the heartbeat makes the recycle race rare.
-                await persist_eval(result)
+                # Persist (per-candidate-idempotent) FIRST, then advance the stage
+                # guarded by worker_id. persist_eval_once skips the non-idempotent
+                # failure/trace write if a prior attempt already persisted this
+                # candidate (crash-before-complete + lease-recycle), NARROWING the B2
+                # double-write to a tiny residual window (see persist_eval_once); the
+                # marker is set only AFTER persist so a crash before it never loses the
+                # candidate. The stage is never clobbered (complete()'s worker_id guard
+                # NO-OPs a stale advance).
+                await persist_eval_once(result, row.id)
                 await complete(
                     CandidateQueue, row.id, st.CAND_DONE,
                     updates={"verdict": result.verdict, "error": result.error},
@@ -345,11 +402,25 @@ def _candidate_row_kwargs(final: Any, ac: Any, intent: Any,
     )
 
 
-async def hg_process_one(workflow: Any, intent: Any, config: Dict[str, Any]) -> List[Dict[str, Any]]:
+async def hg_process_one(workflow: Any, intent: Any, config: Dict[str, Any],
+                         *, wdb: Any = None) -> List[Dict[str, Any]]:
     """Run rag→distill→hypothesis→codegen→validate→[self_correct] for one intent;
-    return candidate_queue INSERT kwargs for each is_valid candidate."""
+    return candidate_queue INSERT kwargs for each is_valid candidate.
+
+    ``wdb`` (the RAGService session) is rolled back after run_hypothesis: the RAG
+    read inside it autobegins a txn that would otherwise sit idle-in-transaction
+    (pinning a snapshot + a connection slot) through the LLM-bound codegen stages
+    (code_gen/validate/self_correct are DB-free). Releasing it mirrors the
+    2026-06-04 FLAT _run_flat_iteration rollback-before-the-long-await fix. (The
+    distill/hypothesis stages inside run_hypothesis still hold it — fully closing
+    that needs rag_service.query to release its own read txn, a shared change.)"""
     state = await hydrate_hg_state(intent)
     hyp_state = await workflow.run_hypothesis(state, config)
+    if wdb is not None:
+        try:
+            await wdb.rollback()  # release the RAG read txn before the LLM codegen
+        except Exception:  # noqa: BLE001 — rollback failure must not kill generation
+            pass
     final = await workflow.run_codegen(hyp_state, config)
     pending = _attr(final, "pending_alphas", []) or []
     gen_trace = _serialize_trace(_attr(final, "trace_steps", []))
@@ -432,7 +503,7 @@ async def hg_loop(*, worker_id: str, poll_sec: float = 3.0, lease_sec: int = 180
                 workflow = build_workflow(wdb)
                 rows = await _run_with_lease_heartbeat(
                     HypothesisIntent, intent.id, lease_sec, worker_id,
-                    hg_process_one(workflow, intent, config),
+                    hg_process_one(workflow, intent, config, wdb=wdb),
                 )
             # Atomic emit + intent→DONE (one txn) so a crash/recycle between the
             # two never duplicates the candidate set. worker_id-guarded.

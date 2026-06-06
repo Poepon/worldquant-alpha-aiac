@@ -116,6 +116,46 @@ async def test_persist_eval_invokes_persister_with_result():
 
 
 @pytest.mark.asyncio
+async def test_persist_eval_once_persists_then_marks(monkeypatch):
+    """P1: persist_eval_once persists + sets the idempotency marker when the
+    candidate has not been persisted by a prior attempt."""
+    monkeypatch.setattr(workers, "_already_persisted", lambda cid: False)
+    marks = []
+    monkeypatch.setattr(workers, "_mark_persisted", lambda cid: marks.append(cid))
+    persisted = []
+
+    async def fake_persist(result, *, persister=None, session_factory=None):
+        persisted.append(result)
+        return 1
+
+    monkeypatch.setattr(workers, "persist_eval", fake_persist)
+    did = await workers.persist_eval_once("RESULT", 42)
+    assert did is True
+    assert persisted == ["RESULT"]
+    assert marks == [42]  # marker set AFTER persist
+
+
+@pytest.mark.asyncio
+async def test_persist_eval_once_skips_when_already_persisted(monkeypatch):
+    """P1: a re-claimed candidate whose prior attempt already persisted is skipped
+    → no duplicate alpha_failures / trace_steps (closes B2)."""
+    monkeypatch.setattr(workers, "_already_persisted", lambda cid: True)
+    marks = []
+    monkeypatch.setattr(workers, "_mark_persisted", lambda cid: marks.append(cid))
+    persisted = []
+
+    async def fake_persist(result, *, persister=None, session_factory=None):
+        persisted.append(result)
+        return 1
+
+    monkeypatch.setattr(workers, "persist_eval", fake_persist)
+    did = await workers.persist_eval_once("RESULT", 42)
+    assert did is False
+    assert persisted == []  # NOT re-persisted
+    assert marks == []      # marker not re-set
+
+
+@pytest.mark.asyncio
 async def test_heartbeat_renews_while_op_runs(monkeypatch):
     """P0 fix A: the heartbeat re-stamps the lease (renew_lease) repeatedly while a
     long op runs, so a live sim is never lease-recycled + double-run (G2)."""

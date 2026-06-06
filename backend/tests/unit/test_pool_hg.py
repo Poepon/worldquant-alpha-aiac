@@ -74,6 +74,54 @@ async def test_hg_process_one_emits_only_valid_with_full_context(monkeypatch):
     assert rows[1]["expression"] == "e3"
 
 
+@pytest.mark.asyncio
+async def test_hg_process_one_rolls_back_rag_session(monkeypatch):
+    """P1: the RAG read txn on wdb is released (rollback) AFTER run_hypothesis and
+    BEFORE the LLM-bound codegen, so it doesn't sit idle-in-transaction through it."""
+    intent = HypothesisIntent(region="USA", universe="TOP3000", dataset_id="pv1",
+                              delay=1, config_snapshot={})
+    intent.id = 1
+    intent.task_id = 7
+    final = _final_state()
+
+    async def _fake_hydrate(it, **kw):
+        return final
+    monkeypatch.setattr("backend.pool.workers.hydrate_hg_state", _fake_hydrate)
+
+    order = []
+
+    class _FakeWdb:
+        async def rollback(self):
+            order.append("rollback")
+
+    class _OrderedWorkflow:
+        async def run_hypothesis(self, state, config=None):
+            order.append("hyp")
+            return state
+
+        async def run_codegen(self, state, config=None):
+            order.append("codegen")
+            return final
+
+    rows = await workers.hg_process_one(_OrderedWorkflow(), intent, {}, wdb=_FakeWdb())
+    assert order == ["hyp", "rollback", "codegen"]  # released between hyp and codegen
+    assert len(rows) == 2  # still emits the valid candidates (e1, e3)
+
+
+@pytest.mark.asyncio
+async def test_hg_process_one_no_wdb_skips_rollback(monkeypatch):
+    """wdb=None (legacy/test path) → no rollback attempted, no crash."""
+    intent = HypothesisIntent(region="USA", dataset_id="pv1", config_snapshot={})
+    intent.id = 2
+    final = _final_state()
+
+    async def _fake_hydrate(it, **kw):
+        return final
+    monkeypatch.setattr("backend.pool.workers.hydrate_hg_state", _fake_hydrate)
+    rows = await workers.hg_process_one(_FakeHGWorkflow(final), intent, {})  # no wdb
+    assert len(rows) == 2
+
+
 def test_resolve_hyp_id_scalar_then_list():
     s1 = MiningState(task_id=1, region="USA", current_hypothesis_id=8)
     assert workers._resolve_hyp_id(s1) == 8
