@@ -13,33 +13,18 @@ from typing import List, Optional, Dict, Any
 from datetime import datetime
 from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func
+from sqlalchemy import select
 
 from backend.services.base import BaseService
 from backend.repositories.task_repository import TaskRepository
 from backend.repositories.alpha_repository import AlphaRepository
-from backend.models import MiningTask, TraceStep, Alpha
+from backend.models import MiningTask, TraceStep
 
 logger = logging.getLogger("services.task")
 
 
-@dataclass
-class TaskCreateData:
-    """Data for creating a new task."""
-    name: str
-    region: str = "USA"
-    universe: str = "TOP3000"
-    dataset_strategy: str = "AUTO"
-    target_datasets: List[str] = None
-    daily_goal: int = 4
-    config: Dict[str, Any] = None
-    schedule: Optional[str] = None       # ONESHOT | FLAT
-
-    def __post_init__(self):
-        if self.target_datasets is None:
-            self.target_datasets = []
-        if self.config is None:
-            self.config = {}
+# TaskCreateData retired in Phase 1d-2 (create_task endpoint removed; ONESHOT
+# task creation is gone — the pool is fed by the scheduler beat).
 
 
 @dataclass
@@ -103,17 +88,7 @@ class TaskDetail:
 # _to_session_info gone, no caller).
 
 
-@dataclass
-class ExperimentRunInfo:
-    """Experiment run information."""
-    id: int
-    task_id: int
-    status: str
-    trigger_source: Optional[str]
-    celery_task_id: Optional[str]
-    started_at: datetime
-    finished_at: Optional[datetime]
-    error_message: Optional[str]
+# ExperimentRunInfo retired in Phase 1d-2 (list_task_runs + experiment_runs removed).
 
 
 class TaskService(BaseService):
@@ -379,13 +354,7 @@ class TaskService(BaseService):
     # =========================================================================
     
 
-    # =========================================================================
-    # Persistent Mining Service (flat sessions, post tier-system removal)
-    # =========================================================================
-
-    SUPPORTED_REGIONS = ("USA", "CHN", "EUR", "ASI", "GLB")
-
+    # Persistent Mining Service (flat sessions) fully retired:
     # _dispatch_session_worker / start_flat_session / resume_flat_session /
-    # pause_flat_session retired in Phase 1c-delete (FLAT path removed).
-    # _to_session_info + MiningSessionInfo retired in Phase 1d-2 (orphaned after
-    # flat-session removal; read progress_current/last_alpha_persisted_at).
+    # pause_flat_session (Phase 1c-delete) + _to_session_info / MiningSessionInfo /
+    # SUPPORTED_REGIONS (Phase 1d-2, orphaned after flat-session removal).

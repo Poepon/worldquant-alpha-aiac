@@ -21,7 +21,7 @@ from backend.services.base import BaseService, transactional
 from backend.services.alpha_service import AlphaService, AlphaListFilters
 from backend.services.dashboard_service import DashboardService
 # mining_service retired in Phase 1d (dead ONESHOT executor)
-from backend.services.task_service import TaskService, TaskCreateData
+from backend.services.task_service import TaskService
 from backend.services.analysis_service import AnalysisService
 from backend.services.credentials_service import CredentialsService
 
@@ -66,7 +66,6 @@ __all__ = [
     "AlphaListFilters",
     "DashboardService",
     "TaskService",
-    "TaskCreateData",
     "AnalysisService",
     "CredentialsService",
     # Dataset Service

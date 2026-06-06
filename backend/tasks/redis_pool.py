@@ -10,10 +10,9 @@ cascade path — they had no caller once mining_tasks.py was deleted.
 """
 from __future__ import annotations
 
-import json
 import uuid
-from datetime import datetime, timezone
 from typing import Optional
+# json / datetime imports retired in Phase 1d-2 (cascade-lock JSON codec removed)
 
 import redis
 from loguru import logger

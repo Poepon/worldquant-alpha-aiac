@@ -6,15 +6,16 @@ status updates and experiment run tracking.
 """
 
 import logging
-from typing import List, Optional, Dict, Any
-from datetime import datetime
+from typing import List, Optional, Dict
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update, func
+from sqlalchemy import select, func
 from sqlalchemy.orm import selectinload
 
 from backend.repositories.base_repository import BaseRepository
 from backend.protocols.repository_protocol import PaginationParams, PaginatedResult
-from backend.models import MiningTask, TraceStep, MiningStatus
+from backend.models import MiningTask
+# TraceStep / MiningStatus / Any / datetime / update imports retired in Phase 1d-2
+# (ExperimentRunRepository + update_progress + increment_iteration removed).
 
 logger = logging.getLogger("repositories.task")
 

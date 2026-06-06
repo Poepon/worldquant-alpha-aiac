@@ -13,7 +13,7 @@ soft-robustness gate in node_evaluate (evaluation.py).
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from loguru import logger
 from sqlalchemy import select, update, func
@@ -22,7 +22,7 @@ from backend.celery_app import celery_app
 from backend.config import settings
 from backend.database import AsyncSessionLocal
 from backend.models import Alpha, AlphaFailure, MiningTask
-from backend.models.task import TraceStep
+# TraceStep import retired in Phase 1d-2 (used only by the removed revive cluster)
 from backend.tasks import run_async
 
 
