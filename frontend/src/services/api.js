@@ -408,6 +408,20 @@ const api = {
     return data
   },
 
+  // Four-pool pipeline (Phase 1c-flip cutover — 2026-06-06)
+  getPoolStatus: async () => {
+    const { data } = await client.get('/ops/pools/status')
+    return data
+  },
+  drainPool: async (name) => {
+    const { data } = await client.post(`/ops/pools/${name}/drain`)
+    return data
+  },
+  resumePool: async (name) => {
+    const { data } = await client.post(`/ops/pools/${name}/resume`)
+    return data
+  },
+
   // Ops Phase 2 — Alpha Health
   getOpsAlphaHealthLatest: async (date = null) => {
     const params = date ? { date } : {}

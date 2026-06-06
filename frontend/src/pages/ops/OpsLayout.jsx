@@ -29,6 +29,7 @@ import AutoSubmitMonitor from './AutoSubmitMonitor'
 import OptimizationCyclesMonitor from './OptimizationCyclesMonitor'
 import OrchestratorMonitor from './OrchestratorMonitor'
 import LLMRoutingConsole from './LLMRoutingConsole'
+import PoolPipelineMonitor from './PoolPipelineMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -64,6 +65,8 @@ export default function OpsLayout() {
       )}
       <Routes>
         <Route index element={<Navigate to="overview" replace />} />
+        {/* Four-pool pipeline monitor (2026-06-06 cutover) — HG/S/E live health */}
+        <Route path="pool-pipeline" element={<PoolPipelineMonitor />} />
         {/* Submit-backlog drain (2026-05-28) — verdict-ranked can_submit queue */}
         <Route path="submit-backlog" element={<SubmitBacklogMonitor />} />
         {/* Auto-submit shadow review (2026-06-04) — would-submit list + Δscore */}

@@ -43,6 +43,21 @@ def build_workflow(db: Any) -> MiningWorkflow:
     return MiningWorkflow(db)
 
 
+async def _ensure_brain(workflow: Any, role: str) -> None:
+    """Set up the BRAIN httpx client + session for an S/E pool worker. The pool
+    worker is a STANDALONE process that never went through the FLAT brain setup, so
+    without this the first BRAIN call fails with "'BrainAdapter' object has no
+    attribute 'client'". __aenter__ sets self.client (= the persistent GLOBAL httpx
+    client) + ensure_session; __aexit__ is a no-op (the global client persists), so
+    calling __aenter__ directly without a matching exit is safe. (Token expiry mid-
+    loop is handled by the per-call 401-retry; long-loop client-socket rot — the
+    FLAT _BRAIN_CLIENT_REFRESH_EVERY lesson — is a follow-up.)"""
+    try:
+        await workflow.brain.__aenter__()
+    except Exception as ex:  # noqa: BLE001 — startup auth blip; per-call 401-retry re-auths
+        logger.warning(f"[pool.{role}] brain session warm failed (continuing): {ex}")
+
+
 def _attr(obj: Any, name: str, default: Any) -> Any:
     """Read off a Pydantic state OR a dict (LangGraph ainvoke returns either)."""
     if hasattr(obj, name):
@@ -270,6 +285,7 @@ async def s_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 3600
     # recycled + double-run (gotcha G2).
     async with AsyncSessionLocal() as wdb:
         workflow = build_workflow(wdb)
+        await _ensure_brain(workflow, "s")  # set .client + session (pool process)
         config = hg_run_config()
         while not (should_stop and should_stop()):
             if is_draining("s") or sims_budget_exceeded():
@@ -316,6 +332,7 @@ async def e_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 1800
     # E is not always sub-minute. Heartbeat-renewed like S (G2).
     async with AsyncSessionLocal() as wdb:
         workflow = build_workflow(wdb)
+        await _ensure_brain(workflow, "e")  # E does sign-flip-retry sims + corr checks
         config = hg_run_config()
         while not (should_stop and should_stop()):
             if is_draining("e"):

@@ -6050,9 +6050,11 @@ async def pool_status(
     _token: str = Depends(_require_ops_token),
     db: AsyncSession = Depends(get_db),
 ):
-    """Pool health: per-pool drain state + queue depth by stage (the退出判据
-    surface — watch for rows stuck SIMULATING/EVALUATING past their lease)."""
-    from sqlalchemy import select, func
+    """Pool health: supervisor workers alive, sim-slot + budget usage, per-pool
+    drain state, queue depth by stage, throughput, and the 退出判据 — rows stuck
+    SIMULATING/EVALUATING (or CLAIMED) past their lease (should be 0)."""
+    import datetime as _dt
+    from sqlalchemy import select, func, text
     from backend.config import settings as _s
     from backend.models import CandidateQueue, HypothesisIntent
     from backend.pool.drain import POOL_NAMES, is_draining
@@ -6062,9 +6064,47 @@ async def pool_status(
             select(model.stage, func.count()).group_by(model.stage))).all()
         return {str(stage): int(c) for stage, c in rows}
 
+    async def _scalar(sql):
+        return int((await db.execute(text(sql))).scalar() or 0)
+
+    # Redis: supervisor workers + shared sim-slot + day budgets (sync client, brief).
+    workers, sims, sims_today, tok_today = [], 0, 0, 0
+    try:
+        from backend.tasks.redis_pool import get_redis_client
+        _r = get_redis_client()
+        workers = sorted(x.decode() if isinstance(x, bytes) else x
+                         for x in _r.smembers("pool:workers:alive"))
+        sims = int(_r.get("brain:concurrent_sims") or 0)
+        _day = _dt.datetime.utcnow().strftime("%Y%m%d")
+        sims_today = int(_r.get(f"budget:sims:{_day}") or 0)
+        tok_today = int(_r.get(f"budget:tokens:{_day}") or 0)
+    except Exception:  # noqa: BLE001 — redis blip must not 500 the status page
+        pass
+
     return {
         "enabled": bool(getattr(_s, "ENABLE_POOL_PIPELINE", False)),
         "drain": {n: is_draining(n) for n in POOL_NAMES},
+        "workers_alive": workers,
+        "workers_count": len(workers),
+        "concurrent_sims": sims,
+        "budget_sims_today": sims_today,
+        "budget_tokens_today": tok_today,
+        "stuck_past_lease": {
+            "hyp_intent": await _scalar(
+                "SELECT count(*) FROM hyp_intent WHERE stage='CLAIMED' "
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at < now()"),
+            "candidate_queue": await _scalar(
+                "SELECT count(*) FROM candidate_queue WHERE stage IN ('SIMULATING','EVALUATING') "
+                "AND lease_expires_at IS NOT NULL AND lease_expires_at < now()"),
+        },
+        "throughput_90min": {
+            "candidates": await _scalar(
+                "SELECT count(*) FROM candidate_queue WHERE created_at > now() - interval '90 min'"),
+            "alphas": await _scalar(
+                "SELECT count(*) FROM alphas WHERE created_at > now() - interval '90 min'"),
+        },
+        "pool_failures_total": await _scalar(
+            "SELECT count(*) FROM alpha_failures WHERE candidate_queue_id IS NOT NULL"),
         "hyp_intent": await _counts(HypothesisIntent),
         "candidate_queue": await _counts(CandidateQueue),
     }

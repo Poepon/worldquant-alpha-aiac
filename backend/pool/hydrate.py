@@ -103,6 +103,42 @@ def hg_run_config(trace_service: Any = None) -> Dict[str, Any]:
     return {"configurable": {"trace_service": trace_service}}
 
 
+# The FK anchor + attribution carrier for scheduler-inserted (scope-less)
+# intents. candidate_queue.task_id / alphas.task_id are FKs to mining_tasks; a
+# coerced task_id=0 violates the FK (no task 0) and a NULL drops the row from the
+# bandit / daily-quota (which filter task_id IS NOT NULL). One resident pool task
+# gives the whole chain a valid, attributable task_id. Cached per worker process.
+_RESIDENT_TASK_NAME = "__pool_resident__"
+_RESIDENT_TASK_ID: Optional[int] = None
+
+
+async def _resident_pool_task_id(s: Any) -> int:
+    """Find-or-create the resident pool MiningTask (the FK anchor); cache its id."""
+    global _RESIDENT_TASK_ID
+    if _RESIDENT_TASK_ID is not None:
+        return _RESIDENT_TASK_ID
+    from sqlalchemy import select
+    from backend.models import MiningTask
+    from backend.config import settings as _s
+    row = (await s.execute(
+        select(MiningTask).where(MiningTask.task_name == _RESIDENT_TASK_NAME).limit(1)
+    )).scalar_one_or_none()
+    if row is None:
+        row = MiningTask(
+            task_name=_RESIDENT_TASK_NAME,
+            region=getattr(_s, "DEFAULT_REGION", "USA"),
+            universe=getattr(_s, "DEFAULT_UNIVERSE", "TOP3000"),
+            status="ACTIVE",          # resident scope (not RUNNING → no watchdog revive)
+            schedule="POOL",          # not FLAT/ONESHOT → run_mining_task never dispatches it
+            daily_goal=0,
+        )
+        s.add(row)
+        await s.flush()
+        await s.commit()
+    _RESIDENT_TASK_ID = int(row.id)
+    return _RESIDENT_TASK_ID
+
+
 async def hydrate_hg_state(intent: Any, *, session_factory: Any = None) -> MiningState:
     """Build the initial round MiningState for the HG pool from a hyp_intent row.
 
@@ -129,11 +165,14 @@ async def hydrate_hg_state(intent: Any, *, session_factory: Any = None) -> Minin
     dataset_id = intent.dataset_id or ""
 
     async with factory() as s:
+        # scope-less scheduler intents (task_id NULL) → anchor to the resident pool
+        # task so candidate_queue/alphas FKs resolve + the row is bandit-attributable.
+        resident_tid = await _resident_pool_task_id(s)
         fields = await _get_dataset_fields(s, dataset_id, region, universe, delay) if dataset_id else []
         operators = await _get_operators(s)
 
     return MiningState(
-        task_id=int(intent.task_id) if intent.task_id is not None else 0,
+        task_id=int(intent.task_id) if intent.task_id is not None else resident_tid,
         region=region,
         universe=universe,
         delay=delay,

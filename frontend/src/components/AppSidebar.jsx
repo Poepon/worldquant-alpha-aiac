@@ -62,6 +62,7 @@ const menuItems = [
     label: '运维监控',
     children: [
       { key: '/ops/overview', label: '总览' },
+      { key: '/ops/pool-pipeline', icon: <ThunderboltOutlined />, label: '挖掘池 (HG/S/E)' },
       { key: '/ops/submit-backlog', icon: <SendOutlined />, label: '提交积压' },
       { key: '/ops/auto-submit', icon: <RobotOutlined />, label: '自动提交 (影子)' },
       { key: '/ops/optimization-cycles', icon: <ThunderboltOutlined />, label: '优化闭环 (Stage A)' },
