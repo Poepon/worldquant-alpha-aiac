@@ -1,7 +1,7 @@
 # KB / 接线 / 反馈环 —— 池原生重设计 (Pool Phase 2)
 
-> 2026-06-06 · v2(双 workflow + 两轮对抗证伪后)
-> 方法:live Postgres 实查 + workflow①(`wy32yozh5`,映射池化后真实接线 + ROI gap + 对抗证伪)+ workflow②(`w2ecldgxe`,3 视角池原生设计 → 综合 → 7 承重决策对抗证伪)+ 人工核验承重根因。
+> 2026-06-06 起 · v3(三 workflow + 两轮对抗证伪 + 业界案例并入,2026-06-07)
+> 方法:live Postgres 实查 + workflow①(`wy32yozh5`,映射池化后真实接线 + ROI gap + 对抗证伪)+ workflow②(`w2ecldgxe`,3 视角池原生设计 → 综合 → 7 承重决策对抗证伪)+ workflow③(`wrm1t4ic4`,5 轴业界/学术案例调研 + 适用性对抗 critique,见 §9)+ 人工核验承重根因。
 > 框架(用户锁定):**在池架构下原生设计、抛弃 FLAT 包袱;按 6 层量化流程归属 + 4 层 KB(战略/战术/执行/认知)划分。**
 > 取向(用户):挑战 execution-limited 先验、投深度 —— 但**对抗证伪表明深度的数据还不存在,Phase 1 先建脊柱 + 仪表,深度成为数据驱动的 Phase 2。**
 
@@ -145,3 +145,60 @@ Alembic:hypotheses.can_submit_count/submitted_count。建 `run_pool_cognitive_re
 9. **rag_service 已 live,L0/L3 是时序**(LB6):要第二跳 + 专用 flag,别复用 AB flag。
 10. **ABANDON 用 0-can_submit 窗口非 0-PASS**(LB7):67 积压下 0-PASS 是错信号;守住别 prune 在产 cell。
 11. **单测盲区**(workflow①):`test_pool_hg.py` mock 硬编码 current_hypothesis_id=5 掩盖 0/2442 死 FK → 修 LB1 须配真实 config-gate 测。
+
+---
+
+## 9. 业界 / 学术案例参考(并入,源 workflow③ `wrm1t4ic4` 2026-06-07)
+
+**TL;DR:** 文献干净分两营,**没有一营住在我们的交点上**——**Camp A(自进化 agent + LLM 量化:Voyager/Reflexion/ExpeL/CoSTEER/QuantaAlpha/AlphaAgent/AlphaGen/RD-Agent(Q))全假设稠密、per-trial、可观测奖励** → 借**认知形状**;**Camp B(延迟标签生产:Criteo/延迟转化 bandit/SSRS/PU 学习/watermark 流)给对了异步 plumbing,但都最终积累够真标签**。我们的 C1(黑盒无梯度无 realized PnL)+ C2(execution-limited)+ C4(~1 lifetime 正例)落两营之间。**从 A 借形状、从 B 借 plumbing,但 orthogonality-primary promotion + self-policing-proxy + ≥5bps 经济门是净新无先例。** 用法铁律:先例分"能借(plumbing/生成先验/离线)"vs"浪漫化(假设我们没有的稠密奖励/可观测 PnL/便宜搜索)",后者**按数据驳回非仅 caveat**。
+
+### 9.1 最像我们的 3 个
+- **Algoplexity「AZR + R&D-Agent(Q) on WorldQuant BRAIN」**(博客提案,algoplexity.github.io/cybernetic-intelligence/Brain/)— **唯一对标我们确切平台 + 把 BRAIN 当 metric-only 黑盒**。拓扑最近,但博客提案非生产 → **借作"验证我们押注对了"非借机制**;它自己点名我们正设计的 3 坑(① 在脱钩提交结果的 simulator reward 上学=我们 67-vs-13 / ② 只 replay buffer 无 pattern KB+谱系=D1/D2 缺 / ③ 对 LIVE 池去相关欠规范=marginal_recon 答)。
+- **RD-Agent(Q)/CoSTEER**(微软 arxiv 2505.15155,开源)— 我们范式本体,**认知层最近**(SOTA-set=D2 / 持久 H_t,F_t 集=D1 / (task,code,feedback) 三元相似检索=skeleton-keyed RAG / contextual-Thompson bandit=D5 祖先 / complexity-bump=D4 预算)。**分歧**:稠密可观测回测奖励(非黑盒门)、缺 D3 显式归因、无正交/执行约束。
+- **QuantaAlpha(arxiv 2602.07085)+ AlphaAgent(arxiv 2502.16789)**— **per-candidate 进化 + 归因最近**。QuantaAlpha 三层重写(hypothesis/expression/code)=最干净 D3;`\|corr\|<0.7` 池准入**字面=我们 BRAIN 门**。AlphaAgent hypothesis-misalignment-vs-structural-violation=**可直接抄的 D3 分类法**,alpha-decay/crowding 最接近 C2 —— **但其 anti-crowding 是对固定 Alpha101 zoo 的静态 AST,我们是 LIVE 演化同区 SUBMITTED 池**。
+
+### 9.2 决策映射 D1–D5
+
+| 决策 | 最佳先例 | 借什么 | 怎么不同(我们约束) |
+|---|---|---|---|
+| **D1** Pattern KB | Voyager verify-before-store(2305.16291)/ ExpeL(2308.10144)/ **AWM induction**(2409.07429)/ Generative Agents(2304.03442)/ A-Mem / Mem0 | verify-before-store(过 band 才写)/ AWM **skeleton 带槽模板** / 重要性用真 sharpe 非 LLM 自报 | C1:"success"=in-sample band+正交非 submit gate;C4:从 band winners 诱导**绝不从 gate-clearer**(仅 1 个);组合性 break→只作生成先验 |
+| **D2** 假设生命周期 | CoSTEER SOTA-set+H_t/F_t / FunSearch islands(nature s41586-023-06924-6)/ 特征库 point-in-time JOIN | SOTA-set=PROMOTED 参考集种 HG;事件驱动触发;**双时态 point-in-time-correct JOIN** | C1:promote key band+正交,真 gate 作稀疏离线审计;**C2 无先例**:须加 marginal/self-corr-headroom 到 promote;拓扑 DB 行非内存树,beat 须 re-read |
+| **D3** 归因 | **AlphaAgent 两桶(2502.16789)可直接抄** / QuantaAlpha 三层(2602.07085)/ Reflexion(2303.11366)/ Alpha-Jungle weakest-dim(2505.11122) | 两桶(实现失败→retry / 假设失败→生命周期)/ weakest-dimension→targeted edit / **存为 TEXT**(=TextGrad/GEPA 梯度) | C1:别人有稠密 OOS IC 确认,我们 in-sample→"假设失败"provisional;**须加第三桶:好 alpha 过不了正交门→多样性惩罚=净新** |
+| **D4** 自进化 | **Alpha-Jungle success-gated budget**(2505.11122)/ AlphaEvolve+OpenEvolve(2506.13131)/ QuantaAlpha localize-rewrite / TextGrad(2406.07496)/ Deflated-Sharpe | success-gated 预算 / **DIFF 编辑非重生** / **slot 前 cascade** / depth 双作多重检验上限 / 偏 mutation 非 crossover | C3 主导:别人 10^6 eval,我们 ~3 槽→cascade 任务是**最小化到达昂贵阶段**;C2:只超 fitness 不超正交的 child 不准 promote;进化 fitness 用稠密 proxy 绝不 submit gate |
+| **D5** 战略 reward | TLRS 稀疏诊断(2507.20263)/ SSRS(2501.19128)/ **延迟转化 bandit censored-not-negative**(1706.09186)/ Criteo(KDD'14)/ **PU 学习**(2303.08269) | reward 绑**稠密 proxy 绝不 gate** / **censored-not-negative**(67 积压是未标注正例)/ **SCAR 违反**(submitted 人选非随机) | **C4 致命**:别人最终拿够真标签估率,我们 ~1 正例→真标签 posterior 退化→**必须绑稠密 proxy**;C1:无 IC 锚→不能 LEARN surrogate 只能手工构造+离线 sign-check |
+
+### 9.3 ✅ 安全可借(critique 验过,大多 plumbing/生成先验/离线,不依赖稠密奖励)
+1. **D1 verify-before-store(Voyager)= 我们 LB3**(唯一全过):过 band 才写 SUCCESS_PATTERN。文献 #1 反模式="Reflexion-without-Voyager"(只记失败)= 我们现状。是 plumbing 非理论。
+2. **AWM skeleton-induction 作纯生成先验**:band winners 聚带槽模板喂 HG prompt。免费 DB 聚合。
+3. **生成期 anti-crowding(Frequent-Subtree-Avoidance + AST-originality)**:KB 挖最常用 skeleton 注入 HG prompt 作禁用表。零 sim,服务 C2/C3。**对 LIVE 同区 SUBMITTED 池测不是固定 zoo**。
+4. **D3 AlphaAgent 两桶 + QuantaAlpha 三层,存 TEXT**:大多已建(attribution_types.py/early_stop)。**+ 第三桶(好 alpha 过不了正交门→多样性惩罚)= 净新**。
+5. **D3 便宜 pre-sim alignment check C(h,d,f)**:占 sim 槽前拒 hypothesis-misaligned=C3 最高杠杆纯赢。
+6. **D4 forward-only DB lineage + DIFF retry + 偏 mutation 非 crossover**:拓扑=我们池;crossover 退役我们 MEMORY+GP 文献都证。
+7. **reconcile-beat 工程成 delayed-label-join 管道**:transactional-outbox 单写每跳/幂等 upsert/watermark+grace/**双时态 point-in-time-correct JOIN**。镜像 orthogonality_score clobber 教训 + 满足 LB2 守卫。
+8. **censored-not-negative 标签纪律(延迟转化 bandit + PU)**:67 积压=未标注正例非失败,别折进 beta_param=0;SCAR→proxy 偏人口味→**保持 bandit 简单,别训神经 reward head**。
+9. **离线 GEPA/DSPy prompt 编译器 FROM reconcile-beat**(GEPA 2507.19457/DSPy):历史语料 replay,**零新 BRAIN sim**(绕开 C3/C4),只离线验过 prompt 上 live worker。**最干净 fit,prompt 优化正确家**(不在 per-candidate 环)。
+
+### 9.4 ❌ 被驳回/浪漫化(与 §5/LB4 一致 —— 第三次独立撞同一结论)
+1. **❌❌ D5 orthogonality-surrogate reward**(synthesizer 最大 overclaim)— critique 判**"被我们 live 数据证伪非仅浪漫化"**:就是已 rolled back 的 v1 的更稀疏版,30d 窗 ~0 正例必崩。**保持 binary can_submit**(§5)。
+2. **❌ marginal_recon kill-switch 当"已有安全网"反了**:休眠(需 ≥15 OS 对现 0,before-and-after 对已提交返 400,~2026-07 才有)→ 永 insufficient_sample → 守不住。C1 结构性不可得非延迟。
+3. **⚠️ FunSearch island-cull + CoSTEER SOTA-set 统计**:假设 10^6 便宜确定性 eval(C3 违反);只借节奏/形状,abandon 自己发明 round-less(N 连续 0-can_submit 非 0-PASS,=LB7)。
+4. **⚠️ ExpeL contrastive-LLM + AlphaGen/RD-Agent IC/contextual reward**:偷藏稠密可观测奖励(C1)+ LLM 调用挤 HG 预算;bandit 保持简单 Beta-Bernoulli 非 contextual/neural(几十事件过拟合)。
+5. **⚠️ Alpha-Jungle 预算=3 起**:只在 trigger 正交感知(非 raw running-max)+ 起始预算=1 + canary gated 时才活(retry FIFO 下饿死新发现,=LB5)。
+
+### 9.5 我们真正 on-our-own 的 3 个净新负担(无先例)
+1. **ORTHOGONALITY-AS-PRIMARY(C2)**:所有系统优化独立质量、crowding 当对固定 zoo 静态后过滤;我们 LIVE 演化同区 SUBMITTED 池。"更多 PASS 没用、更多可提交-正交才有用"无类比 → 自己发明 marginal-正交 promote 判据(D2)+ 第三 D3 桶。
+2. **PROXY-WITHOUT-ANCHOR(C1+C4)**:别人朝**已知**稠密目标 shape proxy;我们朝基本永远观测不到的目标 shape,proxy 唯一有效性检查=离线 sign-agreement kill-switch(小、间歇可得探针)。自我监管 proxy(marginal_recon)我们自建无先例。
+3. **≥5 bps 经济-margin 门** 叠在统计正交上 —— 真实交易成本约束,量化挖掘论文(止于 IC/IR)从不建模。
+
+### 9.6 借鉴 → Phase/LB 衔接
+| 借鉴 | 落点 |
+|---|---|
+| verify-before-store(Voyager)| **LB3 / Phase 1b**(唯一 sound)|
+| 归因两桶+三层 + alignment 预门 | **LB2 Phase 1c shadow 归因** + D3 第三桶(净新)|
+| reconcile-beat=delayed-label-join plumbing | **LB2 Phase 1c**(满足 watermark 守卫)|
+| censored-not-negative + 保持 binary reward | **LB4 修正 / §5**(数据驳回 orthogonal reward)|
+| AWM skeleton-induction + anti-crowding 禁用表 | **战术层 D1 / Phase 1b-2 生成先验**(零 sim)|
+| forward-only lineage + DIFF retry + mutation>crossover + success-gated budget(预算=1+正交 trigger+canary)| **LB5 / Phase 2**(数据 gated)|
+| 离线 GEPA/DSPy prompt 编译器 | **新 Phase 2 候选**(零 sim,beat 跑历史语料,最干净)|
+
+**一句话:业界给了认知形状(camp A)+ 异步 plumbing(camp B)两半,但绑到黑盒+execution-limited+~1-正例上、以及 orthogonality-primary / self-policing-proxy / ≥5bps 经济门,是我们必须自己造的 —— 无现成案例,且任何想把稀有真目标做成频繁 firing 学习环的尝试(如 D5 reward 升级)必须按数据驳回。**
