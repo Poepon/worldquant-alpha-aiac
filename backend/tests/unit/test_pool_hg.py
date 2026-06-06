@@ -110,6 +110,58 @@ async def test_emit_candidates_empty_is_noop():
 
 
 @pytest.mark.asyncio
+async def test_emit_candidates_and_complete_is_atomic():
+    """P0 fix: candidate INSERT + intent→DONE in ONE txn (no duplicate-on-retry
+    window). Owner-guarded."""
+    eng, sf = await _setup_db()
+    try:
+        async with sf() as s:
+            async with s.begin():
+                intent = HypothesisIntent(region="USA", config_snapshot={},
+                                          stage=st.INTENT_CLAIMED, claimed_by="hg-1")
+                s.add(intent)
+                await s.flush()
+                iid = intent.id
+        rows = [dict(region="USA", expression="e1", stage=st.SIM_PENDING, hyp_intent_id=iid),
+                dict(region="USA", expression="e2", stage=st.SIM_PENDING, hyp_intent_id=iid)]
+        n = await workers.emit_candidates_and_complete(iid, rows, worker_id="hg-1", session_factory=sf)
+        assert n == 2
+        async with sf() as s:
+            cands = (await s.execute(select(CandidateQueue))).scalars().all()
+            intent = await s.get(HypothesisIntent, iid)
+        assert len(cands) == 2 and {c.expression for c in cands} == {"e1", "e2"}
+        assert intent.stage == st.INTENT_DONE
+        assert intent.claimed_by is None and intent.lease_expires_at is None
+    finally:
+        await eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_emit_candidates_and_complete_stale_emits_nothing():
+    """P0 fix: if the intent was lease-recycled + reclaimed by another HG worker,
+    a stale worker emits NO duplicate candidates and leaves the intent untouched."""
+    eng, sf = await _setup_db()
+    try:
+        async with sf() as s:
+            async with s.begin():
+                intent = HypothesisIntent(region="USA", config_snapshot={},
+                                          stage=st.INTENT_CLAIMED, claimed_by="hg-2")
+                s.add(intent)
+                await s.flush()
+                iid = intent.id
+        rows = [dict(region="USA", expression="dup", stage=st.SIM_PENDING, hyp_intent_id=iid)]
+        n = await workers.emit_candidates_and_complete(iid, rows, worker_id="hg-1", session_factory=sf)
+        assert n == -1  # stale claim
+        async with sf() as s:
+            cands = (await s.execute(select(CandidateQueue))).scalars().all()
+            intent = await s.get(HypothesisIntent, iid)
+        assert cands == []  # NO duplicate candidate rows
+        assert intent.stage == st.INTENT_CLAIMED and intent.claimed_by == "hg-2"  # untouched
+    finally:
+        await eng.dispose()
+
+
+@pytest.mark.asyncio
 async def test_hydrate_hg_state_builds_round_state(monkeypatch):
     async def _fake_fields(s, ds, r, u, d):
         return [{"field_id": "close"}]

@@ -68,6 +68,9 @@ REM ---------------------------------------------------------------------------
 echo [INFO] Killing Celery workers + Beat (by command line)...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'backend\.celery_app' } | ForEach-Object { Write-Host ('  [kill] celery PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
+echo [INFO] Killing Pool Supervisor + workers (by command line)...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'backend\.pool\.(supervisor|run_worker)' } | ForEach-Object { Write-Host ('  [kill] pool PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+
 echo [INFO] Killing Backend (uvicorn, by command line)...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'python.exe' -and $_.CommandLine -match 'uvicorn' } | ForEach-Object { Write-Host ('  [kill] backend PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 
@@ -78,6 +81,7 @@ REM Close the now-childless cmd.exe wrapper windows (cosmetic).
 taskkill /fi "WINDOWTITLE eq AIAC Backend*" /f >nul 2>&1
 taskkill /fi "WINDOWTITLE eq AIAC Frontend*" /f >nul 2>&1
 taskkill /fi "WINDOWTITLE eq AIAC Celery*" /f >nul 2>&1
+taskkill /fi "WINDOWTITLE eq AIAC Pool Supervisor*" /f >nul 2>&1
 
 REM Port fallback: free the backend port if anything still holds it.
 for /f "tokens=5" %%a in ('netstat -ano 2^>nul ^| findstr ":%PORT% "') do (
@@ -191,6 +195,15 @@ REM never fires and CONTINUOUS_CASCADE sessions stop being revived
 REM after worker crashes.
 echo [INFO] Starting Celery Beat (scheduler)...
 start "AIAC Celery Beat" cmd /k "call venv\Scripts\activate && celery -A backend.celery_app beat --loglevel=info --logfile=.celery_beat.log"
+
+REM Pool Supervisor — the Popen-respawn parent that launches the resident HG/S/E
+REM worker subprocesses of the four-pool pipeline. It SELF-IDLES and exits at once
+REM when ENABLE_POOL_PIPELINE is OFF (PoolSupervisor.run()'s guard), so it is safe
+REM to always start; it only spawns workers after the Phase 1c cutover flips the
+REM flag ON. Without this window the scheduler beat fills hyp_intent/candidate_queue
+REM but NOTHING claims them — the pipeline silently produces zero alphas on flip.
+echo [INFO] Starting Pool Supervisor (idle until ENABLE_POOL_PIPELINE)...
+start "AIAC Pool Supervisor" cmd /k "call venv\Scripts\activate && python -m backend.pool.supervisor"
 
 echo.
 echo ==========================================

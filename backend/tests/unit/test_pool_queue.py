@@ -175,3 +175,53 @@ async def test_candidate_queue_full_stage_chain():
             assert row.claimed_by is None and row.lease_expires_at is None
     finally:
         await eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_complete_owner_guard_blocks_stale_writer():
+    """P0 fix B: a stale worker whose row was lease-recycled + reclaimed must NOT
+    clobber the new claimant via complete() (lost-update guard)."""
+    eng, sf = await _setup()
+    try:
+        [rid] = await _add_intents(sf, 1)
+        await q.claim_one(HypothesisIntent, st.INTENT_PENDING, "hg-1", 300, session_factory=sf)
+        # simulate lease-recycle + reclaim: the row is now owned by hg-2
+        async with sf() as s:
+            async with s.begin():
+                row = await s.get(HypothesisIntent, rid)
+                row.claimed_by = "hg-2"
+        # stale owner hg-1's complete is a NO-OP — stage untouched
+        ok = await q.complete(HypothesisIntent, rid, st.INTENT_DONE,
+                              worker_id="hg-1", session_factory=sf)
+        assert ok is False
+        assert await _stage_of(sf, HypothesisIntent, rid) == st.INTENT_CLAIMED
+        # the real owner hg-2 completes fine
+        ok2 = await q.complete(HypothesisIntent, rid, st.INTENT_DONE,
+                               worker_id="hg-2", session_factory=sf)
+        assert ok2 is True
+        assert await _stage_of(sf, HypothesisIntent, rid) == st.INTENT_DONE
+    finally:
+        await eng.dispose()
+
+
+@pytest.mark.asyncio
+async def test_fail_or_retry_owner_guard_returns_stale():
+    """P0 fix B: a stale worker must not re-PENDING / poison the new claimant's row."""
+    eng, sf = await _setup()
+    try:
+        [rid] = await _add_intents(sf, 1)
+        await q.claim_one(HypothesisIntent, st.INTENT_PENDING, "hg-1", 300, session_factory=sf)
+        async with sf() as s:
+            async with s.begin():
+                row = await s.get(HypothesisIntent, rid)
+                row.claimed_by = "hg-2"
+        out = await q.fail_or_retry(HypothesisIntent, rid, st.INTENT_PENDING, max_attempts=3,
+                                    worker_id="hg-1", session_factory=sf)
+        assert out == "stale"
+        assert await _stage_of(sf, HypothesisIntent, rid) == st.INTENT_CLAIMED  # untouched
+        # no worker_id (legacy callers) → guard skipped, behaves as before
+        out2 = await q.fail_or_retry(HypothesisIntent, rid, st.INTENT_PENDING, max_attempts=3,
+                                     session_factory=sf)
+        assert out2 == "retry"
+    finally:
+        await eng.dispose()

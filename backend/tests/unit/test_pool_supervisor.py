@@ -21,6 +21,29 @@ class _FakeProc:
         self._code = -15
 
 
+class _FakePipe:
+    """Minimal MULTI/EXEC shim: buffer delete/sadd, replay atomically on execute."""
+    def __init__(self, fr):
+        self._fr = fr
+        self._ops = []
+
+    def delete(self, k):
+        self._ops.append(("delete", k, ()))
+        return self
+
+    def sadd(self, k, *vals):
+        self._ops.append(("sadd", k, vals))
+        return self
+
+    def execute(self):
+        for op, k, vals in self._ops:
+            if op == "delete":
+                self._fr.delete(k)
+            else:
+                self._fr.sadd(k, *vals)
+        self._ops = []
+
+
 class _FakeRedis:
     def __init__(self):
         self.s = set()
@@ -33,6 +56,9 @@ class _FakeRedis:
 
     def scard(self, k):
         return len(self.s)
+
+    def pipeline(self, transaction=True):
+        return _FakePipe(self)
 
 
 def _make(*, draining=None):

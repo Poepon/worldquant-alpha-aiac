@@ -90,11 +90,19 @@ class PoolSupervisor:
         return get_redis_client()
 
     def _update_registry(self, alive_ids: List[str]) -> None:
+        # ATOMIC delete+sadd in one MULTI/EXEC: a plain delete-then-sadd leaves a
+        # window where scard(pool:workers:alive)==0, and celery_app's guarded
+        # brain:concurrent_sims reset reads exactly this scard — a worker_process_
+        # init landing in that window would zero the shared sim-slot counter while
+        # live sims still hold slots → over-cap 429 cascade (the 2026-05-31 leak the
+        # guard exists to prevent). The pipeline makes the rewrite indivisible.
         try:
             r = self._redis()
-            r.delete(_REGISTRY_KEY)
+            pipe = r.pipeline(transaction=True)
+            pipe.delete(_REGISTRY_KEY)
             if alive_ids:
-                r.sadd(_REGISTRY_KEY, *alive_ids)
+                pipe.sadd(_REGISTRY_KEY, *alive_ids)
+            pipe.execute()
         except Exception as ex:  # noqa: BLE001 — registry is advisory
             logger.debug(f"[pool.supervisor] registry update failed: {ex}")
 

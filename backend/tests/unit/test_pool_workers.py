@@ -1,4 +1,6 @@
 """Phase 1b B3 — S/E per-candidate processor tests (mock workflow, no brain)."""
+import asyncio
+
 import pytest
 
 from backend.agents.graph.state import MiningState, AlphaCandidate
@@ -111,3 +113,48 @@ async def test_persist_eval_invokes_persister_with_result():
     n = await workers.persist_eval(result, persister=fake_persister, session_factory=_FakeSession)
     assert n == 1
     assert captured == [[result]]
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_renews_while_op_runs(monkeypatch):
+    """P0 fix A: the heartbeat re-stamps the lease (renew_lease) repeatedly while a
+    long op runs, so a live sim is never lease-recycled + double-run (G2)."""
+    calls = []
+
+    async def fake_renew(model, row_id, lease_sec, *, worker_id=None, session_factory=None):
+        calls.append((row_id, worker_id))
+        return True
+
+    monkeypatch.setattr(workers, "renew_lease", fake_renew)
+
+    async def slow_op():
+        await asyncio.sleep(0.1)  # ~5 ticks at interval 0.02
+        return "done"
+
+    out = await workers._run_with_lease_heartbeat(
+        CandidateQueue, 42, 1800, "s-1", slow_op(), interval_sec=0.02)
+    assert out == "done"
+    assert len(calls) >= 2                       # heartbeat fired during the op
+    assert all(c == (42, "s-1") for c in calls)  # correct row + owner
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_stops_when_row_recycled(monkeypatch):
+    """P0 fix A: when renew_lease reports the row was recycled away (False), the
+    heartbeat stops renewing (doesn't fight the new claimant)."""
+    calls = []
+
+    async def fake_renew(model, row_id, lease_sec, *, worker_id=None, session_factory=None):
+        calls.append(row_id)
+        return False  # row recycled/terminal/reclaimed
+
+    monkeypatch.setattr(workers, "renew_lease", fake_renew)
+
+    async def slow_op():
+        await asyncio.sleep(0.15)
+        return "done"
+
+    out = await workers._run_with_lease_heartbeat(
+        CandidateQueue, 7, 1800, "s-1", slow_op(), interval_sec=0.02)
+    assert out == "done"
+    assert len(calls) == 1  # stopped after the first False

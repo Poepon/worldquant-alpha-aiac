@@ -122,20 +122,33 @@ async def complete(
     next_stage: str,
     *,
     updates: Optional[Dict[str, Any]] = None,
+    worker_id: Optional[str] = None,
     session_factory: Any = None,
 ) -> bool:
     """TXN-2: mark a row done/advanced (e.g. PENDING_SIM→PENDING_EVAL→DONE).
 
     Clears claimed_by/lease and applies ``updates`` (result columns:
     sim_result, verdict, error, trace_records, ...). Returns False if the row
-    vanished.
+    vanished — or (when ``worker_id`` is given) if the row is no longer owned by
+    this worker. That owner guard is load-bearing: if a slow worker's lease
+    expired and ``recycle_expired`` re-PENDING'd the row (then another worker
+    re-claimed it), a stale ``complete`` from the original worker must be a NO-OP
+    rather than clobbering the new claimant's stage/result (lost-update). Mirrors
+    the guard ``renew_lease`` already has.
     """
     factory = session_factory or AsyncSessionLocal
     async with factory() as s:
         async with s.begin():
-            row = await s.get(model, row_id)
+            # FOR UPDATE so the owner check + stage flip serialize against a
+            # concurrent recycle_expired / claim_one on the same row (those also
+            # lock). Without the lock, READ COMMITTED could read a pre-recycle
+            # claimed_by, pass the guard, then UPDATE WHERE id= a row recycle just
+            # re-PENDING'd. SQLite (tests) ignores FOR UPDATE — harmless no-op.
+            row = await s.get(model, row_id, with_for_update=True)
             if row is None:
                 return False
+            if worker_id is not None and row.claimed_by != worker_id:
+                return False  # recycled + reclaimed by someone else — don't clobber
             row.stage = next_stage
             row.claimed_by = None
             row.lease_expires_at = None
@@ -151,20 +164,27 @@ async def fail_or_retry(
     max_attempts: int,
     *,
     error: Optional[str] = None,
+    worker_id: Optional[str] = None,
     session_factory: Any = None,
 ) -> str:
     """TXN-2 failure path: attempts<cap → back to ``pending_stage`` ('retry'),
-    else → FAILED poison-pill ('failed'). 'missing' if the row vanished.
+    else → FAILED poison-pill ('failed'). 'missing' if the row vanished, 'stale'
+    if (when ``worker_id`` is given) the row is no longer owned by this worker.
 
     The row's ``attempts`` was already incremented at claim time, so a row that
-    has been claimed ``max_attempts`` times poison-pills here.
+    has been claimed ``max_attempts`` times poison-pills here. The owner guard
+    prevents a stale worker (whose row was lease-recycled + reclaimed) from
+    re-PENDING'ing / poisoning the new claimant's in-flight row.
     """
     factory = session_factory or AsyncSessionLocal
     async with factory() as s:
         async with s.begin():
-            row = await s.get(model, row_id)
+            # FOR UPDATE — same serialize-against-recycle rationale as complete().
+            row = await s.get(model, row_id, with_for_update=True)
             if row is None:
                 return "missing"
+            if worker_id is not None and row.claimed_by != worker_id:
+                return "stale"  # recycled + reclaimed by someone else — don't touch
             if (row.attempts or 0) < max_attempts:
                 row.stage = pending_stage
                 row.claimed_by = None

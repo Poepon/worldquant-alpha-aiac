@@ -89,11 +89,23 @@ stop_services() {
         fi
         rm -f "$PID_DIR/celery.pid"
     fi
-    
+
+    if [ -f "$PID_DIR/pool_supervisor.pid" ]; then
+        PID=$(cat "$PID_DIR/pool_supervisor.pid")
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "[INFO] Killing pool supervisor process: $PID"
+            kill "$PID" 2>/dev/null
+            kill -9 "$PID" 2>/dev/null
+        fi
+        rm -f "$PID_DIR/pool_supervisor.pid"
+    fi
+
     # Kill by process name (fallback)
     pkill -f "uvicorn backend.main:app" 2>/dev/null
     pkill -f "celery -A backend.celery_app" 2>/dev/null
     pkill -f "vite.*frontend" 2>/dev/null
+    pkill -f "backend.pool.supervisor" 2>/dev/null
+    pkill -f "backend.pool.run_worker" 2>/dev/null
     
     # Kill by port (fallback)
     lsof -ti:$PORT | xargs kill -9 2>/dev/null
@@ -190,7 +202,15 @@ except:
     source venv/bin/activate
     celery -A backend.celery_app worker --loglevel=info &
     echo $! > "$PID_DIR/celery.pid"
-    
+
+    # Pool Supervisor — Popen-respawn parent for the resident HG/S/E worker
+    # subprocesses. Self-idles + exits when ENABLE_POOL_PIPELINE is OFF, so it is
+    # safe to always start; it only spawns workers after the Phase 1c cutover.
+    echo "[INFO] Starting Pool Supervisor (idle until ENABLE_POOL_PIPELINE)..."
+    source venv/bin/activate
+    python -m backend.pool.supervisor &
+    echo $! > "$PID_DIR/pool_supervisor.pid"
+
     echo ""
     echo "=========================================="
     echo "            Services Started!"

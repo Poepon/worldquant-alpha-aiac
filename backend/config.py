@@ -1764,9 +1764,14 @@ class Settings(BaseSettings):
     }
     # Master gate for the resident HG/S/E pool pipeline (four-pool decoupling).
     # Default OFF — the pool beats no-op and the supervisor starts no workers
-    # until this flips (Phase 1c-flip). ENABLE_-prefixed so it is hot-flippable
-    # via FeatureFlagOverride (it gates claim/dispatch; process liveness is the
-    # supervisor + drain key, NOT this flag — plan §4 1c-flip runbook).
+    # until this flips (Phase 1c-flip). NOT hot-flippable from the ops console: it
+    # is intentionally NOT registered in SUPPORTED_FLAGS, and the standalone
+    # supervisor / run_worker processes read it straight off Pydantic env at start
+    # with no FeatureFlagOverride cache-refresher — so the ONLY valid flip is an
+    # `.env` edit + full `run.bat --restart` (every process re-reads env). See the
+    # plan §4 1c-flip 3-step manual runbook. (Registering it in SUPPORTED_FLAGS to
+    # regain a console hot-OFF kill-switch is a deferred P2 — would also need the
+    # supervisor to warm the override cache.)
     ENABLE_POOL_PIPELINE: bool = False
     # How many hyp_intent rows the pool scheduler beat inserts per firing.
     POOL_SCHEDULER_BATCH: int = 5

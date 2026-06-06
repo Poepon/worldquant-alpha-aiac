@@ -32,7 +32,7 @@ from backend.pool import stages as st
 from backend.pool.budget import sims_budget_exceeded, tokens_budget_exceeded, incr_sims
 from backend.pool.drain import is_draining
 from backend.pool.hydrate import hydrate_candidate_state, hydrate_hg_state, hg_run_config
-from backend.pool.queue import claim_one, complete, fail_or_retry
+from backend.pool.queue import claim_one, complete, fail_or_retry, renew_lease
 
 
 def build_workflow(db: Any) -> MiningWorkflow:
@@ -62,6 +62,51 @@ def _serialize_trace(steps: Any) -> List[Dict[str, Any]]:
         elif hasattr(s, "dict"):
             out.append(s.dict())
     return out
+
+
+async def _renew_loop(model: Any, row_id: int, lease_sec: int, worker_id: str,
+                      stop: "asyncio.Event", interval_sec: Optional[float] = None) -> None:
+    """Heartbeat coroutine: re-stamp the claimed row's lease every ~lease_sec/4
+    so a legitimately-long op (a BRAIN sim holds 30-90 min) is NOT lease-recycled
+    out from under a still-alive worker. lease/4 (not /3) gives 4 ticks per lease →
+    survives up to THREE consecutive missed renewals (a transient renew exception
+    just `continue`s to the next tick) before the lease can lapse. Stops when
+    ``stop`` is set (op finished) or ``renew_lease`` reports the row is gone /
+    terminal / owned by someone else (already recycled away — nothing left to
+    renew). ``interval_sec`` is injectable for tests; production → max(30, lease/4)."""
+    interval = interval_sec if interval_sec is not None else max(30.0, lease_sec / 4.0)
+    while not stop.is_set():
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=interval)
+            return  # stop signalled → op done
+        except asyncio.TimeoutError:
+            pass
+        try:
+            ok = await renew_lease(model, row_id, lease_sec, worker_id=worker_id)
+        except Exception as ex:  # noqa: BLE001 — a transient renew failure must not
+            # abandon a live op; the lease margin covers a missed beat, retry next tick.
+            logger.debug(f"[pool.heartbeat] renew {model.__tablename__}:{row_id} failed (retry): {ex}")
+            continue
+        if not ok:
+            return  # row recycled/terminal/reclaimed — stop renewing
+
+
+async def _run_with_lease_heartbeat(model: Any, row_id: int, lease_sec: int,
+                                    worker_id: str, coro: Any, *,
+                                    interval_sec: Optional[float] = None) -> Any:
+    """Await ``coro`` while a background heartbeat renews its lease. Cancels the
+    heartbeat in finally so it never outlives the op."""
+    stop = asyncio.Event()
+    hb = asyncio.create_task(_renew_loop(model, row_id, lease_sec, worker_id, stop, interval_sec))
+    try:
+        return await coro
+    finally:
+        stop.set()
+        hb.cancel()
+        try:
+            await hb
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
 
 
 async def _fetch_intent_snapshot(hyp_intent_id: Optional[int]) -> Dict[str, Any]:
@@ -150,8 +195,15 @@ async def persist_eval(result: SimResult, *, persister: Any = None,
 # Resident loops (thin; started by the supervisor in B6, INERT until then)
 # =============================================================================
 
-async def s_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 1800,
+async def s_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 3600,
                  max_attempts: int = 3, should_stop: Any = None) -> None:
+    # lease_sec 3600 (1h) = the real worst-case BRAIN hold, which is one of two
+    # MUTUALLY-EXCLUSIVE paths (not their sum): single-sim = slot-acquire ≤1800 +
+    # poll ≤1800 (BRAIN_SIM_MAX_WAIT_SEC); multisim = poll ≤3600
+    # (BRAIN_MULTISIM_MAX_WAIT_SEC, no slot-acquire). Both ≈3600, so the lease is a
+    # belt. The heartbeat (_run_with_lease_heartbeat) is the PRIMARY guard — it
+    # re-stamps the lease every lease_sec/4 so a live long sim is never lease-
+    # recycled + double-run (gotcha G2).
     async with AsyncSessionLocal() as wdb:
         workflow = build_workflow(wdb)
         config = hg_run_config()
@@ -165,27 +217,39 @@ async def s_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 1800
                 continue
             try:
                 snap = await _fetch_intent_snapshot(row.hyp_intent_id)
-                out = await s_process_one(workflow, row, snap, config)
-                await complete(
+                out = await _run_with_lease_heartbeat(
+                    CandidateQueue, row.id, lease_sec, worker_id,
+                    s_process_one(workflow, row, snap, config),
+                )
+                # worker_id-guarded: a NO-OP (returns False) if our lease lapsed
+                # and the row was recycled + reclaimed by another S worker — we
+                # must not clobber its stage/sim_result (lost-update).
+                advanced = await complete(
                     CandidateQueue, row.id, st.EVAL_PENDING,
                     updates={
                         "sim_result": out["sim_result"],
                         "trace_records": list(row.trace_records or []) + out["trace"],
                     },
+                    worker_id=worker_id,
                 )
                 # Count the BRAIN sim ONLY after a confirmed successful POST
                 # (终审 #6: is_simulated != BRAIN-truth — never count pre-POST /
-                # slot-timeout / 429). Pool-sim count; the brain_adapter global
-                # hook (incl opt/auto-submit) is a later refinement.
-                if out["sim_result"].get("simulation_success"):
+                # slot-timeout / 429), and only if WE actually advanced the row
+                # (a stale/recycled claim's duplicate sim must not double-charge
+                # the daily budget). Pool-sim count; the brain_adapter global hook
+                # (incl opt/auto-submit) is a later refinement.
+                if advanced and out["sim_result"].get("simulation_success"):
                     incr_sims(1)
             except Exception as ex:  # noqa: BLE001
                 logger.warning(f"[pool.s] candidate {row.id} sim failed: {ex}")
-                await fail_or_retry(CandidateQueue, row.id, st.SIM_PENDING, max_attempts, error=str(ex))
+                await fail_or_retry(CandidateQueue, row.id, st.SIM_PENDING, max_attempts,
+                                    error=str(ex), worker_id=worker_id)
 
 
-async def e_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 600,
+async def e_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 1800,
                  max_attempts: int = 3, should_stop: Any = None) -> None:
+    # lease_sec 1800 (30m): node_evaluate can issue fresh sign-flip-retry sims, so
+    # E is not always sub-minute. Heartbeat-renewed like S (G2).
     async with AsyncSessionLocal() as wdb:
         workflow = build_workflow(wdb)
         config = hg_run_config()
@@ -199,15 +263,33 @@ async def e_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 600,
                 continue
             try:
                 snap = await _fetch_intent_snapshot(row.hyp_intent_id)
-                result = await e_process_one(workflow, row, snap, config)
+                result = await _run_with_lease_heartbeat(
+                    CandidateQueue, row.id, lease_sec, worker_id,
+                    e_process_one(workflow, row, snap, config),
+                )
+                # Persist FIRST, then advance the stage guarded by worker_id. This
+                # ordering is deliberate: a crash BETWEEN the two leaves the row
+                # EVAL_INFLIGHT → lease-recycle re-evaluates it → the candidate
+                # outcome is never LOST (vs complete-first, which would mark a row
+                # DONE then lose the persist on a crash). The stage is never
+                # clobbered (complete()'s worker_id guard NO-OPs a stale advance).
+                # Residual (rare, heartbeat-gated): on a recycle race a duplicate
+                # persist can occur — the alphas table is idempotent (ON CONFLICT
+                # DO NOTHING on alpha_id, persistence.py), but alpha_failures /
+                # trace_steps have no per-candidate idempotency, so a duplicate FAIL
+                # row + trace can land. Full failure-write idempotency is a P1
+                # follow-up; accepted here because losing a PASS is worse than a
+                # duplicate FAIL and the heartbeat makes the recycle race rare.
                 await persist_eval(result)
                 await complete(
                     CandidateQueue, row.id, st.CAND_DONE,
                     updates={"verdict": result.verdict, "error": result.error},
+                    worker_id=worker_id,
                 )
             except Exception as ex:  # noqa: BLE001
                 logger.warning(f"[pool.e] candidate {row.id} eval failed: {ex}")
-                await fail_or_retry(CandidateQueue, row.id, st.EVAL_PENDING, max_attempts, error=str(ex))
+                await fail_or_retry(CandidateQueue, row.id, st.EVAL_PENDING, max_attempts,
+                                    error=str(ex), worker_id=worker_id)
 
 
 # =============================================================================
@@ -289,8 +371,50 @@ async def emit_candidates(rows_kwargs: List[Dict[str, Any]], *, session_factory:
     return len(rows_kwargs)
 
 
+async def emit_candidates_and_complete(
+    intent_id: int, rows_kwargs: List[Dict[str, Any]], *,
+    worker_id: Optional[str] = None, session_factory: Any = None,
+) -> int:
+    """ATOMIC emit + intent-DONE: INSERT the candidate rows AND flip the parent
+    hyp_intent → DONE in ONE transaction.
+
+    Why atomic (review finding): candidate_queue has no idempotency key. If emit
+    and the intent→DONE flip are two separate commits and the worker dies (or its
+    lease is recycled) in between, the candidates are committed but the intent
+    stays CLAIMED → lease-recycle re-PENDINGs it → the HG pool re-runs and emits a
+    DUPLICATE candidate set (up to max_attempts×), every duplicate then BRAIN-
+    simulated. One transaction closes that window. Owner-guarded: if the intent
+    was recycled + reclaimed by another HG worker, emit NOTHING (return -1).
+    """
+    factory = session_factory or AsyncSessionLocal
+    async with factory() as s:
+        async with s.begin():
+            # FOR UPDATE so the owner check + emit + intent→DONE serialize against a
+            # concurrent recycle_expired (which also locks) — closes the narrow
+            # READ-COMMITTED window where a just-re-PENDING'd intent gets flipped to
+            # DONE. SQLite (tests) ignores FOR UPDATE — harmless no-op.
+            intent = await s.get(HypothesisIntent, intent_id, with_for_update=True)
+            if intent is None:
+                return 0  # intent vanished (hard-deleted) — nothing to do
+            if worker_id is not None and intent.claimed_by != worker_id:
+                return -1  # stale claim — another worker owns this intent now
+            if rows_kwargs:
+                s.add_all([CandidateQueue(**kw) for kw in rows_kwargs])
+            intent.stage = st.INTENT_DONE
+            intent.claimed_by = None
+            intent.lease_expires_at = None
+    return len(rows_kwargs)
+
+
 async def hg_loop(*, worker_id: str, poll_sec: float = 3.0, lease_sec: int = 1800,
                   max_attempts: int = 3, should_stop: Any = None) -> None:
+    # lease_sec 1800 (30m): the LLM-bound rag→distill→hypothesis→codegen→validate→
+    # [self_correct] chain runs minutes, not the 30-90m a BRAIN sim can; the
+    # heartbeat re-stamps a live chain every lease/4 so even a rare long one is not
+    # recycled mid-generation (re-run would duplicate candidates, G2). Kept at 1800
+    # (not 3600) because with POOL_N_HG=1 a *dead* HG worker strands generation for
+    # one full lease before recycle — a smaller lease halves that MTTR, and the
+    # heartbeat (not the lease size) is what protects a live worker.
     config = hg_run_config()
     while not (should_stop and should_stop()):
         if is_draining("hg") or tokens_budget_exceeded():
@@ -306,12 +430,21 @@ async def hg_loop(*, worker_id: str, poll_sec: float = 3.0, lease_sec: int = 180
         try:
             async with AsyncSessionLocal() as wdb:
                 workflow = build_workflow(wdb)
-                rows = await hg_process_one(workflow, intent, config)
-            n = await emit_candidates(rows)
-            await complete(HypothesisIntent, intent.id, st.INTENT_DONE)
-            logger.info(f"[pool.hg] intent {intent.id} → {n} candidates")
+                rows = await _run_with_lease_heartbeat(
+                    HypothesisIntent, intent.id, lease_sec, worker_id,
+                    hg_process_one(workflow, intent, config),
+                )
+            # Atomic emit + intent→DONE (one txn) so a crash/recycle between the
+            # two never duplicates the candidate set. worker_id-guarded.
+            n = await emit_candidates_and_complete(intent.id, rows, worker_id=worker_id)
+            if n < 0:
+                logger.warning(f"[pool.hg] intent {intent.id} claim went stale "
+                               f"(lease-recycled) — candidates NOT emitted")
+            else:
+                logger.info(f"[pool.hg] intent {intent.id} → {n} candidates")
         except Exception as ex:  # noqa: BLE001
             logger.warning(f"[pool.hg] intent {intent.id} failed: {ex}")
-            await fail_or_retry(HypothesisIntent, intent.id, st.INTENT_PENDING, max_attempts, error=str(ex))
+            await fail_or_retry(HypothesisIntent, intent.id, st.INTENT_PENDING, max_attempts,
+                                error=str(ex), worker_id=worker_id)
         finally:
             clear_task_function_overrides(token)
