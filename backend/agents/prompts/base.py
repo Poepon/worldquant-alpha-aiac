@@ -56,6 +56,13 @@ class PromptContext:
     # Plan: docs/orthogonality_steered_exploration_plan_2026-06-05.md
     submitted_pool_profile: Optional[str] = None
 
+    # Pool Phase 2 (R1a-v1, 2026-06-07): pre-rendered SOFT de-prioritization
+    # nudge listing the most-crowded recent SUCCESS_PATTERN skeletons for this
+    # region. node_hypothesis fills it only when ENABLE_R1A_KB_SKELETON_FREQUENCY
+    # is ON and ≥SKELETON_FREQUENCY_MIN_SAMPLES patterns exist in-window. None/""
+    # → build_hypothesis_prompt splices "" → byte-for-byte legacy. Plan §7 Track B.
+    crowded_skeletons_block: Optional[str] = None
+
     # P2-A (2026-05-16): Macro narratives — RAG-fetched economic mechanism
     # anchors for the current (dataset, region) + top-K focused fields.
     # node_hypothesis fills this when ENABLE_MACRO_NARRATIVE_GUIDANCE is on

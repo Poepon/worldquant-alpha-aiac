@@ -71,22 +71,35 @@ from backend.tasks import run_async
 _WM_KEY = "dataset_bandit_watermark"
 
 def _classify(metrics: Any, can_submit: Any) -> Tuple[bool, float]:
-    """Return ``(is_real_sim, reward)`` for one alpha row.
+    """Return ``(counts_as_pull, reward)`` for one alpha row.
 
-    real sim = NOT metrics._pre_brain_skip   (PRESIM_SKIP never hit BRAIN)
-    reward   = 1.0 if can_submit else 0.0     (v6: SUBMITTABLE yield)
+    counts_as_pull = it hit BRAIN AND its submittability label is KNOWN.
+    reward         = 1.0 if can_submit else 0.0     (v6: SUBMITTABLE yield)
 
     ``can_submit`` = BRAIN is.checks all PASS (no FAIL) — already encodes
     LOW_SHARPE / LOW_FITNESS / HIGH_TURNOVER / CONCENTRATED_WEIGHT / sub-universe,
     so a graded edge term is dead under this gate (can_submit ⟹ above-threshold).
-    NULL/None can_submit (not yet refreshed from BRAIN) → treated as 0 (unknown =
-    not-submittable, conservative) but still counts as a real pull. See module
-    docstring for why v6 is binary + why edge (v2-v5) pointed at fool's gold.
-    Pure + dialect-free so the PRESIM_SKIP exclusion stays unit-testable w/o PG.
+
+    CENSORED-NOT-NEGATIVE (2026-06-07 hotfix, plan §7 Track D / guard #13): a row
+    whose can_submit is still NULL (not yet refreshed from BRAIN — the 30s post-sim
+    countdown hasn't fired, or the refresh failed/was never enqueued) is an
+    UNLABELED sample, NOT a failure. The pre-fix returned ``(True, 0.0)`` for it —
+    folding every unrefreshed in-flight sim into the Beta posterior as a real MISS
+    (β++), which persistently suppressed mining_weight for any dataset with refresh
+    lag. We now CENSOR it: ``(False, 0.0)`` → excluded from BOTH S_d and T_d (no
+    pull charged), exactly like a PRESIM_SKIP. (Residual, accepted: a row created
+    just before the daily beat that flips True only AFTER the watermark advances is
+    dropped from the bandit — a negligible few-minute window vs the daily cadence,
+    and far better than counting it as a fake miss. A label-landed-at column would
+    close it fully — deferred, not load-bearing.)
+
+    Pure + dialect-free so the exclusion stays unit-testable w/o PG.
     """
     m = metrics if isinstance(metrics, dict) else {}
     if m.get("_pre_brain_skip"):
         return False, 0.0  # pre-sim skip — never consumed a BRAIN sim
+    if can_submit is None:
+        return False, 0.0  # CENSORED: unlabeled, not a miss — see docstring
     return True, (1.0 if can_submit is True else 0.0)
 
 

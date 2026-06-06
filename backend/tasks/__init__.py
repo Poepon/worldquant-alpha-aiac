@@ -106,6 +106,10 @@ from backend.tasks.pool_tasks import (  # noqa: F401
     run_pool_lease_recycle,
 )
 
+# Pool Phase 2 (1c): cognitive reconcile beat (gated on
+# ENABLE_POOL_COGNITIVE_RECONCILE, default OFF → inert until flipped).
+from backend.tasks.cognitive_reconcile_tasks import run_pool_cognitive_reconcile  # noqa: F401
+
 __all__ = [
     # Utilities
     "run_async",
@@ -158,4 +162,6 @@ __all__ = [
     # Phase 1b B5: pool scheduler + lease-recycle beats (gated on ENABLE_POOL_PIPELINE)
     "run_pool_scheduler",
     "run_pool_lease_recycle",
+    # Pool Phase 2 (1c): cognitive reconcile beat (gated on ENABLE_POOL_COGNITIVE_RECONCILE)
+    "run_pool_cognitive_reconcile",
 ]

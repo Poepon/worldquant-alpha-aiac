@@ -129,6 +129,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_pool_lease_recycle",
         "schedule": crontab(minute="*/2"),
     },
+    # Pool Phase 2 (1c): cognitive reconcile — drives the hypotheses lifecycle
+    # (refresh_stats / auto-activate / PROMOTE-on-can_submit / attribution stamp)
+    # off recently-landed alphas. Gates on ENABLE_POOL_COGNITIVE_RECONCILE
+    # (default OFF) → fires but no-ops until flipped. Every 15 min; the grace
+    # window (POOL_RECONCILE_GRACE_SEC) keeps it off the E-worker hot path.
+    "pool-cognitive-reconcile": {
+        "task": "backend.tasks.run_pool_cognitive_reconcile",
+        "schedule": crontab(minute="*/15"),
+    },
     # Daily feedback analysis at 23:00
     "daily-feedback-analysis": {
         "task": "backend.tasks.run_daily_feedback",

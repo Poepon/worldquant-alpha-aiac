@@ -110,6 +110,28 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "字节不变。shadow-first 再 A/B。见 orthogonality_steered_exploration_plan_2026-06-05.md"
         ),
     ),
+    # --- Pool-Phase2 认知层 / 战术生成先验 ---
+    "ENABLE_POOL_COGNITIVE_RECONCILE": FlagSpec(
+        name="ENABLE_POOL_COGNITIVE_RECONCILE",
+        flag_type="bool",
+        group="Pool-Phase2",
+        description=(
+            "池认知层 reconcile beat:扫近窗 landed alpha(watermark on created_at + "
+            "grace),驱动 hypotheses 生命周期(auto-activate / refresh can_submit_count / "
+            "PROMOTE on can_submit_count>0 非 pass_count / 廉价归因)。替代 FLAT 同步 "
+            "in-graph CoSTEER。OFF → beat no-op。见 kb_feedback_redesign_2026-06-06.md §7 Track C。"
+        ),
+    ),
+    "ENABLE_R1A_KB_SKELETON_FREQUENCY": FlagSpec(
+        name="ENABLE_R1A_KB_SKELETON_FREQUENCY",
+        flag_type="bool",
+        group="Pool-Phase2",
+        description=(
+            "R1a-v1 生成先验:挖近窗 SUCCESS_PATTERN skeleton 频率,把最拥挤结构作 SOFT "
+            "降权 nudge 注入 hypothesis prompt(非硬禁用表)。sample-size-gated + [:5] cap + "
+            "field-aware。OFF → 字节不变。soak + pillar-nudge A/B 双过前不升级。见 §7 Track B。"
+        ),
+    ),
     # --- P2-C 市场体制 (Consolidated 2026-05-19: single switch + stage str) ---
     "ENABLE_REGIME": FlagSpec(
         name="ENABLE_REGIME",

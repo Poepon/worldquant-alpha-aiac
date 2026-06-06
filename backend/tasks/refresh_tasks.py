@@ -523,6 +523,8 @@ async def _audit_iqc_marginal_async(
     try:
         async with AsyncSessionLocal() as db:
             svc = AlphaService(db)
+            alpha = None
+            self_corr_vs_pool = None
             async with BrainAdapter() as brain:
                 result = await svc.get_marginal_contribution(
                     alpha_pk=alpha_pk,
@@ -533,8 +535,29 @@ async def _audit_iqc_marginal_async(
                 if result is None:
                     return {"alpha_pk": alpha_pk, "skipped": True}
 
+                # 1d instrumentation (plan §7 Track D): measure self-corr vs the
+                # OS pool WHILE the brain adapter is open. Co-located with the IQC
+                # audit because margin_bps / Δsharpe live here too. INSTRUMENTATION
+                # ONLY — the dataset bandit reward stays binary can_submit (LB4: the
+                # orthogonal-yield reward is statistically data-dead). Soft-fail →
+                # None (UNKNOWN: no PnL cache / insufficient overlap).
+                alpha = await svc.alpha_repo.get_by_id(alpha_pk)
+                if alpha is not None and alpha.alpha_id:
+                    try:
+                        from backend.services.correlation_service import (
+                            CorrelationService, CorrSource,
+                        )
+                        _corr, _src = await CorrelationService(brain).calc_self_corr(
+                            alpha.alpha_id, alpha.region
+                        )
+                        self_corr_vs_pool = _corr if _src == CorrSource.LOCAL else None
+                    except Exception as _sc_ex:  # noqa: BLE001 — instrumentation only
+                        logger.debug(
+                            f"[submit_yield] self_corr calc failed (soft) "
+                            f"alpha_pk={alpha_pk}: {_sc_ex}"
+                        )
+
             # Merge audit info into alpha.metrics._iqc_marginal
-            alpha = await svc.alpha_repo.get_by_id(alpha_pk)
             if alpha is None:
                 return {"alpha_pk": alpha_pk, "skipped": True, "reason": "alpha_not_found"}
 
@@ -571,6 +594,22 @@ async def _audit_iqc_marginal_async(
                 # sync_user_alphas flips this to true on submission flip;
                 # sweep prioritises stale=true to refresh first.
                 "stale": False,
+            }
+            # 1d DARK instrumentation (plan §7 Track D) — the three components a
+            # submit-yield reward WOULD consume, stamped purely for observation
+            # (LB4 keeps the bandit reward binary). Backfillable over the whole
+            # can_submit backlog via iqc_audit_backfill_sweep (re-audit re-stamps).
+            # None is stored verbatim (UNKNOWN), mirroring _iqc_marginal's nullable
+            # fields so a re-run writes identical bytes (idempotent retry).
+            new_metrics["_submit_yield_label"] = {
+                "labeled_at": datetime.now(timezone.utc).isoformat(),
+                "scope": result.get("scope"),
+                # marginal ΔSharpe — the team-portfolio contribution.
+                "marginal_delta_sharpe": deltas.get("sharpe"),
+                # economic margin in bps (≥5 bps clears cost; the absolute gate).
+                "margin_bps": analysis.get("margin_bps"),
+                # max self-corr vs the OS pool (PnL-level); None = not measurable.
+                "self_corr_vs_pool": self_corr_vs_pool,
             }
             await db.execute(
                 update(Alpha).where(Alpha.id == alpha_pk).values(metrics=new_metrics)

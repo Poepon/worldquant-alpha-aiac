@@ -147,9 +147,18 @@ class TestClassify:
     def test_can_submit_false(self):
         assert _classify({}, False) == (True, 0.0)
 
-    def test_can_submit_none_is_zero(self):
-        # NULL can_submit (not yet refreshed from BRAIN) → real sim, 0 reward.
-        assert _classify({}, None) == (True, 0.0)
+    def test_can_submit_none_is_censored(self):
+        # CENSORED-NOT-NEGATIVE (2026-06-07 hotfix, plan §7 Track D): NULL
+        # can_submit (not yet refreshed from BRAIN) is an UNLABELED sample, NOT a
+        # miss — counts_as_pull=False so it is dropped from BOTH S_d and T_d (no
+        # β++). The pre-fix returned (True, 0.0), folding every unrefreshed in-
+        # flight sim into the posterior as a fake failure (corrupted mining_weight).
+        assert _classify({}, None) == (False, 0.0)
+
+    def test_presim_skip_takes_priority_over_none(self):
+        # A pre-sim-skipped row with NULL can_submit is still excluded (either
+        # branch censors it) — defensive belt for the ordering.
+        assert _classify({"_pre_brain_skip": True}, None) == (False, 0.0)
 
     def test_high_edge_but_unsubmittable_scores_zero(self):
         # The model16 case: edge alphas (high sharpe in metrics) but

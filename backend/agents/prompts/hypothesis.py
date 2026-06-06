@@ -310,6 +310,16 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
         if orth_steer_text else ""
     )
 
+    # Pool Phase 2 (R1a-v1, 2026-06-07): SOFT skeleton-frequency de-prioritization.
+    # Pre-rendered by node_hypothesis (skeleton_frequency_nudge_block) ONLY when
+    # ENABLE_R1A_KB_SKELETON_FREQUENCY is ON and enough in-window SUCCESS_PATTERNs
+    # exist. "" when OFF / too few → the splice below yields "" → byte-for-byte
+    # legacy. A SOFT nudge (prefer-novel), NOT a hard forbidden list. Plan §7 Track B.
+    crowded_text = getattr(ctx, "crowded_skeletons_block", None) or ""
+    crowded_block_with_leading_newline = (
+        f"\n{crowded_text}\n" if crowded_text else ""
+    )
+
     def _assemble(macro_nl: str, cross_task_nl: str) -> str:
         return f"""## Research Context
 
@@ -325,7 +335,7 @@ MUST combine 2+ datasets unless the entire pool is genuinely uncorrelated.
 {patterns_block}
 {trace_section}
 {strategy_section}
-{pillar_nudge_block}{orth_steer_block_with_leading_newline}
+{pillar_nudge_block}{orth_steer_block_with_leading_newline}{crowded_block_with_leading_newline}
 ## Task
 
 Generate 3-5 investment hypotheses for this dataset.

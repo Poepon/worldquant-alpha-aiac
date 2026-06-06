@@ -181,6 +181,9 @@ async def hydrate_hg_state(intent: Any, *, session_factory: Any = None) -> Minin
         fields=fields or [],
         operators=operators or [],
         num_alphas_target=int(intent.fanout) if intent.fanout else 3,
+        # Pool 1a: carry the parent intent id so node_hypothesis can dedup typed-
+        # Hypothesis creation on lease-recycle (a re-claimed intent re-runs HG).
+        hyp_intent_id=int(intent.id) if intent.id is not None else None,
         available_dataset_pool=[],  # legacy single-anchor (Phase-1 pool = follow-up)
         brain_consultant_mode_at_start=role.get("brain_consultant_mode_at_start"),
         effective_default_test_period=role.get("effective_default_test_period"),

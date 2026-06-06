@@ -146,6 +146,14 @@ class Hypothesis(SQLAlchemyBase):
         server_default="0",
     )
 
+    # Pool Phase 2 (1a, 2026-06-07): the parent hyp_intent.id that produced this
+    # hypothesis in the decoupled HG/S/E pool. Lease-recycle can re-run the HG
+    # worker on the same intent; node_hypothesis dedups on this so a re-run reuses
+    # the open row instead of creating an orphan PROPOSED duplicate. NULL for
+    # FLAT-era / non-pool rows. Indexed for the dedup lookup; intentionally NOT a
+    # hard FK (hyp_intent rows are pruned independently of the long-lived row).
+    hyp_intent_id = Column(Integer, nullable=True, index=True)
+
     # ---- Variant isolation (Plan v5+ F-5) ----
     # Phase gate灰度期间 RAG retrieval / dedup confined to same variant so
     # legacy and Phase 2 don't pollute each other's KB.
@@ -156,6 +164,13 @@ class Hypothesis(SQLAlchemyBase):
     # of truth is alphas.hypothesis_id JOIN; these columns are the rollup.
     alpha_count = Column(Integer, default=0, nullable=False)
     pass_count = Column(Integer, default=0, nullable=False)  # PASS + PASS_PROVISIONAL
+    # Pool Phase 2 (1c, 2026-06-07): submit-gate denormalized rollups that drive
+    # the cognitive reconcile beat's PROMOTE / ABANDON decisions. can_submit_count
+    # is the gate that MATTERS — NOT pass_count, which counts PASS_PROVISIONAL and
+    # would promote on a provisional hold (plan §7 guard #5). submitted_count
+    # tracks realized submissions. Both refreshed by refresh_stats.
+    can_submit_count = Column(Integer, default=0, server_default="0", nullable=False)
+    submitted_count = Column(Integer, default=0, server_default="0", nullable=False)
     sharpe_avg = Column(Float, nullable=True)
     sharpe_max = Column(Float, nullable=True)
 
@@ -167,6 +182,12 @@ class Hypothesis(SQLAlchemyBase):
     # SUPERSEDED — replaced by a child hypothesis (parent_hypothesis_id ref)
     status = Column(String(20), default="PROPOSED", nullable=False, index=True)
     abandon_reason = Column(Text, nullable=True)
+    # Pool Phase 2 (1c, 2026-06-07): cheap heuristic attribution stamp written by
+    # the cognitive reconcile beat (early_stop.classify_attribution) — why the
+    # hypothesis under/over-performed (e.g. implementation vs hypothesis failure).
+    # NULL until the first reconcile pass touches it. String (not enum) so new
+    # attribution kinds don't need a migration.
+    attribution = Column(String(20), nullable=True)
 
     # ---- P1-C part 2 (2026-05-15): structured triggers + LLM thesis scoring ----
     # 来源: docs/alphagbm_skills_research_2026-05-15.md skill `investment-thesis`.

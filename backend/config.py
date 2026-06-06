@@ -1782,6 +1782,42 @@ class Settings(BaseSettings):
     # 200 is generous headroom; a larger backlog drains over successive beats.
     POOL_RECYCLE_BATCH: int = 200
 
+    # ----- Pool Phase 2 (1c) — cognitive reconcile beat -----
+    # The async cognitive engine for the pool: a beat that scans recently-landed
+    # alphas (watermark on alphas.created_at + grace) and drives the hypotheses
+    # lifecycle (auto-activate PROPOSED→ACTIVE, refresh can_submit_count /
+    # submitted_count, PROMOTE on can_submit_count>0 — NOT pass_count, which would
+    # promote on PASS_PROVISIONAL — and a cheap heuristic attribution stamp). This
+    # replaces FLAT's synchronous in-graph CoSTEER. Default OFF → the beat no-ops
+    # (returns skipped). Registered in SUPPORTED_FLAGS → hot-flippable (the celery
+    # beat + the pool worker both warm the override cache). See plan §7 Track C.
+    ENABLE_POOL_COGNITIVE_RECONCILE: bool = False
+    # Grace period (seconds) subtracted from the scan upper-bound so a just-landed
+    # alpha whose can_submit is still being refreshed (the 30s post-sim countdown)
+    # is NOT read as can_submit=NULL → CENSORED before its label lands. ≥2× the 30s
+    # refresh countdown (plan §7 R3 (i) / guard #15). Tune from observed p95
+    # label-write latency once 1d telemetry accrues.
+    POOL_RECONCILE_GRACE_SEC: int = 60
+    # Fallback scan window (days) used on the FIRST reconcile run (no watermark
+    # yet) — bounds the initial backfill so a cold start doesn't scan all history.
+    POOL_RECONCILE_WINDOW_DAYS: int = 7
+
+    # ----- Pool Phase 2 (R1a-v1) — skeleton-frequency soft de-prioritization -----
+    # A generation-side prior: mine recent SUCCESS_PATTERN skeletons, build a
+    # frequency histogram, and inject a SOFT nudge into the hypothesis prompt that
+    # de-prioritizes the most-crowded structural skeletons (steer breadth without a
+    # hard forbidden list). Re-anchored at the live build_hypothesis_prompt
+    # injection point — NOT the dead FLAT recent_dedup_skeletons. Sample-size-gated
+    # + [:5] cap + field-aware. Default OFF → byte-for-byte legacy prompt. Do NOT
+    # promote past OFF until it has soaked AND the already-live pillar nudge's own
+    # A/B reports (plan §7 Track B / guards #12, #14). Registered in SUPPORTED_FLAGS.
+    ENABLE_R1A_KB_SKELETON_FREQUENCY: bool = False
+    # Lookback window (days) for the SUCCESS_PATTERN frequency histogram.
+    SKELETON_FREQUENCY_WINDOW_DAYS: int = 30
+    # Minimum #SUCCESS_PATTERN rows in-window before the nudge renders anything
+    # (below this the histogram is noise → render ""). Plan §7 Track B / guard #15.
+    SKELETON_FREQUENCY_MIN_SAMPLES: int = 3
+
     # ----- G2 Phase A — per-call LLM cost telemetry (2026-05-19) -----
     # Light wiring per [[feedback_light_wiring_deferred_gate]]: Phase A logs
     # every LLMService.call to llm_call_log table (task_id / round_idx /

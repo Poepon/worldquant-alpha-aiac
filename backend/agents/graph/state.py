@@ -181,6 +181,14 @@ class MiningState(BaseModel):
     current_hypothesis_id: Optional[int] = None
     current_hypothesis_ids: List[int] = Field(default_factory=list)
 
+    # Pool Phase 2 (1a, 2026-06-07): the parent hyp_intent.id, set by
+    # hydrate_hg_state for the pool HG worker. node_hypothesis dedups typed-
+    # Hypothesis creation on it so a lease-recycled re-run of the same intent
+    # reuses the open row instead of creating an orphan PROPOSED duplicate
+    # (plan §7 Track C guard #3). None for FLAT-era / non-pool callers → no
+    # dedup, create unconditionally (legacy behaviour preserved).
+    hyp_intent_id: Optional[int] = None
+
     # G8 Phase A follow-up (2026-05-19): hypothesis IDs that node_hypothesis
     # surfaced to the LLM via the cross-task forest reference block. Stamped
     # into alpha.metrics["_g8_forest_referenced_ids"] by _incremental_save_alphas

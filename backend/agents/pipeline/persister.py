@@ -147,6 +147,46 @@ def build_persister(
                     except Exception:  # noqa: BLE001
                         logger.exception("[pipeline] failure-log write failed (skipped)")
 
+                    # Pool 1b (LB3, verify-before-store): the pool RAG read side
+                    # already injects SUCCESS_PATTERN into code_gen ([:5] slot) but
+                    # the pool NEVER wrote one — the KB write asymmetry. Mirror the
+                    # (dead) node_save_results write here so genuinely-passing pool
+                    # candidates feed the pattern KB. THREE gates: a BRAIN alpha_id
+                    # is present, the robustness what-if did not fail, and the
+                    # verdict is PASS / PASS_PROVISIONAL. record_success_pattern
+                    # opens its OWN AsyncSessionLocal (the KB write must not ride —
+                    # or be rolled back with — the persist txn), so we just call it;
+                    # soft-fail so a KB hiccup never blocks alpha persistence.
+                    _kb_winners = [
+                        c for c in pending
+                        if getattr(c, "alpha_id", None)
+                        and getattr(c, "quality_status", None) in ("PASS", "PASS_PROVISIONAL")
+                        and not (getattr(c, "metrics", None) or {}).get("_robustness_failed")
+                    ]
+                    if _kb_winners:
+                        try:
+                            from backend.agents.services.rag_service import RAGService
+                            _rag = RAGService(session)
+                            for c in _kb_winners:
+                                try:
+                                    await _rag.record_success_pattern(
+                                        expression=getattr(c, "expression", "") or "",
+                                        metrics=getattr(c, "metrics", None) or {},
+                                        region=_attr(st, "region", None),
+                                        dataset_id=_attr(st, "dataset_id", None),
+                                        alpha_id=getattr(c, "alpha_id", None),
+                                        hypothesis_id=hypothesis_id,
+                                        source="pool_evaluate",
+                                    )
+                                except Exception:  # noqa: BLE001 — one bad write ≠ batch
+                                    logger.exception(
+                                        "[pipeline] SUCCESS_PATTERN write failed (skipped)"
+                                    )
+                        except Exception:  # noqa: BLE001 — RAGService init guard
+                            logger.exception(
+                                "[pipeline] SUCCESS_PATTERN setup failed (skipped)"
+                            )
+
             # Option C step-2: feed the dataset reward (mean alpha margin) for a
             # simulated candidate so the producer can tilt selection toward
             # cost-positive datasets. margin is on the result metrics; dataset on

@@ -402,3 +402,76 @@ class TestNodeHypothesisPillar:
                 select(Hypothesis).where(Hypothesis.id == hid)
             )).scalar_one()
             assert h.pillar == "value"
+
+
+class TestNodeHypothesisPool1a:
+    """Pool Phase 2 (1a): typed Hypothesis creation is now UNCONDITIONAL —
+    no longer gated by ``hypothesis_centric_level`` (which the pool's
+    hg_run_config drops). This is the fix for the 0/2442 dead FK (guard #11):
+    the REAL node now populates current_hypothesis_id, not a mock."""
+
+    @pytest.mark.asyncio
+    async def test_created_without_hge_level(self, pg_engine_maker):
+        """No hypothesis_centric_level in config → row STILL created + FK set.
+        Pre-1a this returned current_hypothesis_id=None (gate OFF)."""
+        engine, maker = pg_engine_maker
+        state = await _make_state(maker)
+        parsed = {
+            "hypotheses": [{
+                "id": "H1",
+                "statement": f"{_TAG}_stmt_no_hge_level",
+                "pillar": "value",
+                "key_fields": ["eps"],
+                "suggested_operators": ["ts_rank"],
+            }],
+        }
+        llm = _fake_llm(parsed)
+        # config WITHOUT hypothesis_centric_level — the pool's real shape.
+        config = {"configurable": {}}
+
+        from backend.agents.graph.nodes.generation import node_hypothesis
+        result = await node_hypothesis(state, llm, config=config)
+
+        hid = result["current_hypothesis_id"]
+        assert hid is not None, "1a: hypothesis must be created without hge_level"
+        async with maker() as s:
+            h = (await s.execute(
+                select(Hypothesis).where(Hypothesis.id == hid)
+            )).scalar_one()
+            assert h.status == "PROPOSED"
+
+    @pytest.mark.asyncio
+    async def test_dedup_reuses_open_row_on_reintent(self, pg_engine_maker):
+        """A lease-recycled re-run on the SAME intent reuses the open row
+        (find_open_by_intent) instead of creating an orphan duplicate."""
+        engine, maker = pg_engine_maker
+        intent_id = 9_000_000 + abs(hash(_TAG)) % 100_000  # unique-ish, no FK
+        parsed = {
+            "hypotheses": [{
+                "id": "H1",
+                "statement": f"{_TAG}_stmt_dedup",
+                "pillar": "value",
+                "key_fields": ["eps"],
+                "suggested_operators": ["ts_rank"],
+            }],
+        }
+        from backend.agents.graph.nodes.generation import node_hypothesis
+
+        state1 = await _make_state(maker)
+        state1.hyp_intent_id = intent_id
+        r1 = await node_hypothesis(state1, _fake_llm(parsed), config={"configurable": {}})
+        hid1 = r1["current_hypothesis_id"]
+        assert hid1 is not None
+
+        # Second worker, same intent → reuse, no new row.
+        state2 = await _make_state(maker)
+        state2.hyp_intent_id = intent_id
+        r2 = await node_hypothesis(state2, _fake_llm(parsed), config={"configurable": {}})
+        hid2 = r2["current_hypothesis_id"]
+        assert hid2 == hid1, "dedup: same intent must reuse the open hypothesis row"
+        async with maker() as s:
+            from sqlalchemy import func as _f
+            cnt = (await s.execute(
+                select(_f.count(Hypothesis.id)).where(Hypothesis.hyp_intent_id == intent_id)
+            )).scalar()
+            assert cnt == 1, "dedup: exactly one hypothesis row per intent"

@@ -100,6 +100,10 @@ class HypothesisCreateData:
     parent_hypothesis_id: Optional[int] = None
     experiment_variant: Optional[str] = None
 
+    # Pool Phase 2 (1a): parent hyp_intent.id — the lease-recycle dedup key.
+    # None for FLAT-era / non-pool callers.
+    hyp_intent_id: Optional[int] = None
+
     # P2-B (2026-05-15): Five Pillars factor classification. Value is the
     # normalize_pillar(llm_emit) or infer_pillar(...) fallback resolved by the
     # caller (node_hypothesis); None means the caller deliberately chose to
@@ -130,6 +134,10 @@ class HypothesisStats:
     sharpe_avg: Optional[float]
     sharpe_max: Optional[float]
     fail_count: int = 0  # subset of alpha_count, from alpha_failures
+    # Pool Phase 2 (1c): submit-gate rollups (alphas table). can_submit_count is
+    # the PROMOTE gate (NOT pass_count — guard #5); submitted_count = realized.
+    can_submit_count: int = 0
+    submitted_count: int = 0
 
 
 class HypothesisService(BaseService):
@@ -164,6 +172,8 @@ class HypothesisService(BaseService):
             experiment_variant=data.experiment_variant,
             # P2-B (2026-05-15): Five Pillars stamp — see HypothesisCreateData.
             pillar=data.pillar,
+            # Pool 1a: lease-recycle dedup key (see find_open_by_intent).
+            hyp_intent_id=data.hyp_intent_id,
             status=HypothesisStatus.PROPOSED.value,
             is_active=True,
         )
@@ -178,6 +188,33 @@ class HypothesisService(BaseService):
 
     async def get_by_id(self, hypothesis_id: int) -> Optional[Hypothesis]:
         return await super().get_by_id(Hypothesis, hypothesis_id)
+
+    async def find_open_by_intent(self, hyp_intent_id: int) -> Optional[Hypothesis]:
+        """Pool 1a lease-recycle dedup: the still-open (PROPOSED/ACTIVE)
+        Hypothesis row already created for this parent intent, if any.
+
+        A lease-recycled HG re-run on the same intent must reuse the prior row
+        instead of inserting an orphan PROPOSED duplicate (the prior emit may
+        never have linked candidates to it). Terminal rows (PROMOTED/ABANDONED/
+        SUPERSEDED) are intentionally excluded — a re-run after a hypothesis has
+        already graduated should create a fresh row, not resurrect a closed one.
+        Returns the most recent open match (defensive: there should be ≤1).
+        """
+        if hyp_intent_id is None:
+            return None
+        stmt = (
+            select(Hypothesis)
+            .where(
+                Hypothesis.hyp_intent_id == hyp_intent_id,
+                Hypothesis.status.in_([
+                    HypothesisStatus.PROPOSED.value,
+                    HypothesisStatus.ACTIVE.value,
+                ]),
+            )
+            .order_by(Hypothesis.id.desc())
+            .limit(1)
+        )
+        return (await self.db.execute(stmt)).scalar_one_or_none()
 
     async def list_active(
         self,
@@ -716,6 +753,11 @@ class HypothesisService(BaseService):
                 func.count(
                     case((Alpha.quality_status.in_(["PASS", "PASS_PROVISIONAL"]), 1))
                 ).label("pass_count"),
+                # Pool Phase 2 (1c): submit-gate rollups. can_submit is the BRAIN
+                # is.checks-all-PASS gate (the PROMOTE criterion — guard #5, NOT
+                # pass_count which counts PASS_PROVISIONAL). submitted = realized.
+                func.count(case((Alpha.can_submit.is_(True), 1))).label("can_submit_count"),
+                func.count(case((Alpha.date_submitted.isnot(None), 1))).label("submitted_count"),
                 func.avg(Alpha.is_sharpe).label("sharpe_avg"),
                 func.max(Alpha.is_sharpe).label("sharpe_max"),
             )
@@ -733,6 +775,8 @@ class HypothesisService(BaseService):
         fail_count = int(fail_row.fail_attempts or 0)
         alpha_count = alpha_attempts + fail_count
         pass_count = int(alpha_row.pass_count or 0)
+        can_submit_count = int(alpha_row.can_submit_count or 0)
+        submitted_count = int(alpha_row.submitted_count or 0)
         sharpe_avg = float(alpha_row.sharpe_avg) if alpha_row.sharpe_avg is not None else None
         sharpe_max = float(alpha_row.sharpe_max) if alpha_row.sharpe_max is not None else None
 
@@ -742,6 +786,8 @@ class HypothesisService(BaseService):
             .values(
                 alpha_count=alpha_count,
                 pass_count=pass_count,
+                can_submit_count=can_submit_count,
+                submitted_count=submitted_count,
                 sharpe_avg=sharpe_avg,
                 sharpe_max=sharpe_max,
             )
@@ -753,6 +799,8 @@ class HypothesisService(BaseService):
             sharpe_avg=sharpe_avg,
             sharpe_max=sharpe_max,
             fail_count=fail_count,
+            can_submit_count=can_submit_count,
+            submitted_count=submitted_count,
         )
 
     async def refresh_all_stats(
@@ -897,9 +945,29 @@ class HypothesisService(BaseService):
     async def auto_promote_if_eligible(self, hypothesis_id: int) -> bool:
         """If the hypothesis has ≥1 PASS alpha and is currently PROPOSED or
         ACTIVE, transition to PROMOTED. Convenience wrapper around the PASS-
-        gate check that B5 feedback uses."""
+        gate check that B5 feedback uses.
+
+        LEGACY (FLAT B5) gate — promotes on pass_count (PASS + PASS_PROVISIONAL).
+        The pool cognitive reconcile beat uses auto_promote_if_can_submit instead
+        (guard #5: PASS_PROVISIONAL is a provisional hold, not a real winner)."""
         stats = await self.refresh_stats(hypothesis_id)
         if stats.pass_count > 0:
+            return await self.mark_promoted(hypothesis_id)
+        return False
+
+    async def auto_promote_if_can_submit(self, hypothesis_id: int) -> bool:
+        """Pool Phase 2 (1c) PROMOTE gate: a hypothesis graduates to PROMOTED
+        only once it has produced ≥1 alpha that BRAIN confirms is SUBMITTABLE
+        (can_submit=True) — NOT merely ≥1 PASS/PASS_PROVISIONAL alpha.
+
+        Why this and not auto_promote_if_eligible (guard #5): pass_count counts
+        PASS_PROVISIONAL, so a hypothesis whose only "wins" are provisional holds
+        (e.g. brain_checks_unverified) would be promoted prematurely. The submit
+        gate is the economically meaningful one (the platform is execution-/
+        submit-limited), so the cognitive layer's "this thesis works" signal must
+        key off can_submit, the same gate the dataset bandit rewards."""
+        stats = await self.refresh_stats(hypothesis_id)
+        if stats.can_submit_count > 0:
             return await self.mark_promoted(hypothesis_id)
         return False
 

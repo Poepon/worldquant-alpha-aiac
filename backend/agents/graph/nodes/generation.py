@@ -501,6 +501,25 @@ async def node_hypothesis(
     state.cognitive_layer_id_used = enrichment.cognitive_layer_id_used
     state.g10_injected_entries_n = enrichment.g10_injected_entries_n
 
+    # Pool Phase 2 (R1a-v1): SOFT skeleton-frequency de-prioritization nudge.
+    # Flag-gated so the OFF path opens NO DB session → byte-for-byte legacy +
+    # zero overhead. Soft-fail: any error leaves the nudge empty (legacy prompt).
+    crowded_skeletons_block = ""
+    if bool(getattr(_gen_settings, "ENABLE_R1A_KB_SKELETON_FREQUENCY", False)):
+        try:
+            from backend.agents.prompts.skeleton_frequency import (
+                skeleton_frequency_nudge_block,
+            )
+            async with resolve_db(config) as _sk_db:
+                crowded_skeletons_block = await skeleton_frequency_nudge_block(
+                    _sk_db, region=state.region, dataset_id=state.dataset_id,
+                )
+        except Exception as _sk_ex:  # noqa: BLE001 — prompt prior, never fatal
+            logger.warning(
+                f"[{node_name}] R1a skeleton-freq nudge failed (non-fatal): {_sk_ex}"
+            )
+            crowded_skeletons_block = ""
+
     # Build prompt context. Plan v5+ Phase 1: cross-dataset pool is wired
     # through MiningState.available_dataset_pool (populated by mining_tasks
     # when HYPOTHESIS_CENTRIC_LEVEL >= 1; empty otherwise → legacy behavior).
@@ -534,6 +553,9 @@ async def node_hypothesis(
         # Orthogonality Phase A (2026-06-05): None when flag OFF / empty pool →
         # byte-for-byte legacy. render_profile_block ensures "" → None here.
         submitted_pool_profile=(enrichment.orth_steer_block or None),
+        # Pool Phase 2 (R1a-v1): crowded-skeleton soft nudge. "" when flag OFF /
+        # too few samples → build_hypothesis_prompt splices "" → byte-for-byte legacy.
+        crowded_skeletons_block=(crowded_skeletons_block or None),
         # P2-A (2026-05-16): only attach when the flag is ON AND we fetched
         # ≥1 row. Off / fetch-failed paths set macro_narratives=[] so the
         # template splice produces the empty-string byte-for-byte legacy
@@ -708,117 +730,24 @@ async def node_hypothesis(
     current_hypothesis_id: Optional[int] = None
     current_hypothesis_ids: List[int] = []
     cfg = (config.get("configurable", {}) if config else {}) or {}
-    hge_level = int(cfg.get("hypothesis_centric_level", 0) or 0)
 
-    # V-22.13 (2026-05-13) — Hypothesis cross-round reuse.
-    # Spike on Phase 3 trigger monitor (2026-05-13 02:04 UTC) revealed:
-    # 105 attribution=hypothesis feedbacks across 14 days, but ZERO
-    # hypotheses ABANDONED. Root cause: node_hypothesis created a fresh
-    # Hypothesis row per round, so each row's history_for_hid had only 1
-    # entry — should_abandon_hypothesis requires ≥3 consecutive entries.
-    # Abandon path was structurally dead.
+    # Pool Phase 2 (1a, 2026-06-07): typed Hypothesis persistence is now
+    # UNCONDITIONAL — one row per generated hypothesis, regardless of the legacy
+    # ``hypothesis_centric_level`` config. The decoupled HG/S/E pool's
+    # hg_run_config() drops that key, so it was always 0 → this INSERT was gated
+    # OFF → the cognitive spine was DEAD: candidate_queue.current_hypothesis_id
+    # stayed NULL (0/2442), the PROPOSED→ACTIVE→PROMOTED lifecycle never advanced.
+    # The async cognitive reconcile beat (Track C 1c) now drives that lifecycle
+    # from the rows created here.
     #
-    # Fix: when hge_level >= 2 AND state.current_hypothesis_id is set AND
-    # that hypothesis is still ACTIVE AND its round_history has < N entries,
-    # REUSE it for this round. Same Hypothesis row accumulates rounds; B6
-    # abandon fires at round 3 if pattern is hypothesis-fail × 3.
-    # V-25.C (2026-05-13): track every V-22.13 skip path so the post-hoc
-    # audit (scripts/v22_13_reuse_audit.py) can quantify the failure modes:
-    #   path_a_no_state: state.current_hypothesis_id None at round entry
-    #                    (LangGraph scalar-field drop — known issue, see
-    #                    persistence.py:388-395 fallback)
-    #   path_b_history_full: history_len >= N — V-22.13 deliberately gives
-    #                        up so the next round creates a fresh hypothesis
-    #   path_c_db_missing: get_by_id returned None — hypothesis row deleted
-    #                      or never persisted
-    #   path_d_wrong_status: existing.status NOT in (ACTIVE, PROPOSED) —
-    #                        already PROMOTED / SUPERSEDED / ABANDONED
-    #   path_e_exception: DB lookup raised — connection / ORM issue
-    #   path_ok: reuse succeeded
-    v22_13_skip_reason: Optional[str] = None
-    if hge_level >= 2:
-        # V-25.C (2026-05-13): LangGraph scalar field propagation can drop
-        # state.current_hypothesis_id between nodes while state.current_hypothesis_ids
-        # (list, reducer-friendly) still propagates. persistence.py:388-395
-        # already does this fallback for B4 alpha linking; mirror it here so
-        # V-22.13 reuse picks up the same value rather than re-creating a
-        # fresh hypothesis row.
-        _state_hid = state.current_hypothesis_id
-        if _state_hid is None:
-            _state_hids = state.current_hypothesis_ids or []
-            if _state_hids:
-                _state_hid = _state_hids[0]
-                logger.info(
-                    f"[{node_name}] V-22.13 scalar drop recovered via list[0]="
-                    f"{_state_hid}"
-                )
-        if not _state_hid:
-            v22_13_skip_reason = "path_a_no_state"
-        else:
-            try:
-                from backend.database import AsyncSessionLocal
-                from backend.services.hypothesis_service import HypothesisService
-                from backend.agents.graph.early_stop import HYPOTHESIS_ABANDON_ROUNDS
-                history_len = len(
-                    (state.hypothesis_round_history or {}).get(_state_hid, [])
-                )
-                if history_len >= HYPOTHESIS_ABANDON_ROUNDS:
-                    v22_13_skip_reason = "path_b_history_full"
-                else:
-                    async with AsyncSessionLocal() as _reuse_db:
-                        svc = HypothesisService(_reuse_db)
-                        existing = await svc.get_by_id(_state_hid)
-                    if existing is None:
-                        v22_13_skip_reason = "path_c_db_missing"
-                    elif existing.status not in ("ACTIVE", "PROPOSED"):
-                        v22_13_skip_reason = f"path_d_wrong_status:{existing.status}"
-                    else:
-                        current_hypothesis_id = existing.id
-                        current_hypothesis_ids = [existing.id]
-                        hypotheses = [{
-                            "idea": existing.statement,
-                            "statement": existing.statement,
-                            "rationale": existing.rationale or "",
-                            "expected_signal": existing.expected_signal or "unknown",
-                            "key_fields": existing.key_fields or [],
-                            "suggested_operators": existing.suggested_operators or [],
-                            "selected_datasets": existing.dataset_pool or [],
-                            "confidence": existing.confidence,
-                            "novelty": existing.novelty,
-                            "hypothesis_id": existing.id,
-                            "_v22_13_reused": True,
-                        }]
-                        chosen_datasets = existing.dataset_pool or [legacy_anchor]
-                        logger.info(
-                            f"[{node_name}] V-22.13 cross-round reuse: hypothesis_id="
-                            f"{existing.id} (history_len={history_len}/"
-                            f"{HYPOTHESIS_ABANDON_ROUNDS}, status={existing.status}, "
-                            f"statement={existing.statement[:60]!r})"
-                        )
-            except Exception as _v22_13_ex:
-                v22_13_skip_reason = f"path_e_exception:{type(_v22_13_ex).__name__}"
-                logger.warning(
-                    f"[{node_name}] V-22.13 reuse check failed (non-fatal): {_v22_13_ex}"
-                )
-    if hge_level >= 2 and v22_13_skip_reason is not None:
-        # INFO-level so post-hoc grep in celery.log can count path
-        # distribution without DEBUG noise. Each round of every variant=2
-        # task emits exactly one of these.
-        logger.info(
-            f"[{node_name}] V-22.13 skip: reason={v22_13_skip_reason} "
-            f"state_hid_scalar={state.current_hypothesis_id} "
-            f"state_hids_list={state.current_hypothesis_ids or []} "
-            f"task_id={state.task_id}"
-        )
+    # The retired FLAT V-22.13 cross-round reuse block was DELETED: it only ran
+    # at hge_level>=2 (never in the pool) and was itself structurally dead even in
+    # FLAT (0 hypotheses ever ABANDONED — should_abandon needed ≥3 consecutive
+    # round-history entries but each round made a fresh row). Lease-recycle
+    # idempotency is now handled by the per-intent dedup (find_open_by_intent)
+    # inside the INSERT below, not by cross-round reuse.
 
-    # V-27.B (2026-05-14): the G-refine pickup block (reuse a SUPERSEDED
-    # parent's unused refined child) was removed — the G-refine loop never
-    # fired in production (V-26.14: 0/673 hypotheses had a parent), so
-    # find_unused_refined always returned None. node_hypothesis now has two
-    # hge_level>=2 paths: V-22.13 cross-round reuse (above) + fresh LLM
-    # generation (below).
-
-    if hge_level >= 2 and hypotheses and current_hypothesis_id is None:
+    if hypotheses and current_hypothesis_id is None:
         # V-19.7 (2026-05-06) zombie-ACTIVE prevention: persist ONLY the
         # FIRST viable hypothesis (the "primary") instead of N siblings.
         # B4 links every alpha in the round to current_hypothesis_id (the
@@ -912,8 +841,25 @@ async def node_hypothesis(
                             if experiment_variant is not None else None,
                         # P2-B (2026-05-15, M8): always stamp the pillar.
                         pillar=resolved_pillar,
+                        # Pool 1a: lease-recycle dedup key — the parent intent id
+                        # (None for FLAT / non-pool callers → no dedup).
+                        hyp_intent_id=getattr(state, "hyp_intent_id", None),
                     )
-                    row = await svc.create_hypothesis(data)
+                    # Pool 1a dedup: a lease-recycled HG re-run on the same intent
+                    # reuses the already-open row instead of inserting an orphan
+                    # PROPOSED duplicate. Only when an intent id is present (pool);
+                    # FLAT/non-pool falls straight through to create.
+                    _intent_id = getattr(state, "hyp_intent_id", None)
+                    row = None
+                    if _intent_id is not None:
+                        row = await svc.find_open_by_intent(_intent_id)
+                        if row is not None:
+                            logger.info(
+                                f"[{node_name}] reusing open hypothesis={row.id} "
+                                f"for intent={_intent_id} (lease-recycle dedup)"
+                            )
+                    if row is None:
+                        row = await svc.create_hypothesis(data)
                     current_hypothesis_ids.append(row.id)
                     primary_h["hypothesis_id"] = row.id
                     await _hdb.commit()
