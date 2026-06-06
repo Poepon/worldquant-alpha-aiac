@@ -402,11 +402,7 @@ const api = {
     return data
   },
 
-  // Mining Orchestrator (Phase 1 Sub-phase 4 — 2026-05-29)
-  getOrchestratorStatus: async () => {
-    const { data } = await client.get('/ops/orchestrator/status')
-    return data
-  },
+  // getOrchestratorStatus retired in Phase 1c-delete follow-up
 
   // Four-pool pipeline (Phase 1c-flip cutover — 2026-06-06)
   getPoolStatus: async () => {
@@ -556,26 +552,7 @@ const api = {
     return data
   },
 
-  // Ops Phase 3 — P2-C Regime
-  getOpsRegimeCurrent: async (region = 'USA') => {
-    const { data } = await client.get('/ops/regime/current', { params: { region } })
-    return data
-  },
-  getOpsRegimeSnapshot: async (region = 'USA') => {
-    const { data } = await client.get('/ops/regime/snapshot', { params: { region } })
-    return data
-  },
-  getOpsRegimeHistory: async (region = 'USA', days = 14) => {
-    const { data } = await client.get('/ops/regime/history', {
-      params: { region, days },
-    })
-    return data
-  },
-  rerunOpsRegime: async (region = null) => {
-    const params = region ? { region } : {}
-    const { data } = await client.post('/ops/regime/rerun', null, { params })
-    return data
-  },
+  // Ops Phase 3 — P2-C Regime wrappers retired in Phase 1c-delete follow-up
 
   // Ops Phase 4 — LLM op hallucination monitor
   getOpsLLMOpLatest: async (date = null) => {

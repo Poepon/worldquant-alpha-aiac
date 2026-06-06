@@ -949,21 +949,8 @@ class Settings(BaseSettings):
     # weekly Sunday 04:00 SH beat task ``run_failure_tree_pruner`` deletes
     # rows older than this value. Operational tunable — no feature flag.
     R1B_FAILURE_TREE_RETENTION_DAYS: int = 90
-    # ----- Mining orchestrator (2026-05-29) -----
-    # Sub-phase 1 骨架阶段 default OFF。Sub-phase 2/3 ship + Phase B soak 通过
-    # 后翻转。docs/orchestrator_plan_2026-05-29.md Q1-Q7 DECIDED。
-    ENABLE_AUTO_ORCHESTRATOR: bool = False
-    # Q5 DECIDED 保守阈值(防 orchestrator 自烧)
-    ORCHESTRATOR_MAX_RUNNING_TASKS: int = 3      # 同时 RUNNING/PAUSED orchestrator task 上限
-    ORCHESTRATOR_DAILY_LAUNCH_LIMIT: int = 10    # 单日 launch 上限
-    ORCHESTRATOR_BACKOFF_HOURS: int = 2          # 同参数 launch 连续失败 N=3 后 backoff 时长
-    ORCHESTRATOR_SHORT_LIVED_MIN: int = 5        # task ≤ 此分钟 + 0 alpha 标"短命",不算让位
-    ORCHESTRATOR_IDEMPOTENCY_MIN: int = 5        # 防双发窗口
-    # Sub-phase 3: 规则引擎 — 历史 PASS rate Beta-Bernoulli posterior 加权采样
-    ORCHESTRATOR_LOOKBACK_DAYS: int = 7          # 历史窗口
-    ORCHESTRATOR_PRIOR_PASSES: int = 1           # Beta-Bernoulli α 先验
-    ORCHESTRATOR_PRIOR_FAILS: int = 1            # Beta-Bernoulli β 先验
-    ORCHESTRATOR_DATASETS_PER_TASK: int = 3      # 每个 task 选 top-N dataset
+    # Mining orchestrator config retired in Phase 1c-delete follow-up
+    # (tasks/orchestrator.py removed; resident pool needs no auto-launch).
     # ----- R1b outcome reconciliation (Break 2 fix, 2026-05-22) -----
     # Max pending r1b_retry_log rows reconcile_r1b_outcomes processes per run.
     R1B_RECONCILE_MAX_ROWS: int = 1000
@@ -1734,7 +1721,8 @@ class Settings(BaseSettings):
     FIELD_SCREENING_TEMPLATES: int = 4  # Number of templates to test per field
     
     # Rate Limiting
-    MAX_SIMULATIONS_PER_DAY: int = 100
+    # MAX_SIMULATIONS_PER_DAY removed in Phase 1c-delete follow-up (0 readers;
+    # BRAIN_DAILY_SIMULATE_LIMIT + the budget:sims counter are the live caps).
     MAX_TOKENS_PER_DAY: int = 500000
 
     # ----- Pool pipeline budgets (four-pool decoupling) — Phase 0 calibration.

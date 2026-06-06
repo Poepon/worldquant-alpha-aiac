@@ -8,7 +8,7 @@ import OpsOverview from './OpsOverview'
 import PillarBalance from './PillarBalance'
 import NegativeKnowledge from './NegativeKnowledge'
 import MacroNarratives from './MacroNarratives'
-import Regime from './Regime'
+// Regime page retired in Phase 1c-delete follow-up
 import LLMOpMonitor from './LLMOpMonitor'
 import CoSTEERMonitor from './CoSTEERMonitor'
 import BrainRoleSwitch from './BrainRoleSwitch'
@@ -27,7 +27,7 @@ import G3v2Monitor from './G3v2Monitor'
 import SubmitBacklogMonitor from './SubmitBacklogMonitor'
 import AutoSubmitMonitor from './AutoSubmitMonitor'
 import OptimizationCyclesMonitor from './OptimizationCyclesMonitor'
-import OrchestratorMonitor from './OrchestratorMonitor'
+// OrchestratorMonitor page retired in Phase 1c-delete follow-up
 import LLMRoutingConsole from './LLMRoutingConsole'
 import PoolPipelineMonitor from './PoolPipelineMonitor'
 
@@ -85,7 +85,7 @@ export default function OpsLayout() {
         <Route path="pillar-balance" element={<PillarBalance />} />
         <Route path="negative-knowledge" element={<NegativeKnowledge />} />
         <Route path="macro-narratives" element={<MacroNarratives />} />
-        <Route path="regime" element={<Regime />} />
+        {/* regime route retired in Phase 1c-delete follow-up */}
         {/* Phase 4 — LLM op hallucination monitor */}
         <Route path="llm-op-monitor" element={<LLMOpMonitor />} />
         {/* Phase 3 R1b — CoSTEER loop telemetry (R1a + R1b + chain depth) */}
@@ -112,8 +112,7 @@ export default function OpsLayout() {
         <Route path="r13-factor-lens" element={<R13FactorLensMonitor />} />
         <Route path="g10-logic" element={<G10LogicMonitor />} />
         <Route path="g3v2-monitor" element={<G3v2Monitor />} />
-        {/* Mining Orchestrator Phase 1 (2026-05-29) — auto-launch + 决策监控 */}
-        <Route path="orchestrator" element={<OrchestratorMonitor />} />
+        {/* Mining Orchestrator route retired in Phase 1c-delete follow-up */}
       </Routes>
     </div>
   )
