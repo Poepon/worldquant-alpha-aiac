@@ -112,7 +112,6 @@ class TraceService:
         try:
             trace_step = TraceStep(
                 task_id=self.task_id,
-                run_id=self.run_id,
                 step_type=record.step_type,
                 step_order=record.step_order,
                 iteration=self.iteration,
@@ -158,7 +157,6 @@ class TraceService:
             for record in self._pending_records:
                 trace_step = TraceStep(
                     task_id=self.task_id,
-                    run_id=self.run_id,
                     step_type=record.step_type,
                     step_order=record.step_order,
                     iteration=self.iteration,

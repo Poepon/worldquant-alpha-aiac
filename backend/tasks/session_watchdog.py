@@ -21,7 +21,7 @@ from sqlalchemy import select, update, func
 from backend.celery_app import celery_app
 from backend.config import settings
 from backend.database import AsyncSessionLocal
-from backend.models import Alpha, AlphaFailure, ExperimentRun, MiningTask
+from backend.models import Alpha, AlphaFailure, MiningTask
 from backend.models.task import TraceStep
 from backend.tasks import run_async
 

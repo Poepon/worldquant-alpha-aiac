@@ -53,24 +53,9 @@ class AlphaRepository(BaseRepository[Alpha]):
             Paginated result of alphas
         """
         return await self.find_by({"task_id": task_id}, pagination)
-    
-    async def get_by_run_id(
-        self,
-        run_id: int,
-        pagination: Optional[PaginationParams] = None,
-    ) -> PaginatedResult[Alpha]:
-        """
-        Get alphas for a specific experiment run.
-        
-        Args:
-            run_id: The experiment run ID
-            pagination: Pagination parameters
-            
-        Returns:
-            Paginated result of alphas
-        """
-        return await self.find_by({"run_id": run_id}, pagination)
-    
+
+    # get_by_run_id retired in Phase 1d (alphas.run_id dropped; no per-run concept)
+
     # =========================================================================
     # Deduplication
     # =========================================================================

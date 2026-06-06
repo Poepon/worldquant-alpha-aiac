@@ -36,8 +36,8 @@ class Alpha(SQLAlchemyBase):
     task_id = Column(Integer, ForeignKey("mining_tasks.id"), nullable=True)
     trace_step_id = Column(Integer, ForeignKey("trace_steps.id"), nullable=True)
     template_id = Column(Integer, ForeignKey("templates.id"))
-    run_id = Column(Integer, ForeignKey("experiment_runs.id"), nullable=True)
-    
+    # run_id dropped in Phase 1d (experiment_runs retired; pool has no per-run concept)
+
     # Core Info
     expression = Column(Text, nullable=False)
     expression_hash = Column(String(64))
@@ -203,7 +203,7 @@ class AlphaFailure(SQLAlchemyBase):
     id = Column(Integer, primary_key=True, index=True)
     task_id = Column(Integer, ForeignKey("mining_tasks.id"), nullable=True)
     trace_step_id = Column(Integer, ForeignKey("trace_steps.id"), nullable=True)
-    run_id = Column(Integer, ForeignKey("experiment_runs.id"), nullable=True)
+    # run_id dropped in Phase 1d (experiment_runs retired)
 
     expression = Column(Text, nullable=True)
     error_type = Column(String(100), nullable=True)  # SYNTAX_ERROR, FIELD_NOT_FOUND, TIMEOUT

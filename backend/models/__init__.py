@@ -25,7 +25,7 @@ from backend.models.base import (
 # Task models
 from backend.models.task import (
     MiningTask,
-    ExperimentRun,
+    # ExperimentRun retired in Phase 1d
     TraceStep,
     MiningJob,
 )
@@ -158,7 +158,6 @@ __all__ = [
     "HypothesisKind",
     # Task
     "MiningTask",
-    "ExperimentRun",
     "TraceStep",
     "MiningJob",
     # Alpha

@@ -397,7 +397,6 @@ async def _incremental_save_alphas(
 
         values_dict = dict(
             task_id=task_id,
-            run_id=run_id,
             alpha_id=alpha.alpha_id,
             expression=alpha.expression,
             expression_hash=expr_hash,
@@ -786,7 +785,6 @@ async def _incremental_save_failures(
         try:
             rec = AlphaFailure(
                 task_id=task_id,
-                run_id=run_id,
                 expression=(alpha.expression[:2000] if alpha.expression else None),
                 error_type=err_type,
                 error_message=(err_msg[:500] if err_msg else None),

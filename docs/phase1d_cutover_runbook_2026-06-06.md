@@ -60,6 +60,23 @@ post-1c 已坏(调已删/neuter 端点):
 2. **task 创建/启动 UI** → **整个去掉**:删 create 模态 + start 按钮 + POST /tasks + /tasks/{id}/start + api.startTask/createTask。(「以 alpha 为蓝本优化」是独立 trigger,不动。)
 3. **Tasks 页定位** → **整体退役**:删 TaskManagement/TaskDetail;`/tasks` + `/tasks/:id` 重定向 `/ops/pool-pipeline`;AppSidebar 去 /tasks 菜单。实时挖掘看 /ops/pool-pipeline,alpha 浏览看 /alphas。
 
+## 5.5 执行窗口 SOP(代码 + 迁移已就绪 2026-06-06)
+
+**已就绪(代码,已 commit,可逆)**:run_id 从 ORM models(Alpha/AlphaFailure/TraceStep)+ 持久化构造点
+(persistence.py / trace_service.py)移除;ExperimentRun model + models/__init__ 导出移除;
+alpha_repository.get_by_run_id 删;session_watchdog 死 import 修;**Alembic 迁移 `r3d8c1f5a9b2` 已 author**
+(down_revision `q2e8b4d6f1a3`)。验证:import smoke + 86 隔离单测过。**本范围 = run_id×3 + experiment_runs**;
+MiningTask 死列(generation_strategy/current_iteration/max_iterations/progress_current)**DEFER 到 1d-2**
+(需先 rewire dashboard_service + task serializer)。schedule/last_alpha_persisted_at **永不在本轮**(池在写)。
+
+**维护窗口步骤(操作者执行)**:
+1. **部署 + 重启**:拉到含本批 commit 的代码 → 重启 uvicorn + celery + pool supervisor(run.bat --restart)。
+   新代码 ORM 不再映射 run_id/experiment_runs;DB 仍有这些列/表(被忽略)→ 池照常产出。**验证池在产 + /tasks 列表/详情 200**。
+2. **备份**:`pg_dump`(至少 alphas / alpha_failures / trace_steps / experiment_runs)。建议先在 DB 副本跑步骤 3 验证。
+3. **DROP**:`cd backend && alembic upgrade head`(跑 `r3d8c1f5a9b2`:DROP run_id×3 列 → DROP experiment_runs 表)。
+4. **重启 + 验证**:池产出 alpha(新插入无 run_id 列也成功)+ /tasks + dashboard + `/ops/pool-pipeline` 正常。
+5. **回滚**(如需):`alembic downgrade -1`(重建 experiment_runs + run_id 列结构,**数据需从步骤 2 备份恢复**)+ `git revert` 代码 commit。
+
 ## 6. 风险
 - run_id 链在 live 持久化热路径 → 改后必隔离测 persistence/pool + 重启验证池产出。
 - DROP 不可逆 → 备份 + DB 副本测 Alembic。

@@ -68,45 +68,8 @@ class MiningTask(SQLAlchemyBase):
     alphas = relationship("Alpha", back_populates="task")
 
 
-class ExperimentRun(SQLAlchemyBase):
-    """
-    Experiment Run - A single execution of a mining task.
-    
-    Tracks configuration snapshots for reproducibility.
-    """
-    __tablename__ = "experiment_runs"
-    __table_args__ = {'extend_existing': True}
-
-    id = Column(Integer, primary_key=True, index=True)
-    task_id = Column(Integer, ForeignKey("mining_tasks.id"), nullable=False)
-
-    status = Column(String(50), default="RUNNING")
-    trigger_source = Column(String(50), default="API")
-    celery_task_id = Column(String(100))
-
-    config_snapshot = Column(JSONB, default={})
-    prompt_version = Column(String(100))
-    thresholds_version = Column(String(100))
-    strategy_snapshot = Column(JSONB, default={})
-
-    # === Phase 1.5-A (Revision A 7a3f9e1c2b8d, plan v1.3 §1) ===
-    # Per-run mutable runtime state (current_tier / round_idx / progress /
-    # iteration / last_persisted_at / dag). Phase 1.5-B dual-writes from
-    # legacy MiningTask cols; Phase 2 R6 owns the `dag` sub-key. Dual-default
-    # per V1.2-B4 (Python default=dict + DB server_default='{}'::jsonb).
-    runtime_state = Column(
-        JSONB,
-        default=dict,
-        server_default=text("'{}'::jsonb"),
-        nullable=False,
-    )
-
-    started_at = Column(DateTime, server_default=func.now())
-    finished_at = Column(DateTime)
-    error_message = Column(Text)
-
-    # Relationships
-    task = relationship("MiningTask")
+# ExperimentRun model retired in Phase 1d (experiment_runs table dropped; the
+# pool has no per-run concept — lineage anchors on hypotheses.id / candidate_queue).
 
 
 class TraceStep(SQLAlchemyBase):
@@ -120,8 +83,8 @@ class TraceStep(SQLAlchemyBase):
     
     id = Column(Integer, primary_key=True, index=True)
     task_id = Column(Integer, ForeignKey("mining_tasks.id"), nullable=False)
-    run_id = Column(Integer, ForeignKey("experiment_runs.id"), nullable=True)
-    
+    # run_id dropped in Phase 1d (experiment_runs retired)
+
     step_type = Column(String(50), nullable=False)
     step_order = Column(Integer, nullable=False)
     iteration = Column(Integer, default=1)
