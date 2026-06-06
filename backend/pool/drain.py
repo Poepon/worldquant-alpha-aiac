@@ -1,9 +1,14 @@
 """Pool drain control plane (Phase 1b B3).
 
 Replaces MiningTask-status-as-control: each pool checks ``pool:{name}:drain``
-before claiming. STOP = SET drain + purge PENDING→PURGED (in-flight rows are
-left to finish / lease-recycle; drain NEVER touches CLAIMED/SIMULATING/
-EVALUATING). RESUME = clear drain.
+before claiming. The wired ops STOP endpoint (POST /ops/pools/{name}/drain) calls
+``set_drain`` ONLY — a SOFT stop: the pool stops claiming NEW work, but queued
+PENDING rows are PRESERVED (RESUME drains them) and in-flight rows finish / get
+lease-recycled. To ALSO discard the queued backlog (a hard stop), ``purge_pending``
+flips PENDING→PURGED — it is a manual helper with NO wired endpoint, and NEVER
+touches CLAIMED/SIMULATING/EVALUATING. RESUME (clear_drain) re-enables claiming.
+Note: a drain does not gate the scheduler beat — stop the inflow separately
+(ENABLE_POOL_PIPELINE off) or the PENDING backlog keeps growing under a drain.
 
 ``is_draining`` FAILS OPEN (redis blip → not draining → the pool keeps working;
 a transient redis error must not silently halt mining). Operator STOP/RESUME

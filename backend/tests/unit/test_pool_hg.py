@@ -133,31 +133,6 @@ def test_resolve_hyp_id_scalar_then_list():
 
 
 @pytest.mark.asyncio
-async def test_emit_candidates_inserts_pending_sim():
-    eng, sf = await _setup_db()
-    try:
-        rows = [
-            dict(region="USA", expression="e1", stage=st.SIM_PENDING,
-                 context={"patterns": []}, trace_records=[], hyp_intent_id=None),
-            dict(region="USA", expression="e3", stage=st.SIM_PENDING),
-        ]
-        n = await workers.emit_candidates(rows, session_factory=sf)
-        assert n == 2
-        async with sf() as s:
-            got = (await s.execute(select(CandidateQueue))).scalars().all()
-        assert len(got) == 2
-        assert all(g.stage == st.SIM_PENDING for g in got)
-        assert {g.expression for g in got} == {"e1", "e3"}
-    finally:
-        await eng.dispose()
-
-
-@pytest.mark.asyncio
-async def test_emit_candidates_empty_is_noop():
-    assert await workers.emit_candidates([]) == 0
-
-
-@pytest.mark.asyncio
 async def test_emit_candidates_and_complete_is_atomic():
     """P0 fix: candidate INSERT + intent→DONE in ONE txn (no duplicate-on-retry
     window). Owner-guarded."""

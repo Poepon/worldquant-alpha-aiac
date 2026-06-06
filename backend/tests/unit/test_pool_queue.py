@@ -146,6 +146,30 @@ async def test_recycle_expired_recovers_and_poisons():
 
 
 @pytest.mark.asyncio
+async def test_recycle_expired_respects_batch_limit():
+    """P2: batch_limit caps the reclaimed set per beat (oldest-expired first);
+    the rest drain over successive beats."""
+    eng, sf = await _setup()
+    try:
+        past = datetime.now(timezone.utc) - timedelta(minutes=5)
+        async with sf() as s:
+            async with s.begin():
+                for _ in range(3):  # 3 expired in-flight rows, all under the cap
+                    s.add(HypothesisIntent(region="USA", config_snapshot={},
+                                           stage=st.INTENT_CLAIMED, claimed_by="dead",
+                                           lease_expires_at=past, attempts=1))
+        res = await q.recycle_expired(HypothesisIntent, max_attempts=3,
+                                      batch_limit=2, session_factory=sf)
+        assert res == {"recycled": 2, "poisoned": 0}  # capped at 2
+        async with sf() as s:
+            rows = (await s.execute(select(HypothesisIntent))).scalars().all()
+        assert sum(r.stage == st.INTENT_PENDING for r in rows) == 2   # reclaimed
+        assert sum(r.stage == st.INTENT_CLAIMED for r in rows) == 1   # left for next beat
+    finally:
+        await eng.dispose()
+
+
+@pytest.mark.asyncio
 async def test_candidate_queue_full_stage_chain():
     eng, sf = await _setup()
     try:

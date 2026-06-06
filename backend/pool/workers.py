@@ -431,17 +431,6 @@ async def hg_process_one(workflow: Any, intent: Any, config: Dict[str, Any],
     ]
 
 
-async def emit_candidates(rows_kwargs: List[Dict[str, Any]], *, session_factory: Any = None) -> int:
-    """INSERT the candidate_queue rows (PENDING_SIM) in one transaction."""
-    if not rows_kwargs:
-        return 0
-    factory = session_factory or AsyncSessionLocal
-    async with factory() as s:
-        async with s.begin():
-            s.add_all([CandidateQueue(**kw) for kw in rows_kwargs])
-    return len(rows_kwargs)
-
-
 async def emit_candidates_and_complete(
     intent_id: int, rows_kwargs: List[Dict[str, Any]], *,
     worker_id: Optional[str] = None, session_factory: Any = None,

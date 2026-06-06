@@ -39,11 +39,12 @@ def run_pool_lease_recycle():  # pragma: no cover - thin Celery wrapper
     from backend.pool.queue import recycle_expired
 
     cap = int(getattr(settings, "POOL_LEASE_MAX_ATTEMPTS", 3))
+    batch = int(getattr(settings, "POOL_RECYCLE_BATCH", 200))
 
     async def _both():
         return {
-            "hyp_intent": await recycle_expired(HypothesisIntent, cap),
-            "candidate_queue": await recycle_expired(CandidateQueue, cap),
+            "hyp_intent": await recycle_expired(HypothesisIntent, cap, batch_limit=batch),
+            "candidate_queue": await recycle_expired(CandidateQueue, cap, batch_limit=batch),
         }
 
     try:

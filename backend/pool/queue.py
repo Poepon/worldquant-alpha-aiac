@@ -204,11 +204,23 @@ async def recycle_expired(
     model: Any,
     max_attempts: int,
     *,
+    batch_limit: Optional[int] = None,
     session_factory: Any = None,
 ) -> Dict[str, int]:
     """Lease-recycle (beat): in-flight ∧ lease_expires_at<now → attempts<cap back
     to its PENDING stage, else FAILED poison-pill. The single recovery path
     (there is NO task-level watchdog revive — avoids the double-run footgun).
+
+    ``batch_limit`` bounds the reclaimed set per call (oldest-expired first) so one
+    beat can't lock a pathological backlog in a single FOR UPDATE transaction; a
+    larger backlog drains over successive beats. None → unbounded (legacy).
+
+    INVARIANT (load-bearing): the LIMIT is honoured as "up to N rows" only because
+    recycle runs SERIALLY (one every-2-min beat, no second recycler) over ORPHANED
+    rows (lease expired ⇒ the owning worker is gone ⇒ no live FOR UPDATE lock to
+    skip). So SKIP LOCKED skips nothing and PG's LIMIT-before-SKIP-LOCKED ordering
+    can't under-reclaim. If a CONCURRENT recycler is ever added, re-examine this
+    (and add a @requires_postgres test — the SQLite unit test no-ops SKIP LOCKED).
 
     Returns ``{"recycled": n, "poisoned": m}``.
     """
@@ -226,8 +238,11 @@ async def recycle_expired(
                     model.lease_expires_at.is_not(None),
                     model.lease_expires_at < now,
                 )
-                .with_for_update(skip_locked=True)
+                .order_by(model.lease_expires_at)  # most-overdue first
             )
+            if batch_limit is not None:
+                stmt = stmt.limit(int(batch_limit))
+            stmt = stmt.with_for_update(skip_locked=True)
             rows = (await s.execute(stmt)).scalars().all()
             for row in rows:
                 if (row.attempts or 0) < max_attempts:

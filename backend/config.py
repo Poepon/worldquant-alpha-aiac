@@ -1784,7 +1784,15 @@ class Settings(BaseSettings):
     # Claim/lease tunables.
     POOL_LEASE_MAX_ATTEMPTS: int = 3       # attempts before poison-pill
     POOL_SUPERVISOR_POLL_SEC: float = 5.0  # supervisor liveness poll interval
-    POOL_RESPAWN_BACKOFF_SEC: float = 10.0 # min gap between respawns of one slot
+    # min gap before a role is respawned again — PER-ROLE batch, not per-worker:
+    # if several workers of one role die together, the whole role waits one backoff
+    # before respawning (a correlated-death gap, bounded + self-healing).
+    POOL_RESPAWN_BACKOFF_SEC: float = 10.0
+    # Lease-recycle reclaims at most this many expired in-flight rows per beat
+    # (oldest-expired first) — bounds the FOR UPDATE set so one beat can't lock a
+    # pathological backlog in one txn. The live in-flight set is ~worker-count, so
+    # 200 is generous headroom; a larger backlog drains over successive beats.
+    POOL_RECYCLE_BATCH: int = 200
 
     # ----- G2 Phase A — per-call LLM cost telemetry (2026-05-19) -----
     # Light wiring per [[feedback_light_wiring_deferred_gate]]: Phase A logs
