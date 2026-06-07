@@ -129,6 +129,15 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_pool_lease_recycle",
         "schedule": crontab(minute="*/2"),
     },
+    # Regime-turn monitor (greenfield branch B, 2026-06-07): while production is
+    # paused in the regime trough, re-sim the submitted winners (+backlog sample)
+    # on CURRENT data daily and flag if the old edges recover. Gates on
+    # ENABLE_REGIME_MONITOR (default OFF) → inert until flipped. Daily 07:30 —
+    # a regime turn is a day-to-day signal, so once/day keeps sim usage minimal.
+    "regime-monitor": {
+        "task": "backend.tasks.run_regime_monitor",
+        "schedule": crontab(hour=7, minute=30),
+    },
     # Pool Phase 2 (1c): cognitive reconcile — drives the hypotheses lifecycle
     # (refresh_stats / auto-activate / PROMOTE-on-can_submit / attribution stamp)
     # off recently-landed alphas. Gates on ENABLE_POOL_COGNITIVE_RECONCILE

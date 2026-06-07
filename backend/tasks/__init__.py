@@ -110,6 +110,10 @@ from backend.tasks.pool_tasks import (  # noqa: F401
 # ENABLE_POOL_COGNITIVE_RECONCILE, default OFF → inert until flipped).
 from backend.tasks.cognitive_reconcile_tasks import run_pool_cognitive_reconcile  # noqa: F401
 
+# Regime-turn monitor beat (greenfield branch B; gated on ENABLE_REGIME_MONITOR,
+# default OFF → inert until flipped). Re-sims submitted winners on current data.
+from backend.tasks.regime_monitor_tasks import run_regime_monitor  # noqa: F401
+
 __all__ = [
     # Utilities
     "run_async",

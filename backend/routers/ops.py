@@ -6017,6 +6017,41 @@ async def pool_status(
     }
 
 
+@router.get("/regime-monitor")
+async def regime_monitor_status(
+    _token: str = Depends(_require_ops_token),
+) -> Dict[str, Any]:
+    """Latest regime-turn probe snapshot + history (greenfield branch B).
+
+    The beat (backend.tasks.run_regime_monitor, gated on ENABLE_REGIME_MONITOR)
+    re-sims the submitted winners + a backlog sample on CURRENT data daily and
+    writes the signal to Redis. verdict=REGIME_TURNING ⇒ old edges recovered ⇒
+    consider resuming mining. 口径=current IS (regime-decay sensor), NOT OS.
+    """
+    import json as _json
+    from backend.config import settings as _s
+    out: Dict[str, Any] = {
+        "enabled": bool(getattr(_s, "ENABLE_REGIME_MONITOR", False)),
+        "recovery_gate": float(getattr(_s, "REGIME_MONITOR_RECOVERY_SHARPE", 1.25)),
+        "turn_mean_threshold": float(getattr(_s, "REGIME_MONITOR_TURN_MEAN_SHARPE", 0.5)),
+        "latest": None,
+        "history": [],
+    }
+    try:
+        from backend.tasks.redis_pool import get_redis_client
+        _r = get_redis_client()
+        raw = _r.get("regime_monitor:latest")
+        if raw:
+            out["latest"] = _json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+        hist = _r.lrange("regime_monitor:history", 0, 29) or []
+        out["history"] = [
+            _json.loads(h.decode() if isinstance(h, bytes) else h) for h in hist
+        ]
+    except Exception as ex:  # noqa: BLE001 — redis blip must not 500
+        out["error"] = str(ex)
+    return out
+
+
 @router.get("/submit-yield")
 async def submit_yield(
     days: int = 30,

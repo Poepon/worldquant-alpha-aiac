@@ -563,6 +563,17 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "入口。"
         ),
     ),
+    "ENABLE_REGIME_MONITOR": FlagSpec(
+        name="ENABLE_REGIME_MONITOR",
+        flag_type="bool",
+        group="Pool-Phase2",
+        description=(
+            "[regime-turn 探针 — greenfield branch B] 池暂停期周期 re-sim 已提交赢家"
+            "(+backlog 抽样)于当前数据(rolling test_period),老边际恢复=regime 转"
+            "→重启生产。beat backend.tasks.run_regime_monitor,结果存 Redis "
+            "regime_monitor:latest;口径 current IS 非 OS,仅判 WHEN 重启不判 WHAT 提交。"
+        ),
+    ),
     # --- Phase 2 R7: Co-STEER self-correct 半接受 ---
     "ENABLE_SELF_CORRECT_SEMI_ACCEPT": FlagSpec(
         name="ENABLE_SELF_CORRECT_SEMI_ACCEPT",

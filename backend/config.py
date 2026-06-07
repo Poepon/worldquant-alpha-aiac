@@ -1152,6 +1152,16 @@ class Settings(BaseSettings):
     # drain-order 端点仅暴露值供人工复核(不 gate)。
     SUBUNIV_SHARPE_MIN: float = 0.7         # auto-submit G5b 门(comp 隐性标准)
 
+    # ── Regime-turn monitor (greenfield branch B, 2026-06-07) — 池暂停期的廉价探针。
+    # 周期 re-sim 已提交赢家(+backlog 抽样)于当前数据(rolling test_period),老边际
+    # 是否恢复 → regime 是否转 → 重新挖掘。tasks/regime_monitor_tasks.py,持久到 Redis。
+    # 口径=current IS(非 OS);仅判 WHEN 重启生产,不判 WHAT 提交。
+    ENABLE_REGIME_MONITOR: bool = False      # hot-toggle(注册 SUPPORTED_FLAGS);beat gate
+    REGIME_MONITOR_BACKLOG_SAMPLE: int = 10  # 除 13 提交外再抽 N 个 backlog(按 sharpe desc)
+    REGIME_MONITOR_RECOVERY_SHARPE: float = 1.25   # re-sim ≥ 此 = 当前数据可提交(recovered)
+    REGIME_MONITOR_TURN_MEAN_SHARPE: float = 0.5   # 提交集 re-sim 均值 ≥ 此 = 老赢家回正(turn)
+    REGIME_MONITOR_TURN_MIN_RECOVERED: int = 1     # 或 ≥ 此数 alpha re-sim 过门 = turn
+
     # ── Auto-submit (2026-06-04) — automate the orthogonal backlog drain.
     # System is execution-limited (67+ clean alphas, ~12 ever submitted). This 6h
     # beat picks the top of the GET /ops/submit-backlog/drain-order sequence and
