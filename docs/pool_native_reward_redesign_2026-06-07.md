@@ -87,3 +87,19 @@ else:
 | 4 | 前置=#25c soak | **未满足(CRITICAL)** | 无 post-#25c 数据 → 无法判 reward 重设计是否需要(可能 #25c 单独就够)。**整稿 gated on soak**:yield 回 ≥1% 则封存,仍 <0.5% 才实施。 |
 
 **教训(承 [[feedback_adversarial_review_before_plan]]、[[feedback_verify_root_cause_before_fix]])**:① 别用"质量"(\|sharpe\|)代理"价值"——CW 假金高 sharpe 低价值,必须用 BRAIN 失败类型而非裸幅度;② 低 sharpe ≠ 退化(univ1 有方差),零方差门是错靶;③ 大重设计实施前先 soak 数据隔离根因,别在 #25c 可能已解决的问题上 gold-plate。
+
+---
+## 8. REGIME 漂移实证 → 强化本设计(2026-06-07 只读诊断)
+**决定性诊断(只读 BRAIN 重算老赢家于当前数据):**
+- 真·提交赢家 `mLxlen69`(`ts_decay_linear(-ts_rank(returns,5),10)`,曾 sh=2.01 已提交)→ 重算 **sharpe −0.74**(符号反转!短期反转信号经典 regime 翻向)。
+- 老 alpha `Xgkr0O6l`(close-low-high range)sh 2.43→0.87(衰减,且本就 turnover 0.804 不可提交)。
+- 2/2 老赢家垮(一衰减一反转)+ fresh fundamental6 也弱 → **submit-yield 塌方是两层:05-20 FLAT 字段卫生(#25c 已修)+ 数周 REGIME 漂移(老边际衰减/反转)**。
+
+**对 reward 设计的影响(强化、非推翻 §3 v2):**
+1. **#31 不再是"可能过早"——regime 漂移使它更必要**:binary can_submit 在新 regime 下"双重死"(yield≈0 + 老结构失效);必须有能**自动淘汰失效数据集/结构、导向当前在产**的 reward。
+2. **discounted Beta-Bernoulli(γ 遗忘,`discounted_thompson_update` 已实现)+ 当前 \|sharpe\| 正是非平稳工具**:γ 让重挖的失效臂快速遗忘、当前 \|sharpe\| 反映当下而非历史 edge。**这恰是为 regime 漂移设计的**——本设计方向被诊断证实。
+3. **但 reward 只在"已存在的"里选 —— 变不出新边际**。regime 漂移下,**breadth/exploration(新正交数据源 + 新结构)是必备配套**:reward 导流到当下有效的,exploration 扩大"有效集"。**#31 ≠ 全部;需配 breadth。**
+4. **yield 决策门重定**:老风格生成在新 regime 大概率持续 <0.5% → 不应"yield 没回就封存 #31",而是 **#25c(已)+ #31(steer 当前)+ breadth(找新)三管齐下**。soak 验的是"#25c 后 \|sharpe\| 分布"(标定 SHARPE_SCALE),非"yield 是否自愈"(regime 下不会)。
+5. **不追"恢复 ONESHOT +1.5"**:ONESHOT 跑在更友好 regime,老结构已死,那个基线不是目标。目标=当前 regime 下的可提交正交 alpha。
+
+**净结论:诊断把"是不是工程能修"钉死——不全是,是市场变了。#25c 止自伤;真产能恢复靠 reward(导流当下)+ breadth(找新边际),且 reward 的 discounted-|sharpe| 方向正确。**
