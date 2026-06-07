@@ -11,13 +11,10 @@ import {
   MonitorOutlined,
   SwapOutlined,
   ExperimentOutlined,
-  BranchesOutlined,
   FunctionOutlined,
   DollarOutlined,
   CopyOutlined,
   ApartmentOutlined,
-  ForkOutlined,
-  BulbOutlined,
   FundOutlined,
   ReadOutlined,
   CheckSquareOutlined,
@@ -27,9 +24,12 @@ import {
 
 const { Sider } = Layout
 
-// P3 (2026-05-16): "运维监控" SubMenu groups the 9 ops-console pages so the
-// sidebar stays at 7 top-level entries instead of bloating to 14+. The
-// sub-pages map 1:1 to /ops/* routes registered in App.jsx.
+// P3 (2026-05-16): "运维监控" SubMenu groups the ops-console pages; sub-pages
+// map 1:1 to /ops/* routes registered in App.jsx.
+// 2026-06-07 P0 (四池重设计): removed 4 dead pages whose mechanisms were
+// deleted (1c) or flipped OFF (1b) — R5 judge / direction-bandit / G5 crossover
+// / R8-v3 cognitive. G10 / G3-v2 kept but marked [归档] (源码未删, Phase 2 可复用).
+// Full plan: docs/frontend_pool_redesign_2026-06-07.md.
 const menuItems = [
   {
     key: '/dashboard',
@@ -70,18 +70,14 @@ const menuItems = [
       { key: '/ops/macro-narratives', label: '宏观叙事' },
       { key: '/ops/llm-op-monitor', label: 'LLM 算子监控' },
       { key: '/ops/costeer', label: '归因与重试' },
-      { key: '/ops/r5-judge', icon: <ExperimentOutlined />, label: 'LLM 评判' },
       { key: '/ops/g8-monitor', icon: <ApartmentOutlined />, label: '假设森林' },
-      { key: '/ops/direction-bandit-monitor', icon: <BranchesOutlined />, label: '方向 Bandit' },
       { key: '/ops/g3-monitor', icon: <CopyOutlined />, label: 'AST 原创性' },
-      { key: '/ops/g5-monitor', icon: <ForkOutlined />, label: '交叉变异' },
       { key: '/ops/r9-cache', icon: <DatabaseOutlined />, label: '模拟缓存' },
       { key: '/ops/cost-monitor', icon: <DollarOutlined />, label: 'LLM 成本' },
-      { key: '/ops/r8v3-monitor', icon: <BulbOutlined />, label: '认知层 (R8-v3)' },
       { key: '/ops/r11-capacity', icon: <FundOutlined />, label: '容量估算 (R11)' },
       { key: '/ops/r13-factor-lens', icon: <ExperimentOutlined />, label: '因子透镜 (R13)' },
-      { key: '/ops/g10-logic', icon: <ReadOutlined />, label: '逻辑资产库 (G10)' },
-      { key: '/ops/g3v2-monitor', icon: <CheckSquareOutlined />, label: '语法校验 (G3-v2)' },
+      { key: '/ops/g10-logic', icon: <ReadOutlined />, label: '[归档] 逻辑资产库 (G10)' },
+      { key: '/ops/g3v2-monitor', icon: <CheckSquareOutlined />, label: '[归档] 语法校验 (G3-v2)' },
       { key: '/ops/brain-role', icon: <SwapOutlined />, label: 'BRAIN 模式' },
     ],
   },

@@ -719,11 +719,12 @@ async def _evaluate_single_alpha(
                     crisis_by_window = await correlation_service.calc_self_corr_by_window(
                         alpha_id=alpha.alpha_id, region=state.region
                     )
-                    if isinstance(alpha.metrics, dict):
-                        alpha.metrics = dict(alpha.metrics)
-                    else:
-                        alpha.metrics = {}
-                    alpha.metrics["_crisis_correlations"] = crisis_by_window
+                    # MUST write into the `metrics` LOCAL — same clobber reason
+                    # as orthogonality_score above (:709): alpha.metrics is
+                    # rebuilt as {**metrics, ...} at the end, so a stamp on
+                    # alpha.metrics here is dropped and never persists (the bug
+                    # that left _crisis_correlations永远空 for pool alphas). 2026-06-07
+                    metrics["_crisis_correlations"] = crisis_by_window
                     spikes = [
                         (w, info["max_corr"])
                         for w, info in crisis_by_window.items()

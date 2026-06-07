@@ -118,6 +118,13 @@ const api = {
     return data
   },
 
+  // Celery background-task status by UUID (DataManagement sync polling).
+  // Returns { task_id, status, error?, result? } from AsyncResult.
+  getAsyncStatus: async (taskId) => {
+    const { data } = await client.get(`/tasks/celery/${taskId}/status`)
+    return data
+  },
+
   // Alphas
   getAlphas: async (params = {}) => {
     const { data } = await client.get('/alphas', { params })
@@ -578,12 +585,8 @@ const api = {
     return data
   },
 
-  // R5 LLM Judge telemetry (2026-05-18) — complements /ops/r1a/telemetry
-  // with per-judge cost + c1/c2 internal agreement + composite distribution
-  getOpsR5JudgeStats: async (days = 7) => {
-    const { data } = await client.get('/ops/r5/judge-stats', { params: { days } })
-    return data
-  },
+  // getOpsR5JudgeStats retired 2026-06-07 — r5_judge module deleted (1c) +
+  // ENABLE_LLM_JUDGE OFF; the /ops/r5-judge page was removed (dead in pool world).
 
 
   // G2 Phase A cost telemetry (2026-05-19) — per-call LLM cost across all callers
@@ -597,15 +600,8 @@ const api = {
     return data
   },
 
-  // G1 Phase A direction-bandit telemetry (2026-05-19) — per-arm pulls /
-  // observed reward / PASS rate joined from alphas.metrics. GO-gate readiness
-  // signal exposed via go_gate_segments_ready.
-  getOpsDirectionBanditTelemetry: async (days = 7, topSegments = 10) => {
-    const { data } = await client.get('/ops/direction-bandit/telemetry', {
-      params: { days, top_segments: topSegments },
-    })
-    return data
-  },
+  // getOpsDirectionBanditTelemetry retired 2026-06-07 — ContextualDirectionBandit
+  // deleted (1c); direction diversity now via pillar/orthogonality/dataset bandit.
 
   // G3 Phase A AST originality stats (2026-05-19) — shadow-mode block rate at
   // current τ + min_distance histogram + top-N nearest-neighbor + per-pillar
@@ -643,28 +639,15 @@ const api = {
     return data
   },
 
-  // G5 Phase A trajectory crossover telemetry (2026-05-19) — per-strategy +
-  // per-pillar-pair calls / offspring volume / PASS rate (joined from
-  // alphas.metrics._g5_crossover_parent_ids). Healthy gate: flag ON +
-  // total_crossover_calls > 0 + offspring_pass_rate > 0.
-  getOpsG5CrossoverStats: async (days = 7) => {
-    const { data } = await client.get('/ops/g5/crossover-stats', {
-      params: { days },
-    })
-    return data
-  },
+  // getOpsG5CrossoverStats retired 2026-06-07 — llm_crossover_alpha deleted (1c)
+  // + ENABLE_G5_CROSSOVER OFF; g5_crossover_log has no writer in the pool world.
 
   // startFlatSession / resume / pauseFlatSession retired in Phase 1c-delete +
   // 1d (FLAT sessions removed; mining runs through the HG/S/E pool).
 
   // ---- Phase 4 Sprint 3-5 + Tier B/C telemetry ----
-  // R8-v3 cognitive layer per-layer fire + PASS rate (Sprint 3 B5).
-  getOpsR8v3CognitiveLayerStats: async (days = 7) => {
-    const { data } = await client.get('/ops/r8-v3/cognitive-layer-stats', {
-      params: { days },
-    })
-    return data
-  },
+  // getOpsR8v3CognitiveLayerStats retired 2026-06-07 — ENABLE_COGNITIVE_LAYER_PROMPT
+  // default OFF (no override); _cognitive_layer_used is never written in the pool.
   // R11 alpha-capacity log-scale histogram + PASS rate (Sprint 2 B1 / Tier B).
   getOpsR11CapacityStats: async (days = 7) => {
     const { data } = await client.get('/ops/r11/capacity-stats', { params: { days } })

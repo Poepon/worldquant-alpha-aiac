@@ -2468,7 +2468,11 @@ async def r8v3_cognitive_layer_stats(
     _token: str = Depends(_require_ops_token),
     db: AsyncSession = Depends(get_db),
 ) -> CognitiveLayerStatsOut:
-    """R8-v3 per-layer PASS/FAIL distribution.
+    """DEPRECATED 2026-06-07 (四池重设计): /ops/r8v3-monitor page removed —
+    ENABLE_COGNITIVE_LAYER_PROMPT default OFF so _cognitive_layer_used is never
+    stamped in the pool world. Endpoint kept to avoid 404s on bookmarks.
+
+    R8-v3 per-layer PASS/FAIL distribution.
 
     Aggregates ``alpha.metrics->>'_cognitive_layer_used'`` over the
     trailing ``days`` window. Use to confirm that
@@ -3139,7 +3143,10 @@ async def r5_judge_stats(
     _token: str = Depends(_require_ops_token),
     db: AsyncSession = Depends(get_db),
 ) -> R5JudgeStatsOut:
-    """R5 LLM judge internal telemetry — cost-per-judge + c1/c2 alignment.
+    """DEPRECATED 2026-06-07 (四池重设计): /ops/r5-judge page removed — r5_judge
+    module deleted (1c) + ENABLE_LLM_JUDGE OFF. Endpoint kept to avoid 404s.
+
+    R5 LLM judge internal telemetry — cost-per-judge + c1/c2 alignment.
 
     Healthy R5 deploy: ``avg_cost_per_judge <= $0.010`` (deploy GO gate),
     ``c1_c2_internal_agreement >= 0.6`` (two critics genuinely independent
@@ -3299,7 +3306,11 @@ async def g5_crossover_stats(
     _token: str = Depends(_require_ops_token),
     db: AsyncSession = Depends(get_db),
 ) -> G5CrossoverStatsOut:
-    """G5 Phase A follow-up — trajectory crossover telemetry.
+    """DEPRECATED 2026-06-07 (四池重设计): /ops/g5-monitor page removed —
+    llm_crossover_alpha deleted (1c) + ENABLE_G5_CROSSOVER OFF; g5_crossover_log
+    has no writer in the pool world. Endpoint kept to avoid 404s.
+
+    G5 Phase A follow-up — trajectory crossover telemetry.
 
     Reads g5_crossover_log over the last ``days`` window + reverse JOIN
     alphas via outcome_alpha_ids JSONB (back-filled by _incremental_save
@@ -4095,7 +4106,11 @@ async def direction_bandit_telemetry(
     _token: str = Depends(_require_ops_token),
     db: AsyncSession = Depends(get_db),
 ) -> DirectionBanditTelemetryOut:
-    """G1 Phase A direction-bandit telemetry — per-arm pull/reward/PASS-rate.
+    """DEPRECATED 2026-06-07 (四池重设计): /ops/direction-bandit-monitor page
+    removed — ContextualDirectionBandit deleted (1c); direction diversity now via
+    pillar/orthogonality/dataset bandit. Endpoint kept to avoid 404s.
+
+    G1 Phase A direction-bandit telemetry — per-arm pull/reward/PASS-rate.
 
     Aggregates ``direction_bandit_log`` over the last ``days`` window plus
     a one-shot PASS-rate join against ``alphas.metrics``\\->>'_direction_bandit

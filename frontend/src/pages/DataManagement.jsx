@@ -728,8 +728,9 @@ const CoverageTab = () => {
 
       <Paragraph type="secondary" style={{ fontSize: 12 }}>
         breadth 诊断:哪些可挖的正交数据面账号有、但还没挖。<b>新到</b>=BRAIN catalog 近 3 天新增的 cell;
-        <b>未开采</b>=在轮转、有活跃字段、却 0 产出。对这些点「强制挖掘」立即跑一轮 MANUAL FLAT,
-        不必等 bandit 几天后才组织性发现（per 业界调查:新数据源才真降 ρ、增有效 breadth）。
+        <b>未开采</b>=在轮转、有活跃字段、却 0 产出。这些数据集由池调度器(dataset bandit)经 mining_weight
+        自动优先安排挖掘;如需加速可在「运维监控 → 挖掘池」页对相应池 drain/resume
+        （per 业界调查:新数据源才真降 ρ、增有效 breadth）。
       </Paragraph>
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>

@@ -53,16 +53,15 @@ const FALLBACK_MODELS = [
 
 // Typical node_keys shown as quick-add suggestions when the map is empty —
 // mirrors backend config defaults. Not authoritative; operators can add any key.
+// 2026-06-07 (P0 四池重设计): dropped ghost suggestions for mechanisms deleted
+// in 1c / flipped OFF in 1b — r1b_retry / llm_crossover_alpha / r1b_mutate /
+// r5_alignment_c1 / r5_alignment_c2. Existing DB map entries still render; these
+// are only quick-add hints, so we stop nudging operators toward dead node_keys.
 const SUGGESTED_NODE_KEYS = [
   'hypothesis',
   'code_gen',
   'self_correct',
-  'r1b_retry',
   'llm_mutate_alpha',
-  'llm_crossover_alpha',
-  'r1b_mutate',
-  'r5_alignment_c1',
-  'r5_alignment_c2',
   'attribution',
 ]
 
