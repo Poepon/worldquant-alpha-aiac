@@ -132,6 +132,17 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "field-aware。OFF → 字节不变。soak + pillar-nudge A/B 双过前不升级。见 §7 Track B。"
         ),
     ),
+    "ENABLE_FIELD_HYGIENE": FlagSpec(
+        name="ENABLE_FIELD_HYGIENE",
+        flag_type="bool",
+        group="Pool-Phase2",
+        description=(
+            "字段卫生(#25c):池字段路径只给 code-gen LLM 数值信号字段,剔除非信号元数据"
+            "(UNIVERSE 成员 flag top500/SYMBOL/UTC 时间戳 *_time_utc/日期 *_date_utc/ISO 代码"
+            " iso_code)。修 2026-05-20 生成塌方(LLM 在时间戳/代码/flag 上建退化式→负 sharpe)。"
+            "默认 ON(纠错);OFF=legacy 全字段 roster。kill-switch。"
+        ),
+    ),
     # --- P2-C 市场体制 (Consolidated 2026-05-19: single switch + stage str) ---
     "ENABLE_REGIME": FlagSpec(
         name="ENABLE_REGIME",

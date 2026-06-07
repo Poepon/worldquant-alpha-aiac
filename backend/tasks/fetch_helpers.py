@@ -12,6 +12,7 @@ the FLAT path). Behaviour is byte-for-byte the pre-1c FLAT field/operator fetch.
 from sqlalchemy import select, and_, case
 from loguru import logger
 
+from backend.config import settings
 from backend.models import (
     DatasetMetadata,
     Operator,
@@ -22,6 +23,27 @@ from backend.models import (
 # Default BRAIN delay. A delay-0 session passes delay=0; absent/1 = the
 # established delay-1 path (byte-for-byte the legacy cell join).
 _FLAT_DELAY = 1
+
+
+def _is_signal_field(field_id, field_type) -> bool:
+    """Field-hygiene (#25c): True if usable as a numeric alpha SIGNAL input.
+
+    False for NON-SIGNAL metadata the code-gen LLM must never be offered as an
+    alpha input — universe-membership flags (field_type UNIVERSE: top500/top200),
+    symbols (SYMBOL), and UTC timestamps / dates / ISO-entity codes (by field_id
+    substring). The LLM builds degenerate/garbage expressions on these (e.g.
+    ts_zscore(entity_country_iso_code_4), subtract(top500,top500)=0) → 0/neg
+    sharpe; this was the root of the 2026-05-20 submit-yield collapse. Pure +
+    config-driven so it stays unit-testable without DB."""
+    excl_types = set(getattr(settings, "FIELD_HYGIENE_EXCLUDE_TYPES", ["UNIVERSE", "SYMBOL"]) or [])
+    if (field_type or "") in excl_types:
+        return False
+    fid = (field_id or "").lower()
+    for sub in (getattr(settings, "FIELD_HYGIENE_EXCLUDE_ID_SUBSTRINGS",
+                         ["_time_utc", "_date_utc", "iso_code"]) or []):
+        if sub and sub in fid:
+            return False
+    return True
 
 
 async def _get_operators(db):
@@ -105,6 +127,19 @@ async def _get_dataset_fields(db, dataset_id, region, universe, delay=_FLAT_DELA
         )
     )
     rows = (await db.execute(fields_stmt)).all()
+
+    # Field hygiene (#25c): drop non-signal metadata (universe flags / symbols /
+    # UTC timestamps / dates / ISO codes) so the LLM only sees real alpha inputs.
+    # Flag-gated (default ON); OFF → byte-for-byte legacy roster.
+    if bool(getattr(settings, "ENABLE_FIELD_HYGIENE", True)):
+        _n0 = len(rows)
+        rows = [r for r in rows if _is_signal_field(r[0], r[3])]  # field_id, field_type
+        _dropped = _n0 - len(rows)
+        if _dropped:
+            logger.debug(
+                f"[field-hygiene] {dataset_id}/{universe}/d{delay}: dropped "
+                f"{_dropped}/{_n0} non-signal fields"
+            )
 
     return [
         {"id": fid, "name": fname, "description": desc, "type": ftype}

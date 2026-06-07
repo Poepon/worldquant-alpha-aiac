@@ -1818,6 +1818,23 @@ class Settings(BaseSettings):
     # (below this the histogram is noise → render ""). Plan §7 Track B / guard #15.
     SKELETON_FREQUENCY_MIN_SAMPLES: int = 3
 
+    # ----- Field hygiene (#25c, 2026-06-07) — only offer the code-gen LLM NUMERIC
+    # SIGNAL fields -----
+    # ROOT CAUSE of the 2026-05-20 submit-yield collapse: the pool field path
+    # (_get_dataset_fields) handed the LLM the FULL active roster including
+    # NON-SIGNAL metadata — UTC timestamps (*_time_utc), dates (*_date_utc),
+    # ISO/entity codes (*iso_code*), universe-membership flags (field_type
+    # UNIVERSE: top500/top200), symbols (SYMBOL). The LLM dutifully built
+    # degenerate expressions on them (ts_zscore(entity_country_iso_code_4),
+    # subtract(top500,top500)=0) → 0/negative sharpe. These are never alpha
+    # signals. Default ON (correctness fix); flip OFF for the legacy roster.
+    # Verified high-precision over the live catalog: 19/8365 fields excluded,
+    # 0 false positives. Registered in SUPPORTED_FLAGS for a hot kill-switch.
+    ENABLE_FIELD_HYGIENE: bool = True
+    FIELD_HYGIENE_EXCLUDE_TYPES: list = ["UNIVERSE", "SYMBOL"]
+    # case-insensitive substrings in field_id marking non-signal metadata.
+    FIELD_HYGIENE_EXCLUDE_ID_SUBSTRINGS: list = ["_time_utc", "_date_utc", "iso_code"]
+
     # ----- G2 Phase A — per-call LLM cost telemetry (2026-05-19) -----
     # Light wiring per [[feedback_light_wiring_deferred_gate]]: Phase A logs
     # every LLMService.call to llm_call_log table (task_id / round_idx /
