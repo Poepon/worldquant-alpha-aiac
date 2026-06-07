@@ -32,6 +32,7 @@ import PoolQueueMonitor from './PoolQueueMonitor'
 import PoolWorkersMonitor from './PoolWorkersMonitor'
 import SubmitYieldMonitor from './SubmitYieldMonitor'
 import CognitiveReconcileMonitor from './CognitiveReconcileMonitor'
+import RegimeMonitor from './RegimeMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -72,6 +73,7 @@ export default function OpsLayout() {
         {/* P1 (2026-06-07) pool-native pages — queue depth/backlog + worker/lease health */}
         <Route path="pool-queue" element={<PoolQueueMonitor />} />
         <Route path="pool-workers" element={<PoolWorkersMonitor />} />
+        <Route path="regime-monitor" element={<RegimeMonitor />} />
         {/* P2 (2026-06-07) — submission-yield funnel + Phase-2 cognitive-reconcile status */}
         <Route path="submit-yield" element={<SubmitYieldMonitor />} />
         <Route path="cognitive-reconcile" element={<CognitiveReconcileMonitor />} />

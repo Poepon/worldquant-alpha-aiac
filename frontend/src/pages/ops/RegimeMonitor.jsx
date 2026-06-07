@@ -1,0 +1,216 @@
+import { useQuery } from '@tanstack/react-query'
+import { Link } from 'react-router-dom'
+import {
+  Alert, Card, Col, Row, Space, Spin, Statistic, Table, Tag, Tooltip, Typography,
+} from 'antd'
+import { RadarChartOutlined, InfoCircleOutlined, ReloadOutlined } from '@ant-design/icons'
+
+import api from '../../services/api'
+
+const { Title, Text, Paragraph } = Typography
+
+/**
+ * RegimeMonitor — /ops/regime-monitor (#41, greenfield branch B, 2026-06-07).
+ *
+ * Production is paused in a regime trough. The daily beat (run_regime_monitor,
+ * gated on ENABLE_REGIME_MONITOR) re-sims the submitted winners + a backlog
+ * sample on CURRENT data and asks: have the old edges recovered? This page
+ * surfaces the latest probe + history and ALARMS (green banner) when
+ * verdict=REGIME_TURNING → re-engage candidate.
+ *
+ * 口径 = current IS (rolling test_period), NOT OS — a regime-decay sensor that
+ * says WHEN to resume mining, not WHAT to submit.
+ */
+const VERDICT_META = {
+  REGIME_TURNING: { color: 'success', label: '🟢 REGIME 转向', alert: 'success' },
+  REGIME_DOWN: { color: 'default', label: 'REGIME 低谷', alert: 'info' },
+  INSUFFICIENT: { color: 'warning', label: '样本不足', alert: 'warning' },
+}
+
+function sharpeTag(v, gate) {
+  if (v === null || v === undefined) return <Tag color="default">sim 失败</Tag>
+  const color = v >= (gate ?? 1.25) ? 'success' : v >= 0 ? 'gold' : 'error'
+  return <Tag color={color}>{v >= 0 ? '+' : ''}{v.toFixed(2)}</Tag>
+}
+
+export default function RegimeMonitor() {
+  const { data, isLoading, isFetching, error } = useQuery({
+    queryKey: ['ops/regime-monitor'],
+    queryFn: () => api.getOpsRegimeMonitor(),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  })
+
+  if (isLoading) {
+    return <div style={{ textAlign: 'center', padding: 80 }}><Spin size="large" /></div>
+  }
+  if (error) {
+    return (
+      <Alert type="error" showIcon message="加载 regime 监测器失败"
+        description={error?.response?.data?.detail || error?.message || '未知错误'} />
+    )
+  }
+
+  const enabled = !!data?.enabled
+  const gate = data?.recovery_gate ?? 1.25
+  const latest = data?.latest || null
+  const signal = latest?.signal || null
+  const rows = latest?.rows || []
+  const history = data?.history || []
+  const verdict = signal?.verdict
+  const vmeta = VERDICT_META[verdict] || { color: 'default', label: verdict || '—', alert: 'info' }
+  const sub = signal?.submitted || {}
+
+  const columns = [
+    {
+      title: 'Alpha', dataIndex: 'alpha_id', key: 'alpha_id', width: 130,
+      render: (aid) => <Link to={`/alphas/${aid}`}><Text code style={{ fontSize: 12 }}>{aid}</Text></Link>,
+    },
+    {
+      title: '类别', dataIndex: 'kind', key: 'kind', width: 90,
+      render: (k) => <Tag color={k === 'submitted' ? 'blue' : 'default'}>{k === 'submitted' ? '已提交' : '积压'}</Tag>,
+    },
+    {
+      title: '提交时 Sharpe', dataIndex: 'baseline_sharpe', key: 'baseline_sharpe', width: 120, align: 'right',
+      render: (v) => (v !== null && v !== undefined ? v.toFixed(2) : '—'),
+    },
+    {
+      title: (
+        <Tooltip title="当前数据 re-sim 的 IS Sharpe(rolling test_period)。回到提交时水平 = 老边际恢复 = regime 转。">
+          <Space size={4}>当前 re-sim <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
+      dataIndex: 'resim_sharpe', key: 'resim_sharpe', width: 120, align: 'right',
+      render: (v) => sharpeTag(v, gate),
+    },
+    {
+      title: 'Δ vs 提交时', key: 'delta', width: 110, align: 'right',
+      render: (_, r) => {
+        if (r.resim_sharpe === null || r.resim_sharpe === undefined || r.baseline_sharpe === null) return '—'
+        const d = r.resim_sharpe - r.baseline_sharpe
+        return <Text type={d >= 0 ? 'success' : 'danger'}>{d >= 0 ? '+' : ''}{d.toFixed(2)}</Text>
+      },
+    },
+    {
+      title: '错误', dataIndex: 'error', key: 'error', ellipsis: true,
+      render: (e) => (e ? <Text type="secondary" style={{ fontSize: 11 }}>{e}</Text> : ''),
+    },
+  ]
+
+  const histColumns = [
+    { title: '时间 (UTC)', dataIndex: 'computed_at', key: 'computed_at',
+      render: (v) => (v ? String(v).replace('T', ' ').slice(0, 19) : '—') },
+    { title: '裁决', dataIndex: 'verdict', key: 'verdict',
+      render: (v) => <Tag color={(VERDICT_META[v] || {}).color || 'default'}>{(VERDICT_META[v] || {}).label || v}</Tag> },
+    { title: '提交集 re-sim 均值', dataIndex: 'submitted_mean_resim', key: 'submitted_mean_resim', align: 'right',
+      render: (v) => (v !== null && v !== undefined ? v.toFixed(3) : '—') },
+    { title: '恢复数', key: 'rec', align: 'right',
+      render: (_, r) => `${r.n_recovered_total ?? 0}/${r.n_resimmed ?? 0}` },
+  ]
+
+  return (
+    <div>
+      <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
+        <Title level={3} style={{ margin: 0 }}>
+          <RadarChartOutlined style={{ marginRight: 8 }} />
+          Regime 转向监测器
+        </Title>
+        <Space>
+          <Tag color={enabled ? 'success' : 'default'}>{enabled ? '已启用' : '未启用(flag OFF)'}</Tag>
+          {isFetching && <Spin size="small" />}
+        </Space>
+      </Space>
+
+      {/* 主告警 banner */}
+      {!enabled ? (
+        <Alert type="warning" showIcon style={{ marginBottom: 16 }}
+          message="探针未激活"
+          description={<span>翻 <code>ENABLE_REGIME_MONITOR</code> on(Feature Flag 控制台,热)+ run.bat 重启载入 daily beat(07:30)即启动。Celery beat 不受池暂停(ENABLE_POOL_PIPELINE)影响,照跑。</span>} />
+      ) : !signal ? (
+        <Alert type="info" showIcon style={{ marginBottom: 16 }}
+          message="已启用,等首次探针结果"
+          description="daily beat 每日 07:30 跑;或重启后等下一次触发。结果落 Redis 后此处显示。" />
+      ) : verdict === 'REGIME_TURNING' ? (
+        <Alert type="success" showIcon style={{ marginBottom: 16 }}
+          message={<strong>🟢 REGIME 转向信号 — 老边际在当前数据上恢复了</strong>}
+          description={
+            <span>
+              提交集当前 re-sim 均值 <strong>{sub.mean_resim}</strong>(提交时 {sub.mean_baseline})、
+              <strong>{signal.n_recovered_total}</strong> 个 re-sim ≥ {gate}(可提交)。
+              恢复的:{(signal.recovered_ids || []).join(', ') || '—'}。
+              <br /><strong>建议:复核这些 alpha,考虑恢复挖掘生产</strong>(.env ENABLE_POOL_PIPELINE=true + clear_drain + 重启)。
+              ⚠️ 口径=current IS,非 OS —— 是「该重启了」的信号,提交决策仍走选择器 + 当前数据确认。
+            </span>
+          } />
+      ) : (
+        <Alert type={vmeta.alert} showIcon style={{ marginBottom: 16 }}
+          message={`${vmeta.label} — 暂不重启`}
+          description={
+            verdict === 'INSUFFICIENT'
+              ? '所有 re-sim 都失败(BRAIN auth/slot/数据)— 检查 worker BRAIN 连通。'
+              : `老边际仍未恢复:提交集当前 re-sim 均值 ${sub.mean_resim}(提交时 ${sub.mean_baseline}),0 个回到可提交。继续持有,等下次探针。`
+          } />
+      )}
+
+      {/* KPI */}
+      <Row gutter={[16, 16]}>
+        <Col xs={12} sm={6}>
+          <Card className="glass-card">
+            <Statistic title="裁决" value={vmeta.label}
+              valueStyle={{ color: verdict === 'REGIME_TURNING' ? '#00ff88' : '#888', fontSize: 18 }} />
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card className="glass-card">
+            <Tooltip title="13 个已提交赢家的当前数据 re-sim Sharpe 均值。回升=老边际恢复。">
+              <Statistic title="提交集 re-sim 均值" value={sub.mean_resim ?? '—'}
+                valueStyle={{ color: (sub.mean_resim ?? -1) >= 0.5 ? '#00ff88' : '#ff4d4f' }} />
+            </Tooltip>
+            <Text type="secondary" style={{ fontSize: 12 }}>提交时 {sub.mean_baseline ?? '—'}</Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card className="glass-card">
+            <Statistic title="恢复到可提交" value={signal ? `${signal.n_recovered_total}/${signal.n_resimmed}` : '—'}
+              valueStyle={{ color: (signal?.n_recovered_total ?? 0) > 0 ? '#00ff88' : '#888' }} />
+            <Text type="secondary" style={{ fontSize: 12 }}>re-sim ≥ {gate}</Text>
+          </Card>
+        </Col>
+        <Col xs={12} sm={6}>
+          <Card className="glass-card">
+            <Statistic title="最近探针 (UTC)"
+              value={signal?.computed_at ? String(signal.computed_at).replace('T', ' ').slice(5, 16) : '—'}
+              valueStyle={{ fontSize: 16 }} />
+          </Card>
+        </Col>
+      </Row>
+
+      <Alert type="info" showIcon style={{ marginTop: 16, marginBottom: 16 }}
+        message="口径说明"
+        description={
+          <Paragraph style={{ marginBottom: 0, fontSize: 12 }}>
+            周期 re-sim 已提交赢家 + backlog 抽样于<strong>当前数据</strong>(simulate rolling test_period,
+            非冻结 2019-2023)。<strong>口径 = current IS,不是 OS</strong>(BRAIN 隐藏 realized OS)——
+            它是 regime 衰减传感器,判「<strong>何时</strong>重启生产」,不判「提交什么」(那走提交选择器)。
+            turn 条件:提交集 re-sim 均值 ≥ {data?.turn_mean_threshold ?? 0.5} 或 ≥1 个 re-sim 过 {gate}。
+          </Paragraph>
+        } />
+
+      {/* per-alpha 探针明细 */}
+      <Card className="glass-card" size="small" title={<Space><ReloadOutlined />本次探针明细 {rows.length ? `(${rows.length})` : ''}</Space>}
+        style={{ marginBottom: 16 }}>
+        <Table size="small" rowKey="alpha_id" dataSource={rows} columns={columns}
+          pagination={{ pageSize: 25 }}
+          locale={{ emptyText: enabled ? '尚无探针结果(等 beat 或重启)' : '未启用' }} />
+      </Card>
+
+      {/* 历史趋势 */}
+      {history.length > 0 && (
+        <Card className="glass-card" size="small" title="探针历史(最近 30 次)">
+          <Table size="small" rowKey={(r, i) => `${r.computed_at}-${i}`} dataSource={history}
+            columns={histColumns} pagination={{ pageSize: 10 }} />
+        </Card>
+      )}
+    </div>
+  )
+}

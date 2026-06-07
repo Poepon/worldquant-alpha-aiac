@@ -699,10 +699,17 @@ const api = {
   // orders submissions to maximise incremental breadth (lowest max-corr to the
   // already-selected ∪ submitted set). Zero BRAIN cost (local PnL + stored
   // self_corr). Returns { selected[], blocked[], n_* counts, note }.
-  getOpsSubmitBacklogDrainOrder: async ({ region = null, marginBpsMin = 5, threshold = 0.7 } = {}) => {
-    const params = { margin_bps_min: marginBpsMin, threshold }
+  getOpsSubmitBacklogDrainOrder: async ({ region = null, marginBpsMin = 5, threshold = 0.7, minRobustness = -1 } = {}) => {
+    const params = { margin_bps_min: marginBpsMin, threshold, min_robustness: minRobustness }
     if (region) params.region = region
     const { data } = await client.get('/ops/submit-backlog/drain-order', { params })
+    return data
+  },
+  // Regime-turn monitor (#41, greenfield branch B) — latest re-sim probe snapshot
+  // + history. verdict=REGIME_TURNING ⇒ old edges recovered on current data ⇒
+  // consider resuming mining. 口径 current IS (regime-decay sensor), NOT OS.
+  getOpsRegimeMonitor: async () => {
+    const { data } = await client.get('/ops/regime-monitor')
     return data
   },
   // Auto-submit audit (2026-06-04) — the shadow would-submit review surface.

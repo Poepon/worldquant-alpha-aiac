@@ -1,6 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
+  Alert,
   Col,
   Empty,
   List,
@@ -82,6 +83,14 @@ export default function OpsOverview() {
     refetchInterval: 8000,
   })
 
+  // Regime-turn alarm (#41) — surface a prominent banner on the overview when the
+  // monitor flags REGIME_TURNING (old edges recovered → re-engage candidate).
+  const { data: regime } = useQuery({
+    queryKey: ['regimeMonitor', 'opsOverview'],
+    queryFn: api.getOpsRegimeMonitor,
+    refetchInterval: 60_000,
+  })
+
   if (loading && !data) {
     return (
       <div style={{ textAlign: 'center', padding: 40 }}>
@@ -116,8 +125,26 @@ export default function OpsOverview() {
   const tpAlpha = pool?.throughput_90min?.alphas || 0
   const pendingSimHot = candPendingSim > 500
 
+  const regimeSig = regime?.latest?.signal || null
+  const regimeTurning = regimeSig?.verdict === 'REGIME_TURNING'
+
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
+      {regimeTurning && (
+        <Alert
+          type="success"
+          showIcon
+          banner
+          message={<strong>🟢 REGIME 转向信号 — 老边际在当前数据上恢复了</strong>}
+          description={
+            <span>
+              提交集当前 re-sim 均值 {regimeSig?.submitted?.mean_resim}(提交时 {regimeSig?.submitted?.mean_baseline})、
+              {regimeSig?.n_recovered_total} 个回到可提交。考虑恢复挖掘生产。
+              {' '}<a onClick={() => navigate('/ops/regime-monitor')}>查看 Regime 监测器 →</a>
+            </span>
+          }
+        />
+      )}
       <OpsSectionCard
         title="昨夜 daily-beat 执行状态"
         onRefresh={refetch}

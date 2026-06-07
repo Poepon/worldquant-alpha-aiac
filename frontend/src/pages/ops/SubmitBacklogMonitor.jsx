@@ -110,6 +110,28 @@ function deltaSharpeTag(v, significant = true, se = null) {
   return <Tag color={color}>{v > 0 ? '+' : ''}{v.toFixed(3)}</Tag>
 }
 
+// Robustness (#39) — per-alpha OS-survival proxy from sub-period Sharpe
+// consistency (frozen-IS window). ROBUST=一致/无深亏段;FRAGILE=孤峰货。
+function robustnessTag(score, verdict) {
+  if (score === null || score === undefined) return <Tag color="default">无PnL</Tag>
+  const meta = {
+    ROBUST: 'success', MODERATE: 'gold', FRAGILE: 'error',
+  }[verdict] || 'default'
+  return (
+    <Tooltip title={`稳健分 ${score.toFixed(3)}(子周期 Sharpe 一致性,冻结 IS 口径;提交前仍需 re-sim 当前数据确认)`}>
+      <Tag color={meta}>{verdict || '—'} {score.toFixed(2)}</Tag>
+    </Tooltip>
+  )
+}
+
+// BRAIN-official sub-universe Sharpe (#39) — narrow-universe robustness.
+// WQ 隐性标准要求 > ~0.7。
+function subUnivTag(v) {
+  if (v === null || v === undefined) return <Tag>—</Tag>
+  const color = v >= 1.0 ? 'success' : v >= 0.7 ? 'gold' : 'error'
+  return <Tag color={color}>{v.toFixed(2)}</Tag>
+}
+
 // Self-corr 状态分桶:与 KPI 卡(撞门/近门槛/安全/未算)同口径,客户端过滤复用。
 const SELF_CORR_BUCKETS = {
   breach: { label: '撞门(≥0.7)', test: (v) => v !== null && v !== undefined && v >= 0.7 },
@@ -139,6 +161,9 @@ export default function SubmitBacklogMonitor() {
   // P0-1 (2026-06-03): set-level orthogonal drain-order panel.
   const [showDrain, setShowDrain] = useState(false)
   const [drainSelectedKeys, setDrainSelectedKeys] = useState([])
+  // #39 (2026-06-07): robustness gate for the selector (0 = annotate-only / show
+  // all; >0 = drop FRAGILE / no-PnL into the fragile bucket).
+  const [minRobustness, setMinRobustness] = useState(0)
 
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['ops/submit-backlog', region],
@@ -151,8 +176,8 @@ export default function SubmitBacklogMonitor() {
   // breadth-maximising submit sequence; zero BRAIN cost (local PnL + stored
   // self_corr). See GET /ops/submit-backlog/drain-order.
   const { data: drainData, isFetching: drainFetching } = useQuery({
-    queryKey: ['ops/submit-backlog/drain-order', region],
-    queryFn: () => api.getOpsSubmitBacklogDrainOrder({ region }),
+    queryKey: ['ops/submit-backlog/drain-order', region, minRobustness],
+    queryFn: () => api.getOpsSubmitBacklogDrainOrder({ region, minRobustness }),
     enabled: showDrain,
     staleTime: 30_000,
   })
@@ -455,6 +480,29 @@ export default function SubmitBacklogMonitor() {
         }[t] || { c: 'default', label: String(t) }
         return <Tag color={meta.c}>{meta.label}</Tag>
       },
+    },
+    {
+      title: (
+        <Tooltip title="抗过拟合稳健性(#39):子周期 Sharpe 一致性 → ROBUST(一致)/ MODERATE / FRAGILE(孤峰货,易 OS 衰减)。BRAIN 隐藏 OS,这是提交前唯一可控质量代理。冻结 IS 口径。">
+          <Space size={4}>稳健 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
+      dataIndex: 'robustness_score',
+      key: 'robustness_score',
+      width: 130,
+      render: (v, r) => robustnessTag(v, r.robustness_verdict),
+    },
+    {
+      title: (
+        <Tooltip title="BRAIN 官方 sub-universe Sharpe — 窄宇宙稳健度(WQ 隐性标准 >0.7)。比冻结-PnL 稳健性更直接;auto-submit 以此为 G5b 软门。">
+          <Space size={4}>Sub-univ <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
+      dataIndex: 'sub_universe_sharpe',
+      key: 'sub_universe_sharpe',
+      width: 96,
+      align: 'right',
+      render: (v) => subUnivTag(v),
     },
     {
       title: 'self-corr',
@@ -783,6 +831,23 @@ export default function SubmitBacklogMonitor() {
             }
           />
           <Space wrap style={{ marginBottom: 8 }}>
+            <Tooltip title="抗过拟合稳健门(#39):>0 时把 FRAGILE / 无PnL 候选剔进 fragile 桶,只让稳健者进提交序。0 = 仅标注不过滤。口径=冻结 IS 子周期一致性。">
+              <Space size={4}>
+                <Text type="secondary" style={{ fontSize: 12 }}>稳健门:</Text>
+                <Select
+                  size="small"
+                  value={minRobustness}
+                  onChange={(v) => { setMinRobustness(v); setDrainSelectedKeys([]) }}
+                  style={{ width: 130 }}
+                  options={[
+                    { value: 0, label: '仅标注(0)' },
+                    { value: 0.4, label: '≥0.4' },
+                    { value: 0.5, label: '≥0.5' },
+                    { value: 0.6, label: '≥0.6(严)' },
+                  ]}
+                />
+              </Space>
+            </Tooltip>
             <Tag color={drainData?.objective === 'value' ? 'purple' : 'default'}>
               {drainData?.objective === 'value'
                 ? `质量×广度 (ΔSharpe · 基准池 ${drainData?.n_base_pool ?? 0})`
@@ -791,6 +856,9 @@ export default function SubmitBacklogMonitor() {
             <Tag color="cyan">候选 {drainData?.n_candidates ?? 0}</Tag>
             <Tag color="success">可提交 {drainData?.n_selected ?? 0}</Tag>
             <Tag color="error">相关性阻塞 {drainData?.n_blocked ?? 0}</Tag>
+            {(drainData?.min_robustness ?? 0) > 0 && (
+              <Tag color="volcano">稳健剔除 {drainData?.n_fragile ?? 0}</Tag>
+            )}
             <Tag>有本地 PnL {drainData?.n_with_pnl ?? 0}/{drainData?.n_candidates ?? 0}</Tag>
             {drainData?.objective === 'value' && (
               <Tooltip title={`ΔSharpe 超出自身噪声地板(|Δ|>1.64·SE)的数量;越 deflated 期望最大值(${drainData?.deflated_threshold ?? '—'})的数量。0 显著 = ΔSharpe 幅度统计上全是噪声 → 不作精排,改用经对账验证的方向(sign)分层。`}>
@@ -890,6 +958,21 @@ export default function SubmitBacklogMonitor() {
                 size="small"
                 rowKey="alpha_pk"
                 dataSource={drainData.blocked}
+                columns={drainBlockedColumns}
+                pagination={{ pageSize: 10 }}
+                style={{ marginTop: 8 }}
+              />
+            </details>
+          )}
+          {(drainData?.fragile?.length ?? 0) > 0 && (
+            <details style={{ marginTop: 8 }}>
+              <summary style={{ cursor: 'pointer', color: '#ff7a45', fontSize: 12 }}>
+                稳健门剔除 {drainData.fragile.length} 个(robustness_score &lt; {drainData?.min_robustness} 或无本地 PnL — 孤峰货,易 OS 衰减;提交风险高)
+              </summary>
+              <Table
+                size="small"
+                rowKey="alpha_pk"
+                dataSource={drainData.fragile}
                 columns={drainBlockedColumns}
                 pagination={{ pageSize: 10 }}
                 style={{ marginTop: 8 }}
