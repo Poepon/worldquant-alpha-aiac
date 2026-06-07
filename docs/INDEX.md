@@ -1,83 +1,36 @@
 # docs/ 索引
 
-> 本目录顶层只保留**仍描述现行系统或具持久参考价值**的活文档。
-> 已完成 / 已退役 / 被取代的历史文档已移入 [`archive/`](archive/)（按主题分目录）。
-> 最近一次整理:2026-06-04（详见 `_doc_triage_report_2026-06-04.md`）。
+> **2026-06-07 整理:开发只保留一个主线文档 = [`DEVELOPMENT_PLAN.md`](DEVELOPMENT_PLAN.md)。**
+> 所有历史计划/设计/runbook 已移入 [`archive/`](archive/)(可追溯,不删);竞品/架构/调研 reference 留在本目录根;操作输出(scan/audit/backup)留原地。
 
-## 📋 开发计划
-
-| 文档 | 说明 |
-|---|---|
-| **[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)** | **当前开发计划(2026-06-04)** — NOW/NEXT/LATER 三档 + 决策日历 + NO-GO 清单。战略基调:execution-limited → 抽干提交积压 + 新正交数据源 breadth |
-
-## 竞品 / 外部调研（reference）
+## 📋 开发主线(唯一)
 
 | 文档 | 说明 |
 |---|---|
-| [competitive_analysis_v3_2026-05-26.md](competitive_analysis_v3_2026-05-26.md) | 竞品链当前头部:selection-vs-discovery + BRAIN self-corr<0.7 提交门 + Grinold 广度轴 |
-| [competitive_analysis_v2_2026-05-19.md](competitive_analysis_v2_2026-05-19.md) | 工业 8 家 + 学界 ~25 系统全景 + AIAC 5 gap（Phase 4 路线源；§4.2 flag 注解部分过时） |
-| [competitive_analysis_r14_stop_loss_2026-05-27.md](competitive_analysis_r14_stop_loss_2026-05-27.md) | R14 task stop-loss 在 producer-consumer 流水线里的适配方法论 |
-| [industry_alpha_optimization_survey_2026-06-03.md](industry_alpha_optimization_survey_2026-06-03.md) | 业界优化 5 层模型 + Grinold IR / DSR / PBO / CPCV |
-| [rd_agent_alpha_gpt_research_2026-05-16.md](rd_agent_alpha_gpt_research_2026-05-16.md) | RD-Agent CoSTEER + Alpha-GPT 架构方法学（`agents/core/` 设计来源） |
-| [qlib_alpha_research_2026-05-16.md](qlib_alpha_research_2026-05-16.md) | Qlib + 学术因子库调研（KB seed 来源） |
+| **[DEVELOPMENT_PLAN.md](DEVELOPMENT_PLAN.md)** | **唯一开发主线(2026-06-07)** — 当前态速览 / 战略 / 本轮轨迹 / 持有策略(greenfield 分支 B) / 已交付 / 重启 SOP / NO-GO / 重评触发。历史细节背书见 `archive/`。 |
+
+## 竞品 / 架构 / 调研(reference,留根目录)
+
+| 文档 | 说明 |
+|---|---|
+| [competitive_analysis_v3_2026-05-26.md](competitive_analysis_v3_2026-05-26.md) | 竞品头部:selection-vs-discovery + BRAIN self-corr<0.7 提交门 + Grinold 广度轴 |
+| [competitive_analysis_r14_stop_loss_2026-05-27.md](competitive_analysis_r14_stop_loss_2026-05-27.md) | R14 task stop-loss 在流水线里的适配方法论 |
+| [competitive_analysis_v2_2026-05-19.md](competitive_analysis_v2_2026-05-19.md) | 工业 8 家 + 学界 ~25 系统全景 + AIAC gap(部分 flag 注解过时) |
+| [industry_alpha_optimization_survey_2026-06-03.md](industry_alpha_optimization_survey_2026-06-03.md) | 业界优化 5 层 + Grinold IR / DSR / PBO / CPCV(robustness 选择层来源) |
+| [quant_pipeline_6layer_2026-06-05.md](quant_pipeline_6layer_2026-06-05.md) | 量化 6 层切分 + 各层成熟度(架构全景) |
+| [kb_layered_architecture_2026-06-05.md](kb_layered_architecture_2026-06-05.md) | 知识库分层架构全景(写侧闭环 / dormant 脚手架) |
+| [rd_agent_alpha_gpt_research_2026-05-16.md](rd_agent_alpha_gpt_research_2026-05-16.md) | RD-Agent CoSTEER + Alpha-GPT 方法学(`agents/core/` 来源) |
+| [qlib_alpha_research_2026-05-16.md](qlib_alpha_research_2026-05-16.md) | Qlib + 学术因子库调研(KB seed) |
 | [alphagbm_skills_research_2026-05-15.md](alphagbm_skills_research_2026-05-15.md) | AlphaGBM / skills 工程模式调研 |
 
-## 现行设计 / 活路线图
+## 历史归档 [`archive/`](archive/)
 
-| 文档 | 说明 |
-|---|---|
-| [auto_submit_design_2026-06-04.md](auto_submit_design_2026-06-04.md) | 自动提交守门栈设计(as-built);默认 OFF+shadow,影子→live 分阶段 |
-| [heartbeat_liveness_redesign_2026-06-03.md](heartbeat_liveness_redesign_2026-06-03.md) | 流水线 per-coroutine heartbeat 活系统设计（已 ship c07a1ea） |
-| [rag_knowledge_retrieval_design_2026-05-21.md](rag_knowledge_retrieval_design_2026-05-21.md) | 现行 RAG 检索分层设计 + roadmap |
-| [optimization_closure_plan_v1_2026-05-28.md](optimization_closure_plan_v1_2026-05-28.md) | 优化闭环:Stage A 已 ship,B/C 待 14d GO gate |
-| [orchestrator_plan_2026-05-29.md](orchestrator_plan_2026-05-29.md) | 挖掘 orchestrator:Phase 1 已 ship,Phase 2 待 soak |
+2026-06-07 移入 archive/ 根的**计划/设计/runbook**(本主线的详细背书,勿当现行依据):
+`dev_plan_greenfield_2026-06-07` / `dev_plan_post_regime_2026-06-07` / `unified_submit_selector_design_2026-06-07` / `pool_native_reward_redesign_2026-06-07` / `frontend_pool_redesign_2026-06-07` / `kb_feedback_redesign_2026-06-06` / `orthogonality_steered_exploration_plan_2026-06-05` / `four_pool_decoupling_plan_2026-06-05` / `phase1{a-e,b,c,d}_*` / `auto_submit_design_2026-06-04` / `optimization_closure_plan_v1` / `orchestrator_plan` / `heartbeat_liveness_redesign` / `rag_knowledge_retrieval_design` / runbook(dataset_bandit / r12 / sprint5 / phase_c_llm_routing / production_canary)/ `flag_lifecycle` / `llm_per_node_model_selection` / `v26_*` / `_doc_triage_report_2026-06-04` 等。
 
-## 运维手册 / Runbook
+archive/ 下另有按主题分的早期子目录(phase4_plans / pipeline / llm_routing / rca / dataset_bandit / dirty_data / snapshots / llm_benchmarks / db_backups …),均为已完成/已退役复盘。
 
-| 文档 | 说明 |
-|---|---|
-| [dataset_bandit_acceptance_runbook.md](dataset_bandit_acceptance_runbook.md) | `ENABLE_DATASET_VALUE_BANDIT` 验收 / 运维 |
-| [r12_obs_rollout_checklist.md](r12_obs_rollout_checklist.md) | R12 决策（约 2026-07-04±5d）前的观测 checklist |
-| [sprint5_r12_decision_runbook.md](sprint5_r12_decision_runbook.md) | R12 三路条件清理 runbook |
-| [llm_per_node_model_selection_2026-06-05.md](llm_per_node_model_selection_2026-06-05.md) | **per-node LLM 选型重设计**：基线 v2（可用性+成本筛）用法 + 推理 token 溢价发现 + 串行 A/B runbook + 审计落地。结论=全节点 kimi-k2.5 |
-| [phase_c_llm_routing_ab_runbook_2026-05-30.md](phase_c_llm_routing_ab_runbook_2026-05-30.md) | 单 node LLM A/B 流程（⚠ 示例模型选型已被 commit `7034050` 回退 kimi-k2.6,以 config.py 为准） |
-| [flag_lifecycle.md](flag_lifecycle.md) | feature flag 生命周期约定（框架准确;flag 清单待追加 2026-05-20 后新批次） |
-| [production_canary_sop_2026_05_18.md](production_canary_sop_2026_05_18.md) | 生产灰度 / 回滚 SOP（⚠ §1 含已退役的 `ENABLE_DAG_TRACE` / tier 期措辞,机制本体仍可用） |
+## 外部参考
+- [`SourceMaterials/`](SourceMaterials/) — BRAIN 平台示例代码等外部输入。
 
-## 仍准确的活 backlog
-
-| 文档 | 说明 |
-|---|---|
-| [v26_38_39_field_insight_deprecation.md](v26_38_39_field_insight_deprecation.md) | field-insight enum / write-gate 现状 + 待定 A/B/C 决策 |
-| [v26_58_is_valid_tristate_backlog.md](v26_58_is_valid_tristate_backlog.md) | `is_valid` 三态待办观察项 |
-
-## 外部参考材料
-
-- [`SourceMaterials/`](SourceMaterials/) — BRAIN 平台示例代码等外部参考输入。
-
----
-
-## 历史归档 `archive/`
-
-已完成 / 已退役 / 被取代的文档按主题归档（多数 2026-05 中旬文档以 **已退役的 tier/cascade/串行轮** 为前提,仅作复盘,勿当现行依据):
-
-| 子目录 | 内容 |
-|---|---|
-| `phase4_plans/` | Phase 4 A+B 计划 v1–v5（终版 v5 已全部 ship） |
-| `phase1/` `phase2/` `phase3_readiness/` | Phase 1/2/3 早期完成报告 / 架构 / 评估 + 逐日 A/B |
-| `rca/` | 4 篇根因分析（部分涉及已退役 cascade 锁） |
-| `pipeline/` | 串行→流水线 设计 / 实施 / 迁移（已落地） |
-| `llm_routing/` | per-function LLM 路由 plan（PR1-5 已 ship） |
-| `dataset_bandit/` | bandit steering plan + 已作废的 selection audit |
-| `dirty_data/` | 脏数据清理提案 + 前/后扫描快照 |
-| `v22_v26_v27/` | 旧版本号 backlog / report / quality review（体系已弃） |
-| `competitive/` | 竞品分析 v1（被 v2 取代） |
-| `spike/` | 技术验证 spike 报告 |
-| `snapshots/` | datafields/operators 冻结快照 + backlog 抽干快照 |
-| `misc_plans/` | master_implementation_plan、phase15 schema、inverted-hypothesis 等已退役/未实施大 plan |
-| `llm_benchmarks/` | LLM 质量 / per-node 路由 benchmark 结果(支撑 kimi-k2.6 选型决策) |
-| `db_backups/` | 一次性 DB 变更前的 SQL 备份(dataset_id restamp / bandit mining_weight) |
-| `misc_data/` | 其他一次性脚本产物(transfer harvest、cell-edge probe) |
-| `portfolio_theme/` `v26_retrospective/` `v22_5_backfill/` | 一次性分析 / 复盘 |
-
-> 注:脚本在 `docs/` 顶层生成的带日期产物(`backlog_drain_*` / `dirty_data_scan_*` / `llm_alpha_quality_benchmark_*` / `transfer_harvest_*`)已加入 `.gitignore`,不会再污染顶层。
+> 脚本生成的带日期产物(`backlog_drain_*` / `dirty_data_scan_*` / `llm_alpha_quality_benchmark_*` / `transfer_harvest_*`)已在 `.gitignore`,不污染顶层。

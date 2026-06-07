@@ -114,25 +114,15 @@ The status docs flag a few routers that historically did direct DB access — wh
 
 ### Agent / mining workflow
 
-`backend/agents/` is the brain of the system. Two parallel layers exist:
+`backend/agents/` + `backend/pool/` are the brain. **Production architecture = four-pool decoupled pipeline** (Phase 1c, commit `b89b732` 2026-06-06 deleted the old serial/FLAT/ONESHOT path, −24k LOC). Gated by `ENABLE_POOL_PIPELINE` (.env). Strategy / dev state: `docs/DEVELOPMENT_PLAN.md` §2A.
 
-1. **Legacy / production path** — `mining_agent.py`, `feedback_agent.py`, `strategy_agent.py`, `evolution_strategy.py`, `field_screener.py`, plus the LangGraph workflow in `agents/graph/` (state in `state.py`, edges in `edges.py`, node implementations split under `graph/nodes/{generation,validation,evaluation,persistence,base}.py`). This is what Celery's `run_mining_task` invokes today.
-2. **RD-Agent-style core** — `agents/core/` (see `agents/core/ARCHITECTURE.md`) provides `Hypothesis`, `AlphaExperiment`, `EvoStep`, `ExperimentTrace` (DAG), `EvolvingKnowledge`, `HypothesisFeedback` (with `AttributionType` separating hypothesis vs. implementation failures), and a decoupled pipeline (`HypothesisGen` → `Hypothesis2Experiment` → `ExperimentRunner` → `Experiment2Feedback`). It is integrated into the legacy path via `agents/core/integration.py` (e.g. `enhance_existing_node_evaluate`, `run_enhanced_mining`).
+- **Three resident worker pools** — `backend/pool/workers.py` (`hg_loop` / `s_loop` / `e_loop`) launched by a Popen-respawn `pool/supervisor.py` via `pool/run_worker.py` (all gated on `ENABLE_POOL_PIPELINE`; `run.bat` starts the supervisor). Work flows through **persistent DB queues**: scheduler beat → `hyp_intent` → **HG** (RAG + hypothesis + code_gen + validate) → `candidate_queue` → **S** (BRAIN simulate) → **E** (evaluate + persist) → `alphas`. Each worker gets its OWN `AsyncSessionLocal` (no two coroutines share a session); claim/lease via two-txn `pool/queue.py` (claim COMMITs before work); heartbeat-lease + `recycle_expired` beat is the single recovery path (no task-level watchdog revive).
+- The pools **reuse the existing node implementations**: `agents/graph/` (`MiningWorkflow` + `graph/nodes/{generation,validation,evaluation,persistence}.py`, state in `state.py`) and `agents/pipeline/` (e.g. `persister.py` = the E-stage KB write). So the per-alpha trace still follows `TraceStepType` (`models/base.py`): `RAG_QUERY → HYPOTHESIS → CODE_GEN → VALIDATE → SIMULATE → SELF_CORRECT? → EVALUATE`, now split across HG(gen) / S(sim) / E(eval).
+- **Scheduler** (`pool/scheduler.py:schedule_round`, beat every 5 min): `weighted_choice` over `dataset_cell_stats.mining_weight` (the dataset bandit, `ENABLE_DATASET_VALUE_BANDIT`) + `pg_advisory_lock` → inserts `hyp_intent`. **Control plane** (Redis): `pool/drain.py` (`pool:{hg,s,e}:drain` soft-stop — does NOT gate the scheduler; stop inflow via flag) + `pool/budget.py` (`budget:sims:DATE` + token ceiling `POOL_TOKEN_BUDGET_PER_DAY`). Endpoints `POST /ops/pools/{name}/drain|resume`, `GET /ops/pool-*`.
+- Prompts: `backend/agents/prompts/` (`prompts.yaml` via `loader.py` + `registry.py`); `agents/prompts.py` shim re-exports. EVAL band SSOT = `_eval_thresholds()` in `agents/graph/nodes/evaluation.py` (flat `EVAL_*` in `config.py`).
+- KB/RAG (per-alpha): read = `agents/hierarchical_rag.py` (HG stage); write = pool E-stage `agents/pipeline/persister.py` (SUCCESS_PATTERN + hypotheses, Phase 1 four-track). `r1a_attribution_log` write retired with the FLAT path.
 
-The standard mining trace per alpha follows `TraceStepType` (in `models/base.py`):
-`RAG_QUERY → HYPOTHESIS → CODE_GEN → VALIDATE → SIMULATE → SELF_CORRECT? → EVALUATE`.
-
-Prompts are in `backend/agents/prompts/` (loaded from `prompts.yaml` via `loader.py` + `registry.py`); the legacy `agents/prompts.py` shim re-exports them.
-
-**Task dispatch** (post tier-system removal, 2026-05-19): `backend/tasks/mining_tasks.py:run_mining_task` branches on `MiningTask.schedule`:
-1. `FLAT` — `_run_flat_iteration` hypothesis-driven flat session (dataset × hypothesis iteration). Multi-task per region OK. Gated by `settings.ENABLE_FLAT_CONTINUOUS`. Started via `POST /api/v1/ops/start-flat-session`, resumed via `POST /api/v1/ops/flat-sessions/{id}/resume` (preserves `runtime_state["flat_cursor"]` across pause-resume via `_dispatch_session_worker(inherit_runtime_state=True)`). Legacy `/tasks/{id}/intervene` PAUSE/RESUME **refuses FLAT** with 400 (would otherwise strand the task RUNNING-with-no-worker since intervene_task skips worker dispatch).
-2. `ONESHOT` (default) — one-shot discrete task path; created via `POST /api/v1/tasks`.
-
-Cascade (`CONTINUOUS_CASCADE` + T1/T2/T3 ladder + `agent_mode` + `starting_tier`) was retired in the tier-system removal big-bang (2026-05-19). The flat `EVAL_*` threshold band in `config.py` replaces the per-tier `TIER{1,2,3}_*` dicts; `_eval_thresholds()` in `agents/graph/nodes/evaluation.py` is the single source of truth.
-
-**Producer–consumer pipeline** (`agents/pipeline/`, the serial path was retired in Phase C, 2026-05-29): `_run_flat_iteration` delegates to `run_flat_pipeline_session`. The **producer** runs generation→validate and the **N sim consumers** run the slow BRAIN simulate step concurrently; producer, persister, and each consumer get their **own** `AsyncSessionLocal` (the F1 concurrency contract — no two coroutines share a session). Liveness is enforced by a **per-coroutine heartbeat watchdog** + per-op hard deadline (`_pipeline_heartbeat_timeout()` / `_pipeline_op_timeout()` in `mining_tasks.py`), NOT a single `wait_for` around the whole round. The long-lived FLAT BRAIN client is proactively recreated every `_BRAIN_CLIENT_REFRESH_EVERY` (8) rounds and after any failed round — its keepalive sockets rot and sims hang otherwise.
-
-**Mining orchestrator** (`tasks/orchestrator.py`, flag `ENABLE_AUTO_ORCHESTRATOR`, default OFF): auto-launches replacement FLAT sessions to keep regions busy. Event-driven main path (`orchestrator_evaluate_after_finalize`, fired at `_run_flat_iteration` finalize) + 1h cron fallback (`orchestrator_periodic_scan`). Conservative gates (`ORCHESTRATOR_*` in `config.py`: max_running=3, daily=10, backoff=2h, short-lived=5min). Only yields to / relaunches tasks it started itself (`launched_by="orchestrator"`); never touches manual tasks.
+**Retired in `b89b732` (2026-06-06 — do NOT look for these; this file's pre-06-06 version described them as live):** `tasks/mining_tasks.py` / `run_mining_task` / `_run_flat_iteration` / `run_flat_pipeline_session`; FLAT / ONESHOT / CASCADE schedules + `POST /api/v1/tasks` + `/ops/start-flat-session` + `/ops/flat-sessions/*` endpoints; `tasks/orchestrator.py` (`ENABLE_AUTO_ORCHESTRATOR`); `mining_agent.py` / `strategy_agent.py` / `evolution_strategy.py` / `field_screener.py` / `feedback_r1b.py` / `feedback_g5.py` / `genetic_optimizer.py`; `agents/core/` source (only `__pycache__` remains; `AttributionType` lives in `agents/attribution_types.py`); `rag_service.py`; `experiment_runs` table. DB still has 71 historical FLAT/ONESHOT `MiningTask` rows (query-only, can't restart). `feedback_agent.py` survives (consultant/sync path). **Phase 2 (async cognitive reconcile, `ENABLE_POOL_COGNITIVE_RECONCILE`) NOT yet activated** — feedback is the pool E-stage synchronous write, not yet an async reconcile beat.
 
 ### Standalone analytics modules
 
@@ -142,8 +132,7 @@ These are pure-function modules orchestrated by services/agents — keep them de
 |------|---------|
 | `alpha_scoring.py` | Composite score + adaptive thresholds |
 | `alpha_semantic_validator.py` | Operator-aware syntax / semantics check (loads operator registry from DB at startup) |
-| `dataset_selector.py` | Bandit-style dataset picker (controlled by `BANDIT_*` settings) |
-| `genetic_optimizer.py` | GA over alpha expressions (operator/window/wrapper/sign/structure mutations) |
+| `dataset_selector.py` | Bandit-style dataset picker (`BANDIT_*` settings); note the live pool path picks via `pool/scheduler.py` weighted_choice over `dataset_cell_stats.mining_weight` |
 | `diversity_tracker.py` | Fingerprint dedup + novelty score |
 | `external_knowledge.py` | Forum + 101-Alphas pattern import |
 | `metrics_tracker.py` | Session/Round/Alpha metrics, writes `.cursor/debug.log` |
@@ -182,7 +171,7 @@ All LLM calls go through `LLMService`. Providers are a **named registry** (`LLM_
 
 ## Project conventions
 
-- `agents/IMPROVEMENT_ANALYSIS.md`, `backend/CODE_STATUS.md`, `backend/REFACTORING_STATUS.md`, and `backend/agents/core/ARCHITECTURE.md` are the working design notes — read them before larger refactors and update them when status changes.
+- **`docs/DEVELOPMENT_PLAN.md` is the single mainline dev doc** (current architecture state + strategy + NO-GO + flag status; historical plans in `docs/archive/`). `agents/IMPROVEMENT_ANALYSIS.md`, `backend/CODE_STATUS.md`, `backend/REFACTORING_STATUS.md` are the working design notes — read them before larger refactors and update them when status changes. (`agents/core/ARCHITECTURE.md` was deleted with `agents/core/` in `b89b732`.)
 - Keep root-level scripts (`ace_lib.py`, `helpful_functions.py`, `validator.py`, `run_real_mining.py`, `parsetab.py`) as standalone utilities; new logic should live under `backend/`.
 - Top-level files `keys.txt`, `api_structure.json`, `brain_alpha_structure.json` are reference dumps from BRAIN — treat as read-only inputs, not authoritative state.
 - Windows is the primary dev platform; Celery is launched with `--pool=solo` because the prefork pool is broken on Windows.
