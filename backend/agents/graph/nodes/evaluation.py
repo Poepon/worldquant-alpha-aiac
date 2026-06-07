@@ -234,10 +234,18 @@ def _check_is_os_consistency(metrics: Dict) -> bool:
       - 2 <= is_sharpe < 5: require os_sharpe > 0 AND os/is >= 0.3
       - is_sharpe >= 5:   require os_sharpe > 0 AND os/is >= 0.4
 
+    ⚠️ 口径 = IS train/test-split 一致性,NOT 真 OS(2026-06-07 实证更正):
+      - metrics["os_sharpe"] 在 live 恒为 None(brain_adapter:1470 os_stats 提交后
+        盲测、simulate 永不返;实测 alphas.os_sharpe 填充 0/14169)→ 优先级 1 是死读,
+        永远回退到 test_sharpe;保留仅为兼容,不代表有真 OS 流入。
+      - metrics["test_sharpe"] = BRAIN test-period split,仍属 IS 内 holdout(可得)。
+      故本检查实为 "IS train vs IS test-split 一致性"(过拟合 train→test 崩塌检测),
+      不是真 IS-vs-OS;真 OS 衰减因架构隐藏不可建(见 kb_redesign §6 / #34)。
+
     OS sharpe sources, in priority order:
-      1. metrics["os_sharpe"]           (BRAIN OS-evaluated sharpe)
-      2. metrics["test_sharpe"]         (BRAIN test-period split)
-      Both null/zero → reject (no OS evidence).
+      1. metrics["os_sharpe"]           (dead in live — always None; see 上)
+      2. metrics["test_sharpe"]         (BRAIN test-period split, IS-internal)
+      Both null/zero → reject (no out-of-sample-split evidence).
 
     Returns True if the alpha is safe (i.e., not over-fit by this rule).
     """

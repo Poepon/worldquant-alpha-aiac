@@ -8,6 +8,13 @@
 
 ---
 
+## ⚠️ 知识库检索分层 L0/L2/L3 known-dead(2026-06-07 实测)
+
+`agents/hierarchical_rag.py` 的 4 层检索**只有 L1(pillar/dataset-category)真转**;**L0(exact pattern_hash)/ L2(family_signature)/ L3(field 级)结构性永久 dormant**——三层都 gate 在 `if not current_expression: return`(:411/:487/:947),而 HG `generation.py:116` 在生成表达式**之前**调 RAG、不传 `current_expression`,self-correct(`validation.py`)走独立 Redis correction KB 也不传。**live 铁证**:`r8_query_log` layer_hits L1=8709 / L0=L2=L3=0、`current_expression_hash` 0/2211。
+**勿基于"4 层都在转"做检索优化(错前提)。** 复活 L0/L2/L3 = 生成端改造,且实证广度/检索非当前杠杆(execution-limited),止损期不做。详见 `docs/kb_redesign_unified_2026-06-07.md` §3.2 / §6。
+
+---
+
 ## 📁 目录总览
 
 ```

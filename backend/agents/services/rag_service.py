@@ -1451,6 +1451,8 @@ class RAGService:
                             'dataset_categories_used': dataset_categories_used,
                             'error_type': error_type,
                             'severity': severity,
+                            # 口径=IS:失败判定来自 IS 评估(BRAIN 隐藏 realized OS)。
+                            'verdict_basis': 'IS',
                             'operator_chain': op_chain[:5] if op_chain else [],
                             'example_expression': expression[:200],
                             'failure_count': 1,
@@ -1624,6 +1626,9 @@ class RAGService:
                             'avg_turnover': turnover,
                             'expected_sharpe': sharpe,
                             'score': score,
+                            # 口径=IS:此 SUCCESS_PATTERN 由 IS-PASS 判定写入(BRAIN
+                            # 隐藏 realized OS)。组织记忆是 IS-决定的成功库,非 OS 验证。
+                            'verdict_basis': 'IS',
                             'created_at': datetime.now().isoformat(),
                             # Plan v5+ §B8: typed Hypothesis reference + variant
                             # tag for KB learning unit upgrade.

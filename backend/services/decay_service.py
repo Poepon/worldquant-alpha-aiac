@@ -8,6 +8,11 @@ by the daily Celery beat. Each call to `maybe_append_decay_snapshot` either
 appends a new entry or no-ops (if the last entry is too recent or the
 alpha has no metrics yet).
 
+⚠️ 口径 = IS, NOT OS. Every metric below comes from ``alpha.is_*`` (in-sample).
+BRAIN hides realized OS, so decay_curve is an IS-rolling snapshot — readers
+(alpha_health drift / regime probes / 复盘时间线) must NOT interpret it as
+OS/realized decay. Each snapshot is self-tagged ``"basis": "IS"``.
+
 Cadence: weekly. Caller invokes daily, but dedup skips appends until 6+
 days have passed since the last snapshot. Keeps storage at ~52
 entries/year/alpha (~7.5KB JSON).
@@ -85,6 +90,8 @@ def build_decay_snapshot(alpha, now: datetime) -> Optional[dict]:
     return {
         "snapshot_date": today.isoformat(),
         "days_since_submit": days_since_submit,
+        # 口径标签:以下指标全来自 alpha.is_*(IS),非 OS。BRAIN 隐藏 realized OS。
+        "basis": "IS",
         "sharpe": _pick(alpha.is_sharpe, "sharpe"),
         "fitness": _pick(alpha.is_fitness, "fitness"),
         "turnover": _pick(alpha.is_turnover, "turnover"),
