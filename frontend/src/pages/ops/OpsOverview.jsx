@@ -260,7 +260,7 @@ export default function OpsOverview() {
         <Col xs={24} md={12}>
           <OpsSectionCard
             title="池队列快照"
-            source="live"
+            source="service"
             rerunSlot={
               pool ? (
                 pool.enabled ? (

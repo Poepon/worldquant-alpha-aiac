@@ -91,10 +91,16 @@ export default function SubmitYieldMonitor() {
   const canSubmit = totals.can_submit || 0
   const submitted = totals.submitted || 0
 
-  // Recent 7-day can_submit sum: detect the submit-yield collapse.
-  const recent7CanSubmit = useMemo(() => {
-    if (!daily.length) return null
-    return daily.slice(-7).reduce((acc, d) => acc + (d.can_submit || 0), 0)
+  // Matured-cohort can_submit sum to detect a REAL submit-yield collapse.
+  // daily buckets by alpha CREATION date, but can_submit settles days later — so
+  // the most recent ~3 days are immature (structurally near-0). Exclude them to
+  // avoid a false "collapse" alert. Note daily only has rows for dates that
+  // produced alphas, so this is over matured NON-EMPTY buckets, not calendar days.
+  const maturedCanSubmit = useMemo(() => {
+    if (daily.length < 5) return null // too little matured history to judge
+    const matured = daily.slice(0, -3) // drop the ~3 most-recent immature days
+    if (!matured.length) return null
+    return matured.slice(-7).reduce((acc, d) => acc + (d.can_submit || 0), 0)
   }, [daily])
 
   const hasAnyData = produced > 0 || daily.length > 0
@@ -160,13 +166,13 @@ export default function SubmitYieldMonitor() {
             }
           />
 
-          {recent7CanSubmit != null && recent7CanSubmit <= 0 && (
+          {maturedCanSubmit != null && maturedCanSubmit <= 0 && (
             <Alert
               type="warning"
               showIcon
               icon={<WarningOutlined />}
               style={{ marginBottom: 16 }}
-              message="近 7 天 can_submit 合计 ≈ 0 — submit-yield 塌方(疑字段卫生缺失),需排查生成层字段过滤。"
+              message="成熟批次(已剔除最近 ~3 天未成熟 cohort)can_submit 合计 ≈ 0 — 疑 submit-yield 塌方(字段卫生缺失),需排查生成层字段过滤。"
             />
           )}
 
@@ -261,6 +267,11 @@ export default function SubmitYieldMonitor() {
                 </ComposedChart>
               </ResponsiveContainer>
             )}
+            <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
+              说明:daily 按 alpha「创建日」聚合;can_submit/submitted 是该批「至今」的累计结局(非当日事件)。
+              最近 ~2-3 天 cohort 尚未评估完/提交,近端结构性偏低,趋势看成熟天数。
+              (created_at 为 UTC、date_submitted 为北京时区,跨日有 ≤8h 偏移。)
+            </Text>
           </Card>
         </>
       )}

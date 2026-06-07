@@ -5977,24 +5977,25 @@ async def cognitive_reconcile_status(
         _select(SystemConfig).where(SystemConfig.config_key == "pool_reconcile_watermark")
     )).scalar_one_or_none()
 
+    by_status = {str(s): int(c) for s, c in status_rows}
+    by_attribution = {str(a): int(c) for a, c in attr_rows}
     return {
         "enabled": bool(getattr(_s, "ENABLE_POOL_COGNITIVE_RECONCILE", False)),
         "grace_sec": int(getattr(_s, "POOL_RECONCILE_GRACE_SEC", 60)),
         "window_days": int(getattr(_s, "POOL_RECONCILE_WINDOW_DAYS", 7)),
+        # config_value 是权威「最近处理边」;刻意不返回 updated_at —— SystemConfig
+        # 无 onupdate,它只反映建行时间而非 watermark 推进时间(会误导)。
         "watermark": (wm.config_value if wm else None),
-        "watermark_updated_at": (
-            wm.updated_at.isoformat() if wm and getattr(wm, "updated_at", None) else None),
         "lifecycle": {
-            "by_status": {str(s): int(c) for s, c in status_rows},
-            "total": await _scalar("SELECT count(*) FROM hypotheses"),
+            "by_status": by_status,
+            "total": sum(by_status.values()),            # = GROUP BY status 之和,省一次查询
             "pool_era_total": await _scalar(
                 "SELECT count(*) FROM hypotheses WHERE hyp_intent_id IS NOT NULL"),
             "can_submit_count_gt0": await _scalar(
                 "SELECT count(*) FROM hypotheses WHERE can_submit_count > 0"),
             "submitted_count_gt0": await _scalar(
                 "SELECT count(*) FROM hypotheses WHERE submitted_count > 0"),
-            "attribution_stamped": await _scalar(
-                "SELECT count(*) FROM hypotheses WHERE attribution IS NOT NULL"),
-            "by_attribution": {str(a): int(c) for a, c in attr_rows},
+            "attribution_stamped": sum(by_attribution.values()),  # = attr GROUP BY 之和
+            "by_attribution": by_attribution,
         },
     }

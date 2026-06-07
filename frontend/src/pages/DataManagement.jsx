@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { 
   Row, 
@@ -359,23 +359,27 @@ const DatasetsTab = () => {
   // Polling logic
   const [activeTask, setActiveTask] = useState(null) // { id: str, region: str }
   
-  // Poll active task
-  useQuery({
+  // Poll active task. NOTE: @tanstack/react-query v5 removed useQuery's
+  // onSuccess/onError callbacks — completion is handled in the effect below off
+  // the query data (setting activeTask=null then disables the query → polling stops).
+  const { data: taskStatus } = useQuery({
     queryKey: ['taskStatus', activeTask?.id],
     queryFn: () => api.getAsyncStatus(activeTask.id),
     enabled: !!activeTask?.id,
     refetchInterval: 2000,
-    onSuccess: (data) => {
-      if (data.status === 'SUCCESS') {
-        message.success(`${activeTask.region} 同步完成！`)
-        setActiveTask(null)
-        queryClient.invalidateQueries(['datasets'])
-      } else if (data.status === 'FAILURE' || data.status === 'REVOKED') {
-        message.error(`同步失败: ${data.error || '未知错误'}`)
-        setActiveTask(null)
-      }
-    }
   })
+
+  useEffect(() => {
+    if (!activeTask || !taskStatus?.status) return
+    if (taskStatus.status === 'SUCCESS') {
+      message.success(`${activeTask.region} 同步完成！`)
+      setActiveTask(null)
+      queryClient.invalidateQueries(['datasets'])
+    } else if (taskStatus.status === 'FAILURE' || taskStatus.status === 'REVOKED') {
+      message.error(`同步失败: ${taskStatus.error || '未知错误'}`)
+      setActiveTask(null)
+    }
+  }, [taskStatus, activeTask, queryClient])
 
   const syncMutation = useMutation({
     mutationFn: ({ region }) => {

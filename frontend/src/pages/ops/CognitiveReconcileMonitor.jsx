@@ -138,9 +138,6 @@ export default function CognitiveReconcileMonitor() {
           description={
             <span>
               reconcile beat 最近处理边(watermark):<b>{watermarkLabel}</b>
-              {data?.watermark_updated_at
-                ? `（更新于 ${fmtTime(data.watermark_updated_at)}）`
-                : ''}
             </span>
           }
         />

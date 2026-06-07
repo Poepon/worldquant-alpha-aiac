@@ -33,7 +33,7 @@ const CAND_STAGE_COLOR = {
 // canonical stage order so an empty stage still shows a 0 chip
 const INTENT_ORDER = ['PENDING', 'CLAIMED', 'DONE', 'FAILED', 'PURGED']
 const CAND_ORDER = ['PENDING_SIM', 'SIMULATING', 'PENDING_EVAL', 'EVALUATING', 'DONE', 'FAILED', 'PURGED']
-const EXPECTED_WORKERS = 4 // N_HG(1) + K_S(2) + K_E(1)
+const DEFAULT_WORKERS = 4 // fallback if backend (pre-P1) omits expected_workers; UI prefers data.expected_workers
 
 function StageChips({ counts, order, colorMap }) {
   return (
@@ -90,6 +90,7 @@ export default function PoolPipelineMonitor() {
   const stuckCand = data?.stuck_past_lease?.candidate_queue || 0
   const stuckTotal = stuckIntent + stuckCand
   const workers = data?.workers_count || 0
+  const expectedWorkers = data?.expected_workers ?? DEFAULT_WORKERS
 
   return (
     <div>
@@ -115,15 +116,15 @@ export default function PoolPipelineMonitor() {
           message={`⚠️ ${stuckTotal} 行卡在 in-flight 超 lease(hyp_intent CLAIMED: ${stuckIntent} / candidate_queue SIMULATING|EVALUATING: ${stuckCand})`}
           description="cutover 退出判据:此处应恒为 0。lease-recycle beat(每 2min)应回收;若持续 >0,查 worker 是否假死 / lease 太短 / 心跳未续。" />
       )}
-      {data?.enabled && workers < EXPECTED_WORKERS && stuckTotal === 0 && (
+      {data?.enabled && workers < expectedWorkers && stuckTotal === 0 && (
         <Alert type="warning" showIcon style={{ marginBottom: 16 }}
-          message={`supervisor 仅 ${workers}/${EXPECTED_WORKERS} 个 worker 存活 — 检查 supervisor 窗口是否在跑 + crash-loop backoff。`} />
+          message={`supervisor 仅 ${workers}/${expectedWorkers} 个 worker 存活 — 检查 supervisor 窗口是否在跑 + crash-loop backoff。`} />
       )}
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col span={6}><Card size="small"><Statistic title="Supervisor worker"
-          value={workers} suffix={`/ ${EXPECTED_WORKERS}`}
-          valueStyle={{ color: workers >= EXPECTED_WORKERS ? '#3f8600' : '#cf1322' }}
+          value={workers} suffix={`/ ${expectedWorkers}`}
+          valueStyle={{ color: workers >= expectedWorkers ? '#3f8600' : '#cf1322' }}
           prefix={<ThunderboltOutlined />} />
           <Tooltip title={(data?.workers_alive || []).join(', ') || '无'}>
             <Text type="secondary" style={{ fontSize: 12 }}>{(data?.workers_alive || []).join(', ').slice(0, 40) || '—'}</Text>

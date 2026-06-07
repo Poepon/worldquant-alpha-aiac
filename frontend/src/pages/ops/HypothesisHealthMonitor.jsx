@@ -56,7 +56,8 @@ const INTENT_FUNNEL = [
 const PILLAR_PALETTE = ['#00d4ff', '#9c88ff', '#ffb700', '#ff8c00', '#52c41a', '#ff4d4f', '#13c2c2']
 
 export default function HypothesisHealthMonitor() {
-  // 池状态(主体漏斗源) — 与池相关页一致 8s 轮询
+  // 池状态(主体漏斗源)。注:useOpsData 仅 mount/手动 fetch,无自动轮询;
+  // 需实时刷新点右上「重新运行」或刷新页面(漏斗类指标非秒级敏感)。
   const pool = useOpsData(() => api.getPoolStatus(), [])
   // pillar 分布(live)
   const pillar = useOpsData(() => api.getOpsPillarLatest(), [])
