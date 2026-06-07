@@ -38,6 +38,7 @@ def _passing_candidate():
         "_cs_snapshot": fresh,
         "_pnl_covered": True,
         "rank": 1,
+        "_sub_univ_sharpe": settings.SUBUNIV_SHARPE_MIN + 0.3,
     }
 
 
@@ -59,6 +60,8 @@ def test_passing_candidate_passes_all_gates():
     ("_margin", 0.0001, "G6_margin"),          # < 5bps
     ("_margin", -0.01, "G6_margin"),           # negative
     ("_margin", None, "G6_margin"),
+    ("_sub_univ_sharpe", 0.5, "G5b_sub_universe"),   # below comp 0.7 standard
+    ("_sub_univ_sharpe", None, "G5b_sub_universe"),  # missing → fail-closed
     ("_recommendation", "NEUTRAL", "G7_recommendation"),
     ("_recommendation", "SKIP", "G7_recommendation"),
     ("_recommendation", None, "G7_recommendation"),

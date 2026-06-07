@@ -61,7 +61,9 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
                (metrics->'_iqc_marginal'->>'delta_sharpe')::float AS brain_d,
                metrics->>'_brain_can_submit_at' AS cs_at,
                (metrics->'_iqc_marginal'->>'delta_score')::float AS delta_score,
-               metrics->'_iqc_marginal'->>'scope' AS iqc_scope
+               metrics->'_iqc_marginal'->>'scope' AS iqc_scope,
+               (SELECT (e->>'value')::float FROM jsonb_array_elements(metrics->'checks') e
+                WHERE e->>'name' = 'LOW_SUB_UNIVERSE_SHARPE' LIMIT 1) AS sub_univ_sharpe
         FROM alphas
         WHERE can_submit IS TRUE AND date_submitted IS NULL
           AND region = :region
@@ -101,6 +103,25 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
     base_returns = build_pool_returns(pool_rows)
     use_value = base_returns is not None
 
+    # Corr-to-submitted-pool from LOCAL PnL (#39 fix, 2026-06-07 — ports the
+    # endpoint's ops.py fix into auto-submit so the two paths stop diverging).
+    # G3b fail-closes on NULL stored self_corr, and 56/67 backlog are NULL (async
+    # PENDING) → without this auto-submit can't assess orthogonality for ~84% of
+    # the backlog (they all fail G3b regardless of quality). Fill the seed with
+    # each candidate's MAX |corr| to any submitted-pool member from alpha_pnl.
+    # NOTE: only affects G3b/G9 (self_corr seed); recon (ΔSharpe vs BRAIN
+    # before-and-after) is untouched, so sign-agreement is not polluted.
+    pool_corr_by_id: Dict[int, float] = {}
+    pool_member_ids = {p[0] for p in pool_rows}
+    if pool_member_ids and pnl_rows:
+        union_corr = pairwise_corr_from_pnl(pnl_rows + pool_rows)
+        for (a, b), v in union_corr.items():
+            av = abs(v)
+            if a in pnl_ids and b in pool_member_ids:
+                pool_corr_by_id[a] = max(pool_corr_by_id.get(a, 0.0), av)
+            elif b in pnl_ids and a in pool_member_ids:
+                pool_corr_by_id[b] = max(pool_corr_by_id.get(b, 0.0), av)
+
     cand_series: Dict[int, Any] = {}
     if use_value and pnl_rows:
         import pandas as _pd
@@ -134,7 +155,11 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
         composite = float(r[10]) if r[10] is not None else None
         cand: Dict[str, Any] = {
             "id": aid,
-            "self_corr": float(r[8]) if r[8] is not None else None,
+            # stored self_corr wins; else PnL-computed corr-to-pool (#39); else
+            # None (no PnL → G3b fail-closed, correct: can't act on unmeasured).
+            "self_corr": (
+                float(r[8]) if r[8] is not None else pool_corr_by_id.get(aid)
+            ),
             "score": composite if composite is not None else (sharpe or 0.0),
             "measurable": aid in pnl_ids,
             "_brain_id": r[1],
@@ -153,6 +178,8 @@ async def compute_auto_submit_candidates(db, *, region: str, settings) -> Dict[s
             # each submit even though the policy optimizes portfolio marginal value).
             "_delta_score": float(r[13]) if r[13] is not None else None,
             "_iqc_scope": r[14],
+            # BRAIN-official narrow-universe Sharpe (#39 incr) — guard G5b reads it.
+            "_sub_univ_sharpe": float(r[15]) if r[15] is not None else None,
         }
         if sign_routing_ok:
             cand["value_tier"] = sign_value_tier(delta_by_id.get(aid), aid in pnl_ids)
@@ -225,6 +252,7 @@ def evaluate_guard_stack(
     turn_max = float(th.get("turnover_max", getattr(settings, "EVAL_TURNOVER_MAX", 0.4)))
     margin_floor = float(getattr(settings, "AUTO_SUBMIT_MARGIN_BPS_MIN", 5.0)) / 10000.0
     corr_thr = float(getattr(settings, "AUTO_SUBMIT_CORR_THRESHOLD", 0.7))
+    subuniv_min = float(getattr(settings, "SUBUNIV_SHARPE_MIN", 0.7))
     require_fresh = bool(getattr(settings, "AUTO_SUBMIT_REQUIRE_FRESH_CANSUBMIT", True))
     max_age_h = float(getattr(settings, "AUTO_SUBMIT_CANSUBMIT_MAX_AGE_H", 12))
 
@@ -265,6 +293,12 @@ def evaluate_guard_stack(
         turnover is not None and turn_min <= turnover <= turn_max
     )
 
+    # G5b sub-universe Sharpe (#39 incr): BRAIN-official narrow-universe robustness.
+    # WQ hidden standard wants Sub-Universe Sharpe > ~0.7; a candidate strong on
+    # the full universe but weak in the sub-universe is fragile. NULL → fail-closed.
+    sub_univ = cand.get("_sub_univ_sharpe")
+    gates["G5b_sub_universe"] = sub_univ is not None and sub_univ >= subuniv_min
+
     # G6 economic gate.
     gates["G6_margin"] = margin is not None and margin >= margin_floor
 
@@ -289,6 +323,7 @@ def evaluate_guard_stack(
         "sharpe": sharpe, "sharpe_min": sharpe_min,
         "fitness": fitness, "fitness_min": fitness_min,
         "turnover": turnover, "turnover_band": [turn_min, turn_max],
+        "sub_universe_sharpe": sub_univ, "sub_universe_min": subuniv_min,
         "margin": margin, "margin_floor": margin_floor,
         "margin_bps": (margin * 10000.0) if margin is not None else None,
         "composite": composite,

@@ -4532,6 +4532,20 @@ class DrainOrderItem(BaseModel):
     # 3 no-PnL. None when breadth mode. Makes the dilutive (drain-last) tail
     # visible to the operator instead of opaque rank order.
     value_tier: Optional[int] = None
+    # Per-alpha robustness (#39, 2026-06-07) — OS-survival proxy from sub-period
+    # Sharpe consistency of the local alpha_pnl (BRAIN hides realized OS). High =
+    # consistent edge across sub-periods; low / FRAGILE = a lone-spike fit likely
+    # to decay OS. None when no/too-thin local PnL to assess.
+    robustness_score: Optional[float] = None        # [0,1]
+    robustness_verdict: Optional[str] = None        # ROBUST | MODERATE | FRAGILE
+    min_subperiod_sharpe: Optional[float] = None     # worst sub-period Sharpe
+    frac_positive_subperiods: Optional[float] = None
+    max_drawdown: Optional[float] = None
+    fragile_reason: Optional[str] = None             # set only for the gated-out bucket
+    # BRAIN-official narrow-universe Sharpe (#39 incr) — higher = more robust in the
+    # sub-universe (WQ hidden standard: >0.7). Informational here (human review);
+    # auto-submit hard-gates on it (G5b). None when not returned.
+    sub_universe_sharpe: Optional[float] = None
 
 
 class DrainOrderOut(BaseModel):
@@ -4549,10 +4563,16 @@ class DrainOrderOut(BaseModel):
     recon_verdict: Optional[str] = None
     recon_sign_rate: Optional[float] = None
     recon_n_compared: int = 0
+    # Robustness gate (#39): min_robustness>0 drops FRAGILE/unassessable candidates
+    # from the ordered queue into `fragile`. 0 = annotate-only (no gate).
+    min_robustness: float = 0.0
+    n_robust: int = 0                            # candidates with an assessable robustness score
+    n_fragile: int = 0                           # gated out (score < min_robustness or no PnL)
     n_selected: int
     n_blocked: int
     selected: List[DrainOrderItem]
     blocked: List[DrainOrderItem]
+    fragile: List[DrainOrderItem] = []
     note: Optional[str] = None
 
 
@@ -4561,6 +4581,7 @@ async def submit_backlog_drain_order(
     region: Optional[str] = None,
     margin_bps_min: float = Query(5.0, ge=0),
     threshold: float = Query(0.7, gt=0, le=1),
+    min_robustness: float = Query(-1.0, ge=-1.0, le=1.0),
     _token: str = Depends(_require_ops_token),
     db: AsyncSession = Depends(get_db),
 ) -> DrainOrderOut:
@@ -4580,6 +4601,7 @@ async def submit_backlog_drain_order(
     first; submitting near-duplicates wastes the limited submission budget).
     """
     from sqlalchemy import text as _text, bindparam
+    from backend.config import settings
     from backend.marginal_drain import (
         pairwise_corr_from_pnl, greedy_orthogonal_order,
         build_pool_returns, marginal_delta_sharpe,
@@ -4609,7 +4631,9 @@ async def submit_backlog_drain_order(
                (metrics->>'_self_corr')::float AS self_corr,
                metrics->'_iqc_marginal'->>'recommendation' AS verdict,
                (metrics->'_iqc_marginal'->>'composite_score')::float AS composite,
-               (metrics->'_iqc_marginal'->>'delta_sharpe')::float AS brain_d
+               (metrics->'_iqc_marginal'->>'delta_sharpe')::float AS brain_d,
+               (SELECT (e->>'value')::float FROM jsonb_array_elements(metrics->'checks') e
+                WHERE e->>'name' = 'LOW_SUB_UNIVERSE_SHARPE' LIMIT 1) AS sub_univ_sharpe
         FROM alphas
         WHERE {_where}
         """
@@ -4629,6 +4653,29 @@ async def submit_backlog_drain_order(
 
     corr = pairwise_corr_from_pnl(pnl_rows)
 
+    # --- Robustness (#39, 2026-06-07): per-alpha OS-survival proxy from sub-period
+    # Sharpe consistency of the SAME alpha_pnl rows (zero extra DB cost). BRAIN
+    # hides realized OS ⇒ pre-submit robustness is the only controllable quality
+    # lever; a lone-spike alpha (one good sub-period, losing in the rest) likely
+    # decays OS even at the same full Sharpe. min_robustness>0 gates FRAGILE/
+    # unassessable candidates out of the ordered queue into `fragile`. ---
+    from backend.robustness_selector import assess_from_pnl_rows
+    rob_by_id = assess_from_pnl_rows(
+        pnl_rows,
+        k=int(settings.ROBUSTNESS_SUBPERIODS),
+        min_overlap=int(settings.ROBUSTNESS_MIN_OVERLAP_DAYS),
+        worst_ref=float(settings.ROBUSTNESS_WORST_REF),
+        robust_min_sub=float(settings.ROBUSTNESS_ROBUST_MIN_SUB),
+        robust_min_frac=float(settings.ROBUSTNESS_ROBUST_MIN_FRAC),
+        fragile_min_sub=float(settings.ROBUSTNESS_FRAGILE_MIN_SUB),
+        fragile_max_frac=float(settings.ROBUSTNESS_FRAGILE_MAX_FRAC),
+    )
+    # -1 sentinel = use config default; explicit 0 = annotate-only (no gate).
+    robustness_gate = (
+        float(settings.ROBUSTNESS_MIN_SCORE_DEFAULT)
+        if float(min_robustness) < 0 else float(min_robustness)
+    )
+
     # --- Combination layer (P1 L2): base = submitted-pool combined daily returns,
     # built from the LOCAL alpha_pnl (bit-identical to the OS cache + fresher). Per
     # candidate, ΔSharpe = Sharpe(pool+candidate) − Sharpe(pool) on the shared OS
@@ -4644,6 +4691,13 @@ async def submit_backlog_drain_order(
     )
     base_returns = None
     n_base_pool = 0
+    # Corr-to-submitted-pool from LOCAL PnL (#39 orthogonality fix, 2026-06-07).
+    # The stored metrics._self_corr seed is NULL for most backlog (async PENDING),
+    # so without this a candidate that is a near-DUPLICATE of an already-submitted
+    # alpha slips through as orthogonal (self_corr None→0) and gets recommended —
+    # a red-line. Compute each candidate's MAX |corr| to any submitted-pool member
+    # from alpha_pnl and use it to fill the seed where stored self_corr is absent.
+    pool_corr_by_id: Dict[int, float] = {}
     if eff_region:
         pool_res = (await db.execute(_text(
             "SELECT ap.alpha_id, ap.trade_date, ap.pnl FROM alpha_pnl ap "
@@ -4654,6 +4708,18 @@ async def submit_backlog_drain_order(
         pool_rows = [(int(p[0]), p[1], float(p[2])) for p in pool_res if p[2] is not None]
         n_base_pool = len({p[0] for p in pool_rows})
         base_returns = build_pool_returns(pool_rows)  # equal-vol pool series or None
+        pool_member_ids = {p[0] for p in pool_rows}
+        if pool_member_ids and pnl_rows:
+            # Reuse pairwise_corr_from_pnl over candidates ∪ pool; keep only the
+            # cross pairs (one candidate, one submitted) → candidate's max |corr|.
+            union_corr = pairwise_corr_from_pnl(pnl_rows + pool_rows)
+            cand_id_set = set(pnl_ids)
+            for (a, b), v in union_corr.items():
+                av = abs(v)
+                if a in cand_id_set and b in pool_member_ids:
+                    pool_corr_by_id[a] = max(pool_corr_by_id.get(a, 0.0), av)
+                elif b in cand_id_set and a in pool_member_ids:
+                    pool_corr_by_id[b] = max(pool_corr_by_id.get(b, 0.0), av)
     use_value = base_returns is not None
 
     # Per-candidate daily series from the already-pulled pnl_rows (keyed by alpha_pk).
@@ -4718,7 +4784,11 @@ async def submit_backlog_drain_order(
         ds = delta_by_id[aid]
         cand: Dict[str, Any] = {
             "id": aid,
-            "self_corr": float(r[5]) if r[5] is not None else None,
+            # stored self_corr wins; else the PnL-computed corr-to-pool (#39);
+            # else None (no PnL → unmeasured, greedy treats as 0 = orthogonal).
+            "self_corr": (
+                float(r[5]) if r[5] is not None else pool_corr_by_id.get(aid)
+            ),
             # breadth-mode tiebreak (only consulted when objective='breadth').
             "score": composite if composite is not None else (sharpe or 0.0),
             "measurable": aid in pnl_ids,
@@ -4729,6 +4799,8 @@ async def submit_backlog_drain_order(
             "_composite": composite,
             "_verdict": r[6],
             "_pnl_covered": aid in pnl_ids,
+            "_robustness": rob_by_id.get(aid),
+            "_sub_univ_sharpe": float(r[9]) if r[9] is not None else None,
         }
         if sign_routing_ok:
             # SIGN-based value tier (magnitude is noise; sign is validated against
@@ -4737,16 +4809,44 @@ async def submit_backlog_drain_order(
             cand["value_tier"] = sign_value_tier(ds, aid in pnl_ids)
         candidates.append(cand)
 
+    # Robustness gate (#39): when robustness_gate>0, only candidates whose
+    # robustness_score ≥ gate enter the ordered queue; FRAGILE / unassessable
+    # (no local PnL) ones are surfaced in `fragile` so the operator sees them but
+    # doesn't submit a likely-to-decay alpha. gate==0 → annotate-only (all pass).
+    n_robust = sum(1 for c in candidates if (c.get("_robustness") or {}).get("robustness_score") is not None)
+    fragile_cands: List[Dict[str, Any]] = []
+    if robustness_gate > 0:
+        passed: List[Dict[str, Any]] = []
+        for c in candidates:
+            rb = c.get("_robustness") or {}
+            sc = rb.get("robustness_score")
+            if sc is not None and float(sc) >= robustness_gate:
+                passed.append(c)
+            else:
+                c["_fragile_reason"] = (
+                    "no_local_pnl" if not rb
+                    else f"score {sc} < {robustness_gate} ({rb.get('robustness_verdict')})"
+                )
+                fragile_cands.append(c)
+        candidates_for_order = passed
+    else:
+        candidates_for_order = candidates
+
     # FALSIFIED recon ⇒ breadth-only (don't route on a proxy that no longer tracks
     # the authoritative marginal), even though a base pool exists.
     objective = "value" if sign_routing_ok else "breadth"
     ordered, blocked = greedy_orthogonal_order(
-        candidates, corr, threshold=float(threshold), objective=objective,
+        candidates_for_order, corr, threshold=float(threshold), objective=objective,
+    )
+    # Surface most-robust-first within the fragile bucket (operator triage).
+    fragile_cands.sort(
+        key=lambda c: -((c.get("_robustness") or {}).get("robustness_score") or -1.0)
     )
 
     def _item(c: Dict[str, Any]) -> DrainOrderItem:
         aid = int(c["id"])
         ds = delta_by_id.get(aid)
+        rb = c.get("_robustness") or {}
         return DrainOrderItem(
             alpha_pk=aid,
             brain_id=c.get("_brain_id"),
@@ -4764,6 +4864,13 @@ async def submit_backlog_drain_order(
             verdict=c.get("_verdict"),
             pnl_covered=bool(c.get("_pnl_covered")),
             value_tier=c.get("value_tier"),
+            robustness_score=rb.get("robustness_score"),
+            robustness_verdict=rb.get("robustness_verdict"),
+            min_subperiod_sharpe=rb.get("min_subperiod_sharpe"),
+            frac_positive_subperiods=rb.get("frac_positive_subperiods"),
+            max_drawdown=rb.get("max_drawdown"),
+            fragile_reason=c.get("_fragile_reason"),
+            sub_universe_sharpe=c.get("_sub_univ_sharpe"),
         )
 
     n_cand = len(candidates)
@@ -4814,6 +4921,19 @@ async def submit_backlog_drain_order(
             f"故按 sign 分层(增益 {n_additive} / 中性 / 稀释 {n_dilutive})+广度排序,稀释(Δ<0)者排在最后。"
             f"实时核验见 GET /ops/marginal-reconciliation。"
         )
+    # Robustness (#39) note: BRAIN hides realized OS → sub-period consistency is
+    # the only pre-submit OS-survival proxy. Surface coverage + gate effect.
+    if robustness_gate > 0:
+        _notes.append(
+            f"稳健性门(#39):min_robustness={robustness_gate:.2f} → 排除 {len(fragile_cands)} 个"
+            f"FRAGILE/无PnL候选(进 fragile 桶),仅 {len(candidates_for_order)} 个稳健者进排序。"
+            f"口径=本地 alpha_pnl 子周期 Sharpe 一致性(冻结 IS 窗,非当前 regime;提交前仍需 re-sim 当前数据确认未衰减)。"
+        )
+    elif n_robust:
+        _notes.append(
+            f"稳健性(#39):已标注 {n_robust}/{n_cand} 候选(robustness_score/verdict);"
+            f"min_robustness=0 仅标注未 gate。传 min_robustness>0 启用门(剔除孤峰货)。⚠️ 口径=冻结 IS 子周期,提交前仍需 re-sim 当前数据。"
+        )
     note = "；".join(_notes) or None
 
     return DrainOrderOut(
@@ -4829,10 +4949,14 @@ async def submit_backlog_drain_order(
         recon_verdict=recon_stat.get("verdict") if use_value else None,
         recon_sign_rate=recon_stat.get("sign_agreement_rate") if use_value else None,
         recon_n_compared=recon_stat.get("n_sign_compared", 0) if use_value else 0,
+        min_robustness=robustness_gate,
+        n_robust=n_robust,
+        n_fragile=len(fragile_cands),
         n_selected=len(ordered),
         n_blocked=len(blocked),
         selected=[_item(c) for c in ordered],
         blocked=[_item(c) for c in blocked],
+        fragile=[_item(c) for c in fragile_cands],
         note=note,
     )
 

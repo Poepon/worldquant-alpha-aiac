@@ -1129,6 +1129,29 @@ class Settings(BaseSettings):
     OPT_ROBUSTNESS_FILTER: bool = True      # apply RobustnessFilter post-WinnerSelector
     OPT_PLATEAU_BAND: float = 0.15          # same-neut sibling must reach sharpe_min - this
 
+    # ── Submit-selector robustness (#39, 2026-06-07) — per-alpha OS-survival proxy
+    # from sub-period Sharpe consistency of the local alpha_pnl (backend/
+    # robustness_selector.py). BRAIN hides realized OS (reference_brain_os_hidden_
+    # is_only) ⇒ pre-submit robustness is the only controllable submission-quality
+    # lever. Consumed by GET /ops/submit-backlog/drain-order (the orthogonal drain
+    # gains a robustness dimension). ROBUSTNESS_MIN_SCORE_DEFAULT is the default
+    # gate for that endpoint's `min_robustness` (0.0 = annotate-only, no gate).
+    ROBUSTNESS_SUBPERIODS: int = 6          # split PnL window into K sub-periods
+    ROBUSTNESS_MIN_OVERLAP_DAYS: int = 200  # need ≥ this many PnL days to assess
+    ROBUSTNESS_WORST_REF: float = 1.0       # maps worst-subperiod Sharpe [-ref,ref]→[0,1]
+    ROBUSTNESS_ROBUST_MIN_SUB: float = -0.1     # ROBUST: worst sub-period Sharpe ≥ this
+    ROBUSTNESS_ROBUST_MIN_FRAC: float = 0.83    # ROBUST: ≥ this frac of sub-periods positive
+    ROBUSTNESS_FRAGILE_MIN_SUB: float = -1.0    # FRAGILE: worst sub-period Sharpe ≤ this
+    ROBUSTNESS_FRAGILE_MAX_FRAC: float = 0.5    # FRAGILE: < this frac of sub-periods positive
+    ROBUSTNESS_MIN_SCORE_DEFAULT: float = 0.0   # drain-order default gate (0 = annotate-only)
+
+    # ── Sub-universe Sharpe (#39 增量, 2026-06-07) — BRAIN 官方返回的 narrow-universe
+    # 稳健信号(metrics.checks[LOW_SUB_UNIVERSE_SHARPE].value),比我们冻结-PnL 的
+    # 子周期 robustness 更直接(对抗审查 wd7190y28 完整性 gap#2)。WQ 隐性"好 alpha"
+    # 标准要求 Sub+Super Universe 均 Sharpe>0.7。auto-submit 以此为软门(G5b);
+    # drain-order 端点仅暴露值供人工复核(不 gate)。
+    SUBUNIV_SHARPE_MIN: float = 0.7         # auto-submit G5b 门(comp 隐性标准)
+
     # ── Auto-submit (2026-06-04) — automate the orthogonal backlog drain.
     # System is execution-limited (67+ clean alphas, ~12 ever submitted). This 6h
     # beat picks the top of the GET /ops/submit-backlog/drain-order sequence and
