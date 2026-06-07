@@ -133,10 +133,14 @@ class BrainSimulator:
         return list(results)
 
     async def _run_one(self, variant: Variant) -> VariantSimResult:
-        acquired = await BrainAdapter._acquire_sim_slot()
-        if not acquired:
-            return _err(variant, "slot_acquire_timeout")
-
+        # NOTE (2026-06-08, double-acquire root fix): do NOT acquire a BRAIN sim
+        # slot here. simulate_alpha (brain_adapter) already acquires + shield-
+        # releases ONE slot for its full POST→poll→terminal lifecycle. A second
+        # acquire here made every sim hold 2 of the 3 USER slots, so any >=2
+        # concurrent run_batch sims saturated the limit and each inner acquire
+        # deadlocked → all 600s sim_timeout (2026-06-07 regime run: 0/23). One
+        # acquire (simulate_alpha's) = 1 slot/sim → run_batch concurrency works.
+        # See reference_brainsim_double_acquire_deadlock.
         timeout = float(getattr(settings, "OPT_SIM_TIMEOUT_SECONDS", 600))
         try:
             sim = await asyncio.wait_for(
@@ -146,16 +150,17 @@ class BrainSimulator:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            await BrainAdapter._release_sim_slot()
             return _err(variant, f"sim_timeout({timeout:.0f}s)")
         except Exception as ex:  # noqa: BLE001 — any sim error becomes a row
-            await BrainAdapter._release_sim_slot()
             return _err(variant, f"sim_exception: {type(ex).__name__}: {ex}")
-        else:
-            await BrainAdapter._release_sim_slot()
 
         if not isinstance(sim, dict):
             return _err(variant, f"sim_response_not_dict({type(sim).__name__})")
+        # simulate_alpha signals slot-timeout / 429 / auth / creation-failed as
+        # {"success": False, "error": ...}; surface that reason instead of parsing
+        # an error dict as metrics (which would yield a phantom sharpe=None row).
+        if sim.get("success") is False:
+            return _err(variant, str(sim.get("error") or "sim_failed"))
 
         m = _extract_is_metrics(sim)
         return VariantSimResult(

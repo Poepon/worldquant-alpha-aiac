@@ -1159,8 +1159,14 @@ class Settings(BaseSettings):
     ENABLE_REGIME_MONITOR: bool = False      # hot-toggle(注册 SUPPORTED_FLAGS);beat gate
     REGIME_MONITOR_BACKLOG_SAMPLE: int = 10  # 除 13 提交外再抽 N 个 backlog(按 sharpe desc)
     REGIME_MONITOR_RECOVERY_SHARPE: float = 1.25   # re-sim ≥ 此 = 当前数据可提交(recovered)
-    REGIME_MONITOR_TURN_MEAN_SHARPE: float = 0.5   # 提交集 re-sim 均值 ≥ 此 = 老赢家回正(turn)
-    REGIME_MONITOR_TURN_MIN_RECOVERED: int = 1     # 或 ≥ 此数 alpha re-sim 过门 = turn
+    # turn 判定(2026-06-08 重标定:旧 mean≥0.5 OR 1-recovered 在 -0.74 衰减 + 缓存假恢复上误报 TURNING)。
+    # 下列条件须【同时】满足才判 REGIME_TURNING(见 regime_monitor.compute_regime_signal)。
+    REGIME_MONITOR_TURN_MEAN_SHARPE: float = 1.0   # fresh 提交集 re-sim 均值 ≥ 此(绝对地板)
+    REGIME_MONITOR_TURN_MIN_RECOVERED: int = 1     # fresh recovered 计数地板(frac 为主判据)
+    REGIME_MONITOR_TURN_RECOVERED_FRAC: float = 0.5  # fresh 提交集 ≥gate 的比例 ≥ 此 = 多数恢复
+    REGIME_MONITOR_TURN_MAX_DECAY: float = -0.25   # fresh mean_delta ≥ 此(未显著衰减才算 turn)
+    REGIME_MONITOR_STALE_EPS: float = 0.001        # |resim-baseline|≤此 视作 BRAIN dedup 缓存 → 剔除
+    REGIME_MONITOR_MIN_FRESH: int = 3              # fresh 提交集 < 此 → INSUFFICIENT(样本不足判不了)
 
     # ── Auto-submit (2026-06-04) — automate the orthogonal backlog drain.
     # System is execution-limited (67+ clean alphas, ~12 ever submitted). This 6h

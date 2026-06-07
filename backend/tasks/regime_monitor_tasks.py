@@ -96,8 +96,12 @@ async def _run() -> dict:
 
     backlog_n = int(getattr(settings, "REGIME_MONITOR_BACKLOG_SAMPLE", 10))
     recovery_gate = float(getattr(settings, "REGIME_MONITOR_RECOVERY_SHARPE", 1.25))
-    turn_mean = float(getattr(settings, "REGIME_MONITOR_TURN_MEAN_SHARPE", 0.5))
+    turn_mean = float(getattr(settings, "REGIME_MONITOR_TURN_MEAN_SHARPE", 1.0))
     turn_min_recovered = int(getattr(settings, "REGIME_MONITOR_TURN_MIN_RECOVERED", 1))
+    turn_frac = float(getattr(settings, "REGIME_MONITOR_TURN_RECOVERED_FRAC", 0.5))
+    turn_max_decay = float(getattr(settings, "REGIME_MONITOR_TURN_MAX_DECAY", -0.25))
+    stale_eps = float(getattr(settings, "REGIME_MONITOR_STALE_EPS", 1e-3))
+    min_fresh = int(getattr(settings, "REGIME_MONITOR_MIN_FRESH", 3))
 
     async with AsyncSessionLocal() as db:
         specs = await _load_probe_specs(db, backlog_n)
@@ -106,8 +110,20 @@ async def _run() -> dict:
         return {"skipped": "no_probe_alphas"}
 
     variants = [make_variant(s) for s in specs]
+    # Serial re-sim (concurrency 1), conservative default. The 2026-06-07 0/23
+    # failure was NOT "BRAIN throttling" — root cause was a double slot-acquire
+    # (BrainSimulator._run_one + simulate_alpha each took a slot → 2 slots/sim →
+    # >=2 concurrent saturated the USER 3-slot limit → inner-acquire deadlock →
+    # 600s sim_timeout). Now fixed in services/optimization/simulator.py (1
+    # slot/sim), so run_batch concurrency is safe again. Kept one-at-a-time here
+    # since it's a daily off-hours probe (pool paused) where ~1-2h is fine; flip
+    # to `run_batch(variants, budget=len(variants))` for ~3x speedup once a live
+    # concurrent run confirms. See reference_brainsim_double_acquire_deadlock.
     async with BrainAdapter() as brain:
-        results = await BrainSimulator(brain).run_batch(variants, budget=len(variants))
+        sim = BrainSimulator(brain)
+        results = []
+        for v in variants:
+            results.extend(await sim.run_batch([v], budget=1))
 
     # run_batch preserves input order → zip specs with results.
     probes, rows = [], []
@@ -127,6 +143,8 @@ async def _run() -> dict:
     signal = compute_regime_signal(
         probes, recovery_gate=recovery_gate,
         turn_mean_threshold=turn_mean, turn_min_recovered=turn_min_recovered,
+        turn_recovered_frac=turn_frac, turn_max_decay=turn_max_decay,
+        stale_eps=stale_eps, min_fresh=min_fresh,
     )
     signal["computed_at"] = datetime.now(timezone.utc).isoformat()
     _persist(signal, rows)

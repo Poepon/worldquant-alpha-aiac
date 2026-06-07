@@ -42,7 +42,7 @@ def test_make_variant_omits_none_settings():
 
 
 # --------------------------------------------------------------------------- #
-# compute_regime_signal
+# compute_regime_signal  (2026-06-08 recal: frac+delta turn + cache-hit exclusion)
 # --------------------------------------------------------------------------- #
 def test_regime_down_when_old_winners_still_negative():
     # The current trough: submitted winners re-sim deeply negative.
@@ -51,58 +51,67 @@ def test_regime_down_when_old_winners_still_negative():
         _p("b", "submitted", 1.7, -0.20),
         _p("c", "submitted", 1.5, 0.10),
     ]
-    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=0.5)
+    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=1.0)
     assert sig["turn_detected"] is False
     assert sig["verdict"] == "REGIME_DOWN"
     assert sig["n_recovered_total"] == 0
     assert sig["submitted"]["mean_resim"] < 0.5
 
 
-def test_regime_turning_via_mean_recovery():
-    # Old winners' mean current-IS Sharpe back above the turn threshold.
+def test_regime_turning_when_winners_recover_to_gate():
+    # Genuine turn: >= min_fresh submitted, majority re-sim back AT/above the gate
+    # with little decay vs their own baseline.
     probes = [
-        _p("a", "submitted", 2.0, 0.8),
-        _p("b", "submitted", 1.7, 0.6),
-        _p("c", "submitted", 1.5, 0.7),
+        _p("a", "submitted", 1.5, 1.6),
+        _p("b", "submitted", 1.4, 1.45),
+        _p("c", "submitted", 1.6, 1.5),
     ]
-    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=0.5)
+    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=1.0)
     assert sig["turn_detected"] is True
     assert sig["verdict"] == "REGIME_TURNING"
+    assert sig["submitted"]["frac_recovered"] == 1.0
 
 
-def test_regime_turning_via_one_recovered_to_gate():
-    # Mean still below turn threshold, but ONE alpha re-sims submittable (≥gate).
+def test_single_recovery_not_enough_to_turn():
+    # One alpha back at the gate but the cohort is decayed → NOT a turn. Kills the
+    # 2026-06-07 false-positive path ("1 recovered → TURNING").
     probes = [
         _p("a", "submitted", 2.0, -0.5),
         _p("b", "submitted", 1.7, 0.1),
-        _p("c", "backlog", 1.3, 1.40),     # recovered to submittable
+        _p("c", "submitted", 1.5, 1.40),   # only this one recovered
     ]
-    sig = compute_regime_signal(probes, recovery_gate=1.25,
-                                turn_mean_threshold=0.5, turn_min_recovered=1)
-    assert sig["turn_detected"] is True
-    assert sig["verdict"] == "REGIME_TURNING"
-    assert sig["n_recovered_total"] == 1
-    assert "c" in sig["recovered_ids"]
-
-
-def test_turn_min_recovered_threshold_respected():
-    # turn_min_recovered=2 → a single recovered alpha is NOT enough.
-    probes = [
-        _p("a", "submitted", 2.0, -0.5),
-        _p("b", "backlog", 1.3, 1.40),
-    ]
-    sig = compute_regime_signal(probes, recovery_gate=1.25,
-                                turn_mean_threshold=0.5, turn_min_recovered=2)
+    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=1.0)
     assert sig["turn_detected"] is False
+    assert sig["verdict"] == "REGIME_DOWN"
+    assert sig["submitted"]["frac_recovered"] < 0.5
+
+
+def test_stale_resim_excluded_from_recovery():
+    # A re-sim EXACTLY at baseline = BRAIN dedup/cache (no current-data signal):
+    # excluded from fresh/recovery so it can't inflate a turn (the 2026-06-07 bug:
+    # 5/23 re-sims came back exactly at baseline and were counted as recoveries).
+    probes = [
+        _p("a", "submitted", 2.18, 2.18),   # stale (cache) — was a false "recovery"
+        _p("b", "submitted", 1.75, 1.75),   # stale
+        _p("c", "submitted", 1.95, 0.78),   # fresh decay
+        _p("d", "submitted", 1.6, 0.8),     # fresh decay
+        _p("e", "submitted", 1.5, 0.9),     # fresh decay
+    ]
+    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=1.0)
+    assert sig["submitted"]["n_stale"] == 2
+    assert set(sig["submitted"]["stale_ids"]) == {"a", "b"}
+    assert sig["submitted"]["n_fresh"] == 3
+    assert sig["n_recovered_total"] == 0       # the 2 cache hits don't count
     assert sig["verdict"] == "REGIME_DOWN"
 
 
-def test_insufficient_when_all_resims_errored():
+def test_insufficient_when_too_few_fresh_resims():
+    # All errored (or fewer than min_fresh fresh submitted) → can't judge.
     probes = [
         _p("a", "submitted", 2.0, None),
         _p("b", "submitted", 1.7, None),
     ]
-    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=0.5)
+    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=1.0)
     assert sig["verdict"] == "INSUFFICIENT"
     assert sig["n_resimmed"] == 0
     assert sig["turn_detected"] is False
@@ -113,7 +122,7 @@ def test_cohorts_aggregated_separately():
         _p("a", "submitted", 2.0, 0.3),
         _p("b", "backlog", 1.3, 0.9),
     ]
-    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=0.5)
+    sig = compute_regime_signal(probes, recovery_gate=1.25, turn_mean_threshold=1.0)
     assert sig["submitted"]["n"] == 1 and sig["backlog"]["n"] == 1
     assert sig["submitted"]["mean_resim"] == 0.3
     assert sig["backlog"]["mean_resim"] == 0.9
