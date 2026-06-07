@@ -34,13 +34,19 @@ import api from '../../services/api'
 const { Title, Text, Paragraph } = Typography
 
 /**
- * OptimizationCyclesMonitor — /ops/optimization-cycles (Phase 16-A, 2026-05-29).
+ * OptimizationCyclesMonitor — /ops/optimization-cycles
+ *   (Phase 16-A, 2026-05-29; 四池世界冻结轻改 2026-06-07).
  *
- * Stage A 的可观测面:14d 转化率(GO/STOP gate 信号)+ 累计 KPI + 最近 cycle
- * 列表 + 当下进行中 cycle。后端源:`GET /ops/optimization/cycles?days=14`
- * (backend/routers/ops.py:CycleSummary)。
+ * 现状(四池世界):6h 自动优化 beat 已停(ENABLE_OPTIMIZATION_LOOP OFF),
+ * 14d 转化率 KPI 不再更新。但「以 alpha 为蓝本」手动优化独立于此 flag 仍可用。
+ * 顶部 Start 按钮被禁用 —— 它会启动与 HG/S/E 四池抢共享 BRAIN sim 槽的
+ * 孤立 Celery 任务;Stop/abort 保留(紧急止血)。
  *
- * GO/STOP 判定语义(plan §6):
+ * Stage A 的可观测面:14d 转化率(历史 GO/STOP gate 信号,现已冻结)+ 累计 KPI
+ * + 最近 cycle 列表(含手动蓝本历史)+ 当下进行中 cycle。后端源:
+ * `GET /ops/optimization/cycles?days=14`(backend/routers/ops.py:CycleSummary)。
+ *
+ * GO/STOP 判定语义(plan §6,现仅作历史参照):
  *   conversion_rate_14d > 0.20 → GO   (可考虑 Stage B 升级)
  *   conversion_rate_14d < 0.10 → STOP (selection-limited 实证,改抽 backlog)
  *   0.10-0.20 + total_cycles ≥ 30 → TUNE (调 SettingsSweepGenerator 参数)
@@ -69,7 +75,9 @@ const DECISION_LABELS = {
     desc: '14d 转化率 10-20% → 调 SettingsSweepGenerator 参数(decay/window 取值)或延期观察,不直接升档',
   },
   SAMPLE: {
-    color: 'processing',
+    // 'info' (合法 Alert type;decisionMeta.color 仅喂 line 528 的 <Alert>,
+    // 不用于 Tag — antd Alert type 只接受 success/info/warning/error)
+    color: 'info',
     icon: <ClockCircleTwoTone twoToneColor="#1890ff" />,
     label: 'SAMPLE — 样本不足',
     desc: '累计 cycles < 30,等更多数据(典型 4 cycle/天 × 8 天 ≈ 32 cycles 满阈)',
@@ -104,8 +112,8 @@ function statusTag(cycle) {
 // 「以此为蓝本优化」on an alpha) vs 'beat' (6h auto scan) vs 'pipeline_hook'
 // (Stage C near-miss push). Unknown sources fall back to the raw string.
 const TRIGGER_META = {
-  beat: { color: 'blue', label: '定时 beat', tip: '6h 自动 beat 扫描近门 alpha 触发' },
-  manual: { color: 'purple', label: '手动', tip: '用户在前端以某 alpha 为蓝本手动触发（POST /alphas/{id}/optimize）' },
+  beat: { color: 'blue', label: '定时 beat', tip: '6h 自动 beat 扫描近门 alpha 触发(现已停)' },
+  manual: { color: 'purple', label: '手动', tip: '用户在前端以某 alpha 为蓝本手动触发（POST /alphas/{id}/optimize）— 独立于 flag 仍可用' },
   pipeline_hook: { color: 'cyan', label: '管线', tip: 'Stage C pipeline-hook 推送 near-miss 触发' },
 }
 
@@ -167,12 +175,9 @@ export default function OptimizationCyclesMonitor() {
     staleTime: 10_000,
   })
 
-  // Unified Start/Stop (2026-05-31). Stop = flag OFF + abort batch + Redis
-  // flag (3-step no-auto-restart guarantee). Start = flag ON.
-  // The legacy `abortMutation` is RETIRED in favor of stopMutation — abort
-  // alone was always a partial action (flag stayed True so next beat fired);
-  // user feedback explicitly required "stop must not auto-restart", which
-  // only stop endpoint guarantees.
+  // Stop only (2026-06-07). Stop = flag OFF + abort batch + Redis flag (3-step
+  // no-auto-restart guarantee) — kept as an emergency 止血 control. Start is
+  // DISABLED in the 四池世界:启动会跑与 HG/S/E 抢 sim 槽的孤立 Celery 任务。
   const stopMutation = useMutation({
     mutationFn: () => api.stopOpsOptimization(),
     onSuccess: (res) => {
@@ -182,14 +187,15 @@ export default function OptimizationCyclesMonitor() {
     onError: (e) =>
       message.error(e?.response?.data?.detail || e?.message || '停止失败'),
   })
-  const startMutation = useMutation({
-    mutationFn: () => api.startOpsOptimization(),
+  // Abort batch — narrower 紧急止血(只中止当前 in-flight cycle,不翻 flag)。
+  const abortMutation = useMutation({
+    mutationFn: () => api.abortOpsOptimizationBatch(),
     onSuccess: (res) => {
-      message.success({ content: res?.message || 'Stage A 已启动', duration: 6 })
+      message.warning({ content: res?.message || '已中止当前批次', duration: 6 })
       qc.invalidateQueries({ queryKey: ['ops/optimization-cycles'] })
     },
     onError: (e) =>
-      message.error(e?.response?.data?.detail || e?.message || '启动失败'),
+      message.error(e?.response?.data?.detail || e?.message || '中止失败'),
   })
 
   const cycles = data?.cycles || []
@@ -198,10 +204,13 @@ export default function OptimizationCyclesMonitor() {
   const totalVariants = data?.total_variants_14d ?? 0
   const totalWinners = data?.total_winners_14d ?? 0
   const totalSubmitted = data?.total_submitted_14d ?? 0
+  // flag_enabled may be absent in the cycles response — when undefined we
+  // can't trust it, so we still show the freeze banner unconditionally.
   const flagEnabled = data?.flag_enabled ?? false
+  const flagPresent = data?.flag_enabled !== undefined && data?.flag_enabled !== null
   const flagSource = data?.flag_source || 'default'
   const flagNote = data?.flag_note || null
-  const togglePending = stopMutation.isPending || startMutation.isPending
+  const stopPending = stopMutation.isPending || abortMutation.isPending
 
   const decision = useMemo(
     () => classifyDecision(conv, totalCycles),
@@ -211,6 +220,14 @@ export default function OptimizationCyclesMonitor() {
 
   const runningCycles = useMemo(
     () => cycles.filter((c) => !c.cycle_finished_at && !c.error),
+    [cycles],
+  )
+
+  // Manual-blueprint history — trigger_source === 'manual'. These run
+  // independently of ENABLE_OPTIMIZATION_LOOP (POST /alphas/{id}/optimize),
+  // so they remain the live path in the 四池世界.
+  const manualCycles = useMemo(
+    () => cycles.filter((c) => c.trigger_source === 'manual'),
     [cycles],
   )
 
@@ -375,6 +392,48 @@ export default function OptimizationCyclesMonitor() {
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
+      {/* ── 冻结 banner(四池世界,2026-06-07)──
+          flag 状态字段若存在则据它显示,否则无条件显示冻结提示。 */}
+      <Alert
+        type="warning"
+        showIcon
+        icon={<PoweroffOutlined />}
+        message="6h 自动优化闭环已停(ENABLE_OPTIMIZATION_LOOP OFF)"
+        description={
+          <Space direction="vertical" size={4} style={{ width: '100%' }}>
+            <Text>
+              14d 转化率 KPI 不再更新(下方决策卡 / 累计 KPI 仅作历史参照)。
+              手动「以 alpha 为蓝本」优化仍可用(独立于此 flag),入口在
+              {' '}
+              <Link to="/alphas">Alpha 详情页</Link>。
+            </Text>
+            {flagPresent && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                后端报告 flag 状态:
+                <Tag
+                  color={flagEnabled ? 'success' : 'default'}
+                  style={{ marginInlineStart: 6, marginInlineEnd: 0 }}
+                >
+                  ENABLE_OPTIMIZATION_LOOP = {flagEnabled ? 'ON' : 'OFF'}
+                </Tag>
+                {flagEnabled && (
+                  <Text type="warning" style={{ fontSize: 12, marginInlineStart: 8 }}>
+                    ⚠️ flag 实际为 ON —— 6h beat 仍会 fire 并与四池抢 sim 槽,建议点【停止 Stage A】。
+                  </Text>
+                )}
+                {flagNote && (
+                  <Tooltip title={flagNote}>
+                    <Text type="secondary" style={{ fontSize: 11, marginInlineStart: 8 }}>
+                      ({flagSource})
+                    </Text>
+                  </Tooltip>
+                )}
+              </Text>
+            )}
+          </Space>
+        }
+      />
+
       <div
         style={{
           display: 'flex',
@@ -385,98 +444,88 @@ export default function OptimizationCyclesMonitor() {
       >
         <div style={{ flex: 1 }}>
           <Title level={4} style={{ marginBottom: 4 }}>
-            <ThunderboltOutlined /> 优化闭环 Stage A — 14d 观测
+            <ThunderboltOutlined /> 优化闭环 Stage A — 14d 观测(已冻结)
             {isFetching && <Spin size="small" style={{ marginLeft: 12 }} />}
           </Title>
           <Paragraph type="secondary" style={{ marginBottom: 0 }}>
             SettingsSweepGenerator 对 1230 个 delay-1 近门 alpha(sharpe ∈ [1.0, 1.5))做 10 变异 sweep。
-            6h beat × 10 候选 = 40 cycle/天。14d GO/STOP 决策门见下卡。
+            6h beat × 10 候选 = 40 cycle/天 —— <Text type="warning">该自动 beat 现已停</Text>。
             NEVER auto-submit:winner 落 alpha 表 → 进 <Link to="/ops/submit-backlog">/ops/submit-backlog</Link> 人工 review。
           </Paragraph>
         </div>
-        {/* Unified Start/Stop toggle (2026-05-31). State from
-            data.flag_enabled (DB authoritative, not stale per-process cache).
-            Stop = flag OFF + abort batch + Redis flag (3-step
-            no-auto-restart guarantee). Start = flag ON. */}
-        <Space direction="vertical" align="end" size={4} style={{ minWidth: 220 }}>
+        {/* 紧急止血控件(2026-06-07)。Start 被禁用 —— 四池世界下启动会跑与
+            HG/S/E 抢 sim 槽的孤立 Celery 任务;Stop / abort 保留可用。 */}
+        <Space direction="vertical" align="end" size={4} style={{ minWidth: 240 }}>
           <Space>
-            <Tag
-              color={flagEnabled ? 'success' : 'default'}
-              icon={flagEnabled ? <PlayCircleOutlined /> : <PoweroffOutlined />}
-              style={{ fontSize: 13, padding: '2px 8px' }}
-            >
-              {flagEnabled ? '运行中' : '已停止'}
-            </Tag>
-            {flagEnabled ? (
-              <Popconfirm
-                title="停止 Stage A?"
-                description={
-                  <div style={{ maxWidth: 360 }}>
-                    <Text>3 步停止保证<strong>不会自动再启动</strong>:</Text>
-                    <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
-                      <li>翻 <code>ENABLE_OPTIMIZATION_LOOP=false</code>(DB 持久化,worker 15s 内读到)</li>
-                      <li>设 Redis abort 标志(worker 当前 cycle 跑完即跳出 for-loop)</li>
-                      <li>标记所有进行中 cycle 为 <Tag color="error" style={{margin:0}}>aborted_by_user:stop</Tag></li>
-                    </ul>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      已 dispatch 到 BRAIN 的 sim 自然完成(BRAIN 无 recall API)。
-                      恢复需显式点【启动 Stage A】。
-                    </Text>
-                  </div>
-                }
-                okText="停止"
-                okType="danger"
-                cancelText="取消"
-                onConfirm={() => stopMutation.mutate()}
-                disabled={togglePending}
+            <Tooltip title="四池世界下启动会跑与 HG/S/E 抢 sim 槽的孤立 Celery 任务,默认禁用;如需紧急手动跑,改 .env 开 flag(ENABLE_OPTIMIZATION_LOOP=true)后重启。">
+              <Button
+                type="primary"
+                icon={<PlayCircleOutlined />}
+                disabled
               >
-                <Button
-                  danger
-                  icon={<StopOutlined />}
-                  loading={stopMutation.isPending}
-                >
-                  停止 Stage A
-                </Button>
-              </Popconfirm>
-            ) : (
-              <Popconfirm
-                title="启动 Stage A?"
-                description={
-                  <div style={{ maxWidth: 320 }}>
-                    <Text>翻 <code>ENABLE_OPTIMIZATION_LOOP=true</code>,下个 6h beat(北京 02:15 / 08:15 / 14:15 / 20:15)将自然 fire。</Text>
-                    <br />
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      预算 OPT_DAILY_SIM_BUDGET=400 sim/天。决策门 14d 转化率 &gt;20% GO / &lt;10% STOP。
-                    </Text>
-                  </div>
-                }
-                okText="启动"
-                okType="primary"
-                cancelText="取消"
-                onConfirm={() => startMutation.mutate()}
-                disabled={togglePending}
-              >
-                <Button
-                  type="primary"
-                  icon={<PlayCircleOutlined />}
-                  loading={startMutation.isPending}
-                >
-                  启动 Stage A
-                </Button>
-              </Popconfirm>
-            )}
-          </Space>
-          {flagNote && (
-            <Tooltip title={flagNote} placement="bottomRight">
-              <Text type="secondary" style={{ fontSize: 11, maxWidth: 320, display: 'block', textAlign: 'right', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {flagSource}: {flagNote}
-              </Text>
+                启动 Stage A(已禁用)
+              </Button>
             </Tooltip>
-          )}
+            <Popconfirm
+              title="停止 Stage A?(紧急止血)"
+              description={
+                <div style={{ maxWidth: 360 }}>
+                  <Text>3 步停止保证<strong>不会自动再启动</strong>:</Text>
+                  <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
+                    <li>翻 <code>ENABLE_OPTIMIZATION_LOOP=false</code>(DB 持久化,worker 15s 内读到)</li>
+                    <li>设 Redis abort 标志(worker 当前 cycle 跑完即跳出 for-loop)</li>
+                    <li>标记所有进行中 cycle 为 <Tag color="error" style={{ margin: 0 }}>aborted_by_user:stop</Tag></li>
+                  </ul>
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    已 dispatch 到 BRAIN 的 sim 自然完成(BRAIN 无 recall API)。
+                    此操作仅在 flag 意外为 ON 时需要。
+                  </Text>
+                </div>
+              }
+              okText="停止"
+              okType="danger"
+              cancelText="取消"
+              onConfirm={() => stopMutation.mutate()}
+              disabled={stopPending}
+            >
+              <Button
+                danger
+                icon={<StopOutlined />}
+                loading={stopMutation.isPending}
+              >
+                停止 Stage A
+              </Button>
+            </Popconfirm>
+          </Space>
+          <Popconfirm
+            title="中止当前批次?(只停 in-flight cycle,不翻 flag)"
+            description={
+              <div style={{ maxWidth: 320 }}>
+                <Text type="secondary" style={{ fontSize: 12 }}>
+                  比【停止】更窄的紧急止血:设 Redis abort 标志让当前 batch 跑完即止,
+                  但不翻 ENABLE_OPTIMIZATION_LOOP(下个 beat 仍可能 fire,要彻底停请用【停止 Stage A】)。
+                </Text>
+              </div>
+            }
+            okText="中止批次"
+            okType="danger"
+            cancelText="取消"
+            onConfirm={() => abortMutation.mutate()}
+            disabled={stopPending}
+          >
+            <Button
+              size="small"
+              danger
+              icon={<StopOutlined />}
+              loading={abortMutation.isPending}
+            >
+              中止当前批次
+            </Button>
+          </Popconfirm>
         </Space>
       </div>
 
-      {/* Decision banner */}
+      {/* Decision banner — 历史参照(KPI 已冻结) */}
       <Alert
         type={decisionMeta.color}
         showIcon
@@ -487,6 +536,7 @@ export default function OptimizationCyclesMonitor() {
             <Text>
               ({(conv * 100).toFixed(1)}% 转化 · {totalCycles} cycles · {totalWinners}/{totalVariants} winners)
             </Text>
+            <Tag color="default">历史参照 · 已冻结</Tag>
           </Space>
         }
         description={decisionMeta.desc}
@@ -497,7 +547,7 @@ export default function OptimizationCyclesMonitor() {
         <Col xs={12} md={6}>
           <Card>
             <Statistic
-              title="14d 转化率"
+              title="14d 转化率(已冻结)"
               value={(conv * 100).toFixed(1)}
               suffix="%"
               valueStyle={{
@@ -559,7 +609,8 @@ export default function OptimizationCyclesMonitor() {
                 format={() => `${todaySpend} / ${OPT_DAILY_BUDGET}`}
               />
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Stage A 软限制(全程记录到 Redis aiac:opt:sim_budget:&lt;YYYYMMDD&gt;),Stage B 才硬限。剩 {Math.max(0, OPT_DAILY_BUDGET - todaySpend)} sim 给后续 cycle。
+                Stage A 软限制(全程记录到 Redis aiac:opt:sim_budget:&lt;YYYYMMDD&gt;)。自动 beat 已停,
+                正常应为 0;若 &gt; 0 说明仍有手动蓝本 / 残留批次在烧四池共享的 sim 槽。
               </Text>
             </Space>
           </Card>
@@ -571,7 +622,7 @@ export default function OptimizationCyclesMonitor() {
           >
             {runningCycles.length === 0 ? (
               <Text type="secondary">
-                无进行中 cycle。下个 beat: 北京时间 02:15 / 08:15 / 14:15 / 20:15 每 6h fire 一次,单 beat 串行跑 10 个候选 cycle(~2.5-3h 跑完)。
+                无进行中 cycle。自动 6h beat 已停;手动「以 alpha 为蓝本」触发的 cycle 会显示在此(独立于 flag)。
               </Text>
             ) : (
               <Space direction="vertical" style={{ width: '100%' }}>
@@ -592,6 +643,50 @@ export default function OptimizationCyclesMonitor() {
         </Col>
       </Row>
 
+      {/* Manual-blueprint history — 独立于 flag 的 live 路径 */}
+      <Card
+        title={
+          <Space>
+            <Text strong>手动「以 alpha 为蓝本」优化历史</Text>
+            <Tag color="purple">{manualCycles.length}</Tag>
+            <Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>
+              trigger_source = manual · 独立于 ENABLE_OPTIMIZATION_LOOP 仍可用
+            </Text>
+          </Space>
+        }
+        size="small"
+      >
+        {manualCycles.length === 0 ? (
+          <Text type="secondary">
+            近 14d 无手动蓝本优化记录。入口:在 <Link to="/alphas">Alpha 详情页</Link> 点【以此为蓝本优化】(POST /alphas/{'{'}id{'}'}/optimize)。
+          </Text>
+        ) : (
+          <Space direction="vertical" style={{ width: '100%' }} size={6}>
+            {manualCycles.map((c) => (
+              <div key={c.id}>
+                <Space size={6} wrap>
+                  <Tag color="purple">run #{c.id}</Tag>
+                  parent=
+                  {c.parent_alpha_id ? (
+                    <Link to={`/alphas/${c.parent_alpha_id}`} target="_blank">#{c.parent_alpha_id}</Link>
+                  ) : (
+                    '—'
+                  )}
+                  {statusTag(c)}
+                  <Text type="secondary" style={{ fontSize: 12 }}>
+                    {c.n_winners > 0 ? `winner ×${c.n_winners}` : `${c.n_variants} 变异 / 0 winner`}
+                    {' · '}
+                    {c.sim_budget_used}/{c.sim_budget_granted} sims
+                    {' · '}
+                    {formatTs(c.cycle_started_at)}
+                  </Text>
+                </Space>
+              </div>
+            ))}
+          </Space>
+        )}
+      </Card>
+
       {/* Cycle table */}
       <Card title={`最近 cycles(14d 内,最多 100 行)`} size="small">
         <Table
@@ -605,7 +700,7 @@ export default function OptimizationCyclesMonitor() {
           }}
           size="small"
           locale={{
-            emptyText: '无 cycle 数据 — ENABLE_OPTIMIZATION_LOOP=False 时为空。',
+            emptyText: '无 cycle 数据 — ENABLE_OPTIMIZATION_LOOP=False(自动 beat 已停)时为空;手动蓝本优化产生的 cycle 仍会出现在此。',
           }}
         />
       </Card>

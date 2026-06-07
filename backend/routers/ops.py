@@ -5860,6 +5860,15 @@ async def pool_status(
         "drain": {n: is_draining(n) for n in POOL_NAMES},
         "workers_alive": workers,
         "workers_count": len(workers),
+        # expected worker count from pool sizing config (P1 2026-06-07) — so the
+        # UI stops hard-coding 4 and auto-tracks K_S / K_E / N_HG changes.
+        "expected_workers": int(
+            getattr(_s, "POOL_N_HG", 1) + getattr(_s, "POOL_K_S", 2) + getattr(_s, "POOL_K_E", 1)),
+        "expected_by_pool": {
+            "hg": int(getattr(_s, "POOL_N_HG", 1)),
+            "s": int(getattr(_s, "POOL_K_S", 2)),
+            "e": int(getattr(_s, "POOL_K_E", 1)),
+        },
         "concurrent_sims": sims,
         "budget_sims_today": sims_today,
         "budget_tokens_today": tok_today,

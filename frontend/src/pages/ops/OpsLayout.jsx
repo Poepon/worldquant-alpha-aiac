@@ -28,6 +28,8 @@ import OptimizationCyclesMonitor from './OptimizationCyclesMonitor'
 // OrchestratorMonitor page retired in Phase 1c-delete follow-up
 import LLMRoutingConsole from './LLMRoutingConsole'
 import PoolPipelineMonitor from './PoolPipelineMonitor'
+import PoolQueueMonitor from './PoolQueueMonitor'
+import PoolWorkersMonitor from './PoolWorkersMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -65,6 +67,9 @@ export default function OpsLayout() {
         <Route index element={<Navigate to="overview" replace />} />
         {/* Four-pool pipeline monitor (2026-06-06 cutover) — HG/S/E live health */}
         <Route path="pool-pipeline" element={<PoolPipelineMonitor />} />
+        {/* P1 (2026-06-07) pool-native pages — queue depth/backlog + worker/lease health */}
+        <Route path="pool-queue" element={<PoolQueueMonitor />} />
+        <Route path="pool-workers" element={<PoolWorkersMonitor />} />
         {/* Submit-backlog drain (2026-05-28) — verdict-ranked can_submit queue */}
         <Route path="submit-backlog" element={<SubmitBacklogMonitor />} />
         {/* Auto-submit shadow review (2026-06-04) — would-submit list + Δscore */}
