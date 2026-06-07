@@ -30,6 +30,8 @@ import LLMRoutingConsole from './LLMRoutingConsole'
 import PoolPipelineMonitor from './PoolPipelineMonitor'
 import PoolQueueMonitor from './PoolQueueMonitor'
 import PoolWorkersMonitor from './PoolWorkersMonitor'
+import SubmitYieldMonitor from './SubmitYieldMonitor'
+import CognitiveReconcileMonitor from './CognitiveReconcileMonitor'
 
 /**
  * OpsLayout — root for all /ops/* pages.
@@ -70,6 +72,9 @@ export default function OpsLayout() {
         {/* P1 (2026-06-07) pool-native pages — queue depth/backlog + worker/lease health */}
         <Route path="pool-queue" element={<PoolQueueMonitor />} />
         <Route path="pool-workers" element={<PoolWorkersMonitor />} />
+        {/* P2 (2026-06-07) — submission-yield funnel + Phase-2 cognitive-reconcile status */}
+        <Route path="submit-yield" element={<SubmitYieldMonitor />} />
+        <Route path="cognitive-reconcile" element={<CognitiveReconcileMonitor />} />
         {/* Submit-backlog drain (2026-05-28) — verdict-ranked can_submit queue */}
         <Route path="submit-backlog" element={<SubmitBacklogMonitor />} />
         {/* Auto-submit shadow review (2026-06-04) — would-submit list + Δscore */}

@@ -31,7 +31,7 @@ const { Sider } = Layout
 //    知识库&RAG / 系统&配置 / 废弃待Phase2(G10/G3-v2 灰显归档)。
 //  - P0 已删 4 死页(R5/方向Bandit/G5/R8-v3);此处不再出现。
 // 提交相关路由仍是 /ops/* 路径(route 不改,避免书签失效),仅在菜单里归组。
-const SUBMIT_PATHS = ['/ops/submit-backlog', '/ops/auto-submit', '/ops/optimization-cycles']
+const SUBMIT_PATHS = ['/ops/submit-backlog', '/ops/submit-yield', '/ops/auto-submit', '/ops/optimization-cycles']
 
 const menuItems = [
   { key: '/dashboard', icon: <DashboardOutlined />, label: '仪表盘' },
@@ -42,6 +42,7 @@ const menuItems = [
     label: '提交中心',
     children: [
       { key: '/ops/submit-backlog', label: '提交积压' },
+      { key: '/ops/submit-yield', label: '提交产率 (yield)' },
       { key: '/ops/auto-submit', label: '自动提交' },
       { key: '/ops/optimization-cycles', label: '优化 sweep 审计' },
     ],
@@ -95,6 +96,7 @@ const menuItems = [
         label: '知识库 & RAG',
         children: [
           { key: '/ops/costeer', icon: <ReadOutlined />, label: '知识库与 RAG' },
+          { key: '/ops/cognitive-reconcile', label: '池认知对账 (Phase 2)' },
           { key: '/ops/llm-op-monitor', label: 'LLM 算子监控' },
           { key: '/ops/hypothesis-health', label: 'Hypothesis 池漏斗' },
         ],

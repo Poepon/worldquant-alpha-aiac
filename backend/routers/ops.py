@@ -5891,3 +5891,110 @@ async def pool_status(
         "hyp_intent": await _counts(HypothesisIntent),
         "candidate_queue": await _counts(CandidateQueue),
     }
+
+
+@router.get("/submit-yield")
+async def submit_yield(
+    days: int = 30,
+    region: Optional[str] = None,
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Submission-yield funnel (P2, 2026-06-07): produced → can_submit → submitted.
+
+    Pure read off the live ``alphas`` table — independent of any Phase-2 flag. This
+    makes the execution-limited bottleneck visible: the vast majority of mined
+    alphas never get submitted (history: ~13.9k produced / ~80 can_submit / ~13
+    submitted). Totals are all-time; the daily series covers the trailing ``days``
+    window (uses ``created_at`` = naive-UTC, consistent with /pools/status).
+    """
+    from sqlalchemy import text
+
+    where_region = " AND region = :region" if region else ""
+    params: Dict[str, Any] = {"days": int(days)}
+    if region:
+        params["region"] = region
+
+    tot = (await db.execute(text(
+        f"SELECT count(*) AS produced, "
+        f"count(*) FILTER (WHERE can_submit IS TRUE) AS can_submit, "
+        f"count(*) FILTER (WHERE date_submitted IS NOT NULL) AS submitted "
+        f"FROM alphas WHERE 1=1{where_region}",
+        ), {k: v for k, v in params.items() if k != "days"})).one()
+    produced, can_submit, submitted = int(tot[0]), int(tot[1]), int(tot[2])
+
+    daily = (await db.execute(text(
+        f"SELECT to_char(date(created_at), 'YYYY-MM-DD') AS d, "
+        f"count(*) AS produced, "
+        f"count(*) FILTER (WHERE can_submit IS TRUE) AS can_submit, "
+        f"count(*) FILTER (WHERE date_submitted IS NOT NULL) AS submitted "
+        f"FROM alphas WHERE created_at > now() - (:days * interval '1 day'){where_region} "
+        f"GROUP BY 1 ORDER BY 1",
+        ), params)).all()
+
+    return {
+        "window_days": int(days),
+        "region": region,
+        "totals": {"produced": produced, "can_submit": can_submit, "submitted": submitted},
+        "conversion": {
+            "can_submit_rate": round(can_submit / produced, 4) if produced else 0.0,
+            "submit_rate": round(submitted / produced, 6) if produced else 0.0,
+            "submit_of_can_submit": round(submitted / can_submit, 4) if can_submit else 0.0,
+        },
+        "daily": [
+            {"date": r[0], "produced": int(r[1]), "can_submit": int(r[2]), "submitted": int(r[3])}
+            for r in daily
+        ],
+    }
+
+
+@router.get("/cognitive-reconcile/status")
+async def cognitive_reconcile_status(
+    _token: str = Depends(_require_ops_token),
+    db: AsyncSession = Depends(get_db),
+):
+    """Pool cognitive-reconcile beat status (P2, 2026-06-07).
+
+    The Phase-2 pool-native feedback loop: a /15min beat that scans landed alphas
+    and drives the typed-Hypothesis lifecycle (activate / PROMOTE-on-can_submit /
+    attribution stamp). Flag-gated (``ENABLE_POOL_COGNITIVE_RECONCILE``); when OFF
+    the denorm columns (can_submit_count / submitted_count / attribution) stay 0
+    and the watermark is absent — this surface shows the dormant-but-ready state.
+    Read-only; never mutates."""
+    from sqlalchemy import select as _select, text
+    from backend.config import settings as _s
+    from backend.models import SystemConfig
+
+    async def _scalar(sql: str) -> int:
+        return int((await db.execute(text(sql))).scalar() or 0)
+
+    status_rows = (await db.execute(text(
+        "SELECT status, count(*) FROM hypotheses GROUP BY status ORDER BY 2 DESC"))).all()
+    attr_rows = (await db.execute(text(
+        "SELECT attribution, count(*) FROM hypotheses WHERE attribution IS NOT NULL "
+        "GROUP BY attribution ORDER BY 2 DESC"))).all()
+    wm = (await db.execute(
+        _select(SystemConfig).where(SystemConfig.config_key == "pool_reconcile_watermark")
+    )).scalar_one_or_none()
+
+    return {
+        "enabled": bool(getattr(_s, "ENABLE_POOL_COGNITIVE_RECONCILE", False)),
+        "grace_sec": int(getattr(_s, "POOL_RECONCILE_GRACE_SEC", 60)),
+        "window_days": int(getattr(_s, "POOL_RECONCILE_WINDOW_DAYS", 7)),
+        "watermark": (wm.config_value if wm else None),
+        "watermark_updated_at": (
+            wm.updated_at.isoformat() if wm and getattr(wm, "updated_at", None) else None),
+        "lifecycle": {
+            "by_status": {str(s): int(c) for s, c in status_rows},
+            "total": await _scalar("SELECT count(*) FROM hypotheses"),
+            "pool_era_total": await _scalar(
+                "SELECT count(*) FROM hypotheses WHERE hyp_intent_id IS NOT NULL"),
+            "can_submit_count_gt0": await _scalar(
+                "SELECT count(*) FROM hypotheses WHERE can_submit_count > 0"),
+            "submitted_count_gt0": await _scalar(
+                "SELECT count(*) FROM hypotheses WHERE submitted_count > 0"),
+            "attribution_stamped": await _scalar(
+                "SELECT count(*) FROM hypotheses WHERE attribution IS NOT NULL"),
+            "by_attribution": {str(a): int(c) for a, c in attr_rows},
+        },
+    }

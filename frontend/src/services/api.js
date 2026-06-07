@@ -789,6 +789,24 @@ const api = {
     const { data } = await client.post(`/alphas/${alphaId}/optimize`, body)
     return data
   },
+
+  // P2 (2026-06-07) — submission-yield funnel (produced → can_submit → submitted).
+  // Live off the alphas table, independent of any Phase-2 flag. Returns
+  // { window_days, totals, conversion, daily[] }.
+  getOpsSubmitYield: async ({ days = 30, region = null } = {}) => {
+    const params = { days }
+    if (region) params.region = region
+    const { data } = await client.get('/ops/submit-yield', { params })
+    return data
+  },
+
+  // P2 (2026-06-07) — pool cognitive-reconcile beat status (Phase-2 feedback loop;
+  // dormant until ENABLE_POOL_COGNITIVE_RECONCILE flips ON). Returns
+  // { enabled, watermark, grace_sec, window_days, lifecycle{by_status,...} }.
+  getOpsCognitiveReconcileStatus: async () => {
+    const { data } = await client.get('/ops/cognitive-reconcile/status')
+    return data
+  },
 }
 
 export default api
