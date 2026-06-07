@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 AIAC 2.0 is a Human-AI collaborative alpha-mining platform built on the **Alpha-GPT** paradigm fused with **RD-Agent**'s CoSTEER feedback loop. It targets WorldQuant BRAIN, generating alpha expressions via LLM, simulating them on BRAIN, and self-evolving via a knowledge base.
 
-Stack: Python 3.10+ FastAPI backend (async SQLAlchemy + asyncpg), Celery (Redis) for background jobs, LangGraph for agent workflows, OpenAI-compatible LLM (default model `kimi-k2.6` served via Alibaba Cloud MaaS — see *LLM routing* below), React 18 + Vite + Ant Design frontend, PostgreSQL.
+Stack: Python 3.10+ FastAPI backend (async SQLAlchemy + asyncpg), Celery (Redis) for background jobs, LangGraph for agent workflows, OpenAI-compatible LLM (default model `kimi-k2.5` served via Alibaba Cloud **coding-plan** (`coding.dashscope`); the older `aliyun_maas` token-plan kimi-k2.6 was retired 2026-06-04 when its budget ran out — see *LLM routing* below), React 18 + Vite + Ant Design frontend, PostgreSQL.
 
 ## Common Commands
 
@@ -165,14 +165,14 @@ All LLM calls go through `LLMService`. Providers are a **named registry** (`LLM_
 
 ### Frontend layout
 
-- Routing in `frontend/src/App.jsx` (Dashboard / Tasks / TaskDetail / AlphaDetail / DataManagement / ConfigCenter / Ops sub-routes). `AlphaLab` (and `FactorLibrary`) were retired in 2026-05 — `/alphas` redirects to `/tasks`; alpha detail remains at `/alphas/:id`.
+- Routing in `frontend/src/App.jsx` (Dashboard / AlphaList / AlphaDetail / DataManagement / ConfigCenter / `OpsLayout` sub-routes). `AlphaLab`/`FactorLibrary` retired 2026-05; **`TaskManagement`/`TaskDetail` retired Phase 1d (pool autonomous)** — `/tasks` + `/tasks/:id` now **redirect to `/ops/pool-pipeline`** (the mining view). `/alphas` renders `AlphaList` directly (flat list, no tier filter); alpha detail stays at `/alphas/:id`. Ops pages under `/ops/*` (`pages/ops/OpsLayout.jsx`); nav in `components/AppSidebar.jsx`.
 - All HTTP via `frontend/src/services/api.js`. Vite dev server proxies `/api` → backend on `8001`; **don't hardcode `http://localhost:8001`** in components.
 - Live activity uses SSE on `/api/v1/stats/live-feed`.
 
 ## Project conventions
 
 - **`docs/DEVELOPMENT_PLAN.md` is the single mainline dev doc** (current architecture state + strategy + NO-GO + flag status; historical plans in `docs/archive/`). `agents/IMPROVEMENT_ANALYSIS.md`, `backend/CODE_STATUS.md`, `backend/REFACTORING_STATUS.md` are the working design notes — read them before larger refactors and update them when status changes. (`agents/core/ARCHITECTURE.md` was deleted with `agents/core/` in `b89b732`.)
-- Keep root-level scripts (`ace_lib.py`, `helpful_functions.py`, `validator.py`, `run_real_mining.py`, `parsetab.py`) as standalone utilities; new logic should live under `backend/`.
+- Keep root-level scripts (`ace_lib.py`, `helpful_functions.py`, `validator.py`, `parsetab.py`) as standalone utilities; new logic should live under `backend/`.
 - Top-level files `keys.txt`, `api_structure.json`, `brain_alpha_structure.json` are reference dumps from BRAIN — treat as read-only inputs, not authoritative state.
 - Windows is the primary dev platform; Celery is launched with `--pool=solo` because the prefork pool is broken on Windows.
 - Route all new LLM code through `backend/agents/services/llm_service.py` (settings/env + per-function routing win). Note `backend/agents/agent_hub.py` hard-codes a base URL — do not copy that pattern. See the *LLM routing* section above for the real production endpoint and model defaults.

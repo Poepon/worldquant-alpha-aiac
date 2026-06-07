@@ -1,6 +1,6 @@
 # 重构状态报告
 
-> **状态(2026-06-04 复核)**:本文档描述的 2026-01 分层重构(Router→Service→Repository)**已全部完成**——下方原「⚠️ 需要改动」清单中的 Service 创建与大文件拆分均已落地。本文件保留作分层架构的**规约说明**(依赖方向、可测试性标准、改动模板),不再是待办清单。当前系统架构(FLAT/ONESHOT 调度、`agents/pipeline/` 流水线、`agents/core/` CoSTEER、`services/optimization/` 等 2026-01 之后的主线)以根目录 `CLAUDE.md` 为准。
+> **状态(2026-06-04 复核)**:本文档描述的 2026-01 分层重构(Router→Service→Repository)**已全部完成**——下方原「⚠️ 需要改动」清单中的 Service 创建与大文件拆分均已落地。本文件保留作分层架构的**规约说明**(依赖方向、可测试性标准、改动模板),不再是待办清单。当前系统架构以根目录 `CLAUDE.md` + `docs/DEVELOPMENT_PLAN.md` §2A 为准。⚠️ **2026-06-06 `b89b732` 大改后**:FLAT/ONESHOT 调度、`agents/core/`、`tasks/orchestrator.py` **已退役删除**;生产架构 = **四池(HG/S/E)解耦流水线**(`backend/pool/`)。`agents/pipeline/` 仍在(被池复用)、`services/optimization/` 仍在(loop OFF)。
 
 ## 一、代码状态分类
 

@@ -1,5 +1,7 @@
 # RD-Agent vs 当前项目 对比分析与改进建议
 
+> ⚠️ **历史稿(2026-01-29),已 STALE — 勿当现状依据。** 本稿提出并"完成"的 `agents/core/`(experiment/trace/scenario/evolving_kb 等 RD-Agent CoSTEER 实现)**已于 2026-06-06 `b89b732` 整簇删除**(只剩 `__pycache__`;`AttributionType` 迁到 `agents/attribution_types.py`)。生产架构现为**四池(HG/S/E)解耦流水线**。当前状态以 `CLAUDE.md` + `docs/DEVELOPMENT_PLAN.md` §2A 为准;本稿仅作 RD-Agent 方法学对比的历史参考。
+
 ## 🎯 执行摘要
 
 通过深入分析RD-Agent的实现，识别了6个主要改进领域。**现已全部完成核心实现**。
