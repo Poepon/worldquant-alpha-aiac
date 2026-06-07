@@ -46,11 +46,12 @@ greenfield 重定向 → #25c 字段卫生(commit `93a04a7`)→ regime 漂移实
 - **迁移 Phase 状态**:Phase 0(地基)/ 1a(特征抽取)/ 1b(池架构全建:三循环+supervisor+scheduler+claim-lease+drain+budget+endpoints+beats)/ 1c-delete(删旧路 b89b732)= ✅ DONE;**Phase 2(认知 reconcile async beat 重接反馈)= ❌ 未激活**(`ENABLE_POOL_COGNITIVE_RECONCILE`=false,`cognitive_reconcile_tasks.py` 在但 gate 住;gate 在 yield 回升后再激活,见 §6)。
 
 ### 2A.1 知识库 / 反馈环分层现状(post-migration,2026-06-07 实测)
-- **设计基线**:6 层量化切分 + KB 写侧闭环见 reference `kb_layered_architecture_2026-06-05.md` / `quant_pipeline_6layer_2026-06-05.md`(⚠️ 该 reference 部分前提已被 b89b732 改写——`rag_service`/`core/`/`knowledge_extraction` 已删,读时以本节为准)。
+- **🆕 KB 重设计(定稿,2026-06-07)**:两份外部理想方案(生命周期 8 阶段 / LLM-driven 神经-符号)× 两轮 workflow 对抗审查(`w4mms4g0y`/`wx1sqvntx`)× live 实证 → `kb_redesign_unified_2026-06-07.md`。核心裁决:两份设计逃不出两堵墙(OS 隐藏 + 无人类),v2 多 Agent=给已有池阶段换名字 / 三库(向量+图+时序)=NEW_INFRA 反比例,净杠杆≈0;止损期只建 IS 体检卡 + 翻 `ENABLE_REGIME_MONITOR` + 诚实标注(os_sharpe cosmetic 改名 / decay_curve 标 IS-proxy / L0L2L3 known-dead),其余冻结;唯一杠杆仍是已 live 提交选择栈。
+- **设计基线**:6 层量化切分 + KB 写侧闭环见 reference `kb_layered_architecture_2026-06-05.md` / `quant_pipeline_6layer_2026-06-05.md`(⚠️ 该 reference 部分前提已被 b89b732 改写——`agents/core/` + `agents/knowledge_extraction.py` 已删,读时以本节为准;但 `agents/services/rag_service.py` + `agents/hierarchical_rag.py` 仍 live)。
 - **当前 live 闭环(走池,非旧 core/)**:① RAG 读 = `agents/hierarchical_rag.py`(池 HG stage);② **KB 写 = 池 E-stage `agents/pipeline/persister.py`**(本会话 Phase 1 四轨 Track A:SUCCESS_PATTERN + hypotheses un-gate);实测 `knowledge_entries` 12153 / `hypotheses` 2120 **今天仍在写** = 写侧闭环 live。
-- **已退役死路(b89b732)**:`agents/core/` 已空(仅 `__pycache__`、源全删、**无 live caller**=死尾待清;注:之前审计误称它被 E-eval 用,实测证伪)、`rag_service.py` / `core/integration.py` / `knowledge_extraction.py` 删;`r1a_attribution_log` 写停在 **06-05**(FLAT-era 归因路随 b89b732 退役)。`feedback_agent.py` 仍在(consultant/sync 反馈路)。
+- **已退役死路(b89b732)**:`agents/core/` 已空(仅 `__pycache__`、源全删、**无 live caller**=死尾待清)、`agents/core/integration.py` / `agents/knowledge_extraction.py` 删;`r1a_attribution_log` 写停在 **06-05**(FLAT-era 归因路随 b89b732 退役)。`feedback_agent.py` 仍在(consultant/sync 反馈路)。**⚠️ 更正:`agents/services/rag_service.py` 未删(KB 读路径核心,live);之前误判删是查错路径 `services/rag_service.py`。**
 - **Phase 2 的内涵** = 把反馈从「池 E-stage 同步写」升级为「异步 reconcile beat 读 EVALUATED → 插新 hyp_intent 闭环」,未激活(flag OFF)。
-- **残留尾巴**:DB 71 个 FLAT 历史孤儿 task(可查不可起)+ `agents/core/` 空目录(源删仅 pycache,死尾待清)+ `feedback_agent.py`(consultant 路)+ **⚠️ `CLAUDE.md` 仍按已删的 `mining_tasks`/FLAT/`rag_service`/`core` 描述架构 = stale,待更新**(否则按文档找 run_mining_task/rag_service 会扑空)。
+- **残留尾巴**:DB 71 个 FLAT 历史孤儿 task(可查不可起)+ `agents/core/` 空目录(源删仅 pycache,死尾待清)+ `feedback_agent.py`(consultant 路)。`CLAUDE.md` 架构段已据实更新(本会话)。
 
 ### 2A.2 其它 live 子系统 + flag 现状(2026-06-07 实测 `feature_flag_overrides` 表,非 cache)
 > ⚠️ 注意:ad-hoc 子进程读 `settings.ENABLE_X` 会拿 config 默认(cache 冷),**flag 真值以 DB `feature_flag_overrides` 表为准**(本表已 DB 实测)。
@@ -85,6 +86,37 @@ greenfield 重定向 → #25c 字段卫生(commit `93a04a7`)→ regime 漂移实
 | `2af3dda` | 前端:选择器展示(稳健列/sub-univ列/稳健门/fragile桶)+ regime 监测页 + OpsOverview `REGIME_TURNING` 告警 banner |
 
 (早先本会话:`10dbdc8` Phase1 四轨 / 设计文档 `9f495d7`/`285b8a3`。)
+
+---
+
+## 4A. KB 重设计推进 TODO(止损期·低风险优先)
+
+> 源 = `kb_redesign_unified_2026-06-07.md`(v1+v2 融合定稿)。接线已逐点实证。开工序 **A→B→C→D**。
+> ⚠️ 全局依赖:**B1/B4 改的是 pool E-stage 代码 → 需 `run.bat --restart` 生效(重启前查 drain 残留是否有意止损);A/C 不碰 pool worker**。
+
+**Phase A — regime_monitor 热翻(零代码,先做)**
+- [ ] A1 前置:确认 celery **beat + 主 worker 在线**(regime 跑主 worker 非 pool worker);每天 ~23 BRAIN sims + 需 creds。
+- [ ] A2 翻 `ENABLE_REGIME_MONITOR=true`(热;在 SUPPORTED_FLAGS,**无需 .env/重启**)。
+- [ ] A3 验证:等 07:30 beat 或手动触发 → `GET /ops/regime-monitor` + `RegimeMonitor.jsx` 出数(口径=current IS 非 OS)。
+
+**Phase B — 诚实标注(标签/注释级,低风险)**
+- [ ] B1 `verdict_basis='IS'`:`rag_service.py:1605`(SUCCESS meta_data)+ `:~1390`(FAILURE)各加一行(⚠️ JSONB JSON-null footgun)。旧行可选 backfill。**依赖 pool 重启**。
+- [ ] B2 `decay_curve` IS-proxy:`decay_service.py:88` snapshot 加 `"basis":"IS"` + docstring + 读侧(`alpha_health_service`/`regime_monitor`)注释 + `models/alpha.py` 列注释。验证 `test_decay_service.py`。
+- [ ] B3 L0/L2/L3 known-dead:`backend/CODE_STATUS.md` 追加(current_expression 永不传,r8 0/2211)。纯文档。
+- [ ] B4 `os_sharpe` cosmetic:`evaluation.py:225-254` docstring 正名 IS train/test-split(os_sharpe live 恒 None);可选删死前缀。⚠️ eval 热路径,**必跑 `test_suite.py --all` 回归 0 漂移**。**依赖 pool 重启**。
+
+**Phase C — IS 诊断体检卡(唯一新建,中风险;零新指标/库/sim)**
+- [ ] C0 设计决策:**端点按需组装,不写 `alpha.metrics`**(robustness/corr 池相对、每 drain 重算,持久化会 stale)。
+- [ ] C1 确认 `_iqc_marginal.recommendation` + V12/V16 flag 落点,补 `DrainOrderItem` 缺的 3 维(过拟合/turnover/FAILURE-相似)。
+- [ ] C2 `ops.py:4846 _item()` 加 `diagnostic_card`:5 维{过拟合(V12/V16)、流动性(universe×turnover)、拥挤(max_corr_to_selected)、历史相似(FAILURE 命中)、提交建议(robustness_verdict⊕marginal rec⊕value_tier)}+overall。**剥离 OS 字段**。
+- [ ] C3 前端 `SubmitBacklogMonitor.jsx` 渲染 card(展开行/tooltip)。
+- [ ] C4 测试 ops endpoint + `npm run build`(eslint 无配置→build 验证)。**依赖 uvicorn --reload 自动加载**。
+
+**Phase D — 收尾**
+- [ ] D1 commit + push gitea(含 KB 重设计 doc + INDEX/§2A.1 指针 + 上轮 rag_service 误标更正 + B/C 代码;**排除** `scripts/verify_prompt_changes_2026_05_24.py`)。
+- [ ] D2(可选)存 memory:KB 重设计结论(v2=换皮镀金 / L0L2L3 真死 / V-12 cosmetic / 唯一杠杆=提交选择)。
+
+**接线核实快照**:regime_monitor=真零代码(beat `celery_app.py:138` 已注册 + flag `feature_flag_service.py:566` 在 SUPPORTED_FLAGS 热翻);体检卡 robustness 半边已在 `DrainOrderItem`(`ops.py:4535-4548`),缺 3 维 + 编排 + 前端。
 
 ---
 
