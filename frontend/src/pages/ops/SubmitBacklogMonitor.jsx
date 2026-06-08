@@ -132,6 +132,49 @@ function subUnivTag(v) {
   return <Tag color={color}>{v.toFixed(2)}</Tag>
 }
 
+// IS diagnostic card (Phase C, 2026-06-08) — aggregated 5-dim submit-selection
+// summary. overall = SUBMIT/REVIEW/HOLD/SKIP (economic margin gate → hard risk
+// dims → marginal scorecard). Tooltip expands the 4 supporting dims. 口径=IS.
+const CARD_OVERALL_META = {
+  SUBMIT: { color: 'success', label: '可提交' },
+  REVIEW: { color: 'gold', label: '复核' },
+  HOLD: { color: 'orange', label: '暂缓' },
+  SKIP: { color: 'error', label: '不提交' },
+}
+const CARD_DIM_COLOR = { ok: 'success', warn: 'gold', risk: 'error', unknown: 'default' }
+const CARD_DIM_LABEL = { overfit: '过拟合', liquidity: '流动性', crowding: '拥挤', sub_universe: '子宇宙' }
+
+function cardTag(card) {
+  if (!card) return <Tag>—</Tag>
+  const m = CARD_OVERALL_META[card.overall] || { color: 'default', label: card.overall }
+  const dims = card.dims || {}
+  return (
+    <Tooltip
+      title={
+        <div style={{ fontSize: 12 }}>
+          <div style={{ marginBottom: 6 }}>
+            综合 <strong>{m.label}</strong> — {card.reason}
+            <br />口径=IS(BRAIN 隐藏 OS,非 OS 预测)
+          </div>
+          {['overfit', 'liquidity', 'crowding', 'sub_universe'].map((k) => {
+            const d = dims[k] || {}
+            return (
+              <div key={k} style={{ marginBottom: 2 }}>
+                <Tag color={CARD_DIM_COLOR[d.level] || 'default'} style={{ marginRight: 4 }}>
+                  {CARD_DIM_LABEL[k]} {d.level}
+                </Tag>
+                <Text style={{ fontSize: 11 }} type="secondary">{d.note}</Text>
+              </div>
+            )
+          })}
+        </div>
+      }
+    >
+      <Tag color={m.color}>{m.label}</Tag>
+    </Tooltip>
+  )
+}
+
 // Self-corr 状态分桶:与 KPI 卡(撞门/近门槛/安全/未算)同口径,客户端过滤复用。
 const SELF_CORR_BUCKETS = {
   breach: { label: '撞门(≥0.7)', test: (v) => v !== null && v !== undefined && v >= 0.7 },
@@ -437,6 +480,17 @@ export default function SubmitBacklogMonitor() {
     ),
   }
   const drainMetricCols = [
+    {
+      title: (
+        <Tooltip title="IS 5 维体检卡(Phase C):聚合 过拟合/流动性/拥挤/子宇宙 + 边际打分 → 综合提交建议(经济门→硬风险维→边际)。口径=IS,非 OS 预测。悬停看各维。">
+          <Space size={4}>体检卡 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
+      dataIndex: 'diagnostic_card',
+      key: 'diagnostic_card',
+      width: 96,
+      render: (card) => cardTag(card),
+    },
     {
       title: (
         <Tooltip title="与「已选 ∪ 已提交」集的最大相关性 — 越低这次提交加的独立广度越多">

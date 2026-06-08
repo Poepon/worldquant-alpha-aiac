@@ -4546,6 +4546,11 @@ class DrainOrderItem(BaseModel):
     # sub-universe (WQ hidden standard: >0.7). Informational here (human review);
     # auto-submit hard-gates on it (G5b). None when not returned.
     sub_universe_sharpe: Optional[float] = None
+    # IS turnover (impact-cost proxy for the diagnostic card's liquidity dim).
+    turnover: Optional[float] = None
+    # Phase C (2026-06-08): aggregated 5-dim IS submit-selection card. ZERO new
+    # metrics — pure fusion of the fields above. 口径=IS (BRAIN hides OS).
+    diagnostic_card: Optional[Dict[str, Any]] = None
 
 
 class DrainOrderOut(BaseModel):
@@ -4611,6 +4616,7 @@ async def submit_backlog_drain_order(
     from backend.marginal_recon import (
         sign_agreement_stats, route_on_sign_verdict, MIN_PAIRS_FOR_VERDICT,
     )
+    from backend.is_diagnostic_card import build_diagnostic_card
 
     region = (region or "").strip() or None
     margin_min = float(margin_bps_min) / 10000.0  # bps → ratio (5bps = 0.0005)
@@ -4633,7 +4639,8 @@ async def submit_backlog_drain_order(
                (metrics->'_iqc_marginal'->>'composite_score')::float AS composite,
                (metrics->'_iqc_marginal'->>'delta_sharpe')::float AS brain_d,
                (SELECT (e->>'value')::float FROM jsonb_array_elements(metrics->'checks') e
-                WHERE e->>'name' = 'LOW_SUB_UNIVERSE_SHARPE' LIMIT 1) AS sub_univ_sharpe
+                WHERE e->>'name' = 'LOW_SUB_UNIVERSE_SHARPE' LIMIT 1) AS sub_univ_sharpe,
+               is_turnover
         FROM alphas
         WHERE {_where}
         """
@@ -4801,6 +4808,7 @@ async def submit_backlog_drain_order(
             "_pnl_covered": aid in pnl_ids,
             "_robustness": rob_by_id.get(aid),
             "_sub_univ_sharpe": float(r[9]) if r[9] is not None else None,
+            "_turnover": float(r[10]) if r[10] is not None else None,
         }
         if sign_routing_ok:
             # SIGN-based value tier (magnitude is noise; sign is validated against
@@ -4871,6 +4879,17 @@ async def submit_backlog_drain_order(
             max_drawdown=rb.get("max_drawdown"),
             fragile_reason=c.get("_fragile_reason"),
             sub_universe_sharpe=c.get("_sub_univ_sharpe"),
+            turnover=c.get("_turnover"),
+            diagnostic_card=build_diagnostic_card(
+                sharpe=c.get("_sharpe"),
+                turnover=c.get("_turnover"),
+                margin_bps=c.get("_margin_bps"),
+                corr_to_pool=c.get("self_corr"),
+                robustness_verdict=rb.get("robustness_verdict"),
+                robustness_score=rb.get("robustness_score"),
+                marginal_verdict=c.get("_verdict"),
+                sub_universe_sharpe=c.get("_sub_univ_sharpe"),
+            ),
         )
 
     n_cand = len(candidates)

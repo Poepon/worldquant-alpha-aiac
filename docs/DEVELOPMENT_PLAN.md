@@ -94,6 +94,15 @@ greenfield 重定向 → #25c 字段卫生(commit `93a04a7`)→ regime 漂移实
 > 源 = `kb_redesign_unified_2026-06-07.md`(v1+v2 融合定稿)。接线已逐点实证。开工序 **A→B→C→D**。
 > ⚠️ 全局依赖:**B1/B4 改的是 pool E-stage 代码 → 需 `run.bat --restart` 生效(重启前查 drain 残留是否有意止损);A/C 不碰 pool worker**。
 
+> **✅ 完成状态(2026-06-08):A/B/C + 根治 double-acquire + regime 标定 全 ship,4 commit push gitea master。**
+> - **Phase A**(`aff8fb1`):`ENABLE_REGIME_MONITOR` ON(DB override)+ beat 注册 + 串行 re-sim fix(绕 double-acquire 死锁)。首跑 23/23 实证 regime **DOWN**(58qroezz 2.33→0.89、mLxlen69 2.01→−0.74)。
+> - **regime verdict 标定**(`aff8fb1`):剔除 BRAIN dedup 缓存假恢复(stale_eps)+ turn 改 fresh frac≥0.5 ∧ mean_delta≥-0.25 ∧ mean≥1.0(旧松逻辑误报 TURNING)。离线回放→REGIME_DOWN。⚠️ **live Redis verdict 待下次 07:30 beat 重算追上代码**(当前仍显示 stale TURNING)。
+> - **根治 double-acquire**(`aff8fb1`,`simulator.py`):`_run_one` 删冗余 acquire(simulate_alpha 已管槽)→ 1 slot/sim;47 测过。优化闭环潜伏死锁一并解除。
+> - **Phase B**(`d9cb53e`):verdict_basis=IS / decay IS-proxy(纠 "OS-metric" 误注释)/ V-12 docstring / L0L2L3 known-dead。
+> - **Phase C**(本次 `feat(ops)`):`is_diagnostic_card.py`(11 测)+ ops drain-order 接线 + 前端体检卡列。restart 后 **live 验证**(端点返 card,分布 HOLD 4/REVIEW 7/SKIP 61)。
+> - **docs**(`f201d0e`):`kb_redesign_unified` + INDEX + §2A.1/§4A 指针。
+> 后续可选:翻 regime 并发(根治后安全,75min→25min,待 live 实证)。
+
 **Phase A — regime_monitor 热翻(零代码,先做)**
 - [ ] A1 前置:确认 celery **beat + 主 worker 在线**(regime 跑主 worker 非 pool worker);每天 ~23 BRAIN sims + 需 creds。
 - [ ] A2 翻 `ENABLE_REGIME_MONITOR=true`(热;在 SUPPORTED_FLAGS,**无需 .env/重启**)。
