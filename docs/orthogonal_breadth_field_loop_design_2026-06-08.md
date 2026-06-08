@@ -1,6 +1,6 @@
 # 设计稿:正交广度字段探索环(Orthogonal-Breadth Field Exploration Loop)2026-06-08
 
-> 状态:**草案 — 对抗审查 `wzvcwsm0t`(47→34 确认)已过。判定 = 方向成立 / 文档误标已纠 / 主体 DEFER。先读 §0。**
+> 状态:**草案 — 两轮对抗审查(`wzvcwsm0t` 47→34 / `wf2tanq33` 41→36)。裁决 = REVISE,实质「现在别建,只留离线 canary 当唯一生死一锤」。先读 §0 + §0.2。**
 
 ## 0. 对抗审查结论(`wzvcwsm0t`,权威,覆盖下文一切乐观标注)
 
@@ -27,6 +27,21 @@
 **应改(MED)**:提交池基数仅 13 + pv1 主导作正交基准噪声大(用 ~67 can_submit 池 + min-overlap 守卫 + 小池诚实标);scheduler 仍贪心 `weighted_choice`,未改 §8.3 的 Thompson/比例采样;reward 三项小基数下共线(self-pruning 兜底,需 Phase 2 实证监控)。
 
 **落地顺序(分两 PR,降爆炸半径)+ 硬 gate** → 见 §9。
+
+### 0.2 第二轮深度概念审查(`wf2tanq33`,41→36 确认,更狠)
+
+一审抓战术(存在性/缺列);二审攻**概念层**,新增三处更深打击 + 收紧裁决:
+
+1. **「10.6%」分母被夸大(category-error,§0 未纠)**:`fetch_helpers.py:28 _is_signal_field` 早在喂 LLM 前就剔了 UNIVERSE/SYMBOL/timestamp/ISO 类——**8365 是原始 API 目录,非可挖信号字段全集**。真覆盖率**显著高于 10.6%**。内卷方向仍对(pv1 34% / 18 集 yield 一致 0),但**具体数字虚高,凡引用 10.6% 处都要标"分母含不可挖元数据字段,真值更高"**。
+2. **marginal 修正不连贯 + 没真破环(最致命)**:§2.2 静态 `1−max_corr` 与 §8.4「组合边际」数学不等价;且组合边际**仍反向依赖那 13 个 pv1 主导的提交池** → **正反馈环只是被换了标签,没被打破**。环的核心卖点("打破拥挤")因此存疑——orthogonality 项要么换「与池关联硬门(self_corr<0.5)+ novelty + signal 复合、marginal 移出 reward」,要么显式接受 13-池噪声 + min-overlap 守卫,不能继续用"换标签的池依赖 marginal"。
+3. **§9「PR-A 可 staging」自相矛盾**:三 gate 全不满时 PR-A 也是死资产 → 删。正确路径 = **canary 先行,过了 PR-A+PR-B 一起上**(见已修订 §9)。
+
+**二审总裁决 = REVISE(不 GO 不 KILL)**:方向保留(唯一不被 execution-limited 逻辑杀死的进攻轴),但核心赌注零验证 + 爆炸半径大 + 三 gate 市场驱动翻不了 → **建 = 造死资产**。**GO 前必改**:上述 1/2/3 + 一审的 signal `p90×can_submit_rate`(防愚人金)+ 字段级正交聚合口径 + 双环仲裁。
+
+**🎯 唯一生死问题(整环的赌注)**:**经 `_is_signal_field` 过滤后的未碰真·信号字段,IS Sharpe 分布是否真低于 886 熟字段?**
+- ≈ 或 < → **89% 未碰是生成器的正确回避**,整环过度工程 → **朴素结论:长尾无信号,别建,真杠杆是新正交数据源/跨区 + robustness 门**;
+- 有 p50>1.0 的字段 → 才值得投基建。
+- **这一锤(离线 canary)出结果前,任何 PR 代码都是赌博,不写一行。**
 
 ---
 > 起因:本会话实证 USA 字段覆盖率 = **886 / 8365 = 10.6%**(89% 字段从没进过任何 alpha 表达式),且 14193 alpha 里 **34% 砸在 pv1**;18 个 USA 数据集 yield **一致 0–0.85%**(正交集 option8/fundamental2/sentiment1 也挖了几百个 → 同样 ~0)。结论:不是「市场空 / regime DOWN」,是**生成器在 ~886 个熟字段里内卷**,反馈环把探索逼成了 exploit。
@@ -56,6 +71,7 @@
 大多数字段 = 从没挖(全 0)→ 这是探索目标。
 
 ### 2.2 Reward — 正交广度复合(密集 + 抗拥挤 + 乐观探索)
+> ⚠️ **本节以 §0.2/§8.4 为准(两轮审查已驳下列原稿)**:① `1−max_corr` 已废(换组合边际,但组合边际仍依赖 13-pv1 池=**换标签未真破环**,见 §0.2-2,待重设计);② `signal_quality` 裸 p90-Sharpe 是 CONCENTRATED_WEIGHT 愚人金,必须 `p90×can_submit_rate`;③ 「未碰字段=探索目标」的覆盖率分母虚高(§0.2-1)。
 ```
 field_score = novelty(field) × orthogonality_potential(field) × signal_quality(field)
 
@@ -172,18 +188,21 @@ field_score = novelty(field) × orthogonality_potential(field) × signal_quality
 
 ## 9. 落地顺序 + 硬 gate(对抗审查定稿)
 
-**PR-A(基建,池 OFF 期可 staging,不阻塞止损主线)**
+**Step 0 — 离线 canary(唯一生死一锤,零基建,先于一切代码)**
+- K=20 未碰**真·信号字段**(经 `_is_signal_field` 过滤后,非原始 8365)× N=5 alpha,**仅本地 IS 回测**,与 886 熟字段比分布。
+- **硬门(收紧 — 旧版仅比 `p50(new)>p50(old)` 会被 regime 噪声污染、把"regime 塌方"误判成"长尾无信号")**:
+  - 通过 = `p50(未碰) > 1.0 sharpe` **AND** `self_corr < 0.5`(对池)**AND** 字段测试覆盖率 > 50%(非 NaN/可回测);
+  - ⚠️ **当前 regime DOWN → 未碰与熟字段大概率"双方都失败"属预期,不能据此判"长尾无信号"或 pivot 数据源**;canary 应在 regime 非 DOWN 时跑才有判别力(或显式标注 DOWN 期结果仅供参考)。
+- **不过 → 长尾无信号 = 整环过度工程,STOP,真杠杆转新正交数据源/跨区 + robustness 门;过 → 才进 PR-A。**
+
+**PR-A(基建,仅 canary 过后才建,不再"池 OFF 期 staging")**
 1. Alembic 迁移:`datafield_cell_stats` +6 列(`times_mined / distinct_alphas / signal_p90 / orthogonality / last_mined / band_pass_count`)。成本核:只对「近期有 alpha 的 cell」回填,非全 ~125k 行。
-2. 回填 beat:从 `alphas`/`alpha_pnl` 算 `signal_p90 × can_submit_rate`(防愚人金)+ 用 `analyze_marginal_contribution` 算字段级边际(**先定聚合口径**)+ min-overlap NULL 守卫;诚实标 IS-proxy(OS 隐藏)。
+2. 回填 beat:`signal_p90 × can_submit_rate`(防愚人金,非裸 p90)+ 字段级正交(**先定聚合口径 + 解 §0.2-2「换标签未破环」**:倾向 self_corr<0.5 硬门 + novelty + signal,marginal 移出 reward 主项)+ min-overlap NULL 守卫;诚实标 IS-proxy。
 
-**PR-B(进攻,flag-OFF code-ready,等条件)**
-3. **canary 先行(硬前置)**:K=20 未碰字段 × N=5 alpha,**仅本地 IS 回测**,比 p50(未碰) vs p50(886 熟字段)。**不过 → 长尾无信号,STOP,转新数据源/跨区,别投基建。**
-4. canary 过 → 重写 `field_screener.py`(目标字段注入 hypothesis/code_gen prompt)+ `HypothesisIntent` 加 `target_field` 列 + scheduler 两层(dataset→field,避双环冲突)+ Thompson 比例采样 + G3 originality 接进生成目标(非仅 E 阶段)。
-5. `ENABLE_FIELD_SCREENING` flag 默认 OFF;canary 期 10% 预算;监控 self-pruning 速度 + 覆盖率↑ + 与 KB-RAG 不对冲。
+**PR-B(进攻,flag-OFF code-ready)**
+3. 重写 `field_screener.py`(目标字段注入 hypothesis/code_gen prompt)+ `HypothesisIntent` 加 `target_field` 列 + scheduler 两层(dataset→field)+ Thompson 比例采样 + G3 originality 接进生成目标(非仅 E 阶段)+ **双环仲裁**(KB success-RAG 加 target_field 软过滤,防 steering 被同节点 RAG 抵消)。
+4. `ENABLE_FIELD_SCREENING` flag 默认 OFF;canary 期 10% 预算;监控 self-pruning 速度 + 覆盖率↑ + 与 KB-RAG 不对冲。
 
-**硬 gate(任何 PR-B 开工前必须同时满足)**:
-- `ENABLE_POOL_PIPELINE=true` + 池重启(字段探索需 mining ON + sim 预算);
-- regime 非 DOWN(`regime_monitor` 不报持续 DOWN);
-- can_submit 供给企稳。
+**硬 gate(canary 已过 + PR-A/PR-B 开工前必须同时满足)**:`ENABLE_POOL_PIPELINE=true`+池重启 ∧ regime 非 DOWN ∧ can_submit 供给企稳。
 
-**当前三者均不满足(池 OFF / regime DOWN / 止损)→ PR-B 此刻不能开工。** PR-A 可作前向资产 staging,但若不确定要推进,**最省的是先只跑离线 canary(步骤 3,零基建)** 验长尾信号——这是把「赌长尾有信号」变成廉价一锤的决定性测试(与本会话用户「不验证、先设计」的取舍相反,但审查认为投基建前这一锤值得)。
+**当前三者均不满足(池 OFF / regime DOWN / 止损)→ 不写任何 PR 代码。** 正确路径 = **Step 0 canary 先行**(离线、不占 BRAIN 槽、不与 regime_monitor 竞争),过了再 PR-A+PR-B 一起上。**二审已删原"PR-A 可 staging"——三 gate 全不满时 PR-A 也是死资产。**
