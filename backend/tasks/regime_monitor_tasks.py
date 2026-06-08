@@ -110,23 +110,27 @@ async def _run() -> dict:
         return {"skipped": "no_probe_alphas"}
 
     variants = [make_variant(s) for s in specs]
-    # Serial re-sim (concurrency 1) — empirically the right choice for this probe.
-    # The 2026-06-07 0/23 failure was a double slot-acquire deadlock (each sim
-    # held 2 of 3 USER slots), root-fixed in services/optimization/simulator.py
-    # (1 slot/sim). A 2026-06-08 concurrent live test confirmed the fix holds —
-    # run_batch(all 23) ran 3-wide WITHOUT deadlock (max concurrent_sims=3, the
-    # USER ceiling) — BUT concurrent is a NET REGRESSION here: run_batch wraps
-    # each sim in a 600s wait_for that ALSO covers the slot-queue wait, so under
-    # real (cache-cold) sims (~3min each) the 3-wide throughput can't clear 23
-    # within 600s and 13/23 hit sim_timeout(600s) (vs 0 serial). Serial gives
-    # each sim a fresh slot + its full 600s → 23/23, 0 errors. For a daily
-    # off-hours probe (pool paused), signal completeness ≫ the ~36→~10min
-    # speedup. See reference_brainsim_double_acquire_deadlock.
+    # Chunked re-sim: concurrent WITHIN a chunk of exactly the sim-slot ceiling,
+    # serial ACROSS chunks. This is faster than one-at-a-time AND loses no data.
+    # Why the chunk size = slot limit matters: every sim in a chunk acquires a
+    # slot IMMEDIATELY (count 0→N, none exceeds), so its 600s wait_for covers
+    # only the real sim — no slot-queue wait to eat the budget → 0 sim_timeouts.
+    # A chunk finishes in max-of-N (not sum-of-N) time → ~1.5-2x faster than
+    # serial. Between chunks, run_batch's asyncio.gather drains every slot before
+    # the next chunk fires, so there is never cross-chunk contention.
+    # Contrast: firing ALL 23 at once (run_batch(variants, len)) lost 13/23 to
+    # sim_timeout(600s) — the wait_for budget got eaten by slot-queue waiting
+    # (2026-06-08 live test). The double slot-acquire that deadlocked the
+    # 2026-06-07 0/23 run is root-fixed (1 slot/sim, simulator.py), which is what
+    # makes within-chunk concurrency safe. See
+    # reference_brainsim_double_acquire_deadlock.
+    chunk = max(1, int(getattr(settings, "BRAIN_SIM_SLOT_LIMIT_USER", 3)))
     async with BrainAdapter() as brain:
         sim = BrainSimulator(brain)
         results = []
-        for v in variants:
-            results.extend(await sim.run_batch([v], budget=1))
+        for i in range(0, len(variants), chunk):
+            batch = variants[i : i + chunk]
+            results.extend(await sim.run_batch(batch, budget=len(batch)))
 
     # run_batch preserves input order → zip specs with results.
     probes, rows = [], []

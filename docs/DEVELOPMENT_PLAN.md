@@ -101,7 +101,7 @@ greenfield 重定向 → #25c 字段卫生(commit `93a04a7`)→ regime 漂移实
 > - **Phase B**(`d9cb53e`):verdict_basis=IS / decay IS-proxy(纠 "OS-metric" 误注释)/ V-12 docstring / L0L2L3 known-dead。
 > - **Phase C**(`74b4ec7`):`is_diagnostic_card.py`(11 测)+ ops drain-order 接线 + 前端体检卡列。restart 后 **live 验证**(端点返 card,分布 HOLD 4/REVIEW 7/SKIP 61)。
 > - **docs**(`f201d0e`):`kb_redesign_unified` + INDEX + §2A.1/§4A 指针。
-> - **regime 并发实验 → 回退串行**(2026-06-08,`c54680c` 试并发 → 本次回退):重启后 live 实测并发 **3-wide 无死锁**(max concurrent_sims=3,根治确认 live),**但净回归** —— `run_batch` 每 sim 的 600s `wait_for` 同时覆盖「排队等槽」,真 sim(~3min)下 3-wide 清不完 23 个 → **13/23 撞 sim_timeout(600s)**(串行 0 错)。**回退串行**(每 sim 独享新槽+full 600s → 23/23 零错);每日 off-hours 探针信号完整性 ≫ 提速。发现入 [[reference_brainsim_double_acquire_deadlock_2026_06_07]]。
+> - **regime re-sim 提速 = 分块**(2026-06-08,三轮 live 实测收敛):① 全量并发(`c54680c`)= 净回归,`run_batch` 每 sim 600s `wait_for` 覆盖排队等槽 → **13/23 撞 sim_timeout**;② 回退串行(`c4acc20`)= 23/23 但 ~36min;③ **最终分块**(chunk=槽上限 3,块内并发块间串行)= 每 sim 即时拿槽独享 600s → **0 timeout + 23/23,~25min(~30% 提速)**。live 实测 max concurrent_sims=3 从不超、rows_err=0/23、verdict 一致 REGIME_DOWN。机制入 [[reference_brainsim_double_acquire_deadlock_2026_06_07]]。
 
 **Phase A — regime_monitor 热翻(零代码,先做)**
 - [x] A1 前置:确认 celery **beat + 主 worker 在线**(regime 跑主 worker 非 pool worker);每天 ~23 BRAIN sims + 需 creds。
