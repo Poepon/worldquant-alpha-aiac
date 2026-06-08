@@ -110,20 +110,19 @@ async def _run() -> dict:
         return {"skipped": "no_probe_alphas"}
 
     variants = [make_variant(s) for s in specs]
-    # Serial re-sim (concurrency 1), conservative default. The 2026-06-07 0/23
-    # failure was NOT "BRAIN throttling" — root cause was a double slot-acquire
-    # (BrainSimulator._run_one + simulate_alpha each took a slot → 2 slots/sim →
-    # >=2 concurrent saturated the USER 3-slot limit → inner-acquire deadlock →
-    # 600s sim_timeout). Now fixed in services/optimization/simulator.py (1
-    # slot/sim), so run_batch concurrency is safe again. Kept one-at-a-time here
-    # since it's a daily off-hours probe (pool paused) where ~1-2h is fine; flip
-    # to `run_batch(variants, budget=len(variants))` for ~3x speedup once a live
-    # concurrent run confirms. See reference_brainsim_double_acquire_deadlock.
+    # Concurrent re-sim (2026-06-08): fire all variants at once; the BRAIN sim
+    # slot acquire inside simulate_alpha is the throttle (USER = 3 slots), so
+    # run_batch is slot-bound to 3-wide and the rest poll-wait (≤30min acquire
+    # deadline ≫ worst-case wait on a 23-probe run). The 2026-06-07 0/23 failure
+    # was NOT "BRAIN throttling" — root cause was a double slot-acquire (each sim
+    # held 2 of 3 slots → ≥2 concurrent deadlocked). Root-fixed in
+    # services/optimization/simulator.py (1 slot/sim), live-verified serial
+    # (concurrent_sims=1 throughout the 2026-06-08 re-run). Concurrent here is
+    # ~3x faster (~36min→~12min) on the daily off-hours probe. See
+    # reference_brainsim_double_acquire_deadlock.
     async with BrainAdapter() as brain:
         sim = BrainSimulator(brain)
-        results = []
-        for v in variants:
-            results.extend(await sim.run_batch([v], budget=1))
+        results = await sim.run_batch(variants, budget=len(variants))
 
     # run_batch preserves input order → zip specs with results.
     probes, rows = [], []

@@ -13,9 +13,9 @@
 | **生产(挖掘)** | ⏸ **暂停** — `drain hg/s/e`(Redis 热)+ `.env ENABLE_POOL_PIPELINE=false`(下次重启全清停)|
 | **auto-submit** | ⚠️ `ENABLE_AUTO_SUBMIT=true` + `.env AUTO_SUBMIT_MODE=live`(自 06-04,DB 实测)—— **不是关闭**;但 backlog 全 SKIP(#40)→ 06-04 后仅 0-1 提交 = **输出饿死非关闭**。独立 6h beat,不受池 drain 影响,守门栈 fail-closed(0 烂提交)。要真停热翻 flag |
 | **提交选择器(#39)** | ✅ 已建+push(robustness∩正交∩去重 + sub-univ Sharpe);前向就绪,新供给来时挑货 |
-| **regime 监测器(#41)** | ✅ 已建+push;待激活(重启 + 翻 `ENABLE_REGIME_MONITOR`)→ 每日 re-sim 探老边际恢复 |
+| **regime 监测器(#41)** | ✅ **已激活+live**(2026-06-08 重启 + `ENABLE_REGIME_MONITOR` ON);手动重跑实测 verdict=**REGIME_DOWN**(submitted mean 1.7→0.63,frac_recovered 0.22<0.5);每日 07:30 beat 自动跑 |
 | **真杠杆** | 新正交供给(跨区域=Consultant 考核 / 新数据源)—— **regime 锁着** |
-| **下一步(用户)** | run.bat 重启(生效池暂停 + 载 regime beat/端点/选择器新字段)+ 翻 `ENABLE_REGIME_MONITOR` |
+| **下一步(用户)** | 熬市场转(主动权在市场):等 07:30 beat 报 `REGIME_TURNING` / Consultant 到位 → 恢复生产(§5);regime 并发提速改动待 worker 重启生效 |
 
 ---
 
@@ -63,14 +63,14 @@ greenfield 重定向 → #25c 字段卫生(commit `93a04a7`)→ regime 漂移实
 | **auto-submit** | `ENABLE_AUTO_SUBMIT`=**ON**+live(见 §0)| 6h beat,fail-closed 守门栈 G0-G10/G5b;backlog 死→~0 产出 |
 | **BRAIN adapter / 凭证** | live | `brain_adapter` 单例 + DB 加密凭证(`WQBCredential`/`credentials_service`)优先 .env;`BRAIN_AUTH_CIRCUIT` 熔断 + fleet reauth coalescing |
 | **优化闭环** | `ENABLE_OPTIMIZATION_LOOP`=OFF | `services/optimization` 冻结接口(Layer3 `run_one_cycle`);6h beat OFF;manual `POST /ops/optimization/optimize-alpha` 独立;§6 NO-GO |
-| **regime 监测 / 认知 reconcile / Consultant** | 全 OFF(默认)| `ENABLE_REGIME_MONITOR`(#41 待激活)/ `ENABLE_POOL_COGNITIVE_RECONCILE`(Phase 2)/ `ENABLE_BRAIN_CONSULTANT_MODE`(跨区域闸)|
+| **regime 监测 / 认知 reconcile / Consultant** | `ENABLE_REGIME_MONITOR`=**ON**(06-08 激活,live REGIME_DOWN);其余 OFF | `ENABLE_POOL_COGNITIVE_RECONCILE`(Phase 2)/ `ENABLE_BRAIN_CONSULTANT_MODE`(跨区域闸)仍 OFF |
 | **cell_stats 规范化** | live(commit `6a37cb7`,cutover 05-26)| 四表 per-(delay,universe) 统计,支撑池 HG 细粒度特征 |
 | **Celery beats** | 12+ live | pool-scheduler(5min)/ lease-recycle(2min)/ regime-monitor(daily 07:30,gated)/ cognitive-reconcile(15min,gated)/ sync-datasets(daily)/ daily-feedback / os-corr-refresh 等;清单见 `celery_app.py:119+` |
 
 ## 3. 当前持有策略(greenfield 分支 B)
 
 - **止损**:池停烧(drain 热 + .env 持久),挖掘产 0 可提交 = 纯烧 token/sim,已止。
-- **监测**:**regime-turn 监测器(#41)** 每日 re-sim 13 提交 + 10 backlog 抽样于当前数据(rolling test_period,**口径 current IS 非 OS**);提交集 re-sim 均值回 ≥0.5 或 ≥1 个过 1.25 → `REGIME_TURNING` 告警 → 重启生产。
+- **监测**:**regime-turn 监测器(#41,已 live)** 每日 07:30 re-sim 13 提交 + 10 backlog 抽样于当前数据(rolling test_period,**口径 current IS 非 OS**);标定后 turn 规则 = **fresh 子集 frac_recovered≥0.5 ∧ mean_delta≥−0.25 ∧ mean≥1.0**(剔除 BRAIN dedup 缓存假恢复,旧松逻辑曾误报)→ `REGIME_TURNING` 告警 → 重启生产。当前实测 **REGIME_DOWN**。
 - **选择器就绪**:#39 前向资产,新供给来时挑 robust∩orthogonal∩additive(保留 marginal/recon Quarterly 代理)。
 - **等**:`REGIME_TURNING` 告警 / Consultant 考核到位 → 重启生产;否则熬市场转,主动权在市场不在工程。
 
@@ -96,34 +96,34 @@ greenfield 重定向 → #25c 字段卫生(commit `93a04a7`)→ regime 漂移实
 
 > **✅ 完成状态(2026-06-08):A/B/C + 根治 double-acquire + regime 标定 全 ship,4 commit push gitea master。**
 > - **Phase A**(`aff8fb1`):`ENABLE_REGIME_MONITOR` ON(DB override)+ beat 注册 + 串行 re-sim fix(绕 double-acquire 死锁)。首跑 23/23 实证 regime **DOWN**(58qroezz 2.33→0.89、mLxlen69 2.01→−0.74)。
-> - **regime verdict 标定**(`aff8fb1`):剔除 BRAIN dedup 缓存假恢复(stale_eps)+ turn 改 fresh frac≥0.5 ∧ mean_delta≥-0.25 ∧ mean≥1.0(旧松逻辑误报 TURNING)。离线回放→REGIME_DOWN。⚠️ **live Redis verdict 待下次 07:30 beat 重算追上代码**(当前仍显示 stale TURNING)。
-> - **根治 double-acquire**(`aff8fb1`,`simulator.py`):`_run_one` 删冗余 acquire(simulate_alpha 已管槽)→ 1 slot/sim;47 测过。优化闭环潜伏死锁一并解除。
+> - **regime verdict 标定**(`aff8fb1`):剔除 BRAIN dedup 缓存假恢复(stale_eps)+ turn 改 fresh frac≥0.5 ∧ mean_delta≥-0.25 ∧ mean≥1.0(旧松逻辑误报 TURNING)。离线回放→REGIME_DOWN。✅ **2026-06-08 手动重跑(c5338212,~36min,23/23 0 error)live verdict 已更新成 REGIME_DOWN**(n_stale=6 / submitted frac_recovered=0.22 / mean_resim 0.63 vs baseline 1.7),stale TURNING 已覆盖。
+> - **根治 double-acquire**(`aff8fb1`,`simulator.py`):`_run_one` 删冗余 acquire(simulate_alpha 已管槽)→ 1 slot/sim;47 测过。优化闭环潜伏死锁一并解除。**2026-06-08 串行重跑全程 concurrent_sims=1 实证根治生效。**
 > - **Phase B**(`d9cb53e`):verdict_basis=IS / decay IS-proxy(纠 "OS-metric" 误注释)/ V-12 docstring / L0L2L3 known-dead。
-> - **Phase C**(本次 `feat(ops)`):`is_diagnostic_card.py`(11 测)+ ops drain-order 接线 + 前端体检卡列。restart 后 **live 验证**(端点返 card,分布 HOLD 4/REVIEW 7/SKIP 61)。
+> - **Phase C**(`74b4ec7`):`is_diagnostic_card.py`(11 测)+ ops drain-order 接线 + 前端体检卡列。restart 后 **live 验证**(端点返 card,分布 HOLD 4/REVIEW 7/SKIP 61)。
 > - **docs**(`f201d0e`):`kb_redesign_unified` + INDEX + §2A.1/§4A 指针。
-> 后续可选:翻 regime 并发(根治后安全,75min→25min,待 live 实证)。
+> - **regime 并发提速**(2026-06-08,`regime_monitor_tasks.py`):串行 loop → `run_batch(variants, budget=len(variants))`(根治后安全,3-wide slot 背压,~36min→~12min)。⚠️ **待 worker 重启生效 + 首跑 live 实证并发路径**。
 
 **Phase A — regime_monitor 热翻(零代码,先做)**
-- [ ] A1 前置:确认 celery **beat + 主 worker 在线**(regime 跑主 worker 非 pool worker);每天 ~23 BRAIN sims + 需 creds。
-- [ ] A2 翻 `ENABLE_REGIME_MONITOR=true`(热;在 SUPPORTED_FLAGS,**无需 .env/重启**)。
-- [ ] A3 验证:等 07:30 beat 或手动触发 → `GET /ops/regime-monitor` + `RegimeMonitor.jsx` 出数(口径=current IS 非 OS)。
+- [x] A1 前置:确认 celery **beat + 主 worker 在线**(regime 跑主 worker 非 pool worker);每天 ~23 BRAIN sims + 需 creds。
+- [x] A2 翻 `ENABLE_REGIME_MONITOR=true`(热;在 SUPPORTED_FLAGS,**无需 .env/重启**)。
+- [x] A3 验证:等 07:30 beat 或手动触发 → `GET /ops/regime-monitor` + `RegimeMonitor.jsx` 出数(口径=current IS 非 OS)。
 
 **Phase B — 诚实标注(标签/注释级,低风险)**
-- [ ] B1 `verdict_basis='IS'`:`rag_service.py:1605`(SUCCESS meta_data)+ `:~1390`(FAILURE)各加一行(⚠️ JSONB JSON-null footgun)。旧行可选 backfill。**依赖 pool 重启**。
-- [ ] B2 `decay_curve` IS-proxy:`decay_service.py:88` snapshot 加 `"basis":"IS"` + docstring + 读侧(`alpha_health_service`/`regime_monitor`)注释 + `models/alpha.py` 列注释。验证 `test_decay_service.py`。
-- [ ] B3 L0/L2/L3 known-dead:`backend/CODE_STATUS.md` 追加(current_expression 永不传,r8 0/2211)。纯文档。
-- [ ] B4 `os_sharpe` cosmetic:`evaluation.py:225-254` docstring 正名 IS train/test-split(os_sharpe live 恒 None);可选删死前缀。⚠️ eval 热路径,**必跑 `test_suite.py --all` 回归 0 漂移**。**依赖 pool 重启**。
+- [x] B1 `verdict_basis='IS'`:`rag_service.py:1605`(SUCCESS meta_data)+ `:~1390`(FAILURE)各加一行(⚠️ JSONB JSON-null footgun)。旧行可选 backfill。**依赖 pool 重启**。
+- [x] B2 `decay_curve` IS-proxy:`decay_service.py:88` snapshot 加 `"basis":"IS"` + docstring + 读侧(`alpha_health_service`/`regime_monitor`)注释 + `models/alpha.py` 列注释。验证 `test_decay_service.py`。
+- [x] B3 L0/L2/L3 known-dead:`backend/CODE_STATUS.md` 追加(current_expression 永不传,r8 0/2211)。纯文档。
+- [x] B4 `os_sharpe` cosmetic:`evaluation.py:225-254` docstring 正名 IS train/test-split(os_sharpe live 恒 None);可选删死前缀。⚠️ eval 热路径,**必跑 `test_suite.py --all` 回归 0 漂移**。**依赖 pool 重启**。
 
 **Phase C — IS 诊断体检卡(唯一新建,中风险;零新指标/库/sim)**
-- [ ] C0 设计决策:**端点按需组装,不写 `alpha.metrics`**(robustness/corr 池相对、每 drain 重算,持久化会 stale)。
-- [ ] C1 确认 `_iqc_marginal.recommendation` + V12/V16 flag 落点,补 `DrainOrderItem` 缺的 3 维(过拟合/turnover/FAILURE-相似)。
-- [ ] C2 `ops.py:4846 _item()` 加 `diagnostic_card`:5 维{过拟合(V12/V16)、流动性(universe×turnover)、拥挤(max_corr_to_selected)、历史相似(FAILURE 命中)、提交建议(robustness_verdict⊕marginal rec⊕value_tier)}+overall。**剥离 OS 字段**。
-- [ ] C3 前端 `SubmitBacklogMonitor.jsx` 渲染 card(展开行/tooltip)。
-- [ ] C4 测试 ops endpoint + `npm run build`(eslint 无配置→build 验证)。**依赖 uvicorn --reload 自动加载**。
+- [x] C0 设计决策:**端点按需组装,不写 `alpha.metrics`**(robustness/corr 池相对、每 drain 重算,持久化会 stale)。
+- [x] C1 确认 `_iqc_marginal.recommendation` + V12/V16 flag 落点,补 `DrainOrderItem` 缺的 3 维(过拟合/turnover/FAILURE-相似)。
+- [x] C2 `ops.py:4846 _item()` 加 `diagnostic_card`:5 维{过拟合(V12/V16)、流动性(universe×turnover)、拥挤(max_corr_to_selected)、历史相似(FAILURE 命中)、提交建议(robustness_verdict⊕marginal rec⊕value_tier)}+overall。**剥离 OS 字段**。
+- [x] C3 前端 `SubmitBacklogMonitor.jsx` 渲染 card(展开行/tooltip)。
+- [x] C4 测试 ops endpoint + `npm run build`(eslint 无配置→build 验证)。**依赖 uvicorn --reload 自动加载**。
 
 **Phase D — 收尾**
-- [ ] D1 commit + push gitea(含 KB 重设计 doc + INDEX/§2A.1 指针 + 上轮 rag_service 误标更正 + B/C 代码;**排除** `scripts/verify_prompt_changes_2026_05_24.py`)。
-- [ ] D2(可选)存 memory:KB 重设计结论(v2=换皮镀金 / L0L2L3 真死 / V-12 cosmetic / 唯一杠杆=提交选择)。
+- [x] D1 commit + push gitea(含 KB 重设计 doc + INDEX/§2A.1 指针 + 上轮 rag_service 误标更正 + B/C 代码;**排除** `scripts/verify_prompt_changes_2026_05_24.py`)。
+- [x] D2(可选)存 memory:KB 重设计结论(v2=换皮镀金 / L0L2L3 真死 / V-12 cosmetic / 唯一杠杆=提交选择)。
 
 **接线核实快照**:regime_monitor=真零代码(beat `celery_app.py:138` 已注册 + flag `feature_flag_service.py:566` 在 SUPPORTED_FLAGS 热翻);体检卡 robustness 半边已在 `DrainOrderItem`(`ops.py:4535-4548`),缺 3 维 + 编排 + 前端。
 
