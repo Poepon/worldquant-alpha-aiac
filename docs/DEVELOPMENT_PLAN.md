@@ -15,7 +15,7 @@
 | **提交选择器(#39)** | ✅ 已建+push(robustness∩正交∩去重 + sub-univ Sharpe);前向就绪,新供给来时挑货 |
 | **regime 监测器(#41)** | ✅ **已激活+live**(2026-06-08 重启 + `ENABLE_REGIME_MONITOR` ON);手动重跑实测 verdict=**REGIME_DOWN**(submitted mean 1.7→0.63,frac_recovered 0.22<0.5);每日 07:30 beat 自动跑 |
 | **真杠杆** | 新正交供给(跨区域=Consultant 考核 / 新数据源)—— **regime 锁着** |
-| **下一步(用户)** | 熬市场转(主动权在市场):等 07:30 beat 报 `REGIME_TURNING` / Consultant 到位 → 恢复生产(§5);regime 并发提速改动待 worker 重启生效 |
+| **下一步(用户)** | 熬市场转(主动权在市场):等 07:30 beat 报 `REGIME_TURNING` / Consultant 到位 → 恢复生产(§5)|
 
 ---
 
@@ -101,7 +101,7 @@ greenfield 重定向 → #25c 字段卫生(commit `93a04a7`)→ regime 漂移实
 > - **Phase B**(`d9cb53e`):verdict_basis=IS / decay IS-proxy(纠 "OS-metric" 误注释)/ V-12 docstring / L0L2L3 known-dead。
 > - **Phase C**(`74b4ec7`):`is_diagnostic_card.py`(11 测)+ ops drain-order 接线 + 前端体检卡列。restart 后 **live 验证**(端点返 card,分布 HOLD 4/REVIEW 7/SKIP 61)。
 > - **docs**(`f201d0e`):`kb_redesign_unified` + INDEX + §2A.1/§4A 指针。
-> - **regime 并发提速**(2026-06-08,`regime_monitor_tasks.py`):串行 loop → `run_batch(variants, budget=len(variants))`(根治后安全,3-wide slot 背压,~36min→~12min)。⚠️ **待 worker 重启生效 + 首跑 live 实证并发路径**。
+> - **regime 并发实验 → 回退串行**(2026-06-08,`c54680c` 试并发 → 本次回退):重启后 live 实测并发 **3-wide 无死锁**(max concurrent_sims=3,根治确认 live),**但净回归** —— `run_batch` 每 sim 的 600s `wait_for` 同时覆盖「排队等槽」,真 sim(~3min)下 3-wide 清不完 23 个 → **13/23 撞 sim_timeout(600s)**(串行 0 错)。**回退串行**(每 sim 独享新槽+full 600s → 23/23 零错);每日 off-hours 探针信号完整性 ≫ 提速。发现入 [[reference_brainsim_double_acquire_deadlock_2026_06_07]]。
 
 **Phase A — regime_monitor 热翻(零代码,先做)**
 - [x] A1 前置:确认 celery **beat + 主 worker 在线**(regime 跑主 worker 非 pool worker);每天 ~23 BRAIN sims + 需 creds。

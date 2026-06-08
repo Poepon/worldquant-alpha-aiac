@@ -110,19 +110,23 @@ async def _run() -> dict:
         return {"skipped": "no_probe_alphas"}
 
     variants = [make_variant(s) for s in specs]
-    # Concurrent re-sim (2026-06-08): fire all variants at once; the BRAIN sim
-    # slot acquire inside simulate_alpha is the throttle (USER = 3 slots), so
-    # run_batch is slot-bound to 3-wide and the rest poll-wait (≤30min acquire
-    # deadline ≫ worst-case wait on a 23-probe run). The 2026-06-07 0/23 failure
-    # was NOT "BRAIN throttling" — root cause was a double slot-acquire (each sim
-    # held 2 of 3 slots → ≥2 concurrent deadlocked). Root-fixed in
-    # services/optimization/simulator.py (1 slot/sim), live-verified serial
-    # (concurrent_sims=1 throughout the 2026-06-08 re-run). Concurrent here is
-    # ~3x faster (~36min→~12min) on the daily off-hours probe. See
-    # reference_brainsim_double_acquire_deadlock.
+    # Serial re-sim (concurrency 1) — empirically the right choice for this probe.
+    # The 2026-06-07 0/23 failure was a double slot-acquire deadlock (each sim
+    # held 2 of 3 USER slots), root-fixed in services/optimization/simulator.py
+    # (1 slot/sim). A 2026-06-08 concurrent live test confirmed the fix holds —
+    # run_batch(all 23) ran 3-wide WITHOUT deadlock (max concurrent_sims=3, the
+    # USER ceiling) — BUT concurrent is a NET REGRESSION here: run_batch wraps
+    # each sim in a 600s wait_for that ALSO covers the slot-queue wait, so under
+    # real (cache-cold) sims (~3min each) the 3-wide throughput can't clear 23
+    # within 600s and 13/23 hit sim_timeout(600s) (vs 0 serial). Serial gives
+    # each sim a fresh slot + its full 600s → 23/23, 0 errors. For a daily
+    # off-hours probe (pool paused), signal completeness ≫ the ~36→~10min
+    # speedup. See reference_brainsim_double_acquire_deadlock.
     async with BrainAdapter() as brain:
         sim = BrainSimulator(brain)
-        results = await sim.run_batch(variants, budget=len(variants))
+        results = []
+        for v in variants:
+            results.extend(await sim.run_batch([v], budget=1))
 
     # run_batch preserves input order → zip specs with results.
     probes, rows = [], []
