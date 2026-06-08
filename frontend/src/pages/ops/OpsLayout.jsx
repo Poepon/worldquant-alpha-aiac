@@ -28,8 +28,8 @@ import OptimizationCyclesMonitor from './OptimizationCyclesMonitor'
 // OrchestratorMonitor page retired in Phase 1c-delete follow-up
 import LLMRoutingConsole from './LLMRoutingConsole'
 import PoolPipelineMonitor from './PoolPipelineMonitor'
-import PoolQueueMonitor from './PoolQueueMonitor'
-import PoolWorkersMonitor from './PoolWorkersMonitor'
+// pool-queue / pool-workers merged into PoolPipelineMonitor (3-tab) 2026-06-08;
+// their routes redirect to pool-pipeline (deep-links preserved).
 import SubmitYieldMonitor from './SubmitYieldMonitor'
 import CognitiveReconcileMonitor from './CognitiveReconcileMonitor'
 import RegimeMonitor from './RegimeMonitor'
@@ -68,11 +68,12 @@ export default function OpsLayout() {
       )}
       <Routes>
         <Route index element={<Navigate to="overview" replace />} />
-        {/* Four-pool pipeline monitor (2026-06-06 cutover) — HG/S/E live health */}
+        {/* Four-pool pipeline monitor (2026-06-06 cutover; 2026-06-08 merged
+            queue + workers as the 队列/工作器 tabs) — HG/S/E live health */}
         <Route path="pool-pipeline" element={<PoolPipelineMonitor />} />
-        {/* P1 (2026-06-07) pool-native pages — queue depth/backlog + worker/lease health */}
-        <Route path="pool-queue" element={<PoolQueueMonitor />} />
-        <Route path="pool-workers" element={<PoolWorkersMonitor />} />
+        {/* pool-queue / pool-workers merged into pool-pipeline tabs — redirect. */}
+        <Route path="pool-queue" element={<Navigate to="../pool-pipeline" replace />} />
+        <Route path="pool-workers" element={<Navigate to="../pool-pipeline" replace />} />
         <Route path="regime-monitor" element={<RegimeMonitor />} />
         {/* P2 (2026-06-07) — submission-yield funnel + Phase-2 cognitive-reconcile status */}
         <Route path="submit-yield" element={<SubmitYieldMonitor />} />

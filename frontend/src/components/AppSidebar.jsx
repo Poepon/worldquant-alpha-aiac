@@ -20,7 +20,6 @@ import {
   CheckSquareOutlined,
   RadarChartOutlined,
   SendOutlined,
-  ApiOutlined,
 } from '@ant-design/icons'
 
 const { Sider } = Layout
@@ -60,9 +59,7 @@ const menuItems = [
         label: '池总览',
         children: [
           { key: '/ops/overview', label: '总览' },
-          { key: '/ops/pool-pipeline', icon: <ThunderboltOutlined />, label: '挖掘池 (HG/S/E)' },
-          { key: '/ops/pool-queue', icon: <FundOutlined />, label: '队列健康 / 积压' },
-          { key: '/ops/pool-workers', icon: <ApiOutlined />, label: '工作器与心跳' },
+          { key: '/ops/pool-pipeline', icon: <ThunderboltOutlined />, label: '挖掘池 (HG/S/E · 总览/队列/工作器)' },
           { key: '/ops/regime-monitor', icon: <RadarChartOutlined />, label: 'Regime 转向监测' },
         ],
       },
