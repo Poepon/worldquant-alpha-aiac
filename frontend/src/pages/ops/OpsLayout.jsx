@@ -2,7 +2,7 @@ import { Route, Routes, Navigate } from 'react-router-dom'
 import { Alert } from 'antd'
 
 import FeatureFlagsConsole from './FeatureFlagsConsole'
-import AlphaHealthMonitor from './AlphaHealthMonitor'
+import EvalDiagnostics from './EvalDiagnostics'
 import HypothesisHealthMonitor from './HypothesisHealthMonitor'
 import OpsOverview from './OpsOverview'
 import PillarBalance from './PillarBalance'
@@ -16,12 +16,11 @@ import SimulationCacheMonitor from './SimulationCacheMonitor'
 import CostMonitor from './CostMonitor'
 import G3OriginalityMonitor from './G3OriginalityMonitor'
 import G8ForestMonitor from './G8ForestMonitor'
-import R11CapacityMonitor from './R11CapacityMonitor'
+// AlphaHealth / R11 / R13 merged into EvalDiagnostics (3-tab) 2026-06-08;
+// G10 / G3-v2 merged into ArchivedMonitors (2-tab). Sub-components imported there.
+import ArchivedMonitors from './ArchivedMonitors'
 // LLMJudgeMonitor / DirectionBanditMonitor / G5CrossoverMonitor / R8v3Monitor
 // retired 2026-06-07 (P0 四池重设计) — mechanisms deleted (1c) or flipped OFF (1b).
-import R13FactorLensMonitor from './R13FactorLensMonitor'
-import G10LogicMonitor from './G10LogicMonitor'
-import G3v2Monitor from './G3v2Monitor'
 import SubmitBacklogMonitor from './SubmitBacklogMonitor'
 import AutoSubmitMonitor from './AutoSubmitMonitor'
 import OptimizationCyclesMonitor from './OptimizationCyclesMonitor'
@@ -90,7 +89,8 @@ export default function OpsLayout() {
         <Route path="llm-routing" element={<LLMRoutingConsole />} />
         {/* Phase 2 — P1 visualizations */}
         <Route path="overview" element={<OpsOverview />} />
-        <Route path="alpha-health" element={<AlphaHealthMonitor />} />
+        {/* 评估阶段 E 诊断 (2026-06-08 合并 Alpha健康/R11容量/R13因子透镜 为 3-tab) */}
+        <Route path="alpha-health" element={<EvalDiagnostics />} />
         <Route path="hypothesis-health" element={<HypothesisHealthMonitor />} />
         {/* Phase 3 — P2-A/B/C/D dashboards */}
         <Route path="pillar-balance" element={<PillarBalance />} />
@@ -111,10 +111,12 @@ export default function OpsLayout() {
         <Route path="g3-monitor" element={<G3OriginalityMonitor />} />
         {/* G8 Phase A — hypothesis forest telemetry (2026-05-19) */}
         <Route path="g8-monitor" element={<G8ForestMonitor />} />
-        <Route path="r11-capacity" element={<R11CapacityMonitor />} />
-        <Route path="r13-factor-lens" element={<R13FactorLensMonitor />} />
-        <Route path="g10-logic" element={<G10LogicMonitor />} />
-        <Route path="g3v2-monitor" element={<G3v2Monitor />} />
+        {/* r11 / r13 merged into alpha-health (EvalDiagnostics tabs) — redirect. */}
+        <Route path="r11-capacity" element={<Navigate to="../alpha-health" replace />} />
+        <Route path="r13-factor-lens" element={<Navigate to="../alpha-health" replace />} />
+        {/* g10 / g3v2 merged into ArchivedMonitors tabs — g3v2 redirects to g10-logic. */}
+        <Route path="g10-logic" element={<ArchivedMonitors />} />
+        <Route path="g3v2-monitor" element={<Navigate to="../g10-logic" replace />} />
         {/* Mining Orchestrator route retired in Phase 1c-delete follow-up */}
         {/* Catch-all: deleted/unknown ops routes (e.g. bookmarked r5-judge /
             direction-bandit-monitor / g5-monitor / r8v3-monitor, removed

@@ -10,14 +10,12 @@ import {
   WarningOutlined,
   MonitorOutlined,
   SwapOutlined,
-  ExperimentOutlined,
   FunctionOutlined,
   DollarOutlined,
   CopyOutlined,
   ApartmentOutlined,
-  FundOutlined,
   ReadOutlined,
-  CheckSquareOutlined,
+  HeartOutlined,
   RadarChartOutlined,
   SendOutlined,
 } from '@ant-design/icons'
@@ -85,9 +83,7 @@ const menuItems = [
         type: 'group',
         label: '评估阶段 · E',
         children: [
-          { key: '/ops/alpha-health', label: 'Alpha 健康度' },
-          { key: '/ops/r11-capacity', icon: <FundOutlined />, label: '容量估算 (R11)' },
-          { key: '/ops/r13-factor-lens', icon: <ExperimentOutlined />, label: '因子透镜 (R13)' },
+          { key: '/ops/alpha-health', icon: <HeartOutlined />, label: '评估诊断 (健康/容量/因子)' },
         ],
       },
       {
@@ -114,8 +110,7 @@ const menuItems = [
         type: 'group',
         label: '废弃 / 待 Phase 2',
         children: [
-          { key: '/ops/g10-logic', icon: <ReadOutlined />, label: '[归档] 逻辑资产库 (G10)' },
-          { key: '/ops/g3v2-monitor', icon: <CheckSquareOutlined />, label: '[归档] 语法校验 (G3-v2)' },
+          { key: '/ops/g10-logic', icon: <ReadOutlined />, label: '[归档] 逻辑库 / 语法校验' },
         ],
       },
     ],
