@@ -6071,6 +6071,81 @@ async def regime_monitor_status(
     return out
 
 
+class ResimBacklogRequest(BaseModel):
+    alpha_pks: List[int]
+
+
+@router.post("/submit-backlog/resim-current")
+async def submit_backlog_resim_current(
+    body: ResimBacklogRequest,
+    _token: str = Depends(_require_ops_token),
+) -> Dict[str, Any]:
+    """Enqueue an on-demand CURRENT-DATA re-sim of one/many backlog candidates
+    (v2, 2026-06-08). Read-only — simulate only, never submit. Compares against
+    the frozen-IS baseline and classifies decay (stable/soft/hard/margin_killed/
+    unmeasurable_cached). Gated on ENABLE_RESIM_BACKLOG. A single Redis NX lock
+    serialises batches (BRAIN sim slots are shared). Poll GET .../{job_id}.
+
+    口径 = current IS (BRAIN hides OS). 「持平」≠ should-submit — a held alpha
+    still must clear self_corr<0.7 + marginal dilution (#40). See design doc.
+    """
+    import json
+    import uuid
+    from loguru import logger
+    from backend.celery_app import celery_app
+    from backend.config import settings as _s
+    from backend.tasks.resim_backlog_tasks import JOB_KEY_FMT, LOCK_KEY
+
+    if not bool(getattr(_s, "ENABLE_RESIM_BACKLOG", False)):
+        raise HTTPException(status_code=403, detail="ENABLE_RESIM_BACKLOG 未开启(热翻 Feature Flag 控制台)")
+    pks = sorted({int(p) for p in body.alpha_pks})
+    if not pks:
+        raise HTTPException(status_code=400, detail="alpha_pks 为空")
+    max_batch = int(getattr(_s, "RESIM_BACKLOG_MAX_BATCH", 30))
+    if len(pks) > max_batch:
+        raise HTTPException(status_code=400, detail=f"单次上限 {max_batch} 个,收到 {len(pks)}")
+
+    job_id = uuid.uuid4().hex
+    lock_ttl = int(getattr(_s, "RESIM_BACKLOG_LOCK_TTL_SEC", 1800))
+    try:
+        from backend.tasks.redis_pool import get_redis_client
+        _r = get_redis_client()
+        # NX lock: only one batch in flight (slots are shared / pool may resume).
+        if not _r.set(LOCK_KEY, job_id, nx=True, ex=lock_ttl):
+            raise HTTPException(status_code=409, detail="已有一个 re-sim 批次在跑,稍后再试")
+        _r.set(JOB_KEY_FMT.format(job_id=job_id),
+               json.dumps({"job_id": job_id, "status": "queued", "total": len(pks),
+                           "done": 0, "results": []}),
+               ex=int(getattr(_s, "RESIM_BACKLOG_RESULT_TTL_SEC", 604800)))
+    except HTTPException:
+        raise
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Redis 不可用:{ex}")
+
+    celery_app.send_task("backend.tasks.resim_backlog_current", args=[job_id, pks])
+    logger.info(f"[ops] resim-current enqueued job={job_id} n={len(pks)} by token-gated caller")
+    return {"job_id": job_id, "enqueued": len(pks), "status": "queued"}
+
+
+@router.get("/submit-backlog/resim-current/{job_id}")
+async def submit_backlog_resim_current_status(
+    job_id: str,
+    _token: str = Depends(_require_ops_token),
+) -> Dict[str, Any]:
+    """Poll a re-sim job. Returns {status, total, done, results[]} or 404 if the
+    job id is unknown / its 7d TTL expired."""
+    import json as _json
+    from backend.tasks.resim_backlog_tasks import JOB_KEY_FMT
+    try:
+        from backend.tasks.redis_pool import get_redis_client
+        raw = get_redis_client().get(JOB_KEY_FMT.format(job_id=job_id))
+    except Exception as ex:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"Redis 不可用:{ex}")
+    if not raw:
+        raise HTTPException(status_code=404, detail="job 不存在或已过期(7d TTL)")
+    return _json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+
+
 @router.get("/submit-yield")
 async def submit_yield(
     days: int = 30,

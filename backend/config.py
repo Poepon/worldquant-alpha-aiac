@@ -1168,6 +1168,19 @@ class Settings(BaseSettings):
     REGIME_MONITOR_STALE_EPS: float = 0.001        # |resim-baseline|≤此 视作 BRAIN dedup 缓存 → 剔除
     REGIME_MONITOR_MIN_FRESH: int = 3              # fresh 提交集 < 此 → INSUFFICIENT(样本不足判不了)
 
+    # ── Backlog 候选「当前数据 re-sim / 衰减检查」(v2, 2026-06-08, on-demand)
+    # 人工按需把一个/一批 backlog 候选在当前数据 re-sim,对比冻结-IS baseline 判衰减。
+    # 只读(simulate 不 submit)。设计 docs/submit_backlog_resim_current_design_2026-06-08.md。
+    ENABLE_RESIM_BACKLOG: bool = False             # hot-toggle(注册 SUPPORTED_FLAGS);端点 gate
+    RESIM_BACKLOG_STALE_EPS: float = 0.001         # |resim-baseline|≤此 → BRAIN dedup 缓存 → unmeasurable_cached
+    RESIM_BACKLOG_MARGIN_FLOOR_BPS: float = 5.0    # 当前 margin < 此 → margin_killed(经济门,优先于 sharpe 带)
+    RESIM_VERDICT_STABLE_RATIO: float = 0.9        # resim/baseline ≥ 此 → stable(持平)
+    RESIM_VERDICT_SOFT_RATIO: float = 0.6          # soft_ratio ≤ resim/baseline < stable → soft_decay,低于 → hard
+    RESIM_BACKLOG_RESULT_TTL_SEC: int = 604800     # Redis job 结果保留 7d
+    RESIM_BACKLOG_LOCK_TTL_SEC: int = 1800         # 批量 NX 锁 30min(防并发重入)
+    RESIM_BACKLOG_REUSE_REGIME_SEC: int = 21600    # regime rows <此(6h)且命中 → 复用免 sim
+    RESIM_BACKLOG_MAX_BATCH: int = 30              # 单次批量上限(防误点全量烧 sim)
+
     # ── Auto-submit (2026-06-04) — automate the orthogonal backlog drain.
     # System is execution-limited (67+ clean alphas, ~12 ever submitted). This 6h
     # beat picks the top of the GET /ops/submit-backlog/drain-order sequence and

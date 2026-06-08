@@ -574,6 +574,18 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "regime_monitor:latest;口径 current IS 非 OS,仅判 WHEN 重启不判 WHAT 提交。"
         ),
     ),
+    "ENABLE_RESIM_BACKLOG": FlagSpec(
+        name="ENABLE_RESIM_BACKLOG",
+        flag_type="bool",
+        group="Pool-Phase2",
+        description=(
+            "[backlog 当前数据 re-sim — on-demand] submit-backlog 页按需把一个/一批"
+            "候选在当前数据 re-sim,对比冻结-IS baseline 判衰减(stable/soft/hard/"
+            "margin_killed/unmeasurable_cached)。只读(simulate 不 submit)。端点 "
+            "POST/GET /ops/submit-backlog/resim-current,celery resim_backlog_current。"
+            "口径 current IS 非 OS;持平≠该提交(仍需过 self_corr<0.7 + marginal)。"
+        ),
+    ),
     # --- Phase 2 R7: Co-STEER self-correct 半接受 ---
     "ENABLE_SELF_CORRECT_SEMI_ACCEPT": FlagSpec(
         name="ENABLE_SELF_CORRECT_SEMI_ACCEPT",

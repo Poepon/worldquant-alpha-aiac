@@ -114,6 +114,8 @@ from backend.tasks.cognitive_reconcile_tasks import run_pool_cognitive_reconcile
 # default OFF → inert until flipped). Re-sims submitted winners on current data.
 from backend.tasks.regime_monitor_tasks import run_regime_monitor  # noqa: F401
 
+from backend.tasks.resim_backlog_tasks import resim_backlog_current  # noqa: F401
+
 __all__ = [
     # Utilities
     "run_async",

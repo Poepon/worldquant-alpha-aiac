@@ -712,6 +712,18 @@ const api = {
     const { data } = await client.get('/ops/regime-monitor')
     return data
   },
+  // On-demand CURRENT-DATA re-sim of backlog candidates (v2, 2026-06-08). Enqueues
+  // a worker-async batch (read-only simulate, NEVER submit), returns { job_id }.
+  // Poll getResimBacklogStatus(job_id). 口径 current IS; 「持平」≠ should-submit
+  // (still gated by self_corr<0.7 + marginal). Gated on ENABLE_RESIM_BACKLOG (403 if off).
+  resimBacklogCurrent: async (alphaPks) => {
+    const { data } = await client.post('/ops/submit-backlog/resim-current', { alpha_pks: alphaPks })
+    return data
+  },
+  getResimBacklogStatus: async (jobId) => {
+    const { data } = await client.get(`/ops/submit-backlog/resim-current/${jobId}`)
+    return data
+  },
   // Auto-submit audit (2026-06-04) — the shadow would-submit review surface.
   // Returns { enabled, mode, tally_24h, count, items[] } where each item carries
   // outcome + gate_results.{gates,signals} (incl. competition delta_score). Use

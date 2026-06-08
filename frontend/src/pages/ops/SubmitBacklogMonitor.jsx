@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import {
   Alert,
@@ -25,6 +25,7 @@ import {
   ThunderboltOutlined,
   InfoCircleOutlined,
   OrderedListOutlined,
+  ExperimentOutlined,
 } from '@ant-design/icons'
 
 import api from '../../services/api'
@@ -175,6 +176,49 @@ function cardTag(card) {
   )
 }
 
+// Current-data re-sim verdict (v2, 2026-06-08) — on-demand re-sim vs frozen-IS
+// baseline. 口径=当前 IS(非 OS)。「持平」≠ should-submit(仍被 self_corr/marginal 门挡)。
+const RESIM_META = {
+  stable: { color: 'success', label: '持平' },
+  hold_gated: { color: 'gold', label: '持平·仍被门挡' },
+  soft_decay: { color: 'orange', label: '软衰减' },
+  hard_decay: { color: 'error', label: '硬衰减' },
+  margin_killed: { color: 'error', label: 'margin死' },
+  unmeasurable_cached: { color: 'default', label: '缓存·无法测' },
+  error: { color: 'default', label: '失败' },
+}
+function resimTag(row) {
+  if (!row) return null
+  const m = RESIM_META[row.verdict] || { color: 'default', label: row.verdict }
+  const showPct = ['stable', 'hold_gated', 'soft_decay', 'hard_decay'].includes(row.verdict)
+  const pctTxt =
+    showPct && row.resim_pct != null ? ` ${((row.resim_pct - 1) * 100).toFixed(0)}%` : ''
+  const rs = row.resim_sharpe != null ? row.resim_sharpe.toFixed(2) : '—'
+  const bs = row.baseline_sharpe != null ? row.baseline_sharpe.toFixed(2) : '—'
+  return (
+    <Tooltip
+      title={
+        <div style={{ fontSize: 12 }}>
+          <div>
+            baseline <strong>{bs}</strong> → 当前 <strong>{rs}</strong>
+            {row.resim_pct != null ? `(${(row.resim_pct * 100).toFixed(0)}% of baseline)` : ''}
+          </div>
+          <div style={{ marginTop: 2 }}>{row.reason}</div>
+          <div style={{ marginTop: 4 }} className="">
+            口径=当前 IS(BRAIN 隐藏 OS,非 OS 预测)。
+            {row.reused_from_regime ? '复用 regime 探针结果(<6h)。' : ''}
+          </div>
+          <div style={{ color: '#ff7875', marginTop: 2 }}>
+            ⚠️ 「持平」≠ 该提交 — 仍需过 self_corr&lt;0.7 + marginal 稀释门(#40)。
+          </div>
+        </div>
+      }
+    >
+      <Tag color={m.color}>{m.label}{pctTxt}</Tag>
+    </Tooltip>
+  )
+}
+
 // Self-corr 状态分桶:与 KPI 卡(撞门/近门槛/安全/未算)同口径,客户端过滤复用。
 const SELF_CORR_BUCKETS = {
   breach: { label: '撞门(≥0.7)', test: (v) => v !== null && v !== undefined && v >= 0.7 },
@@ -207,6 +251,13 @@ export default function SubmitBacklogMonitor() {
   // #39 (2026-06-07): robustness gate for the selector (0 = annotate-only / show
   // all; >0 = drop FRAGILE / no-PnL into the fragile bucket).
   const [minRobustness, setMinRobustness] = useState(0)
+  // Current-data re-sim (v2, 2026-06-08): on-demand decay check. resimResults maps
+  // alpha_pk → verdict row; resimJobId drives the poll; resimActivePks = the pks
+  // in the in-flight batch (for per-row spinners).
+  const [resimJobId, setResimJobId] = useState(null)
+  const [resimResults, setResimResults] = useState({})
+  const [resimActivePks, setResimActivePks] = useState([])
+  const [resimPosting, setResimPosting] = useState(false)
 
   const { data, isLoading, isFetching, error } = useQuery({
     queryKey: ['ops/submit-backlog', region],
@@ -239,6 +290,36 @@ export default function SubmitBacklogMonitor() {
     staleTime: 60_000,
   })
 
+  // Poll the current-data re-sim job while it runs; stop on done/error.
+  const { data: resimJob } = useQuery({
+    queryKey: ['ops/resim-backlog', resimJobId],
+    queryFn: () => api.getResimBacklogStatus(resimJobId),
+    enabled: !!resimJobId,
+    refetchInterval: (q) => {
+      const s = q?.state?.data?.status
+      return s === 'done' || s === 'error' ? false : 2500
+    },
+  })
+  const resimJobRunning =
+    !!resimJobId && resimJob && resimJob.status !== 'done' && resimJob.status !== 'error'
+
+  // Merge each poll's partial results into the pk→verdict map; toast on terminal.
+  useEffect(() => {
+    if (!resimJob) return
+    if (Array.isArray(resimJob.results) && resimJob.results.length) {
+      setResimResults((prev) => {
+        const next = { ...prev }
+        for (const r of resimJob.results) next[r.alpha_pk] = r
+        return next
+      })
+    }
+    if (resimJob.status === 'done') {
+      message.success(`当前数据 re-sim 完成（${resimJob.done ?? 0}/${resimJob.total ?? 0}）`)
+    } else if (resimJob.status === 'error') {
+      message.error(`re-sim 失败：${resimJob.error || '未知'}`)
+    }
+  }, [resimJob])
+
   const scanMutation = useMutation({
     mutationFn: () => api.scanSubmitBacklog(200),
     onSuccess: (res) => {
@@ -261,6 +342,15 @@ export default function SubmitBacklogMonitor() {
     }
     return Array.from(seen).sort().map((u) => ({ value: u, label: u }))
   }, [items])
+
+  // REVIEW shortlist pks from the drain panel (diagnostic_card.overall==='REVIEW',
+  // across selected ∪ blocked) — the batch re-sim target.
+  const reviewPks = useMemo(() => {
+    const all = [...(drainData?.selected || []), ...(drainData?.blocked || [])]
+    return all
+      .filter((d) => d.diagnostic_card?.overall === 'REVIEW')
+      .map((d) => d.alpha_pk)
+  }, [drainData])
 
   const filteredItems = useMemo(() => {
     return items.filter((it) => {
@@ -343,6 +433,27 @@ export default function SubmitBacklogMonitor() {
     }
     qc.invalidateQueries({ queryKey: ['ops/submit-backlog'] })
     qc.invalidateQueries({ queryKey: ['ops/submit-backlog/drain-order'] })
+  }
+
+  // Trigger an on-demand current-data re-sim of `pks` (read-only; never submits).
+  // A single Redis NX lock serialises batches server-side → 409 if one is running.
+  const triggerResim = async (pks) => {
+    const uniq = Array.from(new Set((pks || []).filter((p) => p != null)))
+    if (uniq.length === 0) {
+      message.info('无候选可 re-sim')
+      return
+    }
+    setResimPosting(true)
+    try {
+      const res = await api.resimBacklogCurrent(uniq)
+      setResimActivePks(uniq)
+      setResimJobId(res.job_id)
+      message.success(`已入队 ${res.enqueued} 个当前数据 re-sim（worker 异步，约 ${Math.max(1, Math.ceil(uniq.length / 2)) * 2}min）`)
+    } catch (e) {
+      message.error(e?.response?.data?.detail || e?.message || 're-sim 触发失败')
+    } finally {
+      setResimPosting(false)
+    }
   }
 
   // Batch submit — only allow selecting non-submitted rows; recommend SUBMIT.
@@ -490,6 +601,32 @@ export default function SubmitBacklogMonitor() {
       key: 'diagnostic_card',
       width: 96,
       render: (card) => cardTag(card),
+    },
+    {
+      title: (
+        <Tooltip title="按需在当前数据 re-sim,对比冻结-IS baseline 判衰减(持平/软/硬/margin死/缓存无法测)。只读不提交。口径=当前 IS 非 OS。点「测」跑单个;批量见上方「复核 REVIEW」按钮。⚠️「持平」≠ 该提交。">
+          <Space size={4}>当前数据 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
+      dataIndex: 'alpha_pk',
+      key: 'resim_current',
+      width: 130,
+      render: (pk) => {
+        const row = resimResults[pk]
+        if (row) return resimTag(row)
+        const pending = resimJobRunning && resimActivePks.includes(pk)
+        return (
+          <Button
+            size="small"
+            icon={<ExperimentOutlined />}
+            loading={pending}
+            disabled={resimJobRunning && !pending}
+            onClick={() => triggerResim([pk])}
+          >
+            测
+          </Button>
+        )
+      },
     },
     {
       title: (
@@ -993,7 +1130,35 @@ export default function SubmitBacklogMonitor() {
             >
               全选可提交 {drainData?.n_selected ?? 0}
             </Button>
+            <Tooltip title="对当前所有 REVIEW(体检卡=复核)候选批量在当前数据 re-sim,判衰减。只读不提交。约 2min/2个(分块并发)。需 ENABLE_RESIM_BACKLOG。">
+              <Button
+                size="small"
+                icon={<ExperimentOutlined />}
+                loading={resimPosting || resimJobRunning}
+                disabled={reviewPks.length === 0 || resimJobRunning}
+                onClick={() => triggerResim(reviewPks)}
+              >
+                复核 REVIEW 当前数据（{reviewPks.length}）
+              </Button>
+            </Tooltip>
+            {resimJobRunning && (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                re-sim 中 {resimJob?.done ?? 0}/{resimJob?.total ?? 0}…
+              </Text>
+            )}
           </Space>
+          <Alert
+            type="warning"
+            showIcon
+            style={{ marginBottom: 8 }}
+            message={
+              <Text style={{ fontSize: 12 }}>
+                「当前数据」列 = 按需 re-sim 于当前 BRAIN 数据(口径 <b>当前 IS,非 OS</b>),对比冻结-IS baseline 判衰减。
+                <b>「持平」≠ 该提交</b> — 个体不衰减不代表对组合有边际,仍需过 self_corr&lt;0.7 + marginal 稀释门(#40)。
+                命中 BRAIN dedup 缓存的标「无法测」(返存储值非当前数据)。此功能只读、绝不提交。
+              </Text>
+            }
+          />
           <Table
             size="small"
             rowKey="alpha_pk"
