@@ -1181,6 +1181,16 @@ class Settings(BaseSettings):
     RESIM_BACKLOG_REUSE_REGIME_SEC: int = 21600    # regime rows <此(6h)且命中 → 复用免 sim
     RESIM_BACKLOG_MAX_BATCH: int = 30              # 单次批量上限(防误点全量烧 sim)
 
+    # ── 正交广度字段探索环(2026-06-09,canary PASS 后落地;默认全 OFF 不碰止损)
+    # 设计 docs/orthogonal_breadth_field_loop_design_2026-06-08.md §9 PR-A/PR-B。
+    ENABLE_FIELD_SCREENING: bool = False           # hot-toggle;gate ledger 回填 beat + scheduler 字段导向
+    FIELD_LEDGER_WINDOW_DAYS: int = 0              # 0 = 全历史回填;>0 = 仅近 N 天 alpha
+    # field_score = novelty × signal_quality(orthogonality 移出 reward,改 self_corr<0.5 硬门,见审查 §0.2)
+    FIELD_NOVELTY_FLOOR: float = 0.05             # 已挖透字段的 novelty 地板(防 0 永不再选)
+    FIELD_SELF_CORR_GATE: float = 0.5             # 字段导向时 alpha 与提交池 self_corr 须 < 此(正交硬门)
+    FIELD_SCREEN_EXPLORE_FRAC: float = 0.1        # 字段导向占调度比例(canary 期小预算)
+    FIELD_SCREEN_TOP_K: int = 50                  # 每轮候选未碰/欠挖字段池大小(Thompson 采样源)
+
     # ── Auto-submit (2026-06-04) — automate the orthogonal backlog drain.
     # System is execution-limited (67+ clean alphas, ~12 ever submitted). This 6h
     # beat picks the top of the GET /ops/submit-backlog/drain-order sequence and

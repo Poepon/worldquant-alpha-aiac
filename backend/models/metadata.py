@@ -143,6 +143,25 @@ class DataFieldCellStats(SQLAlchemyBase):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
+    # ── Orthogonal-breadth field-exploration ledger (2026-06-09, PR-A) ──
+    # Per-(field, universe, delay) mining stats for the field-coverage bandit
+    # (gated ENABLE_FIELD_SCREENING, default OFF). Populated by the
+    # run_field_ledger_refresh beat from `alphas` (field_id ∈ expression) +
+    # alpha_pnl. Migration r2b7f4c9a1e3. INERT until the new code/flag deploy.
+    #   - times_mined / distinct_alphas: usage → novelty (UCB ∝ 1/√(times+1))
+    #   - signal_p90 / band_pass_count: dense signal (reward uses
+    #     signal_p90 × can_submit_rate, NOT bare p90 — anti CONCENTRATED_WEIGHT)
+    #   - orthogonality: informational only (1 - mean self_corr vs pool); the
+    #     reward gates on self_corr<0.5 hard门, does NOT use orthogonality
+    #     directly (design §0.2 — marginal-to-13-pool just relabels the loop)
+    #   - last_mined: most recent alpha using this field (recency)
+    times_mined = Column(Integer, default=0)
+    distinct_alphas = Column(Integer, default=0)
+    signal_p90 = Column(Float)
+    band_pass_count = Column(Integer, default=0)
+    orthogonality = Column(Float)
+    last_mined = Column(DateTime)
+
 
 class Operator(SQLAlchemyBase):
     """

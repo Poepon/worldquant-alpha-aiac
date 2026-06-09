@@ -116,6 +116,8 @@ from backend.tasks.regime_monitor_tasks import run_regime_monitor  # noqa: F401
 
 from backend.tasks.resim_backlog_tasks import resim_backlog_current  # noqa: F401
 
+from backend.tasks.field_ledger_refresh import run_field_ledger_refresh  # noqa: F401
+
 __all__ = [
     # Utilities
     "run_async",
