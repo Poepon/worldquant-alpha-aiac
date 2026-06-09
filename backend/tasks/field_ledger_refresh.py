@@ -74,6 +74,54 @@ def run_field_ledger_refresh() -> Dict[str, Any]:
         return {"updated_cells": 0, "error": str(ex)[:200]}
 
 
+async def _compute_local_pool_corr(db, *, corr_window_days: int = 730) -> Dict[int, float]:
+    """{alpha_pk → max |corr| of its local PnL vs ANY submitted-pool alpha}, from
+    the local ``alpha_pnl`` table (zero BRAIN calls). PR-C2: widens orthogonality
+    coverage from band-pass ``_self_corr`` (~2.1%) to local-PnL (~25.6%); pool is
+    100% PnL-covered. orthogonality_contribution = 1 − max_corr.
+
+    Returns {} on any failure (caller falls back to metrics._self_corr). Bounded to
+    a recent window (default 2y) to cap the pivot. corrwith over the (small) pool is
+    pairwise-complete + vectorised."""
+    from sqlalchemy import text as _text
+    try:
+        import pandas as pd
+        import numpy as np
+    except Exception:  # noqa: BLE001
+        return {}
+    pool_ids = [int(r[0]) for r in (await db.execute(_text(
+        "SELECT id FROM alphas WHERE date_submitted IS NOT NULL"))).all()]
+    if not pool_ids:
+        return {}
+    # NOTE: alpha_pnl holds the FROZEN backtest series (e.g. 2019-2023), NOT recent
+    # calendar dates → window must be relative to MAX(trade_date), not now() (a
+    # now()-relative window filters everything out).
+    rows = (await db.execute(_text(
+        "SELECT alpha_id, trade_date, pnl FROM alpha_pnl "
+        "WHERE trade_date > (SELECT MAX(trade_date) FROM alpha_pnl) - make_interval(days => :d)"
+    ), {"d": int(corr_window_days)})).all()
+    if not rows:
+        return {}
+    df = pd.DataFrame([(int(a), d, float(p) if p is not None else None) for a, d, p in rows],
+                      columns=["aid", "date", "pnl"])
+    piv = df.pivot_table(index="date", columns="aid", values="pnl")
+    pool_cols = [c for c in pool_ids if c in piv.columns]
+    if not pool_cols:
+        return {}
+    cand_cols = [c for c in piv.columns if c not in pool_cols]
+    if not cand_cols:
+        return {}
+    cand_df = piv[cand_cols]
+    out: Dict[int, float] = {}
+    with np.errstate(invalid="ignore", divide="ignore"):  # constant-PnL cols → NaN corr (filtered)
+        for pc in pool_cols:
+            cw = cand_df.corrwith(piv[pc])  # pairwise-complete corr vs this pool alpha
+            for aid, v in cw.items():
+                if pd.notna(v):
+                    out[int(aid)] = max(out.get(int(aid), 0.0), abs(float(v)))
+    return out
+
+
 async def _refresh_async(*, window_days: int = 0, session_factory=None) -> Dict[str, Any]:
     from sqlalchemy import select, text
     from backend.models import Alpha, DataField
@@ -90,8 +138,16 @@ async def _refresh_async(*, window_days: int = 0, session_factory=None) -> Dict[
         for fid, did in fid_rows:
             fid_to_refs.setdefault(fid, []).append(did)
 
+        # PR-C2: local-PnL correlation to the submitted pool (zero BRAIN) — widens
+        # orthogonality coverage ~6x over band-pass _self_corr. {alpha_pk: max_corr}.
+        local_corr: Dict[int, float] = {}
+        try:
+            local_corr = await _compute_local_pool_corr(db)
+        except Exception as ex:  # noqa: BLE001 — corr failure must not break the ledger
+            logger.warning(f"[field-ledger] local pool corr failed (fallback _self_corr): {ex}")
+
         stmt = select(
-            Alpha.expression, Alpha.universe, Alpha.delay, Alpha.metrics,
+            Alpha.id, Alpha.expression, Alpha.universe, Alpha.delay, Alpha.metrics,
             Alpha.can_submit, Alpha.created_at,
         ).where(Alpha.expression.isnot(None))
         if window_days and window_days > 0:
@@ -101,14 +157,16 @@ async def _refresh_async(*, window_days: int = 0, session_factory=None) -> Dict[
         # accumulate per (field_id, universe, delay)
         acc: Dict[Tuple[str, str, int], Dict[str, Any]] = {}
         n_alphas = 0
-        for expr, universe, delay, metrics, can_submit, created in (await db.execute(stmt)).all():
+        for apk, expr, universe, delay, metrics, can_submit, created in (await db.execute(stmt)).all():
             n_alphas += 1
             toks = extract_field_tokens(expr, field_ids)
             if not toks:
                 continue
             m = metrics if isinstance(metrics, dict) else {}
             sh = m.get("sharpe")
-            sc = m.get("_self_corr")
+            # orthogonality source: local-PnL corr (PR-C2, 25.6% cov) preferred,
+            # else band-pass BRAIN _self_corr (precise but ~2.1% cov).
+            sc = local_corr.get(int(apk)) if apk is not None and int(apk) in local_corr else m.get("_self_corr")
             uni = universe or "TOP3000"
             dly = int(delay) if delay is not None else 1
             for fid in toks:
