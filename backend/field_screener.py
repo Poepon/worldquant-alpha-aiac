@@ -25,7 +25,7 @@ from backend.field_selector import sample_target_field
 
 async def pick_target_field(
     session: Any, *, dataset_id: str, region: str, universe: str, delay: int,
-    top_k: int = 50, novelty_floor: float = 0.05,
+    top_k: int = 50, novelty_floor: float = 0.05, k_orth: int = 4,
     rng: Optional[random.Random] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return one under-explored target field dict for the cell, or None.
@@ -40,7 +40,9 @@ async def pick_target_field(
         SELECT df.field_id, df.field_name, df.description, df.field_type,
                COALESCE(c.times_mined, 0) AS times_mined,
                c.signal_p90 AS signal_p90,
-               COALESCE(c.band_pass_count, 0) AS band_pass_count
+               COALESCE(c.band_pass_count, 0) AS band_pass_count,
+               c.orthogonality AS orthogonality,
+               COALESCE(c.distinct_alphas, 0) AS distinct_alphas
         FROM datafield_cell_stats c
         JOIN datafields df ON df.id = c.datafield_ref
         JOIN datasets d ON d.id = df.dataset_id
@@ -57,7 +59,7 @@ async def pick_target_field(
     candidates: List[Dict[str, Any]] = [dict(r) for r in rows]
     if not candidates:
         return None
-    return sample_target_field(candidates, novelty_floor=novelty_floor, rng=rng)
+    return sample_target_field(candidates, novelty_floor=novelty_floor, k_orth=k_orth, rng=rng)
 
 
 def field_injection_block(field: Dict[str, Any]) -> str:

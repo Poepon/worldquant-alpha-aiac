@@ -121,6 +121,7 @@ async def _assign_target_fields(picks: List[Dict[str, Any]], *, session_factory:
     frac = float(getattr(settings, "FIELD_SCREEN_EXPLORE_FRAC", 0.1))
     top_k = int(getattr(settings, "FIELD_SCREEN_TOP_K", 50))
     floor = float(getattr(settings, "FIELD_NOVELTY_FLOOR", 0.05))
+    k_orth = int(getattr(settings, "FIELD_ORTHO_CREDIBILITY_K", 4))
     rng = rng or random.Random()
     factory = session_factory or AsyncSessionLocal
     tagged = 0
@@ -133,7 +134,7 @@ async def _assign_target_fields(picks: List[Dict[str, Any]], *, session_factory:
                     s, dataset_id=c["dataset_id"], region=c["region"],
                     universe=c.get("universe") or "TOP3000",
                     delay=int(c["delay"]) if c.get("delay") is not None else 1,
-                    top_k=top_k, novelty_floor=floor, rng=rng)
+                    top_k=top_k, novelty_floor=floor, k_orth=k_orth, rng=rng)
             except Exception as ex:  # noqa: BLE001 — steering must not break scheduling
                 logger.warning(f"[field-screen] pick_target_field failed: {ex}")
                 tf = None

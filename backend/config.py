@@ -1190,6 +1190,9 @@ class Settings(BaseSettings):
     FIELD_SELF_CORR_GATE: float = 0.5             # 字段导向时 alpha 与提交池 self_corr 须 < 此(正交硬门)
     FIELD_SCREEN_EXPLORE_FRAC: float = 0.1        # 字段导向占调度比例(canary 期小预算)
     FIELD_SCREEN_TOP_K: int = 50                  # 每轮候选未碰/欠挖字段池大小(Thompson 采样源)
+    # PR-C 致命修法:orthogonality 还原进 field reward(field_score=novelty×signal×ortho_credible)。
+    # 可信度地平线 — 字段 distinct_alphas < 此 → 用乐观先验 1.0(新字段先探不预罚),≥ 才信实测正交。
+    FIELD_ORTHO_CREDIBILITY_K: int = 4
 
     # ── Auto-submit (2026-06-04) — automate the orthogonal backlog drain.
     # System is execution-limited (67+ clean alphas, ~12 ever submitted). This 6h

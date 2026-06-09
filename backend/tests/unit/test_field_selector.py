@@ -3,8 +3,39 @@ import random
 
 from backend.field_selector import (
     novelty, signal_quality, field_score, sample_target_field,
-    OPTIMISTIC_SIGNAL,
+    orthogonality_credible, OPTIMISTIC_SIGNAL,
 )
+
+
+def test_orthogonality_credible_horizon():
+    # under-sampled (distinct_alphas < K) → optimistic 1.0 (explore, don't pre-punish)
+    assert orthogonality_credible(0.1, 1, k_orth=4) == 1.0
+    assert orthogonality_credible(None, 100, k_orth=4) == 1.0   # no data → optimistic
+    # well-sampled → trust observed (clamped)
+    assert orthogonality_credible(0.9, 10, k_orth=4) == 0.9
+    assert orthogonality_credible(0.1, 10, k_orth=4) == 0.1
+    assert orthogonality_credible(1.5, 10, k_orth=4) == 1.0     # clamp
+
+
+def test_field_score_orthogonality_closes_crowding_loop():
+    # PR-C fatal fix: two MINED fields (distinct_alphas≥K), same novelty+signal,
+    # but one is orthogonal (0.9) and one crowds the pool (0.1). The crowded one
+    # must score far lower → stops being re-picked (novelty×signal alone couldn't
+    # do this — that was the fatal flaw).
+    base = {"times_mined": 8, "signal_p90": 1.4, "band_pass_count": 4, "distinct_alphas": 8}
+    orthogonal = dict(base, orthogonality=0.9)
+    crowded = dict(base, orthogonality=0.1)
+    assert field_score(orthogonal) > 5 * field_score(crowded)
+
+
+def test_field_score_untouched_still_optimistic_on_ortho():
+    # untouched field (distinct_alphas=0) keeps optimistic orthogonality=1.0 → still
+    # explored (not pre-punished by a missing/zero orthogonality).
+    untouched = {"times_mined": 0, "signal_p90": None, "band_pass_count": 0,
+                 "distinct_alphas": 0, "orthogonality": None}
+    crowded_mined = {"times_mined": 2000, "signal_p90": 2.0, "band_pass_count": 10,
+                     "distinct_alphas": 2000, "orthogonality": 0.1}
+    assert field_score(untouched) > field_score(crowded_mined)
 
 
 def test_novelty_untouched_is_one_decays_floored():

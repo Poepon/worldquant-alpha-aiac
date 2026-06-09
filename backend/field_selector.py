@@ -43,6 +43,26 @@ def novelty(times_mined: int, floor: float = 0.05) -> float:
     return max(float(floor), 1.0 / math.sqrt(n + 1))
 
 
+def orthogonality_credible(orthogonality: Optional[float], distinct_alphas: Optional[int],
+                           k_orth: int = 4) -> float:
+    """Credibility-horizoned orthogonality (PR-C, 致命修法 — design coherent-loop §2.2).
+
+    Orthogonality MUST be in the field reward (not only a downstream self_corr gate),
+    else novelty×signal cannot reduce CROWDING — an untouched field that defines the
+    same latent factor as pv1 (different data source) scores high on novelty+p90 but
+    its alphas self_corr≈0.92 with the pool → bulk-rejected → budget hemorrhage.
+
+    But the submitted pool is tiny (~13, pv1-heavy) → orthogonality from <K_orth field
+    alphas is noise. Credibility horizon: an under-sampled field gets the OPTIMISTIC
+    prior (1.0 → still explored, not pre-punished); only once distinct_alphas ≥ K_orth
+    do we trust the observed orthogonality. ``orthogonality`` None (no self_corr data
+    yet) → optimistic too. Clamped [0,1]."""
+    n = int(distinct_alphas or 0)
+    if orthogonality is None or n < max(1, int(k_orth)):
+        return 1.0  # optimistic-under-uncertainty: explore, don't pre-punish
+    return max(0.0, min(1.0, float(orthogonality)))
+
+
 def signal_quality(times_mined: int, signal_p90: Optional[float],
                    band_pass_count: Optional[int]) -> float:
     """Dense quality signal, fool's-gold-guarded.
@@ -61,19 +81,28 @@ def signal_quality(times_mined: int, signal_p90: Optional[float],
     return p90_term * (0.05 + 0.95 * cs_rate)
 
 
-def field_score(cell: Dict[str, Any], *, novelty_floor: float = 0.05) -> float:
-    """field_score = novelty × signal_quality for one ledger cell dict.
+def field_score(cell: Dict[str, Any], *, novelty_floor: float = 0.05,
+                k_orth: int = 4) -> float:
+    """field_score = novelty × signal_quality × orthogonality_credible (PR-C).
 
-    ``cell`` carries: times_mined, signal_p90, band_pass_count (the PR-A ledger
-    columns). Higher = pick to mine next (under-explored ∩ promising)."""
+    ``cell`` carries the PR-A ledger columns: times_mined, signal_p90,
+    band_pass_count, orthogonality, distinct_alphas. Three orthogonal factors:
+      - novelty       → explore (under-mined fields)
+      - signal_quality→ exploit individual IS quality (fool's-gold-guarded)
+      - orthogonality → exploit PORTFOLIO breadth (de-crowding) — credibility-
+        horizoned so a small-pool noisy estimate can't pre-punish a new field.
+    Restoring orthogonality HERE (not only as a downstream self_corr gate) is the
+    PR-C fatal fix: novelty×signal alone solves coverage, not crowding."""
     nv = novelty(cell.get("times_mined", 0), floor=novelty_floor)
     sq = signal_quality(cell.get("times_mined", 0), cell.get("signal_p90"),
                         cell.get("band_pass_count"))
-    return nv * sq
+    oc = orthogonality_credible(cell.get("orthogonality"),
+                                cell.get("distinct_alphas"), k_orth=k_orth)
+    return nv * sq * oc
 
 
 def sample_target_field(candidates: Sequence[Dict[str, Any]], *,
-                        novelty_floor: float = 0.05,
+                        novelty_floor: float = 0.05, k_orth: int = 4,
                         rng: Optional[random.Random] = None) -> Optional[Dict[str, Any]]:
     """Proportional (GFlowNet/Thompson-style) sample of ONE candidate field ∝
     field_score — NOT argmax (diversity: don't always pick the single top field).
@@ -84,7 +113,7 @@ def sample_target_field(candidates: Sequence[Dict[str, Any]], *,
     if not cands:
         return None
     rng = rng or random.Random()
-    scored = [(c, field_score(c, novelty_floor=novelty_floor)) for c in cands]
+    scored = [(c, field_score(c, novelty_floor=novelty_floor, k_orth=k_orth)) for c in cands]
     total = sum(s for _, s in scored)
     if total <= 0:
         chosen = rng.choice(cands)
