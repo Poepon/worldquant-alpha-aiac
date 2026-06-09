@@ -28,7 +28,7 @@
 3. **BRAIN OS 架构隐藏**(用户确认 + 13/13 提交 os_metrics PENDING 实证):模拟只返 IS,OS(Semi-OS/Real-OS)提交后盲测、永不可作 steering/对账输入 → **提交前抗过拟合 robustness 是唯一可控质量杠杆**(见 [[reference_brain_os_hidden_is_only]] / `industry_alpha_optimization_survey`)。
 4. **WQ 计酬模型**(用户提供):Base(日,数量+质量+ValueFactor 过拟合控制)+ Quarterly(季,平台 Weight + OS)。→ 目标 ≈ 质量×robustness + 数量 + 正交度;**「marginal ΔSharpe vs 我池」是可观测的 Quarterly/Weight 代理(平台 Weight 测不了)→ marginal/recon 机器保留**(对抗审查 `wd7190y28` 否决「拆 marginal」)。
 5. **真杠杆只剩新正交供给**:Grinold 广度=独立下注=数据源(非 universe 轮转);跨区域(CHN/HKG/JPN/EUR)= **Consultant 考核解锁**(USER 只有 USA,鸡生蛋)。regime 锁着 → 等市场转。
-6. **🆕 "USA catalog 见顶 / 没货" 被 2026-06-08 实证修正(重要,纠旧叙事)**:USER/USA = **18 数据集 / 8365 字段**(BRAIN 分页全拉确认,非同步残缺);但 alpha 表达式**只用过 886/8365 = 10.6% 字段**(89% 从没碰),且 14193 alpha **34% 砸 pv1**,18 集 yield **一致 0–0.85%**(正交集 option8/fundamental2/sentiment1 也挖了几百 → 同样 ~0)。→ **不是"市场没货",是生成器在 ~886 熟字段内卷**(dataset bandit reward=can_submit + KB success-RAG 双双正反馈到 pv1)。NO-GO「多挖」测的是**再挖熟字段**(成立);**挖未碰 89% + 强制正交 = 从没测过**。修法 = **正交广度字段探索环**(`docs/orthogonal_breadth_field_loop_design_2026-06-08.md`,commit `f4a7d3f`;SOTA AlphaAgent 印证同根因;对抗审查 `wzvcwsm0t` 判方向 GO 但主体 DEFER 待 regime/池恢复 + 先 canary 验长尾信号)。**残留赌注:未碰 89% 字段是否真有信号(未验,靠 canary 一锤)。**
+6. **🆕 "USA catalog 见顶 / 没货" 被 2026-06-08 实证修正(重要,纠旧叙事)**:USER/USA = **18 数据集 / 8365 字段**(BRAIN 分页全拉确认,非同步残缺);但 alpha 表达式**只用过 886/8365 = 10.6% 字段**(89% 从没碰),且 14193 alpha **34% 砸 pv1**,18 集 yield **一致 0–0.85%**(正交集 option8/fundamental2/sentiment1 也挖了几百 → 同样 ~0)。→ **不是"市场没货",是生成器在 ~886 熟字段内卷**(dataset bandit reward=can_submit + KB success-RAG 双双正反馈到 pv1)。NO-GO「多挖」测的是**再挖熟字段**(成立);**挖未碰 89% + 强制正交 = 从没测过**。修法 = **正交广度字段探索环**(`docs/orthogonal_breadth_field_loop_design_2026-06-08.md`,commit `f4a7d3f`;SOTA AlphaAgent 印证同根因;两轮对抗审查 `wzvcwsm0t`/`wf2tanq33` 判方向 GO 但主体 DEFER)。**🟢 核心赌注 canary 已验 PASS(2026-06-09)**:12 未碰 vs 12 已用字段 ×3 模板,RELATIVE p50(未碰)/p50(已用)=1.48 → **未碰非更差,长尾噪声假设证伪,89% 是真·未探索库存**(本会话第一个通过实证的进攻假设)。真·可用 roster=7989/808=10.1% 覆盖(原 10.6% 含 inactive 虚高,量级不变)。**限定**:N=12 统计弱(稳健结论=「未碰不比已用差」)、绝对值低(regime DOWN 下仍不可提交,canary 验信号存在非可提交)。→ 广度环从「待验搁置」升级为「**已验·待 pool/regime gate 满足即建**」。
 
 ---
 
@@ -163,7 +163,7 @@ greenfield 重定向 → #25c 字段卫生(commit `93a04a7`)→ regime 漂移实
 
 | 触发 | 动作 |
 |---|---|
-| **regime 监测器报 `REGIME_TURNING`**(提交集 re-sim 回升 / ≥1 过门)| 复核 → 恢复生产挖掘(§5)+ 重评 #39 在线 re-sim / #31 reward → **触发头号进攻蓝图:正交广度字段探索环**(§1.6,doc `orthogonal_breadth_field_loop`/`f4a7d3f`)。**第一步必是离线 canary**(20 未碰字段 ×5 alpha,纯 IS,比 p50 vs 熟字段)验长尾有无信号;过则按 §9 PR-A→PR-B 落地,不过则转新数据源/等 Consultant。**别又从"等 regime"空手起步——根因是字段覆盖 10.6% 内卷,不是没货。** |
+| **regime 监测器报 `REGIME_TURNING`**(提交集 re-sim 回升 / ≥1 过门)| 复核 → 恢复生产挖掘(§5)+ 重评 #39 在线 re-sim / #31 reward → **触发头号进攻蓝图:正交广度字段探索环**(§1.6,doc `orthogonal_breadth_field_loop`/`f4a7d3f`)。**🟢 入口门 canary 已验 PASS(2026-06-09,未碰 ≈/略高于熟字段)→ 直接按 §9 PR-A→PR-B 落地**(可选先跑 N≈30 确认性 canary 把统计做实)。**别又从"等 regime"空手起步——根因是字段覆盖 ~10% 内卷不是没货,且长尾有信号已实证。** |
 | **Consultant 考核到位**(`ENABLE_BRAIN_CONSULTANT_MODE`)| 跨区域 sync(CHN/HKG/JPN/EUR)+ 扩**池挖掘**到新 region(非 FLAT,已退役)= 真大 breadth(唯一能抬 \|sharpe\| 顶过 1.25 门)|
 | **~2026-07 BRAIN OS 端点**(复查 `os.osISSharpeRatio` 是否填)| 若填 → 建 os 轮询接 recon realized 腿;仍 null → 继续挂(目前实测永 PENDING)|
 
