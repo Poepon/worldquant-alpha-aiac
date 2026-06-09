@@ -1095,7 +1095,14 @@ async def node_code_gen(
                 "price/volume fields).\n- PREFER this field over the retrieved "
                 "success patterns above if they conflict; those patterns skew to "
                 "crowded fields. Avoid simply re-deriving a common price/volume "
-                "expression — favour an original transform of THIS field."
+                "expression — favour an original transform of THIS field.\n"
+                "- ORTHOGONALITY TARGET (PR-D): the goal is an alpha whose PnL is "
+                "NOT a near-duplicate of the already-submitted portfolio — aim for "
+                "self-correlation < 0.5 vs existing submitted alphas. A standard "
+                "rank/ts_mean of a price/volume-like proxy will collide with what "
+                "the pv-heavy pool already captures and be REJECTED at the "
+                "self_corr<0.7 gate. Use the field's distinct economic content "
+                "(not a generic momentum/reversal shell) to earn genuine breadth."
             )
         except Exception as _ex:  # noqa: BLE001 — steering must not break generation
             logger.warning(f"[field-explore] directive inject failed: {_ex}")

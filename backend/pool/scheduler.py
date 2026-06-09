@@ -125,6 +125,7 @@ async def _assign_target_fields(picks: List[Dict[str, Any]], *, session_factory:
     rng = rng or random.Random()
     factory = session_factory or AsyncSessionLocal
     tagged = 0
+    seen: set = set()  # PR-D: don't steer two intents in this round to the SAME field
     async with factory() as s:
         for c in picks:
             if rng.random() >= frac or not c.get("dataset_id"):
@@ -138,8 +139,10 @@ async def _assign_target_fields(picks: List[Dict[str, Any]], *, session_factory:
             except Exception as ex:  # noqa: BLE001 — steering must not break scheduling
                 logger.warning(f"[field-screen] pick_target_field failed: {ex}")
                 tf = None
-            if tf and tf.get("field_id"):
-                c["target_field"] = tf["field_id"]
+            fid = tf.get("field_id") if tf else None
+            if fid and fid not in seen:
+                c["target_field"] = fid
+                seen.add(fid)
                 tagged += 1
     return tagged
 

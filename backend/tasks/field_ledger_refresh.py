@@ -74,7 +74,8 @@ def run_field_ledger_refresh() -> Dict[str, Any]:
         return {"updated_cells": 0, "error": str(ex)[:200]}
 
 
-async def _compute_local_pool_corr(db, *, corr_window_days: int = 730) -> Dict[int, float]:
+async def _compute_local_pool_corr(db, *, corr_window_days: int = 730,
+                                   min_overlap: int = 60) -> Dict[int, float]:
     """{alpha_pk → max |corr| of its local PnL vs ANY submitted-pool alpha}, from
     the local ``alpha_pnl`` table (zero BRAIN calls). PR-C2: widens orthogonality
     coverage from band-pass ``_self_corr`` (~2.1%) to local-PnL (~25.6%); pool is
@@ -105,6 +106,10 @@ async def _compute_local_pool_corr(db, *, corr_window_days: int = 730) -> Dict[i
     df = pd.DataFrame([(int(a), d, float(p) if p is not None else None) for a, d, p in rows],
                       columns=["aid", "date", "pnl"])
     piv = df.pivot_table(index="date", columns="aid", values="pnl")
+    # min_overlap guard: drop series with too few observations → a corr from a
+    # handful of common dates is spurious (small-sample noise the design warns of).
+    enough = piv.notna().sum(axis=0) >= int(min_overlap)
+    piv = piv.loc[:, enough[enough].index]
     pool_cols = [c for c in pool_ids if c in piv.columns]
     if not pool_cols:
         return {}
