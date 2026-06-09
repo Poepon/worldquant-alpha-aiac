@@ -207,6 +207,13 @@ field_score = novelty(field) × orthogonality_potential(field) × signal_quality
 
 ## 9. 落地顺序 + 硬 gate(对抗审查定稿)
 
+> ✅ **PR-A + PR-B 已建(2026-06-09,canary PASS 后;全 flag-OFF code-ready)**:
+> - **PR-A `c011a8c`**:`datafield_cell_stats` +6 列(迁移 `r2b7f4c9a1e3`,applied live)+ `field_ledger_refresh` 回填任务(token 提取聚合;一次性回填 1461 cell 验通)+ 5 测。
+> - **PR-B `09c6c27`**:`field_selector.py`(field_score=novelty×signal_quality,愚人金 guard,proportional 采样,6 测)+ `field_screener.py`(pick_target_field)+ `hyp_intent.target_field`(迁移 `r3c8a5d1f9b4`)+ `MiningState.target_field` + scheduler `_assign_target_fields`(gated)+ hydrate 透传 + generation `_prepend_target_field`。test_suite 0 漂移(flag-OFF 字节不变)。
+> - **激活硬 gate(未满足)**:`ENABLE_FIELD_SCREENING` ON ∧ `ENABLE_POOL_PIPELINE` ON ∧ regime 非 DOWN ∧ 供给企稳。当前池 OFF+regime DOWN → 不激活。
+> - **follow-up(未做)**:§8.4.3 G3 AST originality 接进生成目标(现仅 E 阶段)+ §0.2-4 KB success-RAG 双环仲裁(target_field 软过滤防被 RAG 抵消)+ field_ledger beat 注册(现手动/直调)+ N≈30 确认性 canary。
+
+
 **Step 0 — 离线 canary(✅ 2026-06-09 已跑 PASS,见 §0.3)**
 - ✅ 已执行:12 未碰 vs 12 已用 × 3 模板,`datafield_cell_stats` is_active 可用过滤;**RELATIVE p50(未碰)/p50(已用)=1.48 → 未碰非更差,长尾噪声证伪,核心赌注 PASS**。
 - (原规格,供 N≈30 确认性复跑参考)K=20 未碰**真·信号字段**(经 cell-stats is_active + `_is_signal_field` 过滤,非原始 8365)× N=5 alpha,**仅本地 IS 回测**,与熟字段比 RELATIVE 分布。
