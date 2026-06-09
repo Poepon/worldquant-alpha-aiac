@@ -96,9 +96,11 @@ regime 是 re-sim 探针感知的状态,**自动回调 exploration_budget + orth
 ## ④ 迁移路径(分阶段,尊重 flag-OFF 现状)
 
 - **Phase 0 基建(✅ 已完成)**:6 列 / target_field / field_ledger beat / regime_monitor / resim / robustness / marginal_recon 均 live。
-- **Phase 1 攻击代码(~3 周 2 PR,含致命修法)**:
-  - **PR-C**:`field_selector.signal_quality` 乘入 `orthogonality_credible`(可信度地平线+min_overlap);`field_ledger_refresh` 重算 orthogonality 列;`marginal_recon` 触发改停 `ENABLE_FIELD_SCREENING`;reward 三维互信息验证。
-  - **PR-D**:`field_screener.py` 完整重写;code_gen 烤入 self_corr<0.5 软约束(违约拒+临时排除)+ 自止损;Scheduler 比例采样护栏。
+- **Phase 1 攻击代码(✅ 大部分已落,2026-06-09)**:
+  - **PR-C `b0b282d`+`eeb2a97`**:`field_score = novelty×signal×orthogonality_credible`(可信度地平线:None+已挖→unknown_prior 0.5 不乐观掩盖)。**实现审查 `wuw1yxmqd` 抓到"修好"是假**(self_corr 仅 2.1% 覆盖→94% NULL→空转),已据实改 + 3 docstring 谎言更正。
+  - **PR-C2 `bb7b675`**:换数据源——`_compute_local_pool_corr` 从本地 alpha_pnl(32.3% 覆盖,池 13/13 全覆盖)算 max-corr-to-pool,**orthogonality 覆盖 39→585 cell**,reward 项真激活。window 相对 MAX(trade_date)(alpha_pnl 是 2019-2023 冻结回测)。
+  - **PR-D `3763592`**:生成时 self_corr<0.5 directive(产出正交)+ min_overlap=60 守卫 + scheduler 同轮去重。自止损经评估冗余(signal_quality.can_submit_rate 已自剪枝)。
+  - **剩 defer**:违约拒 alpha+字段临时排除(E 阶段 self_corr<0.7 硬门已保正确性,此为效率)/ KS1 kill-switch(需 recon-verdict 持久化 beat)/ reward 三维互信息离线验证。
 - **Phase 2 上线 gate(强化 canary)**:原 canary(N=25,p=0.82)只证"未碰 IS≈已用",**不够**——必须扩证 **"未碰字段产出 alpha self_corr<0.5 vs pv1 池比率≥50%"**;若未碰 self_corr≈已用 → 核心前提败(只换拥挤位置)→ NO-GO。canary 须 regime≠DOWN 跑。达标→ 90 天 flag OFF + 5% 白名单 canary → 达成率>60%∧衰减<30% → roll。
 - **Phase 3 深度修(defer)**:RAG 检索层 per-field re-weighting(prompt 级被溺没才升级);orthogonality 算力优化。
 - 工程量:~500 行 + 0 新迁移 + 无新基建/LLM/schema。
