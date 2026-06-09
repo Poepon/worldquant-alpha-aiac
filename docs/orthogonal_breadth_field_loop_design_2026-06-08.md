@@ -1,6 +1,7 @@
 # 设计稿:正交广度字段探索环(Orthogonal-Breadth Field Exploration Loop)2026-06-08
 
-> 状态:**草案 — 两轮对抗审查 + canary 已跑。裁决演进:REVISE → 🟢 核心赌注 canary PASS(未碰字段信号 ≈/略高于熟字段,长尾噪声假设被证伪)→ 方向已实证,待 pool/regime gate 满足即建。先读 §0 + §0.2 + §0.3。**
+> 状态:**草案 — 两轮对抗审查 + canary(N=12/25)PASS。后继 = `coherent_feedback_loop_os_hidden_2026-06-09.md`(从零单一连贯环,workflow `wjyvgmfem`)。**
+> ⚠️ **致命修法(后继设计的 top-2 对抗证伪发现,本稿 §0.2/PR-B 需改)**:§0.2 把 orthogonality「移出 reward 改 self_corr 后置硬门」是**错的**——novelty×signal 单独**无法保证去拥挤**(只解决覆盖率、不解决产出 alpha 是否正交;未碰字段可与 pv1 用不同数据源定义同一潜因子 → IS 高被挖但 self_corr≈0.92 批量拒 → 预算失血)。**修法=正交还原进 field reward(`orthogonality_credible`,可信度地平线 K_orth + min_overlap,beat 预算)=PR-C**,见后继 §2.2。先读 §0 + §0.2 + §0.3 + 后继文档。
 
 ## 0. 对抗审查结论(`wzvcwsm0t`,权威,覆盖下文一切乐观标注)
 
