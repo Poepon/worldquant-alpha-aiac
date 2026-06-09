@@ -1193,6 +1193,9 @@ class Settings(BaseSettings):
     # PR-C 致命修法:orthogonality 还原进 field reward(field_score=novelty×signal×ortho_credible)。
     # 可信度地平线 — 字段 distinct_alphas < 此 → 用乐观先验 1.0(新字段先探不预罚),≥ 才信实测正交。
     FIELD_ORTHO_CREDIBILITY_K: int = 4
+    # KS4 旁路:默认 regime DOWN 抑制字段导向(省探索预算);置 True 则无视 regime
+    # 强制探索(用户主动决策:赌当下能挖到扛住的 + 为 regime 转积累正交库存)。
+    FIELD_SCREEN_IGNORE_REGIME: bool = False
 
     # ── Auto-submit (2026-06-04) — automate the orthogonal backlog drain.
     # System is execution-limited (67+ clean alphas, ~12 ever submitted). This 6h

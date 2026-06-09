@@ -143,9 +143,12 @@ async def _assign_target_fields(picks: List[Dict[str, Any]], *, session_factory:
     # explores for FUTURE breadth; in a confirmed-down regime its output is
     # unsubmittable (re-sim shows decay) → don't spend the explore budget. The
     # regime verdict is the persisted re-sim probe (regime_monitor:latest).
-    if _regime_is_down():
+    if _regime_is_down() and not bool(getattr(settings, "FIELD_SCREEN_IGNORE_REGIME", False)):
         logger.info("[field-screen] regime DOWN → skip field steering (KS4)")
         return 0
+    if _regime_is_down():
+        logger.warning("[field-screen] regime DOWN but FIELD_SCREEN_IGNORE_REGIME=ON "
+                       "→ forcing exploration (user override, expect mostly-unsubmittable)")
     rng = rng or random.Random()
     factory = session_factory or AsyncSessionLocal
     tagged = 0
