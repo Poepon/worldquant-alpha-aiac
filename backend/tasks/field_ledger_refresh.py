@@ -9,8 +9,10 @@ Per (field_id, universe, delay) over the window:
   - times_mined / distinct_alphas = # alphas whose expression uses the field
   - signal_p90    = p90 IS Sharpe of those alphas (dense quality)
   - band_pass_count = # of those that are can_submit (cleared the band)
-  - orthogonality = 1 − mean(self_corr) of those (informational ONLY — the
-    reward gates on self_corr<0.5 hard门, does not use this; design §0.2)
+  - orthogonality = 1 − mean(self_corr) of those, ONLY when ≥3 self_corr samples
+    (else NULL). **PR-C: this IS a field_score reward term** (de-crowding), NOT
+    informational. ⚠️ self_corr only on band-passing candidates → ~2.1% coverage
+    → most fields NULL → reward leans on novelty + downstream gate (ROI question).
   - last_mined    = most recent alpha's created_at
 
 Field usage is detected by tokenising each expression and matching tokens
@@ -123,10 +125,15 @@ async def _refresh_async(*, window_days: int = 0, session_factory=None) -> Dict[
                     b["last"] = created
 
         # write back to datafield_cell_stats (per matching cell)
+        # orthogonality only TRUSTED with ≥ _MIN_ORTH_SAMPLES self_corr observations —
+        # else NULL → field_selector.orthogonality_credible returns the optimistic
+        # prior (PR-C credibility horizon; distinct_alphas counts ALL alphas, but the
+        # orthogonality estimate is only as good as its self_corr sample count).
+        _MIN_ORTH_SAMPLES = 3
         updated = 0
         for (fid, uni, dly), b in acc.items():
             sig = _p90(b["sh"])
-            orth = (1.0 - (_st.mean(b["sc"]) if b["sc"] else 0.0)) if b["sc"] else None
+            orth = (1.0 - _st.mean(b["sc"])) if len(b["sc"]) >= _MIN_ORTH_SAMPLES else None
             for ref in fid_to_refs.get(fid, []):
                 res = await db.execute(text(
                     "UPDATE datafield_cell_stats SET "

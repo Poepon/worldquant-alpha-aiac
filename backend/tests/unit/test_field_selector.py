@@ -8,13 +8,17 @@ from backend.field_selector import (
 
 
 def test_orthogonality_credible_horizon():
-    # under-sampled (distinct_alphas < K) → optimistic 1.0 (explore, don't pre-punish)
-    assert orthogonality_credible(0.1, 1, k_orth=4) == 1.0
-    assert orthogonality_credible(None, 100, k_orth=4) == 1.0   # no data → optimistic
-    # well-sampled → trust observed (clamped)
+    # observed value always trusted (clamped), regardless of n
+    assert orthogonality_credible(0.1, 1, k_orth=4) == 0.1      # observed wins
     assert orthogonality_credible(0.9, 10, k_orth=4) == 0.9
     assert orthogonality_credible(0.1, 10, k_orth=4) == 0.1
     assert orthogonality_credible(1.5, 10, k_orth=4) == 1.0     # clamp
+    # None + under-explored → optimistic 1.0 (explore, don't pre-punish new field)
+    assert orthogonality_credible(None, 2, k_orth=4) == 1.0
+    # None + WELL-mined → unknown_prior 0.5 (review wuw1yxmqd fix: mined but data-
+    # starved must NOT get the optimistic boost that masks crowding)
+    assert orthogonality_credible(None, 100, k_orth=4) == 0.5
+    assert orthogonality_credible(None, 100, k_orth=4, unknown_prior=0.3) == 0.3
 
 
 def test_field_score_orthogonality_closes_crowding_loop():

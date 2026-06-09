@@ -151,9 +151,11 @@ class DataFieldCellStats(SQLAlchemyBase):
     #   - times_mined / distinct_alphas: usage → novelty (UCB ∝ 1/√(times+1))
     #   - signal_p90 / band_pass_count: dense signal (reward uses
     #     signal_p90 × can_submit_rate, NOT bare p90 — anti CONCENTRATED_WEIGHT)
-    #   - orthogonality: informational only (1 - mean self_corr vs pool); the
-    #     reward gates on self_corr<0.5 hard门, does NOT use orthogonality
-    #     directly (design §0.2 — marginal-to-13-pool just relabels the loop)
+    #   - orthogonality = 1 − mean(self_corr vs pool), high=低相关=去拥挤好。**PR-C:
+    #     已是 field_score reward 的一项**(credibility-horizoned;非 informational)。
+    #     仅在 self_corr 样本≥3 时写值,否则 NULL → selector 用 unknown_prior。
+    #     ⚠️ self_corr 仅 band-pass 候选算 → ~2.1% 覆盖 → 多数字段 NULL(数据饥饿,
+    #     见设计 ROI 拷问)。NOT marginal-ΔSharpe-to-pool(那需联合权重优化,无)。
     #   - last_mined: most recent alpha using this field (recency)
     times_mined = Column(Integer, default=0)
     distinct_alphas = Column(Integer, default=0)

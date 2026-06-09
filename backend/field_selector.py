@@ -5,21 +5,27 @@ reward + sampling are unit-testable without DB/BRAIN. Consumed by the pool
 scheduler (gated ENABLE_FIELD_SCREENING) to pick a TARGET FIELD that steers HG
 generation off the ~886 crowded fields toward the under-explored ~89%.
 
-reward (design §0.2, post adversarial-review wf2tanq33):
-    field_score = novelty(times_mined) × signal_quality(signal_p90, band_pass_count)
+reward (PR-C, design coherent-loop §2.2; supersedes the PR-B §0.2 "orthogonality
+out of reward" stance after review wf2tanq33 refuted it — novelty×signal alone
+solves coverage, NOT crowding):
+    field_score = novelty × signal_quality × orthogonality_credible
 
   - novelty       = max(floor, 1/√(times_mined+1))   → untouched (times=0)=1.0,
                     decays as a field saturates (negative feedback to crowding).
-  - signal_quality= normalized(signal_p90 × can_submit_rate)  — DENSE, but ×
-                    can_submit_rate to kill CONCENTRATED_WEIGHT fool's gold
-                    (a field with p90 Sharpe 19.89 but 0/110 can_submit scores ~0).
-                    Untouched (no history) → OPTIMISTIC prior (optimism-under-
-                    uncertainty) so the 89% gets explored; collapses to observed
-                    after K mines → dead fields self-prune.
+  - signal_quality= signal_p90 × can_submit_rate  — DENSE, × can_submit_rate to
+                    kill CONCENTRATED_WEIGHT fool's gold (p90 19.89 but 0/110
+                    can_submit → ~0). Untouched → OPTIMISTIC prior.
+  - orthogonality_credible = portfolio-breadth term (high = low self_corr vs pool)
+                    that PREVENTS crowding (a new field re-deriving pv1's latent
+                    factor scores low once observed). Credibility-horizoned (see fn).
 
-orthogonality is NOT in the reward (the marginal-to-13-pool just relabels the
-positive-feedback loop, review §0.2). De-correlation is enforced downstream as a
-self_corr<gate HARD门 on the produced alpha, not as a field reward.
+⚠️ KNOWN LIMIT (review wuw1yxmqd): self_corr is only computed for band-passing
+candidates → ~2.1% of alphas have it → ~71% of well-mined fields have NULL
+orthogonality → the term degenerates to the unknown_prior for them (de-crowding
+then leans on novelty + the downstream self_corr<0.7 hard gate). Closing this
+needs a WIDER orthogonality data source (design-level ROI question), not a
+selector tweak. NOT marginal-ΔSharpe-to-pool (review §8.4 — that needs joint
+weight optimisation we don't have); this is the cheaper 1−mean(self_corr) proxy.
 """
 from __future__ import annotations
 
@@ -44,23 +50,33 @@ def novelty(times_mined: int, floor: float = 0.05) -> float:
 
 
 def orthogonality_credible(orthogonality: Optional[float], distinct_alphas: Optional[int],
-                           k_orth: int = 4) -> float:
-    """Credibility-horizoned orthogonality (PR-C, 致命修法 — design coherent-loop §2.2).
+                           k_orth: int = 4, unknown_prior: float = 0.5) -> float:
+    """Credibility-horizoned orthogonality (PR-C — design coherent-loop §2.2).
 
-    Orthogonality MUST be in the field reward (not only a downstream self_corr gate),
-    else novelty×signal cannot reduce CROWDING — an untouched field that defines the
-    same latent factor as pv1 (different data source) scores high on novelty+p90 but
-    its alphas self_corr≈0.92 with the pool → bulk-rejected → budget hemorrhage.
+    Orthogonality is in the field reward (NOT only a downstream self_corr gate), else
+    novelty×signal can't reduce CROWDING (an untouched field defining the same latent
+    factor as pv1 scores high on novelty+p90 but its alphas self_corr≈0.92 → bulk-
+    rejected → budget hemorrhage). High orthogonality = low mean self_corr = good.
 
-    But the submitted pool is tiny (~13, pv1-heavy) → orthogonality from <K_orth field
-    alphas is noise. Credibility horizon: an under-sampled field gets the OPTIMISTIC
-    prior (1.0 → still explored, not pre-punished); only once distinct_alphas ≥ K_orth
-    do we trust the observed orthogonality. ``orthogonality`` None (no self_corr data
-    yet) → optimistic too. Clamped [0,1]."""
+    Three regimes (review wuw1yxmqd fix — the original OR-logic masked crowding):
+      - orthogonality observed → trust it (clamp [0,1]).
+      - None AND under-explored (distinct_alphas < K_orth) → OPTIMISTIC 1.0 (explore,
+        don't pre-punish a genuinely new field).
+      - None AND well-explored (≥ K_orth) → ``unknown_prior`` (0.5), NOT optimistic:
+        the field WAS mined yet has no usable orthogonality signal (self_corr only
+        computed for band-passing candidates → data-starved) — it must not get the
+        full optimistic boost that lets a heavily-mined crowded field keep winning.
+
+    ⚠️ 数据饥饿警告: self_corr 仅对 band-passing 候选计算 → live 仅 ~2.1% alpha 有值
+    → 多数已挖字段 orthogonality=None,本项对它们退化为 unknown_prior 常数(去拥挤靠
+    novelty + 下游 self_corr<0.7 硬门兜底)。根本解需更宽的 orthogonality 数据源
+    (见设计 ROI 拷问),非本函数能补。"""
+    if orthogonality is not None:
+        return max(0.0, min(1.0, float(orthogonality)))
     n = int(distinct_alphas or 0)
-    if orthogonality is None or n < max(1, int(k_orth)):
-        return 1.0  # optimistic-under-uncertainty: explore, don't pre-punish
-    return max(0.0, min(1.0, float(orthogonality)))
+    if n < max(1, int(k_orth)):
+        return 1.0  # under-explored → optimistic-under-uncertainty
+    return max(0.0, min(1.0, float(unknown_prior)))  # mined but data-starved → neutral, no boost
 
 
 def signal_quality(times_mined: int, signal_p90: Optional[float],
