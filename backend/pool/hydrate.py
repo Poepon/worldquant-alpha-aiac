@@ -188,4 +188,8 @@ async def hydrate_hg_state(intent: Any, *, session_factory: Any = None) -> Minin
         brain_consultant_mode_at_start=role.get("brain_consultant_mode_at_start"),
         effective_default_test_period=role.get("effective_default_test_period"),
         effective_sharpe_submit_min=role.get("effective_sharpe_submit_min"),
+        # Orthogonal-breadth steering (PR-B): None unless the scheduler tagged
+        # this intent under ENABLE_FIELD_SCREENING. The generation node prepends
+        # it to the code-gen field roster.
+        target_field=getattr(intent, "target_field", None),
     )

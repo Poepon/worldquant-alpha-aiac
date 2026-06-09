@@ -144,6 +144,10 @@ class MiningState(BaseModel):
     # Distillation Results
     distilled_concepts: List[str] = Field(default_factory=list)
     focused_fields: List[Dict] = Field(default_factory=list)
+    # Orthogonal-breadth field steering (PR-B). Set from hyp_intent.target_field
+    # when ENABLE_FIELD_SCREENING; the generation node prepends it to the code-gen
+    # field roster. None = no steering (flag-OFF → byte-for-byte legacy).
+    target_field: Optional[str] = None
 
     hypotheses: List[Dict] = Field(default_factory=list)
 

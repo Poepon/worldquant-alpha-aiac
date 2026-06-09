@@ -116,6 +116,12 @@ class HypothesisIntent(SQLAlchemyBase):
     bandit_arm = Column(String(40), nullable=True)
     rag_ab_arm = Column(String(40), nullable=True)
 
+    # Orthogonal-breadth field steering (2026-06-09, PR-B). When set by the
+    # scheduler (gated ENABLE_FIELD_SCREENING, explore-fraction of intents), the
+    # HG generation node steers code-gen around this under-explored field. NULL =
+    # legacy (no field steering). Migration r3c8a5d1f9b4.
+    target_field = Column(String(200), nullable=True)
+
     # Frozen config: eval-band thresholds + llm_overrides + brain_role_snapshot.
     # NOT NULL + none_as_null + default=dict: writers must supply a real dict;
     # an explicit None would map to SQL NULL and fail-loud on the NOT NULL

@@ -100,8 +100,47 @@ async def insert_intents(picks: List[Dict[str, Any]], config_snapshot: Dict[str,
                     stage=st.INTENT_PENDING,
                     config_snapshot=config_snapshot,
                     thresholds_version=config_snapshot.get("thresholds_version"),
+                    # Orthogonal-breadth steering (PR-B): set by _assign_target_fields
+                    # only when ENABLE_FIELD_SCREENING; None = legacy no-steer.
+                    target_field=c.get("target_field"),
                 ))
     return len(picks)
+
+
+async def _assign_target_fields(picks: List[Dict[str, Any]], *, session_factory: Any = None,
+                                rng: Optional[random.Random] = None) -> int:
+    """Gated (ENABLE_FIELD_SCREENING): tag an explore-fraction of picks with a
+    proportional-sampled under-explored ``target_field`` (mutates pick dicts).
+    No-op + zero cost when the flag is OFF. Never raises (best-effort steering)."""
+    if not bool(getattr(settings, "ENABLE_FIELD_SCREENING", False)):
+        return 0
+    try:
+        from backend.field_screener import pick_target_field
+    except Exception:  # noqa: BLE001
+        return 0
+    frac = float(getattr(settings, "FIELD_SCREEN_EXPLORE_FRAC", 0.1))
+    top_k = int(getattr(settings, "FIELD_SCREEN_TOP_K", 50))
+    floor = float(getattr(settings, "FIELD_NOVELTY_FLOOR", 0.05))
+    rng = rng or random.Random()
+    factory = session_factory or AsyncSessionLocal
+    tagged = 0
+    async with factory() as s:
+        for c in picks:
+            if rng.random() >= frac or not c.get("dataset_id"):
+                continue
+            try:
+                tf = await pick_target_field(
+                    s, dataset_id=c["dataset_id"], region=c["region"],
+                    universe=c.get("universe") or "TOP3000",
+                    delay=int(c["delay"]) if c.get("delay") is not None else 1,
+                    top_k=top_k, novelty_floor=floor, rng=rng)
+            except Exception as ex:  # noqa: BLE001 — steering must not break scheduling
+                logger.warning(f"[field-screen] pick_target_field failed: {ex}")
+                tf = None
+            if tf and tf.get("field_id"):
+                c["target_field"] = tf["field_id"]
+                tagged += 1
+    return tagged
 
 
 async def schedule_round(n: int, *, session_factory: Any = None,
@@ -115,6 +154,11 @@ async def schedule_round(n: int, *, session_factory: Any = None,
         logger.info("[pool.scheduler] no active cells — nothing to schedule")
         return 0
     picks = weighted_pick(cells, n, rng=rng)
+    # Orthogonal-breadth field steering (PR-B, gated ENABLE_FIELD_SCREENING) —
+    # tag an explore-fraction of picks with an under-explored target_field. No-op
+    # when the flag is OFF (legacy byte-for-byte).
+    tagged = await _assign_target_fields(picks, session_factory=factory, rng=rng)
     inserted = await insert_intents(picks, freeze_config_snapshot(), session_factory=factory)
-    logger.info(f"[pool.scheduler] inserted {inserted} hyp_intent rows")
+    logger.info(f"[pool.scheduler] inserted {inserted} hyp_intent rows"
+                + (f" ({tagged} field-steered)" if tagged else ""))
     return inserted

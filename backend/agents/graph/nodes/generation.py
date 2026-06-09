@@ -28,6 +28,19 @@ from backend.config import settings as _gen_settings
 from backend.models import Alpha, Hypothesis
 
 
+def _prepend_target_field(fields: List[Dict], state: Any) -> List[Dict]:
+    """Orthogonal-breadth steering (PR-B): if state.target_field is set (scheduler
+    tagged this intent under ENABLE_FIELD_SCREENING), move that field's dict to the
+    FRONT of the code-gen roster so the LLM builds the alpha around it. Inert when
+    target_field is None (flag-OFF) → returns the list unchanged (byte-for-byte)."""
+    tf = getattr(state, "target_field", None)
+    if not tf:
+        return fields
+    hit = next((f for f in (state.fields or []) if isinstance(f, dict) and f.get("id") == tf), None)
+    rest = [f for f in fields if not (isinstance(f, dict) and f.get("id") == tf)]
+    return ([hit] + rest) if hit else fields
+
+
 # V-26.49 (2026-05-13): proper dataclass for LLM-call failures. Pre-fix used
 # `type('obj', (object,), {...})()` inline which is hard to grep for, hard
 # to extend (new attrs need both call sites updated), and confuses static
@@ -481,6 +494,7 @@ async def node_hypothesis(
             )
 
     target_fields = state.focused_fields if state.focused_fields else state.fields[:20]
+    target_fields = _prepend_target_field(target_fields, state)
 
     # ------------------------------------------------------------------
     # Prompt-context enrichment (Phase 1a-E): the 8 former inline nudge blocks
@@ -1027,6 +1041,7 @@ async def node_code_gen(
         )
     else:
         code_gen_fields = state.focused_fields if state.focused_fields else state.fields[:30]
+    code_gen_fields = _prepend_target_field(code_gen_fields, state)
 
     prompt_context = PromptContext(
         dataset_id=state.dataset_id,
