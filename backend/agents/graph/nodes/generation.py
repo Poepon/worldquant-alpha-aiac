@@ -1074,6 +1074,32 @@ async def node_code_gen(
         experiment_feedback=experiment_feedback
     )
 
+    # Orthogonal-breadth field steering (PR-B follow-up): when the scheduler
+    # tagged this intent with a target_field, append an explicit directive that
+    # (a) steers code-gen AROUND the under-explored field, (b) [G3 originality]
+    # discourages crowded patterns, (c) [RAG double-loop arbitration] tells the
+    # LLM to PREFER the target field over the retrieved success_patterns (which
+    # are pv1/price-volume-heavy and would otherwise pull generation back to the
+    # crowded ~886 fields). Inert unless target_field is set (flag-OFF → skipped).
+    _tf = getattr(state, "target_field", None)
+    if _tf:
+        try:
+            from backend.field_screener import field_injection_block
+            _tf_dict = next((f for f in (state.fields or [])
+                             if isinstance(f, dict) and f.get("id") == _tf), {"field_id": _tf})
+            prompt += (
+                "\n\n## FIELD-EXPLORE DIRECTIVE (orthogonal breadth)\n"
+                + field_injection_block(_tf_dict)
+                + "\n- Build the alpha PRIMARILY around this field — it is an "
+                "under-explored, orthogonal source (most prior alphas crowd a few "
+                "price/volume fields).\n- PREFER this field over the retrieved "
+                "success patterns above if they conflict; those patterns skew to "
+                "crowded fields. Avoid simply re-deriving a common price/volume "
+                "expression — favour an original transform of THIS field."
+            )
+        except Exception as _ex:  # noqa: BLE001 — steering must not break generation
+            logger.warning(f"[field-explore] directive inject failed: {_ex}")
+
     # delay-0 native mining (2026-05-26): the offered field list IS the delay-0
     # roster, but RAG/KB patterns are delay-1 so the LLM reaches for delay-1
     # field names (e.g. anl4_af_eps_value) that don't exist at delay-0 → BRAIN

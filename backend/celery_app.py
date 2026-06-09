@@ -337,6 +337,13 @@ celery_app.conf.beat_schedule = {
         "task": "backend.tasks.run_dataset_weight_refresh",
         "schedule": crontab(hour=5, minute=15),
     },
+    # Orthogonal-breadth field-ledger refresh (2026-06-09, PR-A). Daily 05:40 SH
+    # (after dataset-weight-refresh) — recompute per-field mining stats for the
+    # field bandit. No-op unless ENABLE_FIELD_SCREENING (the task self-gates).
+    "field-ledger-refresh": {
+        "task": "backend.tasks.run_field_ledger_refresh",
+        "schedule": crontab(hour=5, minute=40),
+    },
     # Orchestrator periodic-scan beat retired in Phase 1c-delete (resident pool
     # needs no relaunch — supervisor keeps HG/S/E processes alive).
     # R1b outcome-reconcile beat retired in Phase 1c-delete (R1b machine removed).
