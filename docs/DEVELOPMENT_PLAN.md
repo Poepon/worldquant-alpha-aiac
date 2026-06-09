@@ -9,13 +9,13 @@
 
 | 维度 | 状态 |
 |---|---|
-| **战略** | execution/selection-limited **+ regime 低谷** → greenfield 分支 B(止损+监测+熬市场转)|
-| **生产(挖掘)** | ⏸ **暂停** — `drain hg/s/e`(Redis 热)+ `.env ENABLE_POOL_PIPELINE=false`(下次重启全清停)|
+| **战略** | execution/selection-limited + regime 低谷 → **2026-06-09 用户解除止损,启动全量挖矿 + 广度探索(主动探未碰正交字段,不熬市场)** |
+| **生产(挖掘)** | ▶️ **全量 ON(2026-06-09 重启)** — `ENABLE_POOL_PIPELINE=true` + drain 清 + 4 worker;**广度环 ON**(`ENABLE_FIELD_SCREENING=true` + `FIELD_SCREEN_IGNORE_REGIME=true` override KS4)→ scheduler 10% 字段导向欠挖正交字段(实测 option8 IV 等)。干净重启(1204 PENDING_SIM+980 旧 intent 已 PURGE)。⚠️ **regime 仍 DOWN → 预期 ~0 可提交(canary 证绝对 Sharpe~0.4<1.25),价值=探正交+积累库存+live 测引擎,非当下产出** |
 | **auto-submit** | ⚠️ `ENABLE_AUTO_SUBMIT=true` + `.env AUTO_SUBMIT_MODE=live`(自 06-04,DB 实测)—— **不是关闭**;但 backlog 全 SKIP(#40)→ 06-04 后仅 0-1 提交 = **输出饿死非关闭**。独立 6h beat,不受池 drain 影响,守门栈 fail-closed(0 烂提交)。要真停热翻 flag |
 | **提交选择器(#39)** | ✅ 已建+push(robustness∩正交∩去重 + sub-univ Sharpe);前向就绪,新供给来时挑货 |
 | **regime 监测器(#41)** | ✅ **已激活+live**(2026-06-08 重启 + `ENABLE_REGIME_MONITOR` ON);手动重跑实测 verdict=**REGIME_DOWN**(submitted mean 1.7→0.63,frac_recovered 0.22<0.5);每日 07:30 beat 自动跑 |
 | **真杠杆** | 新正交供给(跨区域=Consultant 考核 / 新数据源)—— **regime 锁着** |
-| **下一步(用户)** | 熬市场转(主动权在市场):等 07:30 beat 报 `REGIME_TURNING` / Consultant 到位 → 恢复生产(§5)|
+| **下一步(用户)** | 监测广度探索产出(`/ops/submit-yield` 看是否流向未碰正交字段非内卷 pv1;regime 转后库存里扛住的成真候选)。急停=`.env` 三 flag 回 false + 重启 |
 
 ---
 
