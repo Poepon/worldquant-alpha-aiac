@@ -107,6 +107,23 @@ async def insert_intents(picks: List[Dict[str, Any]], config_snapshot: Dict[str,
     return len(picks)
 
 
+def _regime_is_down() -> bool:
+    """True iff the latest regime probe verdict is REGIME_DOWN (KS4 gate for field
+    steering). Reads the persisted regime_monitor:latest. Fail-OPEN: any read
+    error / unknown / INSUFFICIENT → False (don't over-block; ENABLE_FIELD_
+    SCREENING is the master gate). Only an explicit REGIME_DOWN suppresses steering."""
+    try:
+        import json as _json
+        from backend.tasks.redis_pool import get_redis_client
+        raw = get_redis_client().get("regime_monitor:latest")
+        if not raw:
+            return False
+        snap = _json.loads(raw.decode() if isinstance(raw, bytes) else raw)
+        return (snap.get("signal") or {}).get("verdict") == "REGIME_DOWN"
+    except Exception:  # noqa: BLE001 — gate read must never break scheduling
+        return False
+
+
 async def _assign_target_fields(picks: List[Dict[str, Any]], *, session_factory: Any = None,
                                 rng: Optional[random.Random] = None) -> int:
     """Gated (ENABLE_FIELD_SCREENING): tag an explore-fraction of picks with a
@@ -122,6 +139,13 @@ async def _assign_target_fields(picks: List[Dict[str, Any]], *, session_factory:
     top_k = int(getattr(settings, "FIELD_SCREEN_TOP_K", 50))
     floor = float(getattr(settings, "FIELD_NOVELTY_FLOOR", 0.05))
     k_orth = int(getattr(settings, "FIELD_ORTHO_CREDIBILITY_K", 4))
+    # KS4 (design §2.4/§2.6): regime DOWN → exploration_budget→0. Field steering
+    # explores for FUTURE breadth; in a confirmed-down regime its output is
+    # unsubmittable (re-sim shows decay) → don't spend the explore budget. The
+    # regime verdict is the persisted re-sim probe (regime_monitor:latest).
+    if _regime_is_down():
+        logger.info("[field-screen] regime DOWN → skip field steering (KS4)")
+        return 0
     rng = rng or random.Random()
     factory = session_factory or AsyncSessionLocal
     tagged = 0

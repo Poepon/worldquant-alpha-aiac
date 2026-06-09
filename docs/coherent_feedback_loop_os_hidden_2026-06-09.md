@@ -100,7 +100,12 @@ regime 是 re-sim 探针感知的状态,**自动回调 exploration_budget + orth
   - **PR-C `b0b282d`+`eeb2a97`**:`field_score = novelty×signal×orthogonality_credible`(可信度地平线:None+已挖→unknown_prior 0.5 不乐观掩盖)。**实现审查 `wuw1yxmqd` 抓到"修好"是假**(self_corr 仅 2.1% 覆盖→94% NULL→空转),已据实改 + 3 docstring 谎言更正。
   - **PR-C2 `bb7b675`**:换数据源——`_compute_local_pool_corr` 从本地 alpha_pnl(32.3% 覆盖,池 13/13 全覆盖)算 max-corr-to-pool,**orthogonality 覆盖 39→585 cell**,reward 项真激活。window 相对 MAX(trade_date)(alpha_pnl 是 2019-2023 冻结回测)。
   - **PR-D `3763592`**:生成时 self_corr<0.5 directive(产出正交)+ min_overlap=60 守卫 + scheduler 同轮去重。自止损经评估冗余(signal_quality.can_submit_rate 已自剪枝)。
-  - **剩 defer**:违约拒 alpha+字段临时排除(E 阶段 self_corr<0.7 硬门已保正确性,此为效率)/ KS1 kill-switch(需 recon-verdict 持久化 beat)/ reward 三维互信息离线验证。
+  - **PR-D 续(defer 处置,2026-06-09)**:
+    - ✅ **reward 三维互信息验证**(`scripts/_reward_collinearity.py`,1487 cell):novelty×ortho=0.77(近共线,但=「未碰字段两者都乐观」良性效应)、signal binding 99%(已挖低产正确压制 / 未碰靠乐观 signal 0.5 被探)。**结论:非有害退化;orthogonality 在 reward 是已有数据已挖字段的次级区分器,alpha 级去拥挤主要靠 self_corr 门+生成 directive(多层)**。不强行 rebalance(rank 归一是未来 lever)。
+    - ✅ **KS4 regime gate**(`scheduler._regime_is_down`):REGIME_DOWN → 跳过字段导向(探索预算→0,设计 §2.4);fail-open(unknown 放行,ENABLE_FIELD_SCREENING 是主闸);live 实测当前 DOWN → 会抑制。
+    - ⏸ **KS1**(recon FALSIFIED→停 field-screening):需 recon-verdict 持久化 beat(recon 现仅 drain-order 端点内按需算,无持久态);**KS4 + self_corr<0.7 硬门已覆盖大部分敞口,KS1 边际价值低** → defer。
+    - ⏸ **违约拒 alpha+字段临时排除**:E 阶段 self_corr<0.7 硬门已保正确性(拒相关 alpha);scheduler 同轮去重(PR-D)防一轮内重挖;ledger orthogonality+reward 跨轮降权 → **三者已覆盖,临时排除边际价值低** → defer。
+    - ⏸ **强化 canary**(未碰字段 self_corr<0.5 比率≥50%):需 sims + regime≠DOWN(当前 DOWN,无判别力)→ 等 regime 转才能跑,非代码项。
 - **Phase 2 上线 gate(强化 canary)**:原 canary(N=25,p=0.82)只证"未碰 IS≈已用",**不够**——必须扩证 **"未碰字段产出 alpha self_corr<0.5 vs pv1 池比率≥50%"**;若未碰 self_corr≈已用 → 核心前提败(只换拥挤位置)→ NO-GO。canary 须 regime≠DOWN 跑。达标→ 90 天 flag OFF + 5% 白名单 canary → 达成率>60%∧衰减<30% → roll。
 - **Phase 3 深度修(defer)**:RAG 检索层 per-field re-weighting(prompt 级被溺没才升级);orthogonality 算力优化。
 - 工程量:~500 行 + 0 新迁移 + 无新基建/LLM/schema。
