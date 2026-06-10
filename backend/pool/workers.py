@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 
 from loguru import logger
 
+from backend.config import settings
 from backend.database import AsyncSessionLocal
 from backend.agents.graph.workflow import MiningWorkflow
 from backend.agents.pipeline.types import Candidate, SimResult
@@ -344,9 +345,17 @@ async def e_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 1800
                 continue
             try:
                 snap = await _fetch_intent_snapshot(row.hyp_intent_id)
+                # Hard ceiling on the eval (2026-06-10 root fix): unlike S's sim
+                # path, run_evaluate had no internal timeout, so a wedged await
+                # (idle-in-transaction holding a select(Alpha) read txn) hung the
+                # SINGLE E worker forever (heartbeat kept the lease alive → recycle
+                # never fired) → 100% alpha output stalled. wait_for cancels the
+                # hung coro → its async-with sessions unwind (txn rolled back/freed)
+                # → TimeoutError falls through to fail_or_retry below → E resumes.
+                _eval_to = float(getattr(settings, "POOL_EVAL_TIMEOUT_SEC", 600))
                 result = await _run_with_lease_heartbeat(
                     CandidateQueue, row.id, lease_sec, worker_id,
-                    e_process_one(workflow, row, snap, config),
+                    asyncio.wait_for(e_process_one(workflow, row, snap, config), timeout=_eval_to),
                 )
                 # Persist (per-candidate-idempotent) FIRST, then advance the stage
                 # guarded by worker_id. persist_eval_once skips the non-idempotent
@@ -363,9 +372,12 @@ async def e_loop(*, worker_id: str, poll_sec: float = 2.0, lease_sec: int = 1800
                     worker_id=worker_id,
                 )
             except Exception as ex:  # noqa: BLE001
-                logger.warning(f"[pool.e] candidate {row.id} eval failed: {ex}")
+                # str(TimeoutError()) is '' — keep the type so an eval_timeout is
+                # identifiable in the row's error + logs.
+                _msg = f"{type(ex).__name__}: {ex}" if str(ex) else type(ex).__name__
+                logger.warning(f"[pool.e] candidate {row.id} eval failed: {_msg}")
                 await fail_or_retry(CandidateQueue, row.id, st.EVAL_PENDING, max_attempts,
-                                    error=str(ex), worker_id=worker_id)
+                                    error=_msg, worker_id=worker_id)
 
 
 # =============================================================================

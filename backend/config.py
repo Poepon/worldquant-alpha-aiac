@@ -1837,6 +1837,14 @@ class Settings(BaseSettings):
     POOL_K_S: int = 2          # S (simulate) workers — hold BRAIN slots
     POOL_K_E: int = 1          # E (evaluate) workers — compute-bound
     POOL_N_HG: int = 1         # HG (hypothesis+generation) workers — LLM-bound
+    # Per-candidate hard timeouts (worker self-recovery). The S sim path is already
+    # internally bounded (slot-acquire ≤1800s + sim wait); the E eval path had NO
+    # bound → a wedged await (e.g. idle-in-transaction holding a select(Alpha) read
+    # txn while awaiting a never-firing primitive) hung E forever, and the lease
+    # heartbeat kept renewing so recycle never reclaimed it (2026-06-10 root cause:
+    # single E worker wedged → 100% alpha output halted ~2h). wait_for cancels the
+    # hung eval → async-with closes the session (txn freed) → fail_or_retry → resume.
+    POOL_EVAL_TIMEOUT_SEC: int = 600       # E run_evaluate hard ceiling (eval p95 ≪ this)
     # Claim/lease tunables.
     POOL_LEASE_MAX_ATTEMPTS: int = 3       # attempts before poison-pill
     POOL_SUPERVISOR_POLL_SEC: float = 5.0  # supervisor liveness poll interval

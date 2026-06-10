@@ -198,3 +198,33 @@ async def test_heartbeat_stops_when_row_recycled(monkeypatch):
         CandidateQueue, 7, 1800, "s-1", slow_op(), interval_sec=0.02)
     assert out == "done"
     assert len(calls) == 1  # stopped after the first False
+
+
+@pytest.mark.asyncio
+async def test_eval_wait_for_bounds_wedged_op_and_cancels(monkeypatch):
+    """2026-06-10 root fix: e_loop wraps e_process_one in asyncio.wait_for so a
+    wedged eval (idle-in-transaction holding a select(Alpha) read txn while awaiting
+    a never-firing primitive) is BOUNDED. wait_for raises TimeoutError → the e_loop
+    except → fail_or_retry → the single E worker resumes (was: hangs forever, lease
+    heartbeat alive so recycle never reclaims → 100% alpha output stalled). The
+    cancel must reach the wedged coro so its async-with sessions unwind (txn freed)."""
+    async def fake_renew(model, row_id, lease_sec, *, worker_id=None, session_factory=None):
+        return True
+    monkeypatch.setattr(workers, "renew_lease", fake_renew)
+
+    cancelled = {"hit": False}
+
+    async def wedged_op():
+        try:
+            await asyncio.sleep(100)  # the never-returning await (deadlocked primitive)
+        except asyncio.CancelledError:
+            cancelled["hit"] = True   # where the async-with __aexit__ rolls back the txn
+            raise
+        return "never"
+
+    with pytest.raises((asyncio.TimeoutError, TimeoutError)):
+        await workers._run_with_lease_heartbeat(
+            CandidateQueue, 99, 1800, "e-1",
+            asyncio.wait_for(wedged_op(), timeout=0.05), interval_sec=0.02)
+    await asyncio.sleep(0.01)  # let the cancellation propagate
+    assert cancelled["hit"] is True  # wedged coro was cancelled → session/txn cleanup runs
