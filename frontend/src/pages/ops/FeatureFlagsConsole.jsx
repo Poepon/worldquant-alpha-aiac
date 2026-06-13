@@ -52,6 +52,15 @@ const DOMAIN_LABELS = {
   brain: 'BRAIN 账号', kb: '知识库', misc: '其它',
 }
 
+// 这些 LLM 路由 flag 留在后端白名单(live 路由 + 配置中心编辑依赖),但不在本控制台展示;
+// 它们经「配置中心 → LLM 厂商」管理。
+const HIDDEN_IN_CONSOLE = new Set([
+  'ENABLE_PER_FUNCTION_LLM_ROUTING',
+  'LLM_FUNCTION_MODEL_MAP',
+  'LLM_PROVIDERS',
+  'LLM_AVAILABLE_MODELS',
+])
+
 // BrainRoleEntryCard — 轻量入口卡，跳转到 /ops/brain-role 专属页
 function BrainRoleEntryCard() {
   const [state, setState] = useState(null)
@@ -133,6 +142,7 @@ export default function FeatureFlagsConsole() {
   const byLifecycle = useMemo(() => {
     const buckets = { operational: [], experimental: [], dormant: [] }
     for (const f of flags) {
+      if (HIDDEN_IN_CONSOLE.has(f.name)) continue   // 隐藏 LLM 路由组(走配置中心)
       const lc = buckets[f.lifecycle] ? f.lifecycle : 'dormant'
       buckets[lc].push(f)
     }
@@ -358,6 +368,9 @@ export default function FeatureFlagsConsole() {
       <Text type="secondary">
         切换开关后立即在当前进程生效；其他后台进程会在 60 秒内同步，点
         『全量刷新』可立即生效。『重置』= 清除运行时覆盖、回到环境变量默认值。
+      </Text>
+      <Text type="secondary" style={{ display: 'block', marginTop: 4, fontSize: 12 }}>
+        LLM 模型路由 / 厂商 / 可选模型在「配置中心 → LLM 厂商」管理,不在此处。
       </Text>
 
       {/* P3-Brain — banner linking to dedicated /ops/brain-role page */}
