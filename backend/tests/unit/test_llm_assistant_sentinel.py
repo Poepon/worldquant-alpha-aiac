@@ -1,8 +1,8 @@
 """Phase 4 Sprint 1 A1.2 — R12 sentinel guard + restore integration tests.
 
 Coverage:
-  - set(ENABLE_LLM_ASSISTANT_MODE, True) cascades 5 sentinel flags OFF
-    + writes 6 audit rows (1 primary + 5 cascade)
+  - set(ENABLE_LLM_ASSISTANT_MODE, True) cascades 4 sentinel flags OFF
+    + writes 5 audit rows (1 primary + 4 cascade)
   - set(ENABLE_LLM_ASSISTANT_MODE, False) does NOT cascade
   - restore_sentinel() reverses the cascade
   - restore_sentinel() preserves operator's prior override (if existed)
@@ -26,10 +26,10 @@ async def test_set_r12_cascades_six_sentinel_flags_off(db_session):
     from sqlalchemy import select
 
     svc = FeatureFlagService(db_session)
-    # Seed: 1 sentinel flag has an existing True override; the other 5
+    # Seed: 1 sentinel flag has an existing True override; the other 3
     # have no override (env default). This lets us check both paths.
     svc.db.add(FeatureFlagOverride(
-        flag_name="ENABLE_G5_CROSSOVER",
+        flag_name="ENABLE_AST_ORIGINALITY_GATE",
         flag_value=json.dumps(True),
         flag_type="bool",
         updated_by="seed",
@@ -56,13 +56,13 @@ async def test_set_r12_cascades_six_sentinel_flags_off(db_session):
     primary = [r for r in audit_rows if r.flag_name == "ENABLE_LLM_ASSISTANT_MODE"]
     cascade = [r for r in audit_rows if r.flag_name != "ENABLE_LLM_ASSISTANT_MODE"]
     assert len(primary) == 1 and primary[0].action == "set"
-    assert len(cascade) == 5
+    assert len(cascade) == 4
     for r in cascade:
         assert r.action == "sentinel_set"
         assert r.sentinel_trigger_for == "ENABLE_LLM_ASSISTANT_MODE"
         assert r.flag_name in set(sentinel_flags)
-        # The G5 row had a prior True override; the other 4 had nothing
-        if r.flag_name == "ENABLE_G5_CROSSOVER":
+        # The AST-gate row had a prior True override; the other 3 had nothing
+        if r.flag_name == "ENABLE_AST_ORIGINALITY_GATE":
             assert r.old_value == json.dumps(True)
         else:
             assert r.old_value is None
@@ -88,7 +88,7 @@ async def test_set_r12_false_does_not_cascade(db_session):
 
 @pytest.mark.asyncio
 async def test_restore_sentinel_reverts_cascade(db_session):
-    """After R12 cascade fires + restore_sentinel: 4 sentinel overrides
+    """After R12 cascade fires + restore_sentinel: 3 sentinel overrides
     are DELETED (no prior state) and 1 is REVERTED to its prior True."""
     from backend.models import FeatureFlagAudit, FeatureFlagOverride
     from backend.services.feature_flag_service import FeatureFlagService
@@ -96,9 +96,9 @@ async def test_restore_sentinel_reverts_cascade(db_session):
     from sqlalchemy import select
 
     svc = FeatureFlagService(db_session)
-    # Seed prior G5 True override
+    # Seed prior AST-gate True override
     svc.db.add(FeatureFlagOverride(
-        flag_name="ENABLE_G5_CROSSOVER",
+        flag_name="ENABLE_AST_ORIGINALITY_GATE",
         flag_value=json.dumps(True),
         flag_type="bool",
         updated_by="seed",
@@ -113,39 +113,39 @@ async def test_restore_sentinel_reverts_cascade(db_session):
     assert result["sentinel_for"] == "ENABLE_LLM_ASSISTANT_MODE"
     assert set(result["restored_flags"]) == set(settings.LLM_ASSISTANT_SENTINEL_FLAGS)
     assert result["skipped"] == []
-    assert result["audit_rows"] == 5
+    assert result["audit_rows"] == 4
 
-    # The 4 sentinel flags that had no prior override → DELETE
+    # The 3 sentinel flags that had no prior override → DELETE
     for sf in settings.LLM_ASSISTANT_SENTINEL_FLAGS:
         row = (await db_session.execute(
             select(FeatureFlagOverride).where(FeatureFlagOverride.flag_name == sf)
         )).scalar_one_or_none()
-        if sf == "ENABLE_G5_CROSSOVER":
+        if sf == "ENABLE_AST_ORIGINALITY_GATE":
             # Reverted to prior True
             assert row is not None
             assert row.flag_value == json.dumps(True)
         else:
             assert row is None, f"sentinel {sf} should be DELETED, got {row}"
 
-    # All 6 cascade audit rows now have restored_at + restored_by stamps
+    # All 4 cascade audit rows now have restored_at + restored_by stamps
     cascade_rows = list((await db_session.execute(
         select(FeatureFlagAudit).where(
             FeatureFlagAudit.action == "sentinel_set",
             FeatureFlagAudit.sentinel_trigger_for == "ENABLE_LLM_ASSISTANT_MODE",
         )
     )).scalars().all())
-    assert len(cascade_rows) == 5
+    assert len(cascade_rows) == 4
     for r in cascade_rows:
         assert r.restored_at is not None
         assert r.restored_by == "restore_op"
 
-    # 6 new sentinel_restore audit rows (one per flag)
+    # 4 new sentinel_restore audit rows (one per flag)
     restore_rows = (await db_session.execute(
         select(FeatureFlagAudit).where(
             FeatureFlagAudit.action == "sentinel_restore"
         )
     )).scalars().all()
-    assert len(list(restore_rows)) == 5
+    assert len(list(restore_rows)) == 4
 
 
 @pytest.mark.asyncio
@@ -156,7 +156,7 @@ async def test_restore_sentinel_idempotent_second_call_is_noop(db_session):
     svc = FeatureFlagService(db_session)
     await svc.set("ENABLE_LLM_ASSISTANT_MODE", True, actor="test_op")
     first = await svc.restore_sentinel(actor="op1")
-    assert first["audit_rows"] == 5
+    assert first["audit_rows"] == 4
 
     second = await svc.restore_sentinel(actor="op2")
     assert second["audit_rows"] == 0
@@ -177,11 +177,11 @@ async def test_restore_sentinel_empty_when_no_cascade(db_session):
 
 @pytest.mark.asyncio
 async def test_list_audit_default_excludes_sentinel_cascade(db_session):
-    """Default list_audit hides the 6 sentinel cascade rows (anti-spam)."""
+    """Default list_audit hides the 4 sentinel cascade rows (anti-spam)."""
     from backend.services.feature_flag_service import FeatureFlagService
 
     svc = FeatureFlagService(db_session)
-    # Trigger cascade (1 primary + 6 cascade audit rows)
+    # Trigger cascade (1 primary + 4 cascade audit rows)
     await svc.set("ENABLE_LLM_ASSISTANT_MODE", True, actor="test_op")
 
     rows = await svc.list_audit(limit=100)
@@ -200,10 +200,10 @@ async def test_list_audit_include_sentinel_shows_all(db_session):
     await svc.set("ENABLE_LLM_ASSISTANT_MODE", True, actor="test_op")
 
     rows = await svc.list_audit(limit=100, include_sentinel=True)
-    # 1 primary + 6 cascade
-    assert len(rows) == 6
+    # 1 primary + 4 cascade
+    assert len(rows) == 5
     sentinel_rows = [r for r in rows if r.sentinel_trigger_for is not None]
-    assert len(sentinel_rows) == 5
+    assert len(sentinel_rows) == 4
 
 
 @pytest.mark.asyncio
@@ -223,7 +223,7 @@ async def test_restore_sentinel_skips_retired_flag_gracefully(db_session):
 
     # Simulate retirement of one sentinel flag: pop from SUPPORTED_FLAGS
     # for the duration of this test, then restore after.
-    retired_flag = "ENABLE_G5_CROSSOVER"
+    retired_flag = "ENABLE_AST_ORIGINALITY_GATE"
     saved_spec = SUPPORTED_FLAGS.pop(retired_flag, None)
     try:
         result = await svc.restore_sentinel(actor="restore_op")
@@ -233,7 +233,7 @@ async def test_restore_sentinel_skips_retired_flag_gracefully(db_session):
 
     # Retired flag → in `skipped`, others → in `restored_flags`
     assert retired_flag in result["skipped"]
-    assert len(result["restored_flags"]) == 4  # 6 - 1 retired
+    assert len(result["restored_flags"]) == 3  # 4 - 1 retired
     # Sentinel audit row for retired flag still gets restored_at stamp
     # (otherwise repeated restore_sentinel would loop on it forever)
     retired_audit = (await db_session.execute(
@@ -278,8 +278,8 @@ async def test_restore_sentinel_preserves_operator_manual_set(db_session):
     assert row is not None
     import json
     assert row.flag_value == json.dumps(True)
-    # Other 5 sentinel flags should still be reverted
-    assert len(result["restored_flags"]) == 4
+    # Other 3 sentinel flags should still be reverted
+    assert len(result["restored_flags"]) == 3
 
 
 @pytest.mark.asyncio
@@ -370,7 +370,7 @@ async def test_verify_sentinel_restore_complete_after_restore(db_session):
     assert report["dangling_cascade_rows"] == 0
     assert report["restore_rows"] >= 1
     assert report["warnings"] == []
-    # per-flag state reported for all 6 sentinels
+    # per-flag state reported for all 4 sentinels
     from backend.config import settings
     for sf in settings.LLM_ASSISTANT_SENTINEL_FLAGS:
         assert sf in report["per_flag_state"]
