@@ -16,7 +16,12 @@
 
 ---
 
-> ⚠️ **现状以 `CLAUDE.md` 与 `docs/INDEX.md` 为准。** 本 README 的**功能列表、架构图、Roadmap、Changelog** 反映早期版本(2026-01),部分已过时(如已退役的 Alpha Lab 页、tier 系统;默认 LLM 已由 DeepSeek 改为 kimi-k2.6/阿里云 MaaS)。下方的**安装与启动、数据库迁移、Docker 部署**章节仍然有效。
+> ⚠️ **现状以 `CLAUDE.md` 与 `docs/INDEX.md` 为准。** 本 README 的**功能列表、架构图、Roadmap、Changelog** 反映早期版本(2026-01),部分已过时。已知主要偏差:
+> - **架构**:已从「单 task 跑全 cycle 的串行/FLAT/ONESHOT」迁移为**四池解耦流水线**(常驻 HG/S/E worker + DB 持久队列,`ENABLE_POOL_PIPELINE`;FLAT/ONESHOT/CASCADE 已于 `b89b732` 2026-06-06 退役)。
+> - **LLM**:默认模型由 DeepSeek 改为 **kimi-k2.5 / 阿里云 coding-plan**(`coding.dashscope`;旧 token-plan MaaS 已于 2026-06-04 停用)。
+> - **已退役/精减**:Alpha Lab 页、tier 系统、R1b CoSTEER retry/mutate 环、llm_mutate/attribution-LLM 节点、孤儿 MiningWorkflow 方法(2026-06-13 `87d3783`)等均已删除——勿据本 README 的功能列表/架构图按图索骥。
+>
+> 下方的**安装与启动、数据库迁移、Docker 部署**章节仍然有效。
 
 ---
 
