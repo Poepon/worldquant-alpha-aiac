@@ -57,12 +57,16 @@ const FALLBACK_MODELS = [
 // in 1c / flipped OFF in 1b — r1b_retry / llm_crossover_alpha / r1b_mutate /
 // r5_alignment_c1 / r5_alignment_c2. Existing DB map entries still render; these
 // are only quick-add hints, so we stop nudging operators toward dead node_keys.
+// 2026-06-13 (node-liveness audit wf_25a507d6): llm_mutate_alpha + attribution
+// are ALSO dead (sole caller tier_seed T2 deleted in 0350c20 / attribution's
+// caller chain is test-only), so dropped from the hint; added the missed live
+// HG node distill_context. The 4 below are the ONLY live node_keys (HG stage:
+// hypothesis/code_gen/self_correct/distill_context) — all others route via __default__.
 const SUGGESTED_NODE_KEYS = [
   'hypothesis',
   'code_gen',
   'self_correct',
-  'llm_mutate_alpha',
-  'attribution',
+  'distill_context',
 ]
 
 let _rowSeq = 0
