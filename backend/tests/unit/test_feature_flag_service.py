@@ -394,7 +394,7 @@ def test_flagstateout_wire_model_has_lifecycle_domain_no_group():
     assert {"lifecycle", "domain"} <= model_fields
     # round-trip a real FlagState through the wire model (the exact ops.py call)
     s = FlagState(
-        name="X", flag_type="bool", lifecycle="operational", domain="submit",
+        name="X", label="测试名", flag_type="bool", lifecycle="operational", domain="submit",
         description="d", env_default=False, override_value=None,
         effective_value=False, source="default",
     )
@@ -402,3 +402,21 @@ def test_flagstateout_wire_model_has_lifecycle_domain_no_group():
     assert dumped["lifecycle"] == "operational"
     assert dumped["domain"] == "submit"
     assert "group" not in dumped
+
+
+def test_every_flag_has_nonempty_label():
+    from backend.services.feature_flag_service import SUPPORTED_FLAGS, FlagSpec
+    import dataclasses
+    assert "label" in {f.name for f in dataclasses.fields(FlagSpec)}
+    for name, spec in SUPPORTED_FLAGS.items():
+        assert isinstance(spec.label, str) and spec.label.strip(), f"{name} missing label"
+        # label 应是中文通俗名,不应等于原始 ENABLE_ 技术名
+        assert spec.label != name, f"{name} label still raw id"
+
+
+def test_flagstate_and_wire_carry_label():
+    from backend.services.feature_flag_service import FlagState
+    from backend.routers.ops import FlagStateOut
+    import dataclasses
+    assert "label" in {f.name for f in dataclasses.fields(FlagState)}
+    assert "label" in FlagStateOut.model_fields
