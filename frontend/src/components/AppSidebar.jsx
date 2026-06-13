@@ -26,7 +26,7 @@ const { Sider } = Layout
 // IA 从「按机制代号平铺 27 项」重组为「按池生命周期阶段分段」。
 //  - 「提交中心」提为顶级组(execution-limited 系统的真瓶颈=提交)。
 //  - 「运维监控」内用 type:'group' 分段:池总览 / 生成HG / 模拟S / 评估E /
-//    知识库&RAG / 系统&配置 / 废弃待Phase2(G10/G3-v2 灰显归档)。
+//    知识库&RAG / 系统&配置。(归档页 G10/G3-v2 仍存于路由 /ops/g10-logic,仅从菜单移除)
 //  - P0 已删 4 死页(R5/方向Bandit/G5/R8-v3);此处不再出现。
 // 提交相关路由仍是 /ops/* 路径(route 不改,避免书签失效),仅在菜单里归组。
 const SUBMIT_PATHS = ['/ops/submit-backlog', '/ops/submit-yield', '/ops/auto-submit', '/ops/optimization-cycles']
@@ -104,13 +104,6 @@ const menuItems = [
           { key: '/ops/cost-monitor', icon: <DollarOutlined />, label: 'LLM 成本' },
           { key: '/ops/feature-flags', label: '功能开关' },
           { key: '/ops/brain-role', icon: <SwapOutlined />, label: 'BRAIN 账号模式' },
-        ],
-      },
-      {
-        type: 'group',
-        label: '废弃 / 待 Phase 2',
-        children: [
-          { key: '/ops/g10-logic', icon: <ReadOutlined />, label: '[归档] 逻辑库 / 语法校验' },
         ],
       },
     ],
