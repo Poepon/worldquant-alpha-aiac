@@ -14,7 +14,6 @@
 | 文档 | 说明 |
 |---|---|
 | [competitive_analysis_v3_2026-05-26.md](competitive_analysis_v3_2026-05-26.md) | 竞品头部:selection-vs-discovery + BRAIN self-corr<0.7 提交门 + Grinold 广度轴 |
-| [competitive_analysis_r14_stop_loss_2026-05-27.md](competitive_analysis_r14_stop_loss_2026-05-27.md) | R14 task stop-loss 在流水线里的适配方法论 |
 | [competitive_analysis_v2_2026-05-19.md](competitive_analysis_v2_2026-05-19.md) | 工业 8 家 + 学界 ~25 系统全景 + AIAC gap(部分 flag 注解过时) |
 | [industry_alpha_optimization_survey_2026-06-03.md](industry_alpha_optimization_survey_2026-06-03.md) | 业界优化 5 层 + Grinold IR / DSR / PBO / CPCV(robustness 选择层来源) |
 | [quant_pipeline_6layer_2026-06-05.md](quant_pipeline_6layer_2026-06-05.md) | 量化 6 层切分 + 各层成熟度(架构全景) |
