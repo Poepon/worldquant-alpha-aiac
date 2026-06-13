@@ -529,7 +529,6 @@ class Settings(BaseSettings):
     # cross-flag state without circular import on feature_flag_service.
     LLM_ASSISTANT_SENTINEL_FLAGS: list = [
         "ENABLE_HYPOTHESIS_FOREST_REUSE",
-        "ENABLE_R8_L0",
         "ENABLE_AST_ORIGINALITY_GATE",
         "ENABLE_SIMULATION_CACHE",
     ]

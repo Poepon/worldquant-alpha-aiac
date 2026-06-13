@@ -164,19 +164,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "field-aware。OFF → 字节不变。soak + pillar-nudge A/B 双过前不升级。见 §7 Track B。"
         ),
     ),
-    "ENABLE_FIELD_HYGIENE": FlagSpec(
-        name="ENABLE_FIELD_HYGIENE",
-        label="字段卫生过滤",
-        flag_type="bool",
-        lifecycle="operational",
-        domain="generation",
-        description=(
-            "字段卫生(#25c):池字段路径只给 code-gen LLM 数值信号字段,剔除非信号元数据"
-            "(UNIVERSE 成员 flag top500/SYMBOL/UTC 时间戳 *_time_utc/日期 *_date_utc/ISO 代码"
-            " iso_code)。修 2026-05-20 生成塌方(LLM 在时间戳/代码/flag 上建退化式→负 sharpe)。"
-            "默认 ON(纠错);OFF=legacy 全字段 roster。kill-switch。"
-        ),
-    ),
     # --- P2-C 市场体制 (Consolidated 2026-05-19: single switch + stage str) ---
     "ENABLE_REGIME": FlagSpec(
         name="ENABLE_REGIME",
@@ -575,37 +562,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "transition 走 evaluation node 末尾的 finalize pass(B3 Sprint 2 重构 — "
             "R10 + R10-v2 stamps 合并 → quality_status=FAIL,允许 7d 互验 SQL 分别"
             "计算两机制 false-positive rate)。误杀时 flag flip OFF 或 FAMILY_CAP_TOP_K=5 放宽。"
-        ),
-    ),
-    # --- Phase 4 Sprint 0 (2026-05-19) ---
-    "ENABLE_LLM_API_CIRCUIT": FlagSpec(
-        name="ENABLE_LLM_API_CIRCUIT",
-        label="LLM 接口熔断",
-        flag_type="bool",
-        lifecycle="operational",
-        domain="llm-routing",
-        description=(
-            "Phase 4 PR0:LLM provider(DeepSeek/Anthropic)outage 熔断。"
-            "60s 内连续 LLM_API_CIRCUIT_FAIL_THRESHOLD(默认 5)次 5xx/timeout "
-            "→ trip 300s 冷却 → 任何 LLM caller fast-fail return success=False/"
-            "error='llm_api_circuit_open',不发实际 HTTP。任何 success → "
-            "立即 clear。Default ON(防御机制 default ON 与 BRAIN_AUTH_CIRCUIT "
-            "一致)。Soft-fail Redis blip 永不 brown-out。"
-        ),
-    ),
-    "ENABLE_R8_L0": FlagSpec(
-        name="ENABLE_R8_L0",
-        label="精确模式匹配检索",
-        flag_type="bool",
-        lifecycle="operational",
-        domain="rag",
-        description=(
-            "Phase 4 PR0.5:R8 hierarchical RAG L0(exact pattern_hash match)"
-            "选择性 sub-flag。Default ON(R8 4-layer 全部 LIVE)。"
-            "R12 LLM_MODE=assistant sentinel ON 时,全局 set False 仅 skip L0,"
-            "保留 L1 pillar / L2 family / L3 field。双 entry skip:"
-            "`backend/agents/hierarchical_rag.py:query_hierarchical` 主 entry + "
-            "`backend/agents/services/rag_service.py:query()` legacy entry。"
         ),
     ),
     # --- Persistence-Ontology (P1-P4 2026-05-19, plan v1.3.1) ---
