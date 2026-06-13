@@ -1,5 +1,7 @@
 *.pyc
 .env
+.env.bak*
+.env.*.bak
 __pycache__
 frontend/node_modules
 frontend/dist
@@ -23,6 +25,11 @@ logs/
 .cursorignore
 backend/alembic/versions/__pycache__/
 backend/data/correlation_cache/
+# Local data artifacts under backend/data — never source-of-truth (the committed
+# seeds are .json/.yaml/.parquet). Top-level sqlite + vendor csv dumps stay local.
+backend/data/*.db
+backend/data/*.sqlite
+backend/data/*.csv
 /.vs
 
 # local probe / experiment scripts (kept out of repo)
