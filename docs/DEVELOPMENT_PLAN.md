@@ -1,6 +1,6 @@
 # AIAC 2.0 开发主线（唯一主线文档）
 
-> **更新 2026-06-07** · 这是项目开发的**单一主线文档**。历史计划/设计/runbook 已归档到 `docs/archive/`(可追溯不删);竞品分析/架构/调研 reference 留在 `docs/` 根;操作输出(scan/audit/backup)留原地。
+> **更新 2026-06-07** · 这是项目开发的**单一主线文档**。竞品分析/架构/调研 reference 留在 `docs/` 根;操作输出(scan/audit/backup)留原地。
 > 组织:**当前态速览 → 战略 → 本轮轨迹 → 持有策略 → 已交付 → 重启 SOP → NO-GO → 重评触发**。所有结论经 live PG / git / BRAIN 只读实测(见各段)。
 
 ---
@@ -171,7 +171,6 @@ greenfield 重定向 → #25c 字段卫生(commit `93a04a7`)→ regime 漂移实
 
 ## 附:索引
 
-- **归档**(历史计划/设计/runbook):`docs/archive/`(本主线的详细背书,如 `dev_plan_greenfield_2026-06-07.md` / `unified_submit_selector_design_2026-06-07.md` / `pool_native_reward_redesign_2026-06-07.md` / `orthogonality_steered_exploration_plan_2026-06-05.md` / `four_pool_decoupling_plan_2026-06-05.md` 等)。
 - **Reference**(留 `docs/` 根):`competitive_analysis_v3` / `industry_alpha_optimization_survey` / `quant_pipeline_6layer` / `kb_layered_architecture` / `rd_agent_alpha_gpt_research` / `qlib_alpha_research` 等。
 - **Memory**(`~/.claude/.../memory/`):`project_dev_plan_branch_b_regime_trough_2026_06_07` / `reference_wq_consultant_compensation_model` / `reference_brain_os_hidden_is_only` / `project_submit_yield_collapse_field_hygiene_2026_06_07`。
 - **代码状态**:`backend/CODE_STATUS.md` / `REFACTORING_STATUS.md` / `agents/core/ARCHITECTURE.md` / 根 `CLAUDE.md`。

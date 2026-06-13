@@ -173,7 +173,7 @@ All LLM calls go through `LLMService`. Providers are a **named registry** (`LLM_
 
 ## Project conventions
 
-- **`docs/DEVELOPMENT_PLAN.md` is the single mainline dev doc** (current architecture state + strategy + NO-GO + flag status; historical plans in `docs/archive/`). `agents/IMPROVEMENT_ANALYSIS.md`, `backend/CODE_STATUS.md`, `backend/REFACTORING_STATUS.md` are the working design notes — read them before larger refactors and update them when status changes. (`agents/core/ARCHITECTURE.md` was deleted with `agents/core/` in `b89b732`.)
+- **`docs/DEVELOPMENT_PLAN.md` is the single mainline dev doc** (current architecture state + strategy + NO-GO + flag status). `agents/IMPROVEMENT_ANALYSIS.md`, `backend/CODE_STATUS.md`, `backend/REFACTORING_STATUS.md` are the working design notes — read them before larger refactors and update them when status changes. (`agents/core/ARCHITECTURE.md` was deleted with `agents/core/` in `b89b732`.)
 - Keep root-level scripts (`ace_lib.py`, `helpful_functions.py`, `validator.py`, `parsetab.py`) as standalone utilities; new logic should live under `backend/`.
 - Top-level files `keys.txt`, `api_structure.json`, `brain_alpha_structure.json` are reference dumps from BRAIN — treat as read-only inputs, not authoritative state.
 - Windows is the primary dev platform; Celery is launched with `--pool=solo` because the prefork pool is broken on Windows.

@@ -680,7 +680,7 @@ python backend/benchmark_test.py --seed
 ## 📈 Roadmap
 
 > 早期的 Phase 1-18 线性 Roadmap 已不再反映实际演进(系统在 2026-02 后经历了 tier 系统退役、FLAT/ONESHOT 调度、生产者-消费者流水线、优化闭环、orchestrator、per-function LLM 路由等多次重构)。
-> **当前活跃的路线图与设计文档见 [`docs/INDEX.md`](docs/INDEX.md)**(现行设计 / 运维 runbook / 竞品调研),历史里程碑见 [`docs/archive/`](docs/archive/)。
+> **当前活跃的路线图与设计文档见 [`docs/INDEX.md`](docs/INDEX.md)**(现行设计 / 运维 runbook / 竞品调研)。
 
 ---
 
