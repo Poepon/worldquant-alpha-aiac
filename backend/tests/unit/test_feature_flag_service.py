@@ -420,3 +420,19 @@ def test_flagstate_and_wire_carry_label():
     import dataclasses
     assert "label" in {f.name for f in dataclasses.fields(FlagState)}
     assert "label" in FlagStateOut.model_fields
+
+
+def test_alwayson_flags_removed_from_console_but_settings_kept():
+    from backend.services.feature_flag_service import SUPPORTED_FLAGS
+    from backend.config import settings
+    omitted = {"ENABLE_FIELD_HYGIENE", "ENABLE_LLM_API_CIRCUIT", "ENABLE_R8_L0"}
+    # 已从控制台白名单移除
+    assert omitted.isdisjoint(SUPPORTED_FLAGS.keys())
+    # 但 Settings 仍有属性且默认 True(live 行为不变)
+    for name in omitted:
+        assert getattr(settings, name) is True, f"{name} must stay True in settings"
+
+
+def test_r8_l0_removed_from_sentinel_list():
+    from backend.config import settings
+    assert "ENABLE_R8_L0" not in settings.LLM_ASSISTANT_SENTINEL_FLAGS
