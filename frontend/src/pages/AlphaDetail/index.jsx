@@ -44,9 +44,9 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts'
-import api from '../services/api'
-import { formatRelative, formatDateTime } from '../utils/time'
-import { STATUS_COLORS, STATUS_LABELS } from '../utils/alphaStatus'
+import api from '../../services/api'
+import { formatRelative, formatDateTime } from '../../utils/time'
+import { STATUS_COLORS, STATUS_LABELS } from '../../utils/alphaStatus'
 
 const { Title, Text, Paragraph } = Typography
 
