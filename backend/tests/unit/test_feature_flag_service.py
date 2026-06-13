@@ -361,3 +361,24 @@ def test_retired_flags_removed_from_whitelist():
         "TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS",
     }
     assert removed.isdisjoint(SUPPORTED_FLAGS.keys())
+
+
+def test_flagspec_has_lifecycle_and_domain_no_group():
+    from backend.services.feature_flag_service import SUPPORTED_FLAGS, FlagSpec
+    import dataclasses
+    field_names = {f.name for f in dataclasses.fields(FlagSpec)}
+    assert "group" not in field_names
+    assert {"lifecycle", "domain"} <= field_names
+    LIFE = {"operational", "experimental", "dormant"}
+    DOM = {"submit","rag","evaluation","generation","llm-routing","regime","breadth","brain","kb","misc"}
+    for name, spec in SUPPORTED_FLAGS.items():
+        assert spec.lifecycle in LIFE, f"{name} bad lifecycle {spec.lifecycle}"
+        assert spec.domain in DOM, f"{name} bad domain {spec.domain}"
+
+
+def test_flagstate_carries_lifecycle_domain():
+    from backend.services.feature_flag_service import FlagState
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(FlagState)}
+    assert "group" not in fields
+    assert {"lifecycle", "domain"} <= fields
