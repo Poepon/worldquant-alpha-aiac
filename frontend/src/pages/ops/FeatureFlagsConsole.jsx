@@ -143,7 +143,7 @@ export default function FeatureFlagsConsole() {
   const domainGroups = useMemo(() => {
     const q = search.trim().toLowerCase()
     const rows = byLifecycle[activeTab].filter(
-      (f) => !q || f.name.toLowerCase().includes(q) || (f.description || '').toLowerCase().includes(q),
+      (f) => !q || (f.label || '').toLowerCase().includes(q) || f.name.toLowerCase().includes(q) || (f.description || '').toLowerCase().includes(q),
     )
     const map = new Map()
     for (const f of rows) {
@@ -218,15 +218,21 @@ export default function FeatureFlagsConsole() {
 
   const columns = [
     {
-      title: '开关名称',
-      dataIndex: 'name',
+      title: '开关',
+      dataIndex: 'label',
       width: 320,
-      render: (name, row) => (
+      render: (label, row) => (
         <Space>
-          <Text strong style={{ fontFamily: 'monospace' }}>
-            {name}
-          </Text>
-          <Tooltip title={row.description}>
+          <Text strong>{label || row.name}</Text>
+          <Tooltip
+            title={
+              <span>
+                <code style={{ color: '#fff' }}>{row.name}</code>
+                <br />
+                {row.description}
+              </span>
+            }
+          >
             <InfoCircleOutlined style={{ color: '#9c88ff' }} />
           </Tooltip>
         </Space>
@@ -366,7 +372,7 @@ export default function FeatureFlagsConsole() {
       ) : (
         <Card size="small" style={{ marginTop: 16 }} className="glass-card">
           <Input.Search
-            placeholder="按开关名 / 描述过滤"
+            placeholder="按中文名 / 开关名 / 描述过滤"
             allowClear
             style={{ maxWidth: 360, marginTop: 12 }}
             onChange={(e) => setSearch(e.target.value)}
