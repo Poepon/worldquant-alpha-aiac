@@ -1,0 +1,90 @@
+{
+  "node": "hypothesis",
+  "control_task": 3983,
+  "treatment_task": 3984,
+  "window_days": "full",
+  "control": {
+    "passes": 1,
+    "real_sims": 38,
+    "  (alphas)": 25,
+    "  (failures)": 13,
+    "pass_rate": 0.0263,
+    "sharpe_n": 25,
+    "sharpe_mean": 0.0476,
+    "sharpe_var": 0.17177733333333334,
+    "node_models": [
+      "qwen3.6-plus"
+    ],
+    "node_calls": 6,
+    "node_tokens": 64715,
+    "node_cost_usd": null,
+    "node_avg_latency_ms": 143133.0,
+    "total_cost_usd": null,
+    "total_tokens": 118635,
+    "cost_per_pass_usd": null,
+    "node_model_counts": {
+      "qwen3.6-plus": 6
+    }
+  },
+  "treatment": {
+    "passes": 0,
+    "real_sims": 37,
+    "  (alphas)": 25,
+    "  (failures)": 12,
+    "pass_rate": 0.0,
+    "sharpe_n": 25,
+    "sharpe_mean": -0.1772,
+    "sharpe_var": 0.37587100000000007,
+    "node_models": [
+      "kimi-k2.5"
+    ],
+    "node_calls": 8,
+    "node_tokens": 34110,
+    "node_cost_usd": null,
+    "node_avg_latency_ms": 42118.6,
+    "total_cost_usd": null,
+    "total_tokens": 106655,
+    "cost_per_pass_usd": null,
+    "node_model_counts": {
+      "kimi-k2.5": 8
+    }
+  },
+  "verdict": {
+    "node": "hypothesis",
+    "decision": "PARTIAL",
+    "binary_gate": "NO-GO",
+    "insufficient_sample": true,
+    "effect_pct_pts": -0.02631578947368421,
+    "ci": {
+      "author_rate": 0.02631578947368421,
+      "assistant_rate": 0.0,
+      "effect_pct_pts": -0.02631578947368421,
+      "ci_lower": -0.05263157894736842,
+      "ci_upper": 0.0,
+      "ci_level": 0.8,
+      "iterations": 1000,
+      "insufficient_samples": false
+    },
+    "sharpe": {
+      "welch_t": -1.519,
+      "p_value": 0.1288,
+      "welch_df": 42.1,
+      "cohens_d": -0.43,
+      "required_n_per_arm": 86
+    },
+    "cost": {
+      "control_per_pass": null,
+      "treatment_per_pass": null,
+      "delta_pct": null,
+      "flag": "unknown"
+    },
+    "validity": "OK",
+    "routed_share": 1.0,
+    "thresholds": {
+      "effect_floor": -0.002,
+      "cost_tolerance_pct": 20.0,
+      "routed_share_min": 0.9,
+      "min_denom": 100
+    }
+  }
+}
