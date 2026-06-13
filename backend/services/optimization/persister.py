@@ -1,9 +1,7 @@
 """Persister — write winner VariantSimResults into the alphas table.
 
-Field mapping mirrors :file:`scripts/_persist_and_submit_15621_variant.py`
-(the manual one-shot that produced alpha 15720) and
-:file:`backend/agents/graph/nodes/persistence.py:398-450` (the live mining
-persist path). Differences are intentional and small:
+Field mapping mirrors :file:`backend/agents/graph/nodes/persistence.py:398-450`
+(the live mining persist path). Differences are intentional and small:
 
   - ``parent_alpha_id`` and ``optimization_run_id`` are always set (Persister
     only ever writes optimization-derived rows; mining writes its own).

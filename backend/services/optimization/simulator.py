@@ -47,8 +47,7 @@ def _today_utc_str() -> str:
 def _extract_is_metrics(sim: Dict[str, Any]) -> Dict[str, Any]:
     """Pull the IS metric dict from BRAIN's many response shapes.
 
-    Mirrors :file:`scripts/_persist_and_submit_15621_variant.py` (the empirical
-    "shape spotter" for live BRAIN responses) — ``sim["is"]`` is the most
+    Empirical "shape spotter" for live BRAIN responses — ``sim["is"]`` is the most
     common, ``sim["metrics"]`` is occasionally seen, and the metric scalars
     are sometimes nested one more level under ``"metrics"``.
     """
