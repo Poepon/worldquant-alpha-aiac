@@ -1346,51 +1346,6 @@ class FlatSessionOut(BaseModel):
 
 
 
-# ----- A3 flat-F4 distribution endpoint -----
-class FlatRegionStatus(BaseModel):
-    region: str
-    count: int
-    share: float
-    quota: Optional[float] = None
-    status: str  # ok / warn / exceeded / no_quota
-
-
-class FlatRegionDistributionOut(BaseModel):
-    total_active_tasks: int
-    regions: List[FlatRegionStatus]
-    enforce: bool
-    lookback_days: int
-
-
-@router.get("/flat-region/distribution", response_model=FlatRegionDistributionOut)
-async def flat_region_distribution(
-    _token: str = Depends(_require_ops_token),
-    db: AsyncSession = Depends(get_db),
-) -> FlatRegionDistributionOut:
-    """A3 flat-F4: per-region active-task share + configured quota with
-    over-quota / warn / ok chips. Powers the frontend FlatRegionMonitor
-    page (defer to next session) and the operator decision to flip
-    FLAT_CROSS_REGION_ENFORCE from warn → reject.
-    """
-    from backend.config import settings
-    from backend.services.flat_region_quota import (
-        compute_region_share as _compute_share,
-        build_distribution_summary as _summary,
-    )
-    _quota = dict(getattr(settings, "FLAT_CROSS_REGION_QUOTA", {}) or {})
-    _enforce = bool(getattr(settings, "FLAT_CROSS_REGION_ENFORCE", False))
-    _lookback = int(getattr(settings, "FLAT_CROSS_REGION_LOOKBACK_DAYS", 30))
-    _share = await _compute_share(db, lookback_days=_lookback)
-    _summary_dict = _summary(_share, _quota)
-    return FlatRegionDistributionOut(
-        total_active_tasks=int(_summary_dict["total_active_tasks"]),
-        regions=[FlatRegionStatus(**r) for r in _summary_dict["regions"]],
-        enforce=_enforce,
-        lookback_days=_lookback,
-    )
-
-
-
 # =============================================================================
 # R1a hook + R5 LLM-judge telemetry (2026-05-18) — operator decision support
 # =============================================================================
