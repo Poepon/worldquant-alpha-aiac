@@ -46,7 +46,7 @@ import {
 } from 'recharts'
 import api from '../services/api'
 import { formatRelative, formatDateTime } from '../utils/time'
-import { STATUS_COLORS } from '../utils/alphaStatus'
+import { STATUS_COLORS, STATUS_LABELS } from '../utils/alphaStatus'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -74,7 +74,7 @@ function CrisisCorrelationPanel({ crisis }) {
   if (!crisis || Object.keys(crisis).length === 0) {
     return (
       <Text type="secondary" style={{ fontSize: 12 }}>
-        尚无危机相关性数据（仅 PASS-eligible alpha 在本地 PnL 缓存命中时计算）。
+        尚无危机相关性数据（仅「通过」级别的 alpha 在本地收益缓存命中时才会计算）。
       </Text>
     )
   }
@@ -94,14 +94,14 @@ function CrisisCorrelationPanel({ crisis }) {
               key={w}
               title={
                 <div style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                  status: {info.status || 'unknown'}
+                  状态: {info.status || '未知'}
                   {info.overlap_days !== undefined && (
-                    <> · overlap_days: {info.overlap_days}</>
+                    <> · 重叠天数: {info.overlap_days}</>
                   )}
                 </div>
               }
             >
-              <Tag>{label} · n/a</Tag>
+              <Tag>{label} · 无数据</Tag>
             </AntTooltip>
           )
         }
@@ -112,9 +112,9 @@ function CrisisCorrelationPanel({ crisis }) {
             key={w}
             title={
               <div style={{ fontFamily: 'monospace', fontSize: 12 }}>
-                <div>max_corr: {v.toFixed(4)}</div>
-                <div>counterpart: {info.counterpart_id}</div>
-                <div>overlap: {info.overlap_days} days</div>
+                <div>最高相关度: {v.toFixed(4)}</div>
+                <div>对手策略: {info.counterpart_id}</div>
+                <div>重叠: {info.overlap_days} 天</div>
               </div>
             }
           >
@@ -132,12 +132,12 @@ function CanSubmitTag({ canSubmit, failed, pending, loading, onRefresh }) {
   if (canSubmit === true) {
     const pendN = pending?.length || 0
     const tip = pendN > 0
-      ? `is.checks 全无 FAIL；仍有 ${pendN} 项 PENDING（如 SELF_CORRELATION）— 通过后才是最终结论。`
-      : 'is.checks 全部 PASS — 满足 BRAIN 提交门槛。'
+      ? `提交前检查无一项未通过；仍有 ${pendN} 项待定（如「与已提交策略的相关度」）— 待定项通过后才是最终结论。`
+      : '提交前检查全部通过 — 满足 BRAIN 提交门槛。'
     return (
       <AntTooltip title={tip}>
         <Tag color="success" icon={loading ? <ReloadOutlined spin /> : null} onClick={onRefresh} style={{ cursor: 'pointer' }}>
-          ✅ 可提交{pendN > 0 ? ` (${pendN} pending)` : ''}
+          ✅ 可提交{pendN > 0 ? ` (${pendN} 项待定)` : ''}
         </Tag>
       </AntTooltip>
     )
@@ -145,12 +145,12 @@ function CanSubmitTag({ canSubmit, failed, pending, loading, onRefresh }) {
   if (canSubmit === false) {
     const tip = (
       <div>
-        <div style={{ marginBottom: 4 }}>{failed.length} 个 BRAIN 检查 FAIL：</div>
+        <div style={{ marginBottom: 4 }}>{failed.length} 项 BRAIN 提交前检查未通过：</div>
         {failed.map((c) => (
           <div key={c.name} style={{ fontFamily: 'monospace', fontSize: 12 }}>
             • {c.name}
             {c.value !== undefined && c.limit !== undefined
-              ? ` (value=${c.value}, limit=${c.limit})`
+              ? `（当前=${c.value}，门槛=${c.limit}）`
               : ''}
           </div>
         ))}
@@ -159,13 +159,13 @@ function CanSubmitTag({ canSubmit, failed, pending, loading, onRefresh }) {
     return (
       <AntTooltip title={tip}>
         <Tag color="error" icon={loading ? <ReloadOutlined spin /> : null} onClick={onRefresh} style={{ cursor: 'pointer' }}>
-          ⚠️ 不可提交 ({failed.length} FAIL)
+          ⚠️ 不可提交 ({failed.length} 项未通过)
         </Tag>
       </AntTooltip>
     )
   }
   return (
-    <AntTooltip title="尚未调用 BRAIN GET /alphas/{id} 校验 is.checks，点击立即检查">
+    <AntTooltip title="尚未调用 BRAIN 做提交前检查，点击立即检查">
       <Tag onClick={onRefresh} style={{ cursor: 'pointer' }} icon={loading ? <ReloadOutlined spin /> : <ReloadOutlined />}>
         🔍 检查可提交性
       </Tag>
@@ -306,7 +306,7 @@ export default function AlphaDetail() {
       } else if (data.can_submit) {
         message.success(`✅ 可提交（${data.pending_checks?.length || 0} 项待定）`)
       } else {
-        message.error(`⚠️ 不可提交：${data.failed_checks.length} 个 FAIL`)
+        message.error(`⚠️ 不可提交：${data.failed_checks.length} 项检查未通过`)
       }
       queryClient.invalidateQueries(['alpha', id])
     },
@@ -339,7 +339,7 @@ export default function AlphaDetail() {
       setOptimizeOpen(false)
       message.success(
         `已启动优化：生成 ${data.n_variants ?? '?'} 个变体（预算 ${data.budget}）。` +
-          `胜出变体将进入「提交积压」队列；进度见 Ops → 优化周期。`,
+          `胜出变体将进入「提交积压」队列；进度见 运维 → 优化周期。`,
         8,
       )
     },
@@ -424,7 +424,7 @@ export default function AlphaDetail() {
               </AntTooltip>
             )}
             <Tag color={STATUS_COLORS[alpha.quality_status] || 'default'}>
-              {alpha.quality_status}
+              {STATUS_LABELS[alpha.quality_status] || alpha.quality_status}
             </Tag>
             {alpha.region && <Tag>{alpha.region}</Tag>}
             {alreadySubmitted ? (
@@ -536,7 +536,7 @@ export default function AlphaDetail() {
           <>
             <Divider style={{ margin: '12px 0' }} />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              ↓ 在下方「边际贡献」拉取 BRAIN before-and-after 数据，获取 SUBMIT/NEUTRAL/SKIP 建议
+              ↓ 在下方「边际贡献」拉取 BRAIN 加入组合前后的对比数据，获取「建议提交 / 中性 / 建议跳过」建议
             </Text>
           </>
         )}
@@ -624,8 +624,8 @@ export default function AlphaDetail() {
             title={
               <Space>
                 <span>危机窗口相关性</span>
-                <AntTooltip title="该 alpha 在 4 个历史危机窗口下相对 OS 池的 max-corr。任一窗口 ≥ 0.7 (红) 提示隐性集中度风险，慎重提交。">
-                  <Tag color="purple">stress test</Tag>
+                <AntTooltip title="该 alpha 在 4 个历史危机窗口下，与样本外策略池的最高相关度。任一窗口 ≥ 0.7（红）提示隐性集中度风险，慎重提交。">
+                  <Tag color="purple">压力测试</Tag>
                 </AntTooltip>
               </Space>
             }
@@ -687,13 +687,13 @@ export default function AlphaDetail() {
                       <Space direction="vertical" size={2}>
                         <Space>
                           {t.old_status && (
-                            <Tag color={STATUS_COLORS[t.old_status]}>{t.old_status}</Tag>
+                            <Tag color={STATUS_COLORS[t.old_status]}>{STATUS_LABELS[t.old_status] || t.old_status}</Tag>
                           )}
                           <span>→</span>
-                          <Tag color={STATUS_COLORS[t.new_status]}>{t.new_status}</Tag>
+                          <Tag color={STATUS_COLORS[t.new_status]}>{STATUS_LABELS[t.new_status] || t.new_status}</Tag>
                           {t.sharpe_at_transition != null && (
                             <Text type="secondary">
-                              sharpe@trans={t.sharpe_at_transition.toFixed(2)}
+                              当时 Sharpe={t.sharpe_at_transition.toFixed(2)}
                             </Text>
                           )}
                         </Space>
@@ -761,8 +761,8 @@ export default function AlphaDetail() {
       >
         {alpha.human_feedback === 'NONE' && (
           <Paragraph type="secondary" style={{ marginBottom: 16 }}>
-            你的反馈会直接进知识库：👍 LIKED 升级为 SUCCESS_PATTERN（+confidence），
-            👎 DISLIKED 削弱已知模式（-confidence）。每条评价都会被下一轮 mining 学习。
+            你的反馈会直接进知识库：👍 喜欢 会把它升级为「成功经验」（提高置信度），
+            👎 不喜欢 会削弱已知模式（降低置信度）。每条评价都会被下一轮挖掘学习。
           </Paragraph>
         )}
         <Space size="middle" wrap>
@@ -781,7 +781,7 @@ export default function AlphaDetail() {
               loading={feedbackMutation.isPending}
               style={alpha.human_feedback === 'NONE' ? { boxShadow: '0 0 0 2px #52c41a44' } : undefined}
             >
-              👍 点赞 (LIKED)
+              👍 点赞
             </Button>
             <Button
               size="large"
@@ -790,7 +790,7 @@ export default function AlphaDetail() {
               onClick={() => handleFeedback('DISLIKED')}
               loading={feedbackMutation.isPending}
             >
-              👎 踩 (DISLIKED)
+              👎 踩
             </Button>
           </Space>
         </div>
@@ -822,11 +822,11 @@ export default function AlphaDetail() {
           <Alert
             type="info"
             showIcon
-            message="设置扫描优化（Stage A）"
-            description="以该 alpha 表达式为蓝本，对 decay / 时间窗口 / 中性化 做最多 10 个设置变体，在 BRAIN 上模拟。胜出变体落库并进入「提交积压」队列等待人工提交——不会自动提交。与 6h 自动 beat 独立。"
+            message="参数扫描优化（第一阶段）"
+            description="以该 alpha 表达式为蓝本，对衰减 / 时间窗口 / 中性化 做最多 10 个参数变体，在 BRAIN 上回测。胜出变体落库并进入「提交积压」队列等待人工提交——不会自动提交。与每 6 小时的自动定时任务相互独立。"
           />
           <div>
-            <Text type="secondary">BRAIN 模拟预算（可选，留空 = 默认覆盖全部变体）:</Text>
+            <Text type="secondary">BRAIN 回测配额（可选，留空 = 默认覆盖全部变体）:</Text>
             <br />
             <InputNumber
               min={1}
@@ -839,7 +839,7 @@ export default function AlphaDetail() {
             />
           </div>
           <Text type="warning" style={{ fontSize: 12 }}>
-            ⚠ 本操作消耗 BRAIN 模拟配额；周期在后台运行，完成情况见 Ops → 优化周期。
+            ⚠ 本操作消耗 BRAIN 回测配额；优化周期在后台运行，完成情况见 运维 → 优化周期。
           </Text>
         </Space>
       </Modal>
@@ -857,15 +857,15 @@ function MarginalPanel({ alpha, marginal, loading, error, enabled, competition, 
     <div>
       <Alert
         type="info"
-        message="BRAIN before-and-after-performance"
+        message="BRAIN 加入组合前后的表现对比"
         description={
           <Space direction="vertical" size={4} style={{ fontSize: 12 }}>
             <span>
-              Standalone(独立运行)vs Merged(并入组合)的 sharpe/fitness/turnover
+              独立运行 vs 并入组合 的 Sharpe / Fitness / 换手率
               对比 — 决定是否值得提交。
             </span>
             <span style={{ color: '#888' }}>
-              竞赛 scope 下含 Δscore；以 merged 后的 stats 增量衡量边际贡献。turnover/drawdown 越低越好。
+              竞赛范围下含「评分变化」；以并入组合后的指标增量衡量边际贡献。换手率 / 回撤 越低越好。
             </span>
           </Space>
         }
@@ -874,7 +874,7 @@ function MarginalPanel({ alpha, marginal, loading, error, enabled, competition, 
       />
       <Space style={{ marginBottom: 16 }} wrap>
         <Input
-          placeholder="competition ID（空=默认 scope）"
+          placeholder="竞赛 ID（留空=默认范围）"
           value={competition}
           onChange={(e) => setCompetition(e.target.value)}
           style={{ width: 220 }}
@@ -959,26 +959,30 @@ function MarginalPanel({ alpha, marginal, loading, error, enabled, competition, 
               }
             />
           )}
-          <Descriptions title={`Scope: ${marginal.scope}`} bordered size="small" column={1} style={{ marginBottom: 16 }}>
+          <Descriptions title={`范围：${marginal.scope}`} bordered size="small" column={1} style={{ marginBottom: 16 }}>
             {marginal.raw?.score != null && (
-              <Descriptions.Item label="竞赛 Δscore（排名分，越高越好）">
+              <Descriptions.Item label="竞赛评分变化（排名分，越高越好）">
                 <Space size={8} wrap>
-                  <Text type="secondary">before: {Number(marginal.raw.score.before).toLocaleString()}</Text>
-                  <Text strong>after: {Number(marginal.raw.score.after).toLocaleString()}</Text>
+                  <Text type="secondary">加入前: {Number(marginal.raw.score.before).toLocaleString()}</Text>
+                  <Text strong>加入后: {Number(marginal.raw.score.after).toLocaleString()}</Text>
                   {marginal.deltas?.score != null && (
                     <Tag color={marginal.deltas.score >= 0 ? 'green' : 'red'}>
-                      Δ {marginal.deltas.score > 0 ? '+' : ''}{Number(marginal.deltas.score).toLocaleString()}
+                      变化 {marginal.deltas.score > 0 ? '+' : ''}{Number(marginal.deltas.score).toLocaleString()}
                     </Tag>
                   )}
                 </Space>
               </Descriptions.Item>
             )}
-            <Descriptions.Item label="Partition">
+            <Descriptions.Item label="分区">
               <Text code>{marginal.partition_name ?? marginal.raw?.partitionName ?? '—'}</Text>
             </Descriptions.Item>
           </Descriptions>
           <Row gutter={16}>
             {['sharpe', 'fitness', 'margin', 'returns', 'pnl', 'turnover', 'drawdown'].map((k) => {
+              const METRIC_LABELS = {
+                sharpe: 'Sharpe', fitness: 'Fitness', margin: 'Margin',
+                returns: '收益', pnl: '盈亏 PnL', turnover: '换手率', drawdown: '回撤',
+              }
               const before = marginal.raw?.stats?.before?.[k]
               const after = marginal.raw?.stats?.after?.[k]
               const delta = marginal.deltas?.[k]
@@ -987,10 +991,10 @@ function MarginalPanel({ alpha, marginal, loading, error, enabled, competition, 
                 typeof v === 'number' ? (isMoney ? v.toLocaleString() : v.toFixed(4)) : '—'
               return (
                 <Col span={8} key={k} style={{ marginBottom: 12 }}>
-                  <Card size="small" title={k.toUpperCase()}>
+                  <Card size="small" title={METRIC_LABELS[k] || k.toUpperCase()}>
                     <Space direction="vertical" size={2} style={{ fontSize: 12 }}>
-                      <Text type="secondary">before: {fmt(before)}</Text>
-                      <Text strong>after: {fmt(after)}</Text>
+                      <Text type="secondary">加入前: {fmt(before)}</Text>
+                      <Text strong>加入后: {fmt(after)}</Text>
                       {delta != null && (
                         <Tag
                           color={
@@ -999,7 +1003,7 @@ function MarginalPanel({ alpha, marginal, loading, error, enabled, competition, 
                               : (delta >= 0 ? 'green' : 'red')
                           }
                         >
-                          Δ {delta > 0 ? '+' : ''}{fmt(delta)}
+                          变化 {delta > 0 ? '+' : ''}{fmt(delta)}
                         </Tag>
                       )}
                     </Space>

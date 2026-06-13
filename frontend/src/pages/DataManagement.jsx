@@ -82,27 +82,31 @@ const DatasetDetailView = ({ dataset, onBack }) => {
 
   const columns = [
     {
-      title: '字段 (Field)',
+      title: '字段',
       dataIndex: 'field_id',
       key: 'field_id',
       render: text => <Text code copyable>{text}</Text>,
       width: 250,
     },
     {
-      title: '描述 (Description)',
+      title: '描述',
       dataIndex: 'description',
       key: 'description',
       ellipsis: true,
     },
     {
-      title: '类型 (Type)',
+      title: '类型',
       dataIndex: 'field_type',
       key: 'field_type',
       width: 100,
-      render: (text) => <Tag>{text || 'VECTOR'}</Tag>
+      render: (text) => <Tag>{text || '向量'}</Tag>
     },
     {
-      title: 'Pyramid Multiplier',
+      title: (
+        <Tooltip title="金字塔系数 — BRAIN 对该字段的价值加权倍数">
+          <span>金字塔系数</span>
+        </Tooltip>
+      ),
       dataIndex: 'pyramid_multiplier',
       key: 'pyramid_multiplier',
       width: 150,
@@ -110,7 +114,7 @@ const DatasetDetailView = ({ dataset, onBack }) => {
       render: (val) => val?.toFixed(1)
     },
     {
-      title: '覆盖率 (Coverage)',
+      title: '覆盖率',
       dataIndex: 'coverage',
       key: 'coverage',
       width: 120,
@@ -118,7 +122,7 @@ const DatasetDetailView = ({ dataset, onBack }) => {
       render: (val) => val ? `${(val * 100).toFixed(0)}%` : '-'
     },
     {
-      title: '日期覆盖 (Date Coverage)',
+      title: '日期覆盖率',
       dataIndex: 'date_coverage',
       key: 'date_coverage',
       width: 150,
@@ -126,7 +130,7 @@ const DatasetDetailView = ({ dataset, onBack }) => {
       render: (val) => val ? `${(val * 100).toFixed(0)}%` : '-'
     },
     {
-      title: 'Alphas',
+      title: 'alpha 数',
       dataIndex: 'alpha_count',
       key: 'alpha_count',
       width: 80,
@@ -162,7 +166,7 @@ const DatasetDetailView = ({ dataset, onBack }) => {
         items={[
             {
                 key: 'fields',
-                label: '字段列表 (Fields)',
+                label: '字段列表',
                 children: (
                     <>
                         <Row justify="space-between" style={{ marginBottom: 16 }}>
@@ -206,7 +210,7 @@ const DatasetDetailView = ({ dataset, onBack }) => {
             },
             {
                 key: 'desc',
-                label: '详细描述 (Description)',
+                label: '详细描述',
                 children: <Card><Paragraph>{dataset.description}</Paragraph></Card>
             }
         ]}
@@ -248,7 +252,7 @@ const OperatorsTab = () => {
       dataIndex: 'category',
       key: 'category',
       width: 150,
-      render: (text) => text ? <Tag color="cyan">{text}</Tag> : <Tag>General</Tag>,
+      render: (text) => text ? <Tag color="cyan">{text}</Tag> : <Tag>通用</Tag>,
     },
     {
       title: '描述',
@@ -261,7 +265,7 @@ const OperatorsTab = () => {
       dataIndex: 'is_active',
       key: 'is_active',
       width: 100,
-      render: (active) => active ? <Tag color="success">Active</Tag> : <Tag color="error">Inactive</Tag>
+      render: (active) => active ? <Tag color="success">启用</Tag> : <Tag color="error">停用</Tag>
     }
   ]
 
@@ -285,13 +289,13 @@ const OperatorsTab = () => {
             >
               {/* Values must match operators.category in DB exactly
                   (case + space). Counts shown are current distribution. */}
-              <Option value="Time Series">Time Series (24)</Option>
-              <Option value="Arithmetic">Arithmetic 算术 (15)</Option>
-              <Option value="Logical">Logical 逻辑 (11)</Option>
-              <Option value="Cross Sectional">Cross Sectional (6)</Option>
-              <Option value="Group">Group (6)</Option>
-              <Option value="Transformational">Transformational (2)</Option>
-              <Option value="Vector">Vector (2)</Option>
+              <Option value="Time Series">时间序列 (24)</Option>
+              <Option value="Arithmetic">算术 (15)</Option>
+              <Option value="Logical">逻辑 (11)</Option>
+              <Option value="Cross Sectional">横截面 (6)</Option>
+              <Option value="Group">分组 (6)</Option>
+              <Option value="Transformational">变换 (2)</Option>
+              <Option value="Vector">向量 (2)</Option>
             </Select>
           </Space>
         </Col>
@@ -405,7 +409,7 @@ const DatasetsTab = () => {
 
   const columns = [
     {
-      title: '数据集 (Dataset)',
+      title: '数据集',
       dataIndex: 'dataset_id',
       key: 'dataset_id',
       width: 280,
@@ -422,10 +426,14 @@ const DatasetsTab = () => {
       align: 'right',
     },
     {
-      title: 'Pyramid',
+      title: (
+        <Tooltip title="金字塔系数 — BRAIN 对该数据集的价值加权倍数">
+          <span>金字塔系数</span>
+        </Tooltip>
+      ),
       dataIndex: 'pyramid_multiplier',
       key: 'pyramid_multiplier',
-      width: 100,
+      width: 110,
       align: 'right',
       render: val => val?.toFixed(1)
     },
@@ -446,14 +454,18 @@ const DatasetsTab = () => {
       render: val => val ? `${(val*100).toFixed(0)}%` : '-'
     },
     {
-      title: 'Value Score',
+      title: (
+        <Tooltip title="价值评分 — 系统对该数据集挖掘价值的综合评分">
+          <span>价值评分</span>
+        </Tooltip>
+      ),
       dataIndex: 'value_score',
       key: 'value_score',
       width: 100,
       align: 'right',
     },
     {
-      title: 'Alphas',
+      title: 'alpha 数',
       dataIndex: 'alpha_count',
       key: 'alpha_count',
       width: 80,
@@ -465,7 +477,7 @@ const DatasetsTab = () => {
       key: 'resources',
       width: 80,
       align: 'center',
-      render: (res) => (res && res.length > 0) ? <Tag color="purple">Paper</Tag> : null
+      render: (res) => (res && res.length > 0) ? <Tag color="purple">论文</Tag> : null
     },
     {
       title: '地区',
@@ -475,7 +487,11 @@ const DatasetsTab = () => {
       render: (region) => <Tag color="blue">{region}</Tag>,
     },
     {
-      title: 'Universe',
+      title: (
+        <Tooltip title="股票池 — 该数据集对应的可交易股票范围">
+          <span>股票池</span>
+        </Tooltip>
+      ),
       dataIndex: 'universe',
       key: 'universe',
       width: 100,
@@ -505,7 +521,7 @@ const DatasetsTab = () => {
       key: 'last_synced_at',
       width: 150,
       render: (date) => (
-        <Tooltip title={date ? new Date(date).toLocaleString() : 'Never'}>
+        <Tooltip title={date ? new Date(date).toLocaleString() : '从未同步'}>
           {date ? new Date(date).toLocaleDateString() : '-'}
         </Tooltip>
       ),
@@ -547,12 +563,12 @@ const DatasetsTab = () => {
               allowClear
               onChange={val => setFilters(prev => ({ ...prev, region: val }))}
             >
-              <Option value="USA">USA</Option>
-              <Option value="CHN">China</Option>
-              <Option value="ASI">Asia</Option>
-              <Option value="EUR">Europe</Option>
-              <Option value="KOR">Korea</Option>
-              <Option value="IND">India</Option>
+              <Option value="USA">美国 (USA)</Option>
+              <Option value="CHN">中国 (CHN)</Option>
+              <Option value="ASI">亚洲 (ASI)</Option>
+              <Option value="EUR">欧洲 (EUR)</Option>
+              <Option value="KOR">韩国 (KOR)</Option>
+              <Option value="IND">印度 (IND)</Option>
             </Select>
             <Select 
               placeholder="类别" 
@@ -657,7 +673,7 @@ const CoverageTab = () => {
     { label: '可用数据集', value: data?.n_available ?? '—', color: '#00d4ff' },
     { label: '在轮转中', value: data?.n_in_rotation ?? '—', color: '#00ff88' },
     { label: '已产出 alpha', value: data?.n_mined ?? '—', color: '#52c41a' },
-    { label: '未开采(有面0产出)', value: data?.n_untapped ?? '—', color: '#faad14' },
+    { label: '未开采(有字段但0产出)', value: data?.n_untapped ?? '—', color: '#faad14' },
     { label: '新到(近3天)', value: data?.n_new ?? '—', color: '#9c88ff' },
   ]
 
@@ -699,7 +715,11 @@ const CoverageTab = () => {
       render: (v) => (v > 0 ? v : <Text type="warning">0</Text>),
     },
     {
-      title: 'mining_weight',
+      title: (
+        <Tooltip title="挖掘权重 — 调度器优先安排挖掘的权重，越高越优先">
+          <span>挖掘权重</span>
+        </Tooltip>
+      ),
       dataIndex: 'mining_weight',
       key: 'mining_weight',
       width: 120,
@@ -719,22 +739,22 @@ const CoverageTab = () => {
   return (
     <div style={{ paddingTop: 16 }}>
       <Space style={{ marginBottom: 16 }} wrap>
-        <Text type="secondary">Region:</Text>
+        <Text type="secondary">地区:</Text>
         <Select value={region} onChange={(v) => { setRegion(v); setUniverse(REGION_UNIVERSE_MAP[v] || 'TOP3000') }} style={{ width: 100 }}
           options={Object.keys(REGION_UNIVERSE_MAP).map((r) => ({ value: r, label: r }))} />
-        <Text type="secondary">Universe:</Text>
+        <Text type="secondary">股票池:</Text>
         <Input value={universe} onChange={(e) => setUniverse(e.target.value)} style={{ width: 120 }} />
-        <Text type="secondary">Delay:</Text>
-        <Select value={delay} onChange={setDelay} style={{ width: 90 }}
-          options={[{ value: 1, label: '1' }, { value: 0, label: '0 (原生)' }]} />
+        <Text type="secondary">数据延迟:</Text>
+        <Select value={delay} onChange={setDelay} style={{ width: 110 }}
+          options={[{ value: 1, label: '1(隔日)' }, { value: 0, label: '0(当日)' }]} />
         <Button icon={<SyncOutlined />} loading={isFetching} onClick={() => refetch()}>刷新</Button>
       </Space>
 
       <Paragraph type="secondary" style={{ fontSize: 12 }}>
-        breadth 诊断:哪些可挖的正交数据面账号有、但还没挖。<b>新到</b>=BRAIN catalog 近 3 天新增的 cell;
-        <b>未开采</b>=在轮转、有活跃字段、却 0 产出。这些数据集由池调度器(dataset bandit)经 mining_weight
-        自动优先安排挖掘;如需加速可在「运维监控 → 挖掘池」页对相应池 drain/resume
-        （per 业界调查:新数据源才真降 ρ、增有效 breadth）。
+        广度诊断：哪些可挖的、与现有策略不重复的数据面账号有、但还没挖。<b>新到</b>=BRAIN 数据目录近 3 天新增的；
+        <b>未开采</b>=在轮转、有活跃字段、却 0 产出。这些数据集由流水线调度器按「挖掘权重」
+        自动优先安排挖掘；如需加速可在「运维监控 → 挖掘流水线」页对相应环节暂停接新活 / 恢复
+        （依据业界调查：只有新数据源才真正降低策略间相关性、增加有效的独立下注数量）。
       </Paragraph>
 
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
@@ -768,7 +788,7 @@ export default function DataManagement() {
       label: (
         <span>
           <DatabaseOutlined />
-          数据集 (Datasets)
+          数据集
         </span>
       ),
       children: <DatasetsTab />,
@@ -778,7 +798,7 @@ export default function DataManagement() {
       label: (
         <span>
           <RadarChartOutlined />
-          数据覆盖 (Coverage)
+          数据覆盖
         </span>
       ),
       children: <CoverageTab />,
@@ -788,7 +808,7 @@ export default function DataManagement() {
       label: (
         <span>
           <FunctionOutlined />
-          算子库 (Operators)
+          算子库
         </span>
       ),
       children: <OperatorsTab />,

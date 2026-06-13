@@ -35,7 +35,19 @@ const INTENT_ORDER = ['PENDING', 'CLAIMED', 'DONE', 'FAILED', 'PURGED']
 const CAND_ORDER = ['PENDING_SIM', 'SIMULATING', 'PENDING_EVAL', 'EVALUATING', 'DONE', 'FAILED', 'PURGED']
 const DEFAULT_WORKERS = 4 // fallback if backend (pre-P1) omits expected_workers
 const POOLS = ['hg', 's', 'e']
-const POOL_LABEL = { hg: 'HG (假设·生成)', s: 'S (模拟)', e: 'E (评估)' }
+const POOL_LABEL = { hg: '想法生成', s: '回测模拟', e: '评估入库' }
+// 队列状态码 → 中文 label(渲染处用 LABEL[s] || s,后端 key 不改)
+const STAGE_LABEL = {
+  PENDING: '排队中',
+  PENDING_SIM: '排队待回测',
+  SIMULATING: '回测中',
+  PENDING_EVAL: '排队待评估',
+  EVALUATING: '评估中',
+  CLAIMED: '已认领（处理中）',
+  DONE: '已完成',
+  FAILED: '失败',
+  PURGED: '已清除',
+}
 // PENDING_SIM 积压阈值
 const BACKLOG_RED = 500
 const BACKLOG_YELLOW = 100
@@ -45,7 +57,7 @@ function StageChips({ counts, order, colorMap }) {
     <Space size={[8, 8]} wrap>
       {order.map((s) => (
         <Tag key={s} color={(counts?.[s] || 0) > 0 ? colorMap[s] : 'default'}>
-          {s}: <b>{counts?.[s] || 0}</b>
+          {STAGE_LABEL[s] || s}: <b>{counts?.[s] || 0}</b>
         </Tag>
       ))}
     </Space>
@@ -63,19 +75,20 @@ function countByPrefix(workersAlive) {
 }
 
 function PoolDrainControl({ name, draining, onToggle, pending }) {
+  const label = POOL_LABEL[name] || name.toUpperCase()
   return draining ? (
-    <Popconfirm title={`恢复 ${name.toUpperCase()} 池?`} onConfirm={() => onToggle(name, false)}>
+    <Popconfirm title={`恢复「${label}」环节?`} onConfirm={() => onToggle(name, false)}>
       <Button size="small" danger icon={<PauseCircleOutlined />} loading={pending}>
-        {name.toUpperCase()} 已暂停 — 恢复
+        {label} 已暂停 — 恢复
       </Button>
     </Popconfirm>
   ) : (
     <Popconfirm
-      title={`暂停 ${name.toUpperCase()} 池?(软停:停认领新活,在飞的跑完)`}
+      title={`暂停「${label}」环节?(软停:停止接新活,正在处理的任务跑完)`}
       onConfirm={() => onToggle(name, true)}
     >
       <Button size="small" icon={<PlayCircleOutlined />} loading={pending}>
-        {name.toUpperCase()} 运行中 — 暂停
+        {label} 运行中 — 暂停
       </Button>
     </Popconfirm>
   )
@@ -91,15 +104,15 @@ function PoolWorkerCard({ name, online, expected, draining }) {
           <Space size={4}>
             <DesktopOutlined />
             {POOL_LABEL[name] || name.toUpperCase()}
-            {draining && <Tag color="orange" style={{ marginLeft: 4 }}>drain</Tag>}
+            {draining && <Tag color="orange" style={{ marginLeft: 4 }}>已暂停</Tag>}
           </Space>
         )}
         value={online}
-        suffix={`/ ${expected} 期望`}
+        suffix={`/ ${expected} 应有`}
         valueStyle={{ color }}
       />
       {!healthy && expected > 0 && (
-        <Text type="danger" style={{ fontSize: 12 }}>缺 {expected - online} 个 worker</Text>
+        <Text type="danger" style={{ fontSize: 12 }}>缺 {expected - online} 个工作进程</Text>
       )}
     </Card>
   )
@@ -107,7 +120,7 @@ function PoolWorkerCard({ name, online, expected, draining }) {
 
 function DrainControlCard({ data, onToggle, pending }) {
   return (
-    <Card size="small" title="池控制 (drain 软停 / resume)">
+    <Card size="small" title="流水线环节控制（暂停接新活 / 恢复）">
       <Space size={[12, 12]} wrap>
         {POOLS.map((n) => (
           <PoolDrainControl key={n} name={n} draining={!!data?.drain?.[n]}
@@ -116,7 +129,7 @@ function DrainControlCard({ data, onToggle, pending }) {
       </Space>
       <div style={{ marginTop: 8 }}>
         <Text type="secondary" style={{ fontSize: 12 }}>
-          drain = 软停(停认领新活,在飞的跑完 / 被 lease-recycle 回收);不 purge 队列、不停 scheduler beat。
+          暂停 = 软停:该环节停止接新活,正在处理的任务跑完(或超时后被回收);不清空队列,也不影响定时调度。
         </Text>
       </div>
     </Card>
@@ -134,14 +147,14 @@ export default function PoolPipelineMonitor() {
   const drainMut = useMutation({
     mutationFn: ({ name, drain }) => (drain ? api.drainPool(name) : api.resumePool(name)),
     onSuccess: (_r, v) => {
-      message.success(`${v.name.toUpperCase()} 池已${v.drain ? '暂停' : '恢复'}`)
+      message.success(`「${POOL_LABEL[v.name] || v.name.toUpperCase()}」环节已${v.drain ? '暂停' : '恢复'}`)
       qc.invalidateQueries({ queryKey: ['poolStatus'] })
     },
     onError: (e) => message.error(`操作失败: ${e?.message || e}`),
   })
   const onToggle = (name, drain) => drainMut.mutate({ name, drain })
 
-  if (isLoading) return <Spin tip="加载池状态..." style={{ marginTop: 80 }} />
+  if (isLoading) return <Spin tip="加载流水线状态..." style={{ marginTop: 80 }} />
 
   // ── derived ──────────────────────────────────────────────────────────
   const stuckIntent = data?.stuck_past_lease?.hyp_intent || 0
@@ -180,7 +193,7 @@ export default function PoolPipelineMonitor() {
   const overviewTab = (
     <>
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={6}><Card size="small"><Statistic title="Supervisor worker"
+        <Col span={6}><Card size="small"><Statistic title="在线工作进程"
           value={workers} suffix={`/ ${expectedWorkers}`}
           valueStyle={{ color: workersHealthy ? '#3f8600' : '#cf1322' }}
           prefix={<ThunderboltOutlined />} />
@@ -188,19 +201,19 @@ export default function PoolPipelineMonitor() {
             <Text type="secondary" style={{ fontSize: 12 }}>{workersAlive.join(', ').slice(0, 40) || '—'}</Text>
           </Tooltip>
         </Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="并发 BRAIN sim (共享槽)"
+        <Col span={6}><Card size="small"><Statistic title="正在回测数（占用并发名额）"
           value={concurrentSims} prefix={<ApiOutlined />} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="今日 sim 计数 (budget)"
+        <Col span={6}><Card size="small"><Statistic title="今日回测次数（配额）"
           value={data?.budget_sims_today ?? 0} /></Card></Col>
-        <Col span={6}><Card size="small"><Statistic title="今日 token (budget)"
+        <Col span={6}><Card size="small"><Statistic title="今日 token 用量（配额）"
           value={data?.budget_tokens_today ?? 0} /></Card></Col>
       </Row>
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={8}><Card size="small"><Statistic title="候选 (近 90min)" value={thrCand} /></Card></Col>
-        <Col span={8}><Card size="small"><Statistic title="alpha 产出 (近 90min)" value={thrAlpha}
+        <Col span={8}><Card size="small"><Statistic title="候选数（近 90 分钟）" value={thrCand} /></Card></Col>
+        <Col span={8}><Card size="small"><Statistic title="alpha 产出（近 90 分钟）" value={thrAlpha}
           valueStyle={{ color: thrAlpha > 0 ? '#3f8600' : undefined }} /></Card></Col>
-        <Col span={8}><Card size="small"><Statistic title="pool 归因失败行 (cand_id)" value={data?.pool_failures_total ?? 0} /></Card></Col>
+        <Col span={8}><Card size="small"><Statistic title="流水线失败记录数" value={data?.pool_failures_total ?? 0} /></Card></Col>
       </Row>
 
       <DrainControlCard data={data} onToggle={onToggle} pending={drainMut.isPending} />
@@ -212,75 +225,75 @@ export default function PoolPipelineMonitor() {
     <>
       {backlogLevel === 'red' && (
         <Alert type="error" showIcon icon={<WarningOutlined />} style={{ marginBottom: 16 }}
-          message={`⚠️ S 模拟产能严重落后于 HG 生成 — candidate_queue.PENDING_SIM = ${pendingSim} (> ${BACKLOG_RED})`}
-          description={`每个 S worker 名下约 ${backlogPerSWorker.toFixed(0)} 个待模拟候选(S worker = ${sWorkers})。HG 生成速率远超 S 模拟吞吐 → 队列单向膨胀。处置:扩 K_S / 提 sim 配额 / 软停 HG 池(见「总览」Tab)给 S 追平时间。`} />
+          message={`⚠️ 回测产能严重落后于想法生成 — 排队待回测 = ${pendingSim}(> ${BACKLOG_RED}）`}
+          description={`每个回测工作进程名下约 ${backlogPerSWorker.toFixed(0)} 个待回测候选(回测工作进程 = ${sWorkers})。想法生成速率远超回测吞吐 → 队列单向膨胀。处置:增加回测工作进程 / 提高回测配额 / 暂停想法生成环节(见「总览」页)给回测追平时间。`} />
       )}
       {backlogLevel === 'yellow' && (
         <Alert type="warning" showIcon style={{ marginBottom: 16 }}
-          message={`PENDING_SIM = ${pendingSim} (> ${BACKLOG_YELLOW}) — S 模拟开始落后于 HG 生成`}
-          description={`每个 S worker 名下约 ${backlogPerSWorker.toFixed(0)} 个待模拟候选(S worker = ${sWorkers})。关注趋势,若持续上行考虑扩 K_S 或软停 HG。`} />
+          message={`排队待回测 = ${pendingSim}(> ${BACKLOG_YELLOW}）— 回测开始落后于想法生成`}
+          description={`每个回测工作进程名下约 ${backlogPerSWorker.toFixed(0)} 个待回测候选(回测工作进程 = ${sWorkers})。关注趋势,若持续上行考虑增加回测工作进程或暂停想法生成。`} />
       )}
       {backlogLevel === 'ok' && (
         <Alert type="success" showIcon style={{ marginBottom: 16 }}
-          message={`队列健康 — PENDING_SIM = ${pendingSim} (≤ ${BACKLOG_YELLOW})`}
-          description="S 模拟吞吐与 HG 生成基本匹配,无明显积压。" />
+          message={`队列健康 — 排队待回测 = ${pendingSim}(≤ ${BACKLOG_YELLOW}）`}
+          description="回测吞吐与想法生成基本匹配,无明显积压。" />
       )}
 
-      <Text type="secondary" style={{ fontSize: 12 }}>candidate_queue(HG → S → E 的候选流)</Text>
+      <Text type="secondary" style={{ fontSize: 12 }}>候选队列（想法生成 → 回测 → 评估的候选流）</Text>
       <Row gutter={16} style={{ marginBottom: 16, marginTop: 8 }}>
-        <Col span={6}><Card><Statistic title="PENDING_SIM(待模拟)" value={pendingSim}
+        <Col span={6}><Card><Statistic title="排队待回测" value={pendingSim}
           valueStyle={{ color: pendingSimColor, fontSize: 30 }} prefix={<DatabaseOutlined />} />
-          <Text type="secondary" style={{ fontSize: 12 }}>每 S worker ≈ {backlogPerSWorker.toFixed(0)}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>每回测工作进程 ≈ {backlogPerSWorker.toFixed(0)}</Text>
         </Card></Col>
-        <Col span={6}><Card><Statistic title="SIMULATING(在飞模拟)" value={simulating}
+        <Col span={6}><Card><Statistic title="回测中" value={simulating}
           valueStyle={{ fontSize: 30 }} prefix={<ThunderboltOutlined />} />
-          <Text type="secondary" style={{ fontSize: 12 }}>占共享 sim 槽 {concurrentSims}</Text>
+          <Text type="secondary" style={{ fontSize: 12 }}>占用并发回测名额 {concurrentSims}</Text>
         </Card></Col>
-        <Col span={6}><Card><Statistic title="PENDING_EVAL(待评估)" value={pendingEval}
+        <Col span={6}><Card><Statistic title="排队待评估" value={pendingEval}
           valueStyle={{ fontSize: 30, color: '#08979c' }} /></Card></Col>
-        <Col span={6}><Card><Statistic title="DONE(已完成)" value={candDone}
+        <Col span={6}><Card><Statistic title="已完成" value={candDone}
           valueStyle={{ fontSize: 30, color: '#3f8600' }} /></Card></Col>
       </Row>
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={6}><Card><Statistic title="hyp_intent PENDING(待 HG 认领)" value={intentPending}
+        <Col span={6}><Card><Statistic title="想法队列：待认领" value={intentPending}
           valueStyle={{ fontSize: 30, color: '#1677ff' }} /></Card></Col>
-        <Col span={6}><Card><Statistic title="hyp_intent DONE" value={intentDone}
+        <Col span={6}><Card><Statistic title="想法队列：已完成" value={intentDone}
           valueStyle={{ fontSize: 30, color: '#3f8600' }} /></Card></Col>
         <Col span={12}>
-          <Card title={<span><ThunderboltOutlined /> 待模拟 vs 在用 sim 槽(产能瓶颈对比)</span>}>
+          <Card title={<span><ThunderboltOutlined /> 待回测 vs 正在回测（产能瓶颈对比）</span>}>
             <Row gutter={16}>
-              <Col span={8}><Statistic title="PENDING_SIM" value={pendingSim} valueStyle={{ color: pendingSimColor }} /></Col>
-              <Col span={8}><Statistic title="concurrent_sims" value={concurrentSims} /></Col>
+              <Col span={8}><Statistic title="排队待回测" value={pendingSim} valueStyle={{ color: pendingSimColor }} /></Col>
+              <Col span={8}><Statistic title="正在回测数" value={concurrentSims} /></Col>
               <Col span={8}>
-                <Tooltip title="PENDING_SIM ÷ max(concurrent_sims, 1):若极大,表示在用槽相对积压杯水车薪">
-                  <Statistic title="积压/在用 倍数"
+                <Tooltip title="排队待回测 ÷ max(正在回测数, 1):若极大,表示正在跑的回测相对积压杯水车薪">
+                  <Statistic title="积压/在跑 倍数"
                     value={(pendingSim / Math.max(concurrentSims, 1)).toFixed(1)} suffix="x"
                     valueStyle={{ color: pendingSim / Math.max(concurrentSims, 1) > 50 ? '#cf1322' : undefined }} />
                 </Tooltip>
               </Col>
             </Row>
             <Text type="secondary" style={{ fontSize: 12 }}>
-              共享 sim 槽今日计数 {data?.budget_sims_today ?? 0};槽位有限时巨量 PENDING_SIM 只能排队等待。
+              今日已用回测次数 {data?.budget_sims_today ?? 0};并发名额有限时,巨量待回测只能排队等待。
             </Text>
           </Card>
         </Col>
       </Row>
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={12}><Card size="small" title="hyp_intent(全 stage)">
+        <Col span={12}><Card size="small" title="想法队列（各状态）">
           <StageChips counts={intent} order={INTENT_ORDER} colorMap={INTENT_STAGE_COLOR} />
         </Card></Col>
-        <Col span={12}><Card size="small" title="candidate_queue(全 stage)">
+        <Col span={12}><Card size="small" title="候选队列（各状态）">
           <StageChips counts={cand} order={CAND_ORDER} colorMap={CAND_STAGE_COLOR} />
         </Card></Col>
       </Row>
 
-      <Card size="small" title={<span><FundProjectionScreenOutlined /> 吞吐(近 90min)</span>}>
+      <Card size="small" title={<span><FundProjectionScreenOutlined /> 吞吐（近 90 分钟）</span>}>
         <Row gutter={16}>
-          <Col span={6}><Statistic title="候选数 (近 90min)" value={thrCand} /></Col>
+          <Col span={6}><Statistic title="候选数（近 90 分钟）" value={thrCand} /></Col>
           <Col span={6}><Statistic title="候选/小时" value={candsPerHour.toFixed(1)} suffix="/h" /></Col>
-          <Col span={6}><Statistic title="alpha 产出 (近 90min)" value={thrAlpha}
+          <Col span={6}><Statistic title="alpha 产出（近 90 分钟）" value={thrAlpha}
             valueStyle={{ color: thrAlpha > 0 ? '#3f8600' : undefined }} /></Col>
           <Col span={6}><Statistic title="alpha/小时" value={alphasPerHour.toFixed(1)} suffix="/h"
             valueStyle={{ color: thrAlpha > 0 ? '#3f8600' : undefined }} /></Col>
@@ -292,7 +305,7 @@ export default function PoolPipelineMonitor() {
   // ── Tab 3: 工作器 ────────────────────────────────────────────────────
   const workersTab = (
     <>
-      <Card size="small" title="按池在线 worker (workers_alive 前缀分组 vs expected_by_pool)" style={{ marginBottom: 16 }}>
+      <Card size="small" title="各环节在线工作进程（在线数 vs 应有数量）" style={{ marginBottom: 16 }}>
         <Row gutter={16}>
           {POOLS.map((n) => (
             <Col span={8} key={n}>
@@ -303,17 +316,17 @@ export default function PoolPipelineMonitor() {
         </Row>
         <div style={{ marginTop: 8 }}>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            在线数按 workers_alive 名字前缀(hg-/s-/e-)统计;某池在线 &lt; 期望 ⇒ 该池 worker 缺失或在 crash-loop。
+            在线数按进程名前缀(想法生成 / 回测 / 评估)统计;某环节在线 &lt; 应有数量 ⇒ 该环节工作进程缺失或在反复崩溃。
           </Text>
         </div>
       </Card>
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
-        <Col span={8}><Card size="small"><Statistic title="hyp_intent 超 lease (应 0)"
+        <Col span={8}><Card size="small"><Statistic title="想法队列处理超时（应为 0）"
           value={stuckIntent} valueStyle={{ color: stuckIntent > 0 ? '#cf1322' : '#3f8600' }} /></Card></Col>
-        <Col span={8}><Card size="small"><Statistic title="candidate_queue 超 lease (应 0)"
+        <Col span={8}><Card size="small"><Statistic title="候选队列处理超时（应为 0）"
           value={stuckCand} valueStyle={{ color: stuckCand > 0 ? '#cf1322' : '#3f8600' }} /></Card></Col>
-        <Col span={8}><Card size="small"><Statistic title="pool 归因失败行 (累计)"
+        <Col span={8}><Card size="small"><Statistic title="流水线失败记录数（累计）"
           value={data?.pool_failures_total ?? 0} /></Card></Col>
       </Row>
 
@@ -325,30 +338,30 @@ export default function PoolPipelineMonitor() {
     <div>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
-          <ApiOutlined /> 挖掘池 (HG/S/E)
+          <ApiOutlined /> 挖掘流水线（想法生成 / 回测 / 评估）
         </Title>
         <Space>
           {data?.enabled
-            ? <Badge status="processing" text="ENABLE_POOL_PIPELINE ON" />
-            : <Badge status="default" text="OFF" />}
+            ? <Badge status="processing" text="挖掘流水线开关 已开启" />
+            : <Badge status="default" text="已关闭" />}
           <Button icon={<ReloadOutlined spin={isFetching} />} onClick={() => refetch()}>刷新</Button>
         </Space>
       </Row>
 
       {/* 页级健康告警 — 任意 Tab 都常显 */}
-      {isError && <Alert type="error" showIcon message="拉取池状态失败(端点 /ops/pools/status)。" style={{ marginBottom: 16 }} />}
+      {isError && <Alert type="error" showIcon message="拉取流水线状态失败（接口 /ops/pools/status）。" style={{ marginBottom: 16 }} />}
       {data && !data.enabled && (
         <Alert type="warning" showIcon style={{ marginBottom: 16 }}
-          message="ENABLE_POOL_PIPELINE OFF — 池未启用(beats no-op、supervisor idle、队列深度为静态历史值)。需 .env 设 true + 重启。" />
+          message="挖掘流水线开关已关闭(ENABLE_POOL_PIPELINE)— 流水线未启用(定时任务空转、进程守护空闲、下方队列深度为历史静态值)。需在 .env 设为 true 并重启。" />
       )}
       {stuckTotal > 0 && (
         <Alert type="error" showIcon icon={<WarningOutlined />} style={{ marginBottom: 16 }}
-          message={`⚠️ ${stuckTotal} 行卡在 in-flight 超 lease(hyp_intent CLAIMED: ${stuckIntent} / candidate_queue SIMULATING|EVALUATING: ${stuckCand})`}
-          description="cutover 退出判据:此处应恒为 0。lease-recycle beat(每 2min)应回收;若持续 >0,查 worker 是否假死 / lease 太短 / 心跳未续。" />
+          message={`⚠️ ${stuckTotal} 个任务认领后处理超时未完成(想法队列「已认领」: ${stuckIntent} / 候选队列「回测中·评估中」: ${stuckCand})`}
+          description="正常情况下此处应恒为 0。超时回收的定时任务(每 2 分钟)应自动回收;若持续 >0,请检查工作进程是否假死 / 超时时限是否太短 / 心跳是否未续。" />
       )}
       {data?.enabled && workers < expectedWorkers && stuckTotal === 0 && (
         <Alert type="warning" showIcon style={{ marginBottom: 16 }}
-          message={`supervisor 仅 ${workers}/${expectedWorkers} 个 worker 存活 — 检查 supervisor 窗口是否在跑 + crash-loop backoff。`} />
+          message={`进程守护下只有 ${workers}/${expectedWorkers} 个工作进程存活 — 检查进程守护窗口是否在运行 + 是否在反复崩溃重启。`} />
       )}
 
       <Tabs
@@ -356,7 +369,7 @@ export default function PoolPipelineMonitor() {
         items={[
           { key: 'overview', label: <span><ThunderboltOutlined /> 总览</span>, children: overviewTab },
           { key: 'queue', label: <span><DatabaseOutlined /> 队列健康 / 积压{backlogLevel === 'red' ? ' ⚠️' : ''}</span>, children: queueTab },
-          { key: 'workers', label: <span><HeartOutlined /> 工作器与心跳</span>, children: workersTab },
+          { key: 'workers', label: <span><HeartOutlined /> 工作进程与心跳</span>, children: workersTab },
         ]}
       />
     </div>

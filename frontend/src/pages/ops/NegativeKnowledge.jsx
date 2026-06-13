@@ -46,6 +46,16 @@ const CATEGORY_COLORS = {
   attribution: '#00ff88',
 }
 
+// 失败经验类别的中文显示名（不改 key，仅用于展示）
+const CATEGORY_LABEL = {
+  static_finding: '静态校验发现',
+  threshold: '指标未达门槛',
+  robustness: '稳健性不足',
+  sim_error: '回测报错',
+  hyp_trigger: '假设触发',
+  attribution: '归因分析',
+}
+
 const REGION_OPTIONS = ['USA', 'CHN', 'EUR', 'ASI', 'GLB']
 
 /**
@@ -124,7 +134,7 @@ export default function NegativeKnowledge() {
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 60 },
     {
-      title: 'rule_id',
+      title: '规则编号',
       dataIndex: 'rule_id',
       width: 180,
       render: (v) => <Text code>{v || '—'}</Text>,
@@ -134,18 +144,20 @@ export default function NegativeKnowledge() {
       dataIndex: 'category',
       width: 130,
       render: (v) => (
-        <Tag color={CATEGORY_COLORS[v] || 'default'}>{v || 'unknown'}</Tag>
+        <Tag color={CATEGORY_COLORS[v] || 'default'}>
+          {CATEGORY_LABEL[v] || v || '未知'}
+        </Tag>
       ),
     },
-    { title: 'Region', dataIndex: 'region', width: 70 },
+    { title: '地区', dataIndex: 'region', width: 70 },
     {
-      title: 'fail_count',
+      title: '失败次数',
       dataIndex: 'fail_count',
       width: 100,
       sorter: (a, b) => a.fail_count - b.fail_count,
     },
     {
-      title: 'skeleton',
+      title: '表达式骨架',
       dataIndex: 'pattern',
       ellipsis: true,
       render: (v) => <Text code style={{ fontSize: 12 }}>{v}</Text>,
@@ -167,7 +179,7 @@ export default function NegativeKnowledge() {
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <OpsSectionCard
-        title="失败模式沉淀(Negative Knowledge)"
+        title="失败经验库"
         source={top.data?.source}
         onRefresh={() => {
           top.refetch()
@@ -178,7 +190,7 @@ export default function NegativeKnowledge() {
         rerunSlot={
           <RerunButton
             triggerFn={api.rerunOpsNegative}
-            label="重跑 negative-knowledge"
+            label="重跑失败经验提取"
             onSuccess={() =>
               setTimeout(() => {
                 top.refetch()
@@ -190,7 +202,7 @@ export default function NegativeKnowledge() {
         }
       >
         <Space style={{ marginBottom: 12 }} wrap>
-          <span>Region:</span>
+          <span>地区:</span>
           <Select
             allowClear
             placeholder="全部"
@@ -199,29 +211,32 @@ export default function NegativeKnowledge() {
             style={{ width: 120 }}
             options={REGION_OPTIONS.map((r) => ({ label: r, value: r }))}
           />
-          <span style={{ marginLeft: 12 }}>Category:</span>
+          <span style={{ marginLeft: 12 }}>类别:</span>
           <Select
             allowClear
             placeholder="全部"
             value={category}
             onChange={setCategory}
             style={{ width: 160 }}
-            options={Object.keys(CATEGORY_COLORS).map((c) => ({ label: c, value: c }))}
+            options={Object.keys(CATEGORY_COLORS).map((c) => ({
+              label: CATEGORY_LABEL[c] || c,
+              value: c,
+            }))}
           />
         </Space>
         <Row gutter={[16, 16]}>
           <Col xs={12} sm={6}>
-            <Statistic title="active pitfalls" value={activeCount} />
+            <Statistic title="生效中的教训数" value={activeCount} />
           </Col>
           <Col xs={12} sm={6}>
             <Statistic title="近 7 天新增" value={sevenDayNew} valueStyle={{ color: '#ff8c00' }} />
           </Col>
           <Col xs={12} sm={6}>
-            <Statistic title="Top 20 累计 fail_count" value={totalFail} valueStyle={{ color: '#ff4d4f' }} />
+            <Statistic title="前 20 条累计失败次数" value={totalFail} valueStyle={{ color: '#ff4d4f' }} />
           </Col>
           <Col xs={12} sm={6}>
             <Statistic
-              title="覆盖 category 数"
+              title="覆盖类别数"
               value={Object.keys(byCat.data?.by_category || {}).length}
             />
           </Col>
@@ -230,9 +245,9 @@ export default function NegativeKnowledge() {
 
       <Row gutter={[16, 16]}>
         <Col xs={24} md={14}>
-          <OpsSectionCard title="Top 20 高频 pitfall" source={top.data?.source}>
+          <OpsSectionCard title="前 20 条高频教训" source={top.data?.source}>
             {top20.length === 0 ? (
-              <Empty description="无 pitfall" />
+              <Empty description="暂无教训" />
             ) : (
               <ResponsiveContainer width="100%" height={320}>
                 <BarChart data={top20} layout="vertical">
@@ -261,7 +276,7 @@ export default function NegativeKnowledge() {
                     cx="50%"
                     cy="50%"
                     outerRadius={100}
-                    label
+                    label={({ name, value }) => `${CATEGORY_LABEL[name] || name}: ${value}`}
                   >
                     {pieData.map((d) => (
                       <Cell
@@ -270,7 +285,10 @@ export default function NegativeKnowledge() {
                       />
                     ))}
                   </Pie>
-                  <Tooltip contentStyle={{ background: '#1f2937', border: '1px solid #444' }} />
+                  <Tooltip
+                    formatter={(v, n) => [v, CATEGORY_LABEL[n] || n]}
+                    contentStyle={{ background: '#1f2937', border: '1px solid #444' }}
+                  />
                 </PieChart>
               </ResponsiveContainer>
             )}
@@ -278,7 +296,7 @@ export default function NegativeKnowledge() {
         </Col>
       </Row>
 
-      <OpsSectionCard title="30 天新增 pitfall" source="docs_archived">
+      <OpsSectionCard title="30 天新增教训" source="docs_archived">
         {(timeline.data || []).length === 0 ? (
           <Empty description="近 30 天无新增" />
         ) : (
@@ -287,9 +305,12 @@ export default function NegativeKnowledge() {
               <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
               <XAxis dataKey="date" stroke="#888" />
               <YAxis stroke="#888" />
-              <Tooltip contentStyle={{ background: '#1f2937', border: '1px solid #444' }} />
-              <Legend />
-              <Line type="monotone" dataKey="new_count" stroke="#ff8c00" strokeWidth={2} dot={false} />
+              <Tooltip
+                formatter={(v) => [v, '新增教训']}
+                contentStyle={{ background: '#1f2937', border: '1px solid #444' }}
+              />
+              <Legend formatter={() => '新增教训'} />
+              <Line type="monotone" dataKey="new_count" name="新增教训" stroke="#ff8c00" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         )}

@@ -22,11 +22,11 @@ export default function R11CapacityMonitor() {
   }
   if (error) {
     return (
-      <Alert type="error" showIcon message="加载 R11 capacity 统计失败"
+      <Alert type="error" showIcon message="加载容量估算统计失败"
         description={error?.response?.data?.detail || error?.message} />
     )
   }
-  if (!data) return <Empty description="无 R11 数据" />
+  if (!data) return <Empty description="无容量估算数据" />
 
   const flagOn = data.flags?.ENABLE_CAPACITY_SCORE
   const total = data.total_with_capacity ?? 0
@@ -44,7 +44,7 @@ export default function R11CapacityMonitor() {
           容量估算监控（R11）
         </Title>
         <Space>
-          <Text type="secondary">窗口(天):</Text>
+          <Text type="secondary">统计窗口(天):</Text>
           <InputNumber min={1} max={90} value={days} onChange={(v) => setDays(v || 7)} style={{ width: 80 }} />
           {isFetching && <Spin size="small" />}
         </Space>
@@ -54,7 +54,7 @@ export default function R11CapacityMonitor() {
         type={flagOn ? 'success' : 'warning'} showIcon style={{ marginBottom: 16 }}
         message={
           <Space>
-            <span>容量评分开关 (ENABLE_CAPACITY_SCORE)：</span>
+            <span>容量评分开关（ENABLE_CAPACITY_SCORE）：</span>
             <Tag color={flagOn ? 'green' : 'default'}>{flagOn ? '已开启' : '已关闭'}</Tag>
             <Text type="secondary">近 {days} 天有容量估算的 alpha {total} 个</Text>
           </Space>
@@ -62,8 +62,8 @@ export default function R11CapacityMonitor() {
         description={
           saturated ? (
             <Text type="warning" style={{ fontSize: 12 }}>
-              ⚠️ {((topBucket.count / total) * 100).toFixed(0)}% 集中在「{topBucket.bucket_label}」桶 —
-              可能是公式饱和（Sprint 2 review 指出 USA 大盘易顶到 top 桶），考虑调整 ADV 表或 sub-linear scaling。
+              ⚠️ {((topBucket.count / total) * 100).toFixed(0)}% 集中在「{topBucket.bucket_label}」区间 —
+              可能是公式饱和（美国大盘股容易顶到最高区间），考虑调整日均成交额(ADV)表或改用次线性缩放。
             </Text>
           ) : null
         }
@@ -77,20 +77,20 @@ export default function R11CapacityMonitor() {
         </Col>
         <Col xs={12} sm={8}>
           <Card className="glass-card">
-            <Statistic title="其中 PASS 数" value={data.pass_count_with_capacity ?? 0} valueStyle={{ color: '#00ff88' }} />
+            <Statistic title="其中通过数" value={data.pass_count_with_capacity ?? 0} valueStyle={{ color: '#00ff88' }} />
           </Card>
         </Col>
         <Col xs={12} sm={8}>
           <Card className="glass-card">
-            <Statistic title="容量样本 PASS 率" value={(data.capacity_pass_rate ?? 0) * 100}
+            <Statistic title="容量样本通过率" value={(data.capacity_pass_rate ?? 0) * 100}
               precision={1} suffix="%" valueStyle={{ color: '#ffb700' }} />
           </Card>
         </Col>
       </Row>
 
-      <Card className="glass-card" title="容量 log-scale 分布（USD）">
+      <Card className="glass-card" title="容量对数刻度分布（美元）">
         {total === 0 ? (
-          <Empty description="窗口内无容量估算数据（开关关闭或无 PASS alpha）" />
+          <Empty description="窗口内无容量估算数据（开关关闭或无通过的 alpha）" />
         ) : (
           <Space direction="vertical" style={{ width: '100%' }} size="middle">
             {buckets.map((b) => (

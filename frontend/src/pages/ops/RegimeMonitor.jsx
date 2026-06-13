@@ -22,13 +22,13 @@ const { Title, Text, Paragraph } = Typography
  * says WHEN to resume mining, not WHAT to submit.
  */
 const VERDICT_META = {
-  REGIME_TURNING: { color: 'success', label: '🟢 REGIME 转向', alert: 'success' },
-  REGIME_DOWN: { color: 'default', label: 'REGIME 低谷', alert: 'info' },
+  REGIME_TURNING: { color: 'success', label: '🟢 行情切换', alert: 'success' },
+  REGIME_DOWN: { color: 'default', label: '行情低谷', alert: 'info' },
   INSUFFICIENT: { color: 'warning', label: '样本不足', alert: 'warning' },
 }
 
 function sharpeTag(v, gate) {
-  if (v === null || v === undefined) return <Tag color="default">sim 失败</Tag>
+  if (v === null || v === undefined) return <Tag color="default">回测失败</Tag>
   const color = v >= (gate ?? 1.25) ? 'success' : v >= 0 ? 'gold' : 'error'
   return <Tag color={color}>{v >= 0 ? '+' : ''}{v.toFixed(2)}</Tag>
 }
@@ -46,7 +46,7 @@ export default function RegimeMonitor() {
   }
   if (error) {
     return (
-      <Alert type="error" showIcon message="加载 regime 监测器失败"
+      <Alert type="error" showIcon message="加载行情切换监测器失败"
         description={error?.response?.data?.detail || error?.message || '未知错误'} />
     )
   }
@@ -76,8 +76,8 @@ export default function RegimeMonitor() {
     },
     {
       title: (
-        <Tooltip title="当前数据 re-sim 的 IS Sharpe(rolling test_period)。回到提交时水平 = 老边际恢复 = regime 转。">
-          <Space size={4}>当前 re-sim <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        <Tooltip title="在当前数据上重新回测得到的样本内 Sharpe(滚动测试区间)。回到提交时水平 = 老策略优势恢复 = 行情切换。">
+          <Space size={4}>当前重新回测 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
       dataIndex: 'resim_sharpe', key: 'resim_sharpe', width: 120, align: 'right',
@@ -102,7 +102,7 @@ export default function RegimeMonitor() {
       render: (v) => (v ? String(v).replace('T', ' ').slice(0, 19) : '—') },
     { title: '裁决', dataIndex: 'verdict', key: 'verdict',
       render: (v) => <Tag color={(VERDICT_META[v] || {}).color || 'default'}>{(VERDICT_META[v] || {}).label || v}</Tag> },
-    { title: '提交集 re-sim 均值', dataIndex: 'submitted_mean_resim', key: 'submitted_mean_resim', align: 'right',
+    { title: '提交集重新回测均值', dataIndex: 'submitted_mean_resim', key: 'submitted_mean_resim', align: 'right',
       render: (v) => (v !== null && v !== undefined ? v.toFixed(3) : '—') },
     { title: '恢复数', key: 'rec', align: 'right',
       render: (_, r) => `${r.n_recovered_total ?? 0}/${r.n_resimmed ?? 0}` },
@@ -113,10 +113,10 @@ export default function RegimeMonitor() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }} wrap>
         <Title level={3} style={{ margin: 0 }}>
           <RadarChartOutlined style={{ marginRight: 8 }} />
-          Regime 转向监测器
+          行情切换监测器
         </Title>
         <Space>
-          <Tag color={enabled ? 'success' : 'default'}>{enabled ? '已启用' : '未启用(flag OFF)'}</Tag>
+          <Tag color={enabled ? 'success' : 'default'}>{enabled ? '已启用' : '未启用(开关已关)'}</Tag>
           {isFetching && <Spin size="small" />}
         </Space>
       </Space>
@@ -125,21 +125,21 @@ export default function RegimeMonitor() {
       {!enabled ? (
         <Alert type="warning" showIcon style={{ marginBottom: 16 }}
           message="探针未激活"
-          description={<span>翻 <code>ENABLE_REGIME_MONITOR</code> on(Feature Flag 控制台,热)+ run.bat 重启载入 daily beat(07:30)即启动。Celery beat 不受池暂停(ENABLE_POOL_PIPELINE)影响,照跑。</span>} />
+          description={<span>在功能开关控制台打开「行情切换监测」开关(可热生效)+ 重启载入每日定时任务(07:30)即启动。定时任务不受挖掘流水线暂停影响,照跑。</span>} />
       ) : !signal ? (
         <Alert type="info" showIcon style={{ marginBottom: 16 }}
           message="已启用,等首次探针结果"
-          description="daily beat 每日 07:30 跑;或重启后等下一次触发。结果落 Redis 后此处显示。" />
+          description="每日定时任务在 07:30 跑;或重启后等下一次触发。结果出来后此处显示。" />
       ) : verdict === 'REGIME_TURNING' ? (
         <Alert type="success" showIcon style={{ marginBottom: 16 }}
-          message={<strong>🟢 REGIME 转向信号 — 老边际在当前数据上恢复了</strong>}
+          message={<strong>🟢 行情切换信号 — 老策略优势在当前数据上恢复了</strong>}
           description={
             <span>
-              提交集当前 re-sim 均值 <strong>{sub.mean_resim}</strong>(提交时 {sub.mean_baseline})、
-              <strong>{signal.n_recovered_total}</strong> 个 re-sim ≥ {gate}(可提交)。
+              提交集当前重新回测均值 <strong>{sub.mean_resim}</strong>(提交时 {sub.mean_baseline})、
+              <strong>{signal.n_recovered_total}</strong> 个重新回测 ≥ {gate}(可提交)。
               恢复的:{(signal.recovered_ids || []).join(', ') || '—'}。
-              <br /><strong>建议:复核这些 alpha,考虑恢复挖掘生产</strong>(.env ENABLE_POOL_PIPELINE=true + clear_drain + 重启)。
-              ⚠️ 口径=current IS,非 OS —— 是「该重启了」的信号,提交决策仍走选择器 + 当前数据确认。
+              <br /><strong>建议:复核这些 alpha,考虑恢复挖掘生产</strong>(打开挖掘流水线开关 + 清除暂停 + 重启)。
+              ⚠️ 口径=当前样本内,不是样本外 —— 这是「该重启了」的信号,提交决策仍走提交选择器 + 当前数据确认。
             </span>
           } />
       ) : (
@@ -147,8 +147,8 @@ export default function RegimeMonitor() {
           message={`${vmeta.label} — 暂不重启`}
           description={
             verdict === 'INSUFFICIENT'
-              ? '所有 re-sim 都失败(BRAIN auth/slot/数据)— 检查 worker BRAIN 连通。'
-              : `老边际仍未恢复:提交集当前 re-sim 均值 ${sub.mean_resim}(提交时 ${sub.mean_baseline}),0 个回到可提交。继续持有,等下次探针。`
+              ? '所有重新回测都失败(BRAIN 认证/名额/数据)— 检查工作进程与 BRAIN 的连通。'
+              : `老策略优势仍未恢复:提交集当前重新回测均值 ${sub.mean_resim}(提交时 ${sub.mean_baseline}),0 个回到可提交。继续持有,等下次探针。`
           } />
       )}
 
@@ -156,14 +156,14 @@ export default function RegimeMonitor() {
       <Row gutter={[16, 16]}>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Statistic title="裁决" value={vmeta.label}
+            <Statistic title="结论" value={vmeta.label}
               valueStyle={{ color: verdict === 'REGIME_TURNING' ? '#00ff88' : '#888', fontSize: 18 }} />
           </Card>
         </Col>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="13 个已提交赢家的当前数据 re-sim Sharpe 均值。回升=老边际恢复。">
-              <Statistic title="提交集 re-sim 均值" value={sub.mean_resim ?? '—'}
+            <Tooltip title="已提交的历史优胜策略在当前数据上重新回测的 Sharpe 均值。回升=老策略优势恢复。">
+              <Statistic title="提交集重新回测均值" value={sub.mean_resim ?? '—'}
                 valueStyle={{ color: (sub.mean_resim ?? -1) >= 0.5 ? '#00ff88' : '#ff4d4f' }} />
             </Tooltip>
             <Text type="secondary" style={{ fontSize: 12 }}>提交时 {sub.mean_baseline ?? '—'}</Text>
@@ -173,7 +173,7 @@ export default function RegimeMonitor() {
           <Card className="glass-card">
             <Statistic title="恢复到可提交" value={signal ? `${signal.n_recovered_total}/${signal.n_resimmed}` : '—'}
               valueStyle={{ color: (signal?.n_recovered_total ?? 0) > 0 ? '#00ff88' : '#888' }} />
-            <Text type="secondary" style={{ fontSize: 12 }}>re-sim ≥ {gate}</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>重新回测 ≥ {gate}</Text>
           </Card>
         </Col>
         <Col xs={12} sm={6}>
@@ -189,10 +189,10 @@ export default function RegimeMonitor() {
         message="口径说明"
         description={
           <Paragraph style={{ marginBottom: 0, fontSize: 12 }}>
-            周期 re-sim 已提交赢家 + backlog 抽样于<strong>当前数据</strong>(simulate rolling test_period,
-            非冻结 2019-2023)。<strong>口径 = current IS,不是 OS</strong>(BRAIN 隐藏 realized OS)——
-            它是 regime 衰减传感器,判「<strong>何时</strong>重启生产」,不判「提交什么」(那走提交选择器)。
-            turn 条件:提交集 re-sim 均值 ≥ {data?.turn_mean_threshold ?? 0.5} 或 ≥1 个 re-sim 过 {gate}。
+            周期性地把已提交的优胜策略 + 积压抽样在<strong>当前数据</strong>上重新回测(滚动测试区间,
+            非冻结的 2019-2023)。<strong>口径 = 当前样本内,不是样本外</strong>(BRAIN 隐藏真实样本外结果)——
+            它是行情衰减传感器,判「<strong>何时</strong>重启生产」,不判「提交什么」(那走提交选择器)。
+            切换条件:提交集重新回测均值 ≥ {data?.turn_mean_threshold ?? 0.5} 或 ≥1 个重新回测过 {gate}。
           </Paragraph>
         } />
 

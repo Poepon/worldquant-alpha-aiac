@@ -35,6 +35,18 @@ import api from '../../services/api'
 
 const { Title, Text } = Typography
 
+// 假设状态 label 映射（勿改 key，仅显示用）
+const HYP_STATUS_LABEL = {
+  PROMOTED: '已提升复用',
+  ACTIVE: '生效中',
+  PROPOSED: '已提出',
+}
+
+// 开关名 label 映射（勿改 key，仅显示用）
+const FLAG_LABEL = {
+  ENABLE_HYPOTHESIS_FOREST_REUSE: '假设库跨任务复用',
+}
+
 /**
  * G8ForestMonitor — /ops/g8-monitor (2026-05-19, 四池世界诚实降级改写 2026-06-07).
  *
@@ -65,27 +77,26 @@ export default function G8ForestMonitor() {
     staleTime: 10_000,
   })
 
-  // 池模式下的诚实降级 banner — 任何加载/错误/空态都先呈现,提醒读数失真
+  // 流水线模式下的诚实降级提示 — 任何加载/错误/空态都先呈现,提醒读数失真
   const poolDegradeBanner = (
     <Alert
       type="warning"
       showIcon
       style={{ marginBottom: 16 }}
-      message="四池世界下假设森林部分失真(诚实降级)"
+      message="当前流水线模式下假设库部分数据失真（诚实降级说明）"
       description={
         <Space direction="vertical" size={4} style={{ fontSize: 12 }}>
           <Text style={{ fontSize: 12 }}>
-            池 <Text code>node_hypothesis</Text> 跑 LEVEL-0,假设状态停在 PROPOSED 不达晋升阈值
-            → <Text strong>合格假设池(eligible_count)恒为 0</Text>。
+            假设节点在当前模式下不跨任务复用，假设状态停在"提出"阶段、不达提升阈值
+            → <Text strong>合格假设数量恒为 0</Text>。
           </Text>
           <Text style={{ fontSize: 12 }}>
-            池 persister 未传 cross_task_hyps,反向引用明细
-            <Text code>_g8_forest_referenced_ids</Text> 未被写入
-            → <Text strong>被引用 alpha 数 / 引用 PASS 率恒空</Text>(非故障,是池模式预期)。
+            流水线评估入库环节未回写假设引用关系
+            → <Text strong>被引用 alpha 数 / 引用通过率恒空</Text>（非故障，是当前模式的预期）。
           </Text>
           <Text style={{ fontSize: 12 }}>
-            复活依赖 <Text strong>Phase 2 池认知对账 beat</Text>(假设生命周期晋升)。flag{' '}
-            <Text code>ENABLE_HYPOTHESIS_FOREST_REUSE</Text> 仍 ON,boolean 复用信号可能仍出现。
+            恢复依赖 <Text strong>第二阶段「知识库对账」定时任务</Text>（假设生命周期提升）。
+            假设库复用开关仍开启，复用信号可能仍出现。
           </Text>
         </Space>
       }
@@ -109,7 +120,7 @@ export default function G8ForestMonitor() {
         <Alert
           type="error"
           showIcon
-          message="加载 hypothesis forest 失败"
+          message="加载假设库数据失败"
           description={error?.response?.data?.detail || error?.message || '未知错误'}
         />
       </div>
@@ -119,7 +130,7 @@ export default function G8ForestMonitor() {
     return (
       <div>
         {poolDegradeBanner}
-        <Empty description="无 hypothesis forest 数据" />
+        <Empty description="暂无假设库数据" />
       </div>
     )
   }
@@ -143,9 +154,9 @@ export default function G8ForestMonitor() {
 
   // 池模式下「合格池为空」是预期状态,空态文案统一走这个,避免看起来像故障
   const POOL_EMPTY_TEXT =
-    '池模式下合格假设池预期为空(node_hypothesis LEVEL-0,状态未晋升)— 非故障'
+    '当前模式下合格假设库预期为空（假设不跨任务复用、状态未提升）—— 非故障'
   const POOL_REF_EMPTY_TEXT =
-    '池 persister 未写 _g8_forest_referenced_ids,引用明细预期为空 — 非故障'
+    '当前流水线未回写假设引用关系，引用明细预期为空 —— 非故障'
 
   const entryColumns = [
     {
@@ -157,7 +168,7 @@ export default function G8ForestMonitor() {
       render: (v) => <Text code style={{ fontSize: 12 }}>{v}</Text>,
     },
     {
-      title: '陈述 (statement)',
+      title: '假设陈述',
       dataIndex: 'statement',
       key: 'statement',
       ellipsis: true,
@@ -168,12 +179,12 @@ export default function G8ForestMonitor() {
       ),
     },
     {
-      title: '支柱',
+      title: '因子类别',
       dataIndex: 'pillar',
       key: 'pillar',
       width: 110,
       render: (v) =>
-        v ? <Tag color="cyan">{v}</Tag> : <Tag color="default">(none)</Tag>,
+        v ? <Tag color="cyan">{v}</Tag> : <Tag color="default">（无）</Tag>,
     },
     {
       title: '地区',
@@ -189,7 +200,7 @@ export default function G8ForestMonitor() {
       width: 100,
       render: (v) => (
         <Tag color={v === 'PROMOTED' ? 'gold' : v === 'ACTIVE' ? 'green' : 'default'}>
-          {v || '—'}
+          {v ? (HYP_STATUS_LABEL[v] || v) : '—'}
         </Tag>
       ),
     },
@@ -202,7 +213,7 @@ export default function G8ForestMonitor() {
       render: (v) => (v !== null && v !== undefined ? v.toFixed(3) : '—'),
     },
     {
-      title: 'PASS',
+      title: '通过数',
       dataIndex: 'pass_count',
       key: 'pass_count',
       width: 70,
@@ -222,7 +233,7 @@ export default function G8ForestMonitor() {
       width: 120,
       align: 'right',
       render: (v) => (
-        <Tooltip title="窗口内 alphas.metrics._g8_forest_referenced_ids 包含此 hypothesis_id 的 PASS+FAIL 总条数(池模式下未被 persister 写入,预期 0)">
+        <Tooltip title="窗口内引用了此假设的 alpha 总数（含通过与未通过；当前流水线未回写引用关系，预期为 0）">
           <Tag color={v > 0 ? 'success' : 'default'} icon={<LinkOutlined />}>
             {v}
           </Tag>
@@ -233,12 +244,12 @@ export default function G8ForestMonitor() {
 
   const pillarColumns = [
     {
-      title: '支柱',
+      title: '因子类别',
       dataIndex: 'pillar',
       key: 'pillar',
       width: 140,
       render: (v) => (
-        <Tag color={v === '(none)' ? 'default' : 'cyan'}>{v}</Tag>
+        <Tag color={v === '(none)' ? 'default' : 'cyan'}>{v === '(none)' ? '（无）' : v}</Tag>
       ),
     },
     {
@@ -257,7 +268,7 @@ export default function G8ForestMonitor() {
       render: (v) => v?.toFixed(3) ?? '—',
     },
     {
-      title: 'PASS 累计',
+      title: '累计通过数',
       dataIndex: 'total_pass',
       key: 'total_pass',
       width: 110,
@@ -270,10 +281,10 @@ export default function G8ForestMonitor() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           <ApartmentOutlined style={{ marginRight: 8 }} />
-          假设森林监控（G8 Phase A · 四池降级）
+          假设库分布监控（当前模式降级）
         </Title>
         <Space>
-          <Text type="secondary">地区:</Text>
+          <Text type="secondary">地区：</Text>
           <Select
             value={region}
             onChange={setRegion}
@@ -286,7 +297,7 @@ export default function G8ForestMonitor() {
               { value: 'EUR', label: 'EUR' },
             ]}
           />
-          <Text type="secondary">时间窗口:</Text>
+          <Text type="secondary">时间窗口：</Text>
           <Select
             value={days}
             onChange={setDays}
@@ -314,26 +325,25 @@ export default function G8ForestMonitor() {
             <strong>当前读数</strong>
             {flagsList.map(([k, v]) => (
               <Tag key={k} color={v ? 'success' : 'default'}>
-                {k}: {v ? '开' : '关'}
+                {FLAG_LABEL[k] || k}：{v ? '开' : '关'}
               </Tag>
             ))}
             <Text type="secondary">
-              {region} · 近 {days} 天:合格池 {eligible} · 被引用 alpha {totalRef}
+              {region} · 近 {days} 天：合格假设 {eligible} 条 · 被引用 alpha {totalRef} 个
             </Text>
           </Space>
         }
         description={
           !flagOn ? (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              ENABLE_HYPOTHESIS_FOREST_REUSE 关闭中,cross-task PROMOTED hypothesis
-              不会注入 LLM prompt。
+              假设库跨任务复用开关关闭中，跨任务已提升的假设不会注入到模型提示词。
             </Text>
           ) : (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              flag 已开,但池模式下假设状态停在 PROPOSED(LEVEL-0 不晋升),
-              因此 {region} 合格池与反向引用明细预期为空。这是池世界的预期状态,
-              不代表 stamp 链路或 mining 故障;待 Phase 2 池认知对账 beat 上线后,
-              假设晋升 → eligible_count / 引用明细才会重新有值。
+              开关已开，但当前模式下假设状态停在"已提出"（不跨任务提升），
+              因此 {region} 的合格假设与引用明细预期为空。这是当前模式的预期状态，
+              不代表标注链路或挖掘故障；待第二阶段「知识库对账」定时任务上线后，
+              假设提升 → 合格假设数 / 引用明细才会重新有值。
             </Text>
           )
         }
@@ -343,11 +353,11 @@ export default function G8ForestMonitor() {
       <Row gutter={[16, 16]}>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title={`pass_count ≥ 2 AND sharpe_avg ≥ 1.0 的 ACTIVE/PROMOTED hypothesis 数 — fetch_cross_task_promoted 的实际池子(池模式 LEVEL-0 不晋升 → 预期 0)`}>
+            <Tooltip title={`通过数 ≥ 2 且 平均 Sharpe ≥ 1.0 的「生效中/已提升」假设数量 —— 可供跨任务复用注入的实际假设池（当前模式不提升 → 预期 0）`}>
               <Statistic
                 title={
                   <Space>
-                    候选池规模
+                    合格假设数
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }
@@ -358,14 +368,14 @@ export default function G8ForestMonitor() {
             </Tooltip>
             {eligible === 0 && (
               <Text type="secondary" style={{ fontSize: 11 }}>
-                池模式预期为 0(未晋升)
+                当前模式预期为 0（未提升）
               </Text>
             )}
           </Card>
         </Col>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="窗口内 metrics 包含 _g8_forest_referenced_ids 的 alpha 总数(PASS+FAIL)— 池 persister 未写,预期 0">
+            <Tooltip title="窗口内引用了假设的 alpha 总数（含通过与未通过）—— 当前流水线未回写引用，预期 0">
               <Statistic
                 title={
                   <Space>
@@ -380,7 +390,7 @@ export default function G8ForestMonitor() {
             </Tooltip>
             {totalRef === 0 && (
               <Text type="secondary" style={{ fontSize: 11 }}>
-                池 persister 未写引用,预期为 0
+                当前流水线未回写引用，预期为 0
               </Text>
             )}
           </Card>
@@ -388,22 +398,22 @@ export default function G8ForestMonitor() {
         <Col xs={12} sm={6}>
           <Card className="glass-card">
             <Statistic
-              title="其中 PASS"
+              title="其中通过数"
               value={passRef}
               valueStyle={{ color: passRef > 0 ? '#00ff88' : '#9c88ff' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              quality_status ∈ PASS / PASS_PROVISIONAL
+              质量状态为「通过」或「暂定通过」
             </Text>
           </Card>
         </Col>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="reference_pass_rate — 森林影响产出的 alpha PASS 率(池模式下引用明细恒空 → 无意义)">
+            <Tooltip title="引用了假设而产出的 alpha 通过率（当前模式下引用明细恒空 → 无意义）">
               <Statistic
                 title={
                   <Space>
-                    引用 PASS 率
+                    引用通过率
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }
@@ -415,7 +425,7 @@ export default function G8ForestMonitor() {
             </Tooltip>
             {totalRef === 0 && (
               <Text type="secondary" style={{ fontSize: 11 }}>
-                无引用样本,比率无意义
+                无引用样本，比率无意义
               </Text>
             )}
           </Card>
@@ -425,7 +435,7 @@ export default function G8ForestMonitor() {
       {/* Per-pillar bar charts */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={12}>
-          <Card className="glass-card" title="森林按支柱分布（候选数量）" size="small">
+          <Card className="glass-card" title="假设库按因子类别分布（候选数量）" size="small">
             {pillarBars.length === 0 ? (
               <Empty description={POOL_EMPTY_TEXT} />
             ) : (
@@ -447,12 +457,12 @@ export default function G8ForestMonitor() {
               </ResponsiveContainer>
             )}
             <Text type="secondary" style={{ fontSize: 12 }}>
-              候选最多的支柱 = 森林倾斜的方向。池模式下合格池为空时此图预期空白。
+              候选最多的因子类别 = 假设库倾斜的方向。当前模式下合格假设为空时此图预期空白。
             </Text>
           </Card>
         </Col>
         <Col xs={24} lg={12}>
-          <Card className="glass-card" title="森林按支柱分布（平均 Sharpe）" size="small">
+          <Card className="glass-card" title="假设库按因子类别分布（平均 Sharpe）" size="small">
             {pillarBars.length === 0 ? (
               <Empty description={POOL_EMPTY_TEXT} />
             ) : (
@@ -474,14 +484,14 @@ export default function G8ForestMonitor() {
               </ResponsiveContainer>
             )}
             <Text type="secondary" style={{ fontSize: 12 }}>
-              平均 Sharpe 最高的支柱 = 最有信号密度的 reference 来源。
+              平均 Sharpe 最高的因子类别 = 信号密度最高的参考来源。
             </Text>
           </Card>
         </Col>
       </Row>
 
       {/* Pillar table */}
-      <Card className="glass-card" title="按支柱明细" style={{ marginTop: 16 }} size="small">
+      <Card className="glass-card" title="各因子类别明细" style={{ marginTop: 16 }} size="small">
         <Table
           size="small"
           rowKey="pillar"
@@ -497,8 +507,8 @@ export default function G8ForestMonitor() {
         className="glass-card"
         title={
           <Space>
-            候选 hypothesis Top 10
-            <Tooltip title="按 sharpe_avg DESC, pass_count DESC, updated_at DESC 排序 — 同 fetch_cross_task_promoted 注入 prompt 的顺序(池模式下合格池为空)">
+            候选假设 Top 10
+            <Tooltip title="按平均 Sharpe、通过数、更新时间倒序排列 —— 与跨任务复用注入提示词的顺序一致（当前模式下合格假设为空）">
               <InfoCircleOutlined style={{ color: '#9c88ff' }} />
             </Tooltip>
           </Space>
@@ -515,7 +525,7 @@ export default function G8ForestMonitor() {
           locale={{ emptyText: POOL_EMPTY_TEXT }}
         />
         <Text type="secondary" style={{ fontSize: 12 }}>
-          {POOL_REF_EMPTY_TEXT}。Phase 2 池认知对账 beat 上线、假设晋升后,
+          {POOL_REF_EMPTY_TEXT}。第二阶段「知识库对账」定时任务上线、假设提升后，
           被引用次数才会重新累积。
         </Text>
       </Card>

@@ -58,7 +58,7 @@ export default function OpsLayout() {
     <div>
       {!hasToken && (
         <Alert
-          message="未配置 X-Ops-Token (localStorage.ops_token)。Dev 模式可忽略;生产 OPS_API_TOKEN 设置后此处请求会 401。"
+          message="未配置运维访问令牌（X-Ops-Token，存于 localStorage.ops_token）。开发模式可忽略；生产环境设置访问令牌后，此处请求会被拒绝（401 未授权）。"
           type="info"
           showIcon
           style={{ marginBottom: 16 }}

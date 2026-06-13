@@ -55,15 +55,15 @@ export default function LLMOpMonitor() {
   )
 
   const columns = [
-    { title: 'KB#', dataIndex: 'kb_id', width: 80 },
+    { title: '知识库条目号', dataIndex: 'kb_id', width: 80 },
     {
-      title: 'source',
+      title: '来源',
       dataIndex: 'source',
       width: 110,
-      render: (v) => <Tag>{v || 'unknown'}</Tag>,
+      render: (v) => <Tag>{v || '未知'}</Tag>,
     },
     {
-      title: 'bad_ops',
+      title: '虚构算子',
       dataIndex: 'bad_ops',
       render: (ops) =>
         (ops || []).map((op) => (
@@ -73,7 +73,7 @@ export default function LLMOpMonitor() {
         )),
     },
     {
-      title: 'pattern (first 80)',
+      title: '模式片段（前 80 字）',
       dataIndex: 'pattern',
       ellipsis: true,
       render: (v) => (
@@ -87,7 +87,7 @@ export default function LLMOpMonitor() {
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <OpsSectionCard
-        title={`LLM 算子幻觉监控${latest.data?.report_date ? ` · ${latest.data.report_date}` : ''}`}
+        title={`LLM 虚构算子监控${latest.data?.report_date ? ` · ${latest.data.report_date}` : ''}`}
         source={source}
         staleDays={latest.data?.stale_days}
         onRefresh={latest.refetch}
@@ -95,7 +95,7 @@ export default function LLMOpMonitor() {
         rerunSlot={
           <RerunButton
             triggerFn={api.rerunOpsLLMOp}
-            label="重跑 llm-op-monitor"
+            label="重新扫描"
             onSuccess={() => setTimeout(latest.refetch, 3000)}
           />
         }
@@ -103,11 +103,11 @@ export default function LLMOpMonitor() {
         {latest.loading && !latest.data ? (
           <Spin />
         ) : summary.scanned === 0 && source === 'missing' ? (
-          <Empty description="今日尚无 llm-op-monitor 数据;点右上 Rerun 触发" />
+          <Empty description="今日尚无扫描数据；点右上「重新扫描」触发" />
         ) : (
           <Row gutter={[16, 16]}>
             <Col xs={12} sm={6}>
-              <Statistic title="扫描的 KB 条目" value={summary.scanned || 0} />
+              <Statistic title="扫描的知识库条目" value={summary.scanned || 0} />
             </Col>
             <Col xs={12} sm={6}>
               <Statistic
@@ -118,30 +118,30 @@ export default function LLMOpMonitor() {
             </Col>
             <Col xs={12} sm={6}>
               <Statistic
-                title="幻觉 (pattern + template)"
+                title="含虚构算子的条目"
                 value={(summary.pattern_halluc || 0) + (summary.template_halluc || 0)}
                 valueStyle={{ color: '#ff8c00' }}
               />
             </Col>
             <Col xs={12} sm={6}>
               <Statistic
-                title="已 deactivated"
+                title="已停用条目"
                 value={summary.deactivated || 0}
                 valueStyle={{ color: '#ff4d4f' }}
               />
             </Col>
             <Col xs={24}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Registry 中合法 BRAIN op 数:{summary.valid_ops_in_registry || 0}
+                算子库中合法 BRAIN 算子数：{summary.valid_ops_in_registry || 0}
               </Text>
             </Col>
           </Row>
         )}
       </OpsSectionCard>
 
-      <OpsSectionCard title="Top 20 幻觉 op 频次" source={source}>
+      <OpsSectionCard title="虚构算子频次 Top 20" source={source}>
         {opRows.length === 0 ? (
-          <Empty description="无幻觉 op(所有 KB 模式均使用合法 BRAIN op)" />
+          <Empty description="无虚构算子（所有知识库模式均使用合法 BRAIN 算子）" />
         ) : (
           <ResponsiveContainer width="100%" height={Math.max(220, opRows.length * 26)}>
             <BarChart data={opRows} layout="vertical">
@@ -158,7 +158,7 @@ export default function LLMOpMonitor() {
       </OpsSectionCard>
 
       <OpsSectionCard
-        title={`受影响 KB 条目(${(summary.affected_entries || []).length})`}
+        title={`受影响的知识库条目（${(summary.affected_entries || []).length}）`}
         source={source}
       >
         <Table

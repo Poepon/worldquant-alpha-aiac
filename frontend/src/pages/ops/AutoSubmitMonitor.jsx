@@ -43,7 +43,7 @@ const { Title, Text } = Typography
 const OUTCOME_META = {
   would_submit: { color: 'success', label: '将提交' },
   submitted: { color: 'processing', label: '已提交' },
-  rejected: { color: 'warning', label: 'BRAIN 拒' },
+  rejected: { color: 'warning', label: 'BRAIN 拒绝' },
   skipped: { color: 'default', label: '已跳过' },
   error: { color: 'error', label: '错误' },
 }
@@ -61,7 +61,7 @@ function deltaScoreTag(v) {
   if (v === null || v === undefined) return <Tag>—</Tag>
   const positive = v >= 0
   return (
-    <Tooltip title="竞赛 before-and-after Δscore(只展示、不 gate)。<0=提交会拉低 IQC 竞赛分(已提交池即竞赛组合);你已选「组合/consultant 价值优先」,故此项不参与提交决策。">
+    <Tooltip title="竞赛评分变化(只展示、不作为提交门槛)。小于 0 = 提交这个 alpha 会拉低你的竞赛分(已提交的策略集合就是竞赛组合);你已选择「组合价值优先」,所以这一项不参与提交决策。">
       <Tag color={positive ? 'green' : 'volcano'}>
         {positive ? '+' : ''}{v.toFixed(0)}
       </Tag>
@@ -75,7 +75,7 @@ function valueTierTag(t) {
     0: { c: 'green', label: '增益' },
     1: { c: 'gold', label: '中性' },
     2: { c: 'red', label: '稀释' },
-    3: { c: 'default', label: '无PnL' },
+    3: { c: 'default', label: '无收益数据' },
   }[t] || { c: 'default', label: String(t) }
   return <Tag color={meta.c}>{meta.label}</Tag>
 }
@@ -90,7 +90,7 @@ function selfCorrTag(v) {
 const OUTCOME_OPTIONS = [
   { value: 'would_submit', label: '将提交' },
   { value: 'submitted', label: '已提交' },
-  { value: 'rejected', label: 'BRAIN 拒' },
+  { value: 'rejected', label: 'BRAIN 拒绝' },
   { value: 'skipped', label: '已跳过' },
   { value: 'all', label: '全部' },
 ]
@@ -190,7 +190,7 @@ export default function AutoSubmitMonitor() {
     },
     {
       title: (
-        <Tooltip title="alpha 自身 margin(bps)— ≥5bps 才扣成本盈利(经济门 G6)">
+        <Tooltip title="alpha 自身的 Margin(每单位交易利润,单位 bps)— 要 ≥5bps 才能覆盖交易成本盈利(经济门槛)">
           <Space size={4}>Margin <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
@@ -203,14 +203,18 @@ export default function AutoSubmitMonitor() {
       },
     },
     {
-      title: 'Self-corr',
+      title: (
+        <Tooltip title="与已提交策略的相关度 — ≥0.7 BRAIN 会硬性拒绝">
+          <Space size={4}>相关度 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        </Tooltip>
+      ),
       key: 'self_corr',
       width: 100,
       render: (_, r) => selfCorrTag(sig(r).self_corr),
     },
     {
       title: (
-        <Tooltip title="边际综合评分(composite,>0 才推荐)— 提交决策按此(组合价值目标)">
+        <Tooltip title="边际贡献综合评分(大于 0 才推荐)— 提交决策按这个来(以组合价值为目标)">
           <Space size={4}>综合 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
@@ -227,8 +231,8 @@ export default function AutoSubmitMonitor() {
     },
     {
       title: (
-        <Tooltip title="竞赛 Δscore(只展示、不 gate)。<0=提交拉低 IQC 竞赛分;你已选组合价值优先。">
-          <Space size={4}>竞赛Δscore <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        <Tooltip title="竞赛评分变化(只展示、不作为提交门槛)。小于 0 = 提交会拉低竞赛分;你已选择组合价值优先。">
+          <Space size={4}>竞赛评分变化 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
       key: 'delta_score',
@@ -260,9 +264,9 @@ export default function AutoSubmitMonitor() {
           自动提交监控
         </Title>
         <Space wrap>
-          <Tag color={enabled ? 'green' : 'default'}>{enabled ? 'ENABLED' : 'OFF'}</Tag>
+          <Tag color={enabled ? 'green' : 'default'}>{enabled ? '已启用' : '未启用'}</Tag>
           <Tag color={mode === 'live' ? 'red' : mode === 'shadow' ? 'blue' : 'default'}>
-            模式: {mode}
+            模式: {mode === 'live' ? '正式提交' : mode === 'shadow' ? '影子观察' : mode}
           </Tag>
           <Text type="secondary">地区:</Text>
           <Select
@@ -295,16 +299,16 @@ export default function AutoSubmitMonitor() {
         style={{ marginBottom: 16 }}
         message={
           mode === 'shadow'
-            ? '影子模式:跑完整 fail-closed 守门栈并记录「将提交」名单,但绝不真发。观察名单干净后再切 live。'
+            ? '影子观察模式:跑完整的失败即拦截守门流程并记录「将提交」名单,但绝不真的提交。观察名单干净后再切到正式提交。'
             : mode === 'live'
-              ? 'LIVE 模式:符合守门栈的候选会按日上限真提交到 BRAIN(不可逆)。'
-              : '自动提交未启用 (mode=off)。'
+              ? '正式提交模式:符合守门流程的候选会按每日上限真的提交到 BRAIN(不可逆)。'
+              : '自动提交未启用。'
         }
         description={
           <Text style={{ fontSize: 12 }}>
-            提交决策按<strong>组合边际价值</strong>(Δsharpe/composite/additive);
-            <strong>竞赛 Δscore 只展示、不 gate</strong> —— 提交即入 IQC 竞赛池,Δscore&lt;0 会拉低竞赛分,
-            按你「组合/consultant 价值优先」的选择不参与决策,但每行都列出以便你随时知道竞赛分代价。
+            提交决策按<strong>组合边际价值</strong>(Sharpe 增量 / 综合评分 / 是否带来增益);
+            <strong>竞赛评分变化只展示、不作为门槛</strong> —— 提交即进入竞赛组合,评分变化小于 0 会拉低竞赛分,
+            按你「组合价值优先」的选择不参与决策,但每行都列出以便你随时知道竞赛分的代价。
           </Text>
         }
       />
@@ -312,14 +316,14 @@ export default function AutoSubmitMonitor() {
       <Row gutter={[16, 16]} style={{ marginBottom: 16 }}>
         <Col xs={12} sm={6} lg={4}>
           <Card className="glass-card">
-            <Statistic title="将提交 (本次 beat)" value={snap.would_submit ?? 0} valueStyle={{ color: '#00ff88' }} />
+            <Statistic title="将提交 (本次定时任务)" value={snap.would_submit ?? 0} valueStyle={{ color: '#00ff88' }} />
             <Text type="secondary" style={{ fontSize: 11 }}>最近一次评估的快照</Text>
           </Card>
         </Col>
         <Col xs={12} sm={6} lg={4}>
           <Card className="glass-card">
-            <Statistic title="已跳过 (本次 beat)" value={snap.skipped ?? 0} valueStyle={{ color: '#888' }} />
-            <Text type="secondary" style={{ fontSize: 11 }}>被守门栈挡下</Text>
+            <Statistic title="已跳过 (本次定时任务)" value={snap.skipped ?? 0} valueStyle={{ color: '#888' }} />
+            <Text type="secondary" style={{ fontSize: 11 }}>被守门流程挡下</Text>
           </Card>
         </Col>
         <Col xs={12} sm={6} lg={4}>
@@ -330,7 +334,7 @@ export default function AutoSubmitMonitor() {
         </Col>
         <Col xs={12} sm={6} lg={4}>
           <Card className="glass-card">
-            <Statistic title="BRAIN 拒 (24h)" value={tally.rejected ?? 0} valueStyle={{ color: '#ffb700' }} />
+            <Statistic title="BRAIN 拒绝 (24h)" value={tally.rejected ?? 0} valueStyle={{ color: '#ffb700' }} />
           </Card>
         </Col>
         <Col xs={12} sm={6} lg={4}>
@@ -344,8 +348,8 @@ export default function AutoSubmitMonitor() {
         <Text type="secondary">查看:</Text>
         <Segmented value={outcome} onChange={setOutcome} options={OUTCOME_OPTIONS} />
         {snapshotView && (
-          <Tooltip title="只显示最近一次 beat 的快照(每 6h 一次 beat 会给每个候选重写一行,否则同一 alpha 会按历史 run 重复出现)。看「全部」查跨 run 历史。">
-            <Tag color="blue">最近一次 beat 快照</Tag>
+          <Tooltip title="只显示最近一次定时任务的快照(每 6 小时一次定时任务会给每个候选重写一行,否则同一 alpha 会按历史执行批次重复出现)。看「全部」查跨批次历史。">
+            <Tag color="blue">最近一次定时任务快照</Tag>
           </Tooltip>
         )}
         {outcome === 'skipped' && skipDist.length > 0 && (
@@ -368,7 +372,7 @@ export default function AutoSubmitMonitor() {
           locale={{
             emptyText:
               outcome === 'would_submit'
-                ? '当前无「将提交」候选 — beat 尚未跑、或全部被守门栈挡下(看「已跳过」+各门分布)'
+                ? '当前无「将提交」候选 — 定时任务尚未跑、或全部被守门流程挡下(看「已跳过」+各门分布)'
                 : '无记录',
           }}
         />

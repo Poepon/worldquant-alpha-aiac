@@ -51,10 +51,10 @@ const BAND_ORDER = ['GREEN', 'YELLOW', 'ORANGE', 'RED', 'UNKNOWN']
 //   - hypothesis_health_check: 触发器口径已弃用(见 hypothesis-health 页 banner)。
 const BEAT_META = {
   alpha_health_check: { label: 'Alpha 健康度', route: '/ops/alpha-health' },
-  hypothesis_health_check: { label: 'Hypothesis 触发器', route: '/ops/hypothesis-health', stale: true },
-  pillar_balance: { label: '五支柱平衡', route: '/ops/pillar-balance' },
-  regime_infer: { label: '市场体制', route: '/ops/regime', stale: true },
-  negative_knowledge_extract: { label: '失败模式沉淀', route: '/ops/negative-knowledge' },
+  hypothesis_health_check: { label: '假设触发器', route: '/ops/hypothesis-health', stale: true },
+  pillar_balance: { label: '五大因子类别平衡', route: '/ops/pillar-balance' },
+  regime_infer: { label: '市场行情阶段', route: '/ops/regime', stale: true },
+  negative_knowledge_extract: { label: '失败经验库', route: '/ops/negative-knowledge' },
   macro_narrative_extract: { label: '宏观叙事', route: '/ops/macro-narratives' },
   llm_op_monitor: { label: 'LLM 算子监控', route: '/ops/llm-op-monitor' },
 }
@@ -135,18 +135,18 @@ export default function OpsOverview() {
           type="success"
           showIcon
           banner
-          message={<strong>🟢 REGIME 转向信号 — 老边际在当前数据上恢复了</strong>}
+          message={<strong>🟢 行情切换信号 — 老策略的优势在当前数据上恢复了</strong>}
           description={
             <span>
-              提交集当前 re-sim 均值 {regimeSig?.submitted?.mean_resim}(提交时 {regimeSig?.submitted?.mean_baseline})、
+              已提交策略当前重新回测均值 {regimeSig?.submitted?.mean_resim}(提交时 {regimeSig?.submitted?.mean_baseline})、
               {regimeSig?.n_recovered_total} 个回到可提交。考虑恢复挖掘生产。
-              {' '}<a onClick={() => navigate('/ops/regime-monitor')}>查看 Regime 监测器 →</a>
+              {' '}<a onClick={() => navigate('/ops/regime-monitor')}>查看行情切换监测 →</a>
             </span>
           }
         />
       )}
       <OpsSectionCard
-        title="昨夜 daily-beat 执行状态"
+        title="昨夜定时任务执行状态"
         onRefresh={refetch}
         loading={loading}
       >
@@ -169,7 +169,7 @@ export default function OpsOverview() {
                   <Space size={4} align="center">
                     <Text style={{ fontSize: 13 }}>{m.label}</Text>
                     {m.stale && (
-                      <Tooltip title="数据源已退役 / 冻结,以下日期不可信。">
+                      <Tooltip title="数据源已退役 / 冻结，以下日期不可信。">
                         <Tag color="default" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>
                           已弃用
                         </Tag>
@@ -205,21 +205,21 @@ export default function OpsOverview() {
               </Col>
               <Col span={6}>
                 <Statistic
-                  title="GREEN"
+                  title="健康"
                   value={alphaSummary.band_counts?.GREEN || 0}
                   valueStyle={{ color: BAND_COLORS.GREEN }}
                 />
               </Col>
               <Col span={6}>
                 <Statistic
-                  title="RED"
+                  title="异常"
                   value={alphaSummary.band_counts?.RED || 0}
                   valueStyle={{ color: BAND_COLORS.RED }}
                 />
               </Col>
               <Col span={6}>
                 <Statistic
-                  title="UNKNOWN"
+                  title="未知"
                   value={alphaSummary.band_counts?.UNKNOWN || 0}
                   valueStyle={{ color: BAND_COLORS.UNKNOWN }}
                 />
@@ -246,13 +246,13 @@ export default function OpsOverview() {
 
         <Col xs={24} md={12}>
           <OpsSectionCard
-            title="Hypothesis 触发概览"
+            title="假设触发概览"
             source={hypSummary.source}
             staleDays={hypSummary.stale_days}
           >
             <Row gutter={[8, 8]}>
               <Col span={8}>
-                <Statistic title="ACTIVE+PROMOTED" value={hypSummary.total_active || 0} />
+                <Statistic title="生效中 + 已提升复用" value={hypSummary.total_active || 0} />
               </Col>
               <Col span={8}>
                 <Statistic
@@ -263,7 +263,7 @@ export default function OpsOverview() {
               </Col>
               <Col span={8}>
                 <Statistic
-                  title="平均 score"
+                  title="平均评分"
                   value={hypSummary.avg_thesis_score ?? '—'}
                   precision={2}
                 />
@@ -286,20 +286,20 @@ export default function OpsOverview() {
       <Row gutter={[16, 16]}>
         <Col xs={24} md={12}>
           <OpsSectionCard
-            title="池队列快照"
+            title="流水线队列快照"
             source="service"
             rerunSlot={
               pool ? (
                 pool.enabled ? (
-                  <Tag color="green" style={{ margin: 0 }}>POOL ON</Tag>
+                  <Tag color="green" style={{ margin: 0 }}>流水线 运行中</Tag>
                 ) : (
-                  <Tag color="default" style={{ margin: 0 }}>POOL OFF</Tag>
+                  <Tag color="default" style={{ margin: 0 }}>流水线 已关闭</Tag>
                 )
               ) : null
             }
           >
             {poolError ? (
-              <Empty description="池状态拉取失败(GET /ops/pools/status)" />
+              <Empty description="流水线状态拉取失败（GET /ops/pools/status）" />
             ) : !pool ? (
               <div style={{ textAlign: 'center', padding: 24 }}>
                 <Spin />
@@ -309,14 +309,14 @@ export default function OpsOverview() {
                 <Row gutter={[8, 12]}>
                   <Col span={8}>
                     <Statistic
-                      title="hyp_intent PENDING"
+                      title="想法队列：待认领"
                       value={intentPending}
                     />
                   </Col>
                   <Col span={8}>
-                    <Tooltip title={pendingSimHot ? 'PENDING_SIM > 500:HG 产出严重快于 S 消费,sim 槽积压' : undefined}>
+                    <Tooltip title={pendingSimHot ? '排队待回测 > 500:想法生成产出严重快于回测消费,并发回测名额积压' : undefined}>
                       <Statistic
-                        title="待模拟 PENDING_SIM"
+                        title="排队待回测"
                         value={candPendingSim}
                         valueStyle={{ color: pendingSimHot ? '#ff4d4f' : undefined }}
                       />
@@ -324,20 +324,20 @@ export default function OpsOverview() {
                   </Col>
                   <Col span={8}>
                     <Statistic
-                      title="待评估 PENDING_EVAL"
+                      title="排队待评估"
                       value={candPendingEval}
                     />
                   </Col>
                   <Col span={8}>
                     <Statistic
-                      title="已完成 DONE"
+                      title="已完成"
                       value={candDone}
                       valueStyle={{ color: candDone > 0 ? '#3f8600' : undefined }}
                     />
                   </Col>
                   <Col span={8}>
                     <Statistic
-                      title="Supervisor worker"
+                      title="在线工作进程"
                       value={poolWorkers}
                       suffix={poolExpected ? `/ ${poolExpected}` : undefined}
                       valueStyle={{
@@ -352,7 +352,7 @@ export default function OpsOverview() {
                   </Col>
                   <Col span={8}>
                     <Statistic
-                      title="产出 (近 90min)"
+                      title="产出（近 90 分钟）"
                       value={tpAlpha}
                       suffix={`alpha / ${tpCand} 候选`}
                       valueStyle={{ color: tpAlpha > 0 ? '#3f8600' : undefined }}
@@ -361,9 +361,9 @@ export default function OpsOverview() {
                 </Row>
                 {pendingSimHot && (
                   <div style={{ marginTop: 12 }}>
-                    <Tag color="red">PENDING_SIM 积压</Tag>
+                    <Tag color="red">待回测积压</Tag>
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      待模拟队列 &gt; 500 —— HG 远快于 S,考虑暂停 HG / 增 S worker。详见挖掘池页。
+                      待回测队列 &gt; 500 —— 想法生成远快于回测,考虑暂停想法生成 / 增加回测工作进程。详见挖掘流水线页。
                     </Text>
                   </div>
                 )}
@@ -373,9 +373,9 @@ export default function OpsOverview() {
         </Col>
 
         <Col xs={24} md={12}>
-          <OpsSectionCard title="近期 Top 5 失败模式">
+          <OpsSectionCard title="近期 Top 5 失败教训">
             {(data.top_pitfalls || []).length === 0 ? (
-              <Empty description="尚无 negative knowledge 数据" />
+              <Empty description="尚无失败经验库数据" />
             ) : (
               <List
                 size="small"

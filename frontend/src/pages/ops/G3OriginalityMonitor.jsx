@@ -36,6 +36,13 @@ import api from '../../services/api'
 
 const { Title, Text } = Typography
 
+// 拦截模式 label 映射（勿改 key，仅显示用）
+const MODE_LABEL = {
+  shadow: '影子（只记录不拦截）',
+  soft: '软拦截（提示）',
+  hard: '硬拦截（直接拒绝）',
+}
+
 /**
  * G3OriginalityMonitor — /ops/g3-monitor (2026-05-19).
  *
@@ -70,12 +77,12 @@ export default function G3OriginalityMonitor() {
       <Alert
         type="error"
         showIcon
-        message="加载 G3 originality stats 失败"
+        message="加载代码结构去重统计失败"
         description={error?.response?.data?.detail || error?.message || '未知错误'}
       />
     )
   }
-  if (!data) return <Empty description="无 G3 originality stats 数据" />
+  if (!data) return <Empty description="暂无代码结构去重统计数据" />
 
   const flagOn = !!data.flags?.ENABLE_AST_ORIGINALITY_GATE
   const diversityFlagOn = !!data.flags?.ENABLE_AST_DIVERSITY_DIM
@@ -112,7 +119,7 @@ export default function G3OriginalityMonitor() {
 
   const neighborColumns = [
     {
-      title: '最近邻 hash',
+      title: '最相似历史 alpha 指纹',
       dataIndex: 'nearest_neighbor_hash',
       key: 'nearest_neighbor_hash',
       render: (v) => (
@@ -139,11 +146,11 @@ export default function G3OriginalityMonitor() {
 
   const pillarColumns = [
     {
-      title: '支柱',
+      title: '因子类别',
       dataIndex: 'pillar',
       key: 'pillar',
       width: 130,
-      render: (v) => <Tag color={v === 'unknown' ? 'default' : 'cyan'}>{v}</Tag>,
+      render: (v) => <Tag color={v === 'unknown' ? 'default' : 'cyan'}>{v === 'unknown' ? '未知' : v}</Tag>,
     },
     {
       title: '拦截 / 总数',
@@ -167,10 +174,10 @@ export default function G3OriginalityMonitor() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           <CopyOutlined style={{ marginRight: 8 }} />
-          AST 原创性监控（G3 Phase A）
+          代码结构去重监控
         </Title>
         <Space>
-          <Text type="secondary">时间窗口:</Text>
+          <Text type="secondary">时间窗口：</Text>
           <Select
             value={days}
             onChange={setDays}
@@ -194,41 +201,41 @@ export default function G3OriginalityMonitor() {
           <Space wrap>
             <strong>健康状态：{healthy ? '健康' : '需关注'}</strong>
             <Tag color={mode === 'hard' ? 'red' : mode === 'soft' ? 'orange' : 'blue'}>
-              MODE: {mode}
+              模式：{MODE_LABEL[mode] || mode}
             </Tag>
-            <Tag color="purple">τ = {threshold.toFixed(3)}</Tag>
+            <Tag color="purple">阈值 τ = {threshold.toFixed(3)}</Tag>
             <Tag color={flagOn ? 'success' : 'default'}>
-              ENABLE_AST_ORIGINALITY_GATE: {flagOn ? '开' : '关'}
+              去重开关：{flagOn ? '开' : '关'}
             </Tag>
             <Tag color={diversityFlagOn ? 'success' : 'default'}>
-              ENABLE_AST_DIVERSITY_DIM: {diversityFlagOn ? '开' : '关'}
+              多样性维度：{diversityFlagOn ? '开' : '关'}
             </Tag>
             <Text type="secondary">
-              健康门槛: flag ON + 拦截率落在 5-15% 区间（shadow 校准 sweet spot）
+              健康门槛：开关开启 + 拦截率落在 5-15% 区间（影子模式校准的最佳区间）
             </Text>
           </Space>
         }
         description={
           !flagOn ? (
             <Text type="warning" style={{ fontSize: 12 }}>
-              ENABLE_AST_ORIGINALITY_GATE 关闭中,候选时不会检查 AST 相似度。
-              开启后(默认 mode=shadow)将记录 ast_distance_log 但不阻断,
-              此页可看到 block_rate 是否需要升级到 soft / hard。
+              代码结构去重开关关闭中，生成候选时不会检查代码结构相似度。
+              开启后（默认为影子模式）只记录相似度但不拦截，
+              此页可看到拦截率是否需要升级到软拦截 / 硬拦截。
             </Text>
           ) : total === 0 ? (
             <Text type="warning" style={{ fontSize: 12 }}>
-              flag 已开,但窗口内 ast_distance_log 无数据。
-              确认是否有候选在生成 / 是否需要 enable_ast_diversity_dim 提供基准向量。
+              开关已开，但窗口内没有相似度记录数据。
+              确认是否有候选在生成 / 是否需要开启多样性维度提供基准向量。
             </Text>
           ) : blockPct > 15 ? (
             <Text type="warning" style={{ fontSize: 12 }}>
-              拦截率 {blockPct.toFixed(2)}% 偏高 — τ = {threshold} 可能过严。
-              先降 τ 再考虑升级 mode,否则 hard 模式会拒掉大量正常候选。
+              拦截率 {blockPct.toFixed(2)}% 偏高 —— 阈值 τ = {threshold} 可能过严。
+              先降低 τ 再考虑升级拦截模式，否则硬拦截会拒掉大量正常候选。
             </Text>
           ) : blockPct < 5 ? (
             <Text type="warning" style={{ fontSize: 12 }}>
-              拦截率 {blockPct.toFixed(2)}% 偏低 — τ = {threshold} 可能过松。
-              升 τ 才能抓住"换皮"候选,或者继续观察直到样本量充足。
+              拦截率 {blockPct.toFixed(2)}% 偏低 —— 阈值 τ = {threshold} 可能过松。
+              提高 τ 才能抓住"换皮重复"候选，或者继续观察直到样本量充足。
             </Text>
           ) : null
         }
@@ -244,7 +251,7 @@ export default function G3OriginalityMonitor() {
               valueStyle={{ color: '#00d4ff' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              ast_distance_log 行数（非空 distance）
+              已计算结构相似度的候选条数
             </Text>
           </Card>
         </Col>
@@ -257,13 +264,13 @@ export default function G3OriginalityMonitor() {
               valueStyle={{ color: '#ff4d4f' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              ast_distance_min &lt; τ
+              结构相似度过高（最近距离 &lt; 阈值 τ）
             </Text>
           </Card>
         </Col>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="拦截 / 总数。Shadow 校准 sweet spot 在 5-15% 区间">
+            <Tooltip title="拦截数 / 总数。影子模式校准的最佳区间在 5-15%">
               <Statistic
                 title={
                   <Space>
@@ -288,7 +295,7 @@ export default function G3OriginalityMonitor() {
               valueStyle={{ color: '#ffb700' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              MODE: {mode}
+              模式：{MODE_LABEL[mode] || mode}
             </Text>
           </Card>
         </Col>
@@ -299,8 +306,8 @@ export default function G3OriginalityMonitor() {
         className="glass-card"
         title={
           <Space>
-            min_distance 直方图
-            <Tooltip title={`τ 位置已用 ⚑ 标在 X 轴 (${threshold.toFixed(3)})。落在 τ 左侧的桶都会被拦截`}>
+            结构相似度（最近距离）分布直方图
+            <Tooltip title={`阈值 τ 位置已用 ⚑ 标在 X 轴（${threshold.toFixed(3)}）。落在 τ 左侧的区间都会被拦截`}>
               <InfoCircleOutlined style={{ color: '#9c88ff' }} />
             </Tooltip>
           </Space>
@@ -324,7 +331,7 @@ export default function G3OriginalityMonitor() {
               <YAxis allowDecimals={false} />
               <RTooltip />
               <Legend
-                formatter={() => `min_distance 分布 (τ = ${threshold.toFixed(3)})`}
+                formatter={() => `结构相似度分布（阈值 τ = ${threshold.toFixed(3)}）`}
               />
               <Bar dataKey="count" fill="#00d4ff">
                 {histBars.map((b, i) => (
@@ -338,16 +345,16 @@ export default function G3OriginalityMonitor() {
           </ResponsiveContainer>
         )}
         <Text type="secondary" style={{ fontSize: 12 }}>
-          红色桶位于 τ 左侧,会被 hard 模式拦截。Operator 目标:τ 抓住底部 5-10% 的"换皮"候选。
+          红色区间位于阈值 τ 左侧，会被硬拦截模式拦截。调参目标：让 τ 抓住底部 5-10% 的"换皮重复"候选。
         </Text>
       </Card>
 
       {/* Per-pillar block rate */}
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={14}>
-          <Card className="glass-card" title="按支柱拦截率（post-gate 信号）" size="small">
+          <Card className="glass-card" title="各因子类别拦截率" size="small">
             {pillarBars.length === 0 ? (
-              <Empty description="alphas.metrics 暂无 _g3_verdict 标签" />
+              <Empty description="暂无去重结论标注数据" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <BarChart data={pillarBars}>
@@ -363,19 +370,19 @@ export default function G3OriginalityMonitor() {
               </ResponsiveContainer>
             )}
             <Text type="secondary" style={{ fontSize: 12 }}>
-              拦截率最高的支柱 = 需要推动多样性的下一目标。
+              拦截率最高的因子类别 = 需要推动多样性的下一目标。
             </Text>
           </Card>
         </Col>
         <Col xs={24} lg={10}>
-          <Card className="glass-card" title="按支柱明细" size="small">
+          <Card className="glass-card" title="各因子类别明细" size="small">
             <Table
               size="small"
               rowKey="pillar"
               dataSource={pillarBars}
               columns={pillarColumns}
               pagination={false}
-              locale={{ emptyText: '暂无支柱数据' }}
+              locale={{ emptyText: '暂无因子类别数据' }}
             />
           </Card>
         </Col>
@@ -386,8 +393,8 @@ export default function G3OriginalityMonitor() {
         className="glass-card"
         title={
           <Space>
-            高频"换皮"磁铁 Top 10
-            <Tooltip title="最近邻 hash 被拦截次数最多的历史 alpha — 这些是 AST-isomorphism 磁铁,新候选频繁与之相似">
+            高频"换皮重复"来源 Top 10
+            <Tooltip title="被拦截次数最多的历史 alpha —— 新候选频繁与这些 alpha 的代码结构相似">
               <InfoCircleOutlined style={{ color: '#9c88ff' }} />
             </Tooltip>
           </Space>
@@ -401,7 +408,7 @@ export default function G3OriginalityMonitor() {
           dataSource={data.top_neighbors || []}
           columns={neighborColumns}
           pagination={false}
-          locale={{ emptyText: '窗口内暂无被拦截候选' }}
+          locale={{ emptyText: '窗口内暂无被拦截的候选' }}
         />
       </Card>
     </div>

@@ -41,6 +41,14 @@ const STATUS_COLOR = {
   ABANDONED: '#8c8c8c',
   PROMOTED: '#722ed1',
 }
+// 假设生命周期状态 → 中文 label(渲染处用 STATUS_LABEL[s] || s,后端 key 不改)
+const STATUS_LABEL = {
+  PROPOSED: '待定',
+  ACTIVE: '生效中',
+  SUPERSEDED: '被替代',
+  ABANDONED: '已弃用',
+  PROMOTED: '已提升复用',
+}
 
 function fmtTime(iso) {
   if (!iso) return '—'
@@ -73,7 +81,7 @@ export default function CognitiveReconcileMonitor() {
     [byAttribution],
   )
 
-  if (isLoading) return <Spin tip="加载池认知对账状态..." style={{ marginTop: 80 }} />
+  if (isLoading) return <Spin tip="加载知识库对账状态..." style={{ marginTop: 80 }} />
 
   const enabled = !!data?.enabled
   const watermark = data?.watermark || null
@@ -91,12 +99,12 @@ export default function CognitiveReconcileMonitor() {
     <div>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
-          <ExperimentOutlined /> 池认知对账 (Phase 2 反馈环)
+          <ExperimentOutlined /> 知识库对账（第二阶段反馈环）
         </Title>
         <Space>
           {enabled
-            ? <Badge status="processing" text="ENABLE_POOL_COGNITIVE_RECONCILE ON" />
-            : <Badge status="default" text="OFF — 休眠但就绪" />}
+            ? <Badge status="processing" text="知识库对账开关 已开启" />
+            : <Badge status="default" text="已关闭 — 休眠但就绪" />}
           <Button icon={<ReloadOutlined spin={isFetching} />} onClick={() => refetch()}>刷新</Button>
         </Space>
       </Row>
@@ -106,7 +114,7 @@ export default function CognitiveReconcileMonitor() {
           type="error"
           showIcon
           style={{ marginBottom: 16 }}
-          message="拉取池认知对账状态失败(端点 /ops/cognitive-reconcile/status)。"
+          message="拉取知识库对账状态失败（接口 /ops/cognitive-reconcile/status）。"
           description={String(error?.message || error || '')}
         />
       )}
@@ -117,13 +125,13 @@ export default function CognitiveReconcileMonitor() {
           showIcon
           icon={<WarningOutlined />}
           style={{ marginBottom: 16 }}
-          message="Phase 2 池原生反馈环未启用(ENABLE_POOL_COGNITIVE_RECONCILE OFF)"
+          message="第二阶段流水线原生反馈环未启用（知识库对账开关关闭）"
           description={
             <Paragraph style={{ marginBottom: 0 }}>
-              reconcile beat 从未运行(watermark={watermark ? fmtTime(watermark) : '未运行'});
-              以下 denorm 生命周期列(can_submit_count / submitted_count / attribution)恒为 <b>0</b>;
-              池已产 <b>{poolEraTotal}</b> 个池原生假设待对账。
-              翻 ON 有前置(先跑 pillar A/B + monitor breadth),属后端生产决策。
+              对账定时任务从未运行(处理进度位置={watermark ? fmtTime(watermark) : '未运行'});
+              以下汇总预计算的生命周期列(可提交数 / 已提交数 / 归因)恒为 <b>0</b>;
+              流水线已产出 <b>{poolEraTotal}</b> 个流水线原生假设待对账。
+              开启有前置(先跑因子类别 A/B + 观测广度),属后端生产决策。
             </Paragraph>
           }
         />
@@ -134,10 +142,10 @@ export default function CognitiveReconcileMonitor() {
           type="success"
           showIcon
           style={{ marginBottom: 16 }}
-          message="Phase 2 池原生反馈环已启用"
+          message="第二阶段流水线原生反馈环已启用"
           description={
             <span>
-              reconcile beat 最近处理边(watermark):<b>{watermarkLabel}</b>
+              对账定时任务最近处理进度位置:<b>{watermarkLabel}</b>
             </span>
           }
         />
@@ -148,29 +156,29 @@ export default function CognitiveReconcileMonitor() {
         <Row gutter={16}>
           <Col xs={12} sm={8} md={5}>
             <Statistic
-              title="池原生假设 (hyp_intent)"
+              title="流水线原生假设（来自想法队列）"
               value={poolEraTotal}
               prefix={<AimOutlined />}
               valueStyle={{ color: poolEraTotal > 0 ? '#3f8600' : undefined }}
             />
-            <Text type="secondary" style={{ fontSize: 12 }}>待本 beat 对账</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>待本任务对账</Text>
           </Col>
           <Col xs={12} sm={8} md={5}>
             <Statistic
-              title="假设总数 (含 FLAT 遗留)"
+              title="假设总数（含历史遗留）"
               value={total}
               prefix={<BranchesOutlined />}
             />
           </Col>
           <Col xs={12} sm={8} md={5}>
-            <Statistic title="grace_sec" value={graceSec} suffix="s" />
+            <Statistic title="宽限秒数" value={graceSec} suffix="s" />
           </Col>
           <Col xs={12} sm={8} md={4}>
-            <Statistic title="window_days" value={windowDays} suffix="d" />
+            <Statistic title="统计窗口天数" value={windowDays} suffix="d" />
           </Col>
           <Col xs={24} sm={24} md={5}>
             <Statistic
-              title="watermark (beat 处理边)"
+              title="处理进度位置"
               value={watermarkLabel}
               valueStyle={{ fontSize: 16 }}
               prefix={<ClockCircleOutlined />}
@@ -182,7 +190,7 @@ export default function CognitiveReconcileMonitor() {
       {/* ---- 生命周期分布 --------------------------------------------- */}
       <Card
         size="small"
-        title="假设生命周期分布 (by_status)"
+        title="假设生命周期分布"
         style={{ marginBottom: 16 }}
       >
         {!hasStatusData ? (
@@ -195,16 +203,17 @@ export default function CognitiveReconcileMonitor() {
                   key={r.status}
                   color={r.count > 0 ? STATUS_COLOR[r.status] : 'default'}
                 >
-                  {r.status}: <b>{r.count}</b>
+                  {STATUS_LABEL[r.status] || r.status}: <b>{r.count}</b>
                 </Tag>
               ))}
             </Space>
             <ResponsiveContainer width="100%" height={260}>
               <BarChart data={statusRows}>
                 <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
-                <XAxis dataKey="status" stroke="#888" />
+                <XAxis dataKey="status" stroke="#888" tickFormatter={(s) => STATUS_LABEL[s] || s} />
                 <YAxis stroke="#888" allowDecimals={false} />
-                <ReTooltip contentStyle={{ background: '#1f2937', border: '1px solid #444' }} />
+                <ReTooltip contentStyle={{ background: '#1f2937', border: '1px solid #444' }}
+                  labelFormatter={(s) => STATUS_LABEL[s] || s} />
                 <Bar dataKey="count" name="假设数">
                   {statusRows.map((r) => (
                     <Cell key={r.status} fill={STATUS_COLOR[r.status] || '#888'} />
@@ -215,42 +224,42 @@ export default function CognitiveReconcileMonitor() {
           </>
         )}
         <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 8, marginBottom: 0 }}>
-          注脚:这些 status 计数主要是 <b>FLAT 时代遗留</b>(PROMOTED 等来自旧同步更新),
-          并非本 reconcile beat 的产出。本 beat 上线后会按 attribution 重新归因池原生假设。
+          注脚:这些状态计数主要是 <b>历史遗留数据</b>(「已提升复用」等来自旧的同步更新),
+          并非本对账任务的产出。本任务上线后会按归因类型重新归因流水线原生假设。
         </Paragraph>
       </Card>
 
       {/* ---- Phase 2 denorm 进度卡 ----------------------------------- */}
       <Card
         size="small"
-        title="Phase 2 denorm 进度(待 beat 上线后填充)"
+        title="第二阶段汇总预计算进度（待对账任务上线后填充）"
       >
         {!enabled && (
           <Alert
             type="info"
             showIcon
             style={{ marginBottom: 12 }}
-            message="以下指标由 reconcile beat 写入的 denorm 列计算;beat 未运行时结构性恒为 0。"
+            message="以下指标由对账任务写入的汇总预计算列计算;任务未运行时结构性恒为 0。"
           />
         )}
         <Row gutter={16}>
           <Col xs={12} sm={8}>
             <Statistic
-              title="can_submit_count > 0 的假设"
+              title="有可提交 alpha 的假设"
               value={canSubmitGt0}
               valueStyle={{ color: canSubmitGt0 > 0 ? '#3f8600' : '#8c8c8c' }}
             />
           </Col>
           <Col xs={12} sm={8}>
             <Statistic
-              title="submitted_count > 0 的假设"
+              title="有已提交 alpha 的假设"
               value={submittedGt0}
               valueStyle={{ color: submittedGt0 > 0 ? '#3f8600' : '#8c8c8c' }}
             />
           </Col>
           <Col xs={12} sm={8}>
             <Statistic
-              title="已盖 attribution 的假设"
+              title="已标注归因的假设"
               value={attributionStamped}
               valueStyle={{ color: attributionStamped > 0 ? '#3f8600' : '#8c8c8c' }}
             />
@@ -258,11 +267,11 @@ export default function CognitiveReconcileMonitor() {
         </Row>
 
         <div style={{ marginTop: 16 }}>
-          <Text strong>attribution 分布 (by_attribution)</Text>
+          <Text strong>归因类型分布</Text>
           <div style={{ marginTop: 8 }}>
             {attributionEntries.length === 0 ? (
-              <Tooltip title="reconcile beat 上线并归因后,此处会按 AttributionType 分桶填充。">
-                <Tag color="default">待 beat 上线后填充(当前为空)</Tag>
+              <Tooltip title="对账任务上线并归因后,此处会按归因类型分桶填充。">
+                <Tag color="default">待对账任务上线后填充(当前为空)</Tag>
               </Tooltip>
             ) : (
               <Space size={[8, 8]} wrap>
@@ -277,10 +286,10 @@ export default function CognitiveReconcileMonitor() {
         </div>
 
         <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 12, marginBottom: 0 }}>
-          这些 denorm 列(can_submit_count / submitted_count / attribution)是 Phase 2 反馈环的
-          核心产出:beat 会把池原生假设的下游 alpha 结果(是否 can_submit / 是否 submitted)
-          回写到假设层,并按 attribution(hypothesis 失败 vs implementation 失败)归因,
-          供后续 KB / bandit reward 学习。当前 beat 休眠,故全部为 0。
+          这些汇总预计算列(可提交数 / 已提交数 / 归因)是第二阶段反馈环的
+          核心产出:对账任务会把流水线原生假设的下游 alpha 结果(是否可提交 / 是否已提交)
+          回写到假设层,并按归因(假设方向失败 vs 代码实现失败)归类,
+          供后续知识库 / 数据集选择奖励学习。当前对账任务休眠,故全部为 0。
         </Paragraph>
       </Card>
     </div>

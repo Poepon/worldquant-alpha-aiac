@@ -73,22 +73,22 @@ export default function CoSTEERMonitor() {
 
   return (
     <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-      {/* 诚实 banner — 说明 CoSTEER 反馈环已停用 */}
+      {/* 诚实 banner — 说明知识库反馈环已停用 */}
       <Alert
         type="info"
         showIcon
-        message="CoSTEER 反馈环已在四池切换中停用"
+        message="知识库反馈环已在流水线改造中停用"
         description={
           <span>
-            CoSTEER 反馈环（R1a 归因 / R1b 重试链）已在四池切换中停用
-            （1b-flip + 1c-delete）；将以 Phase 2 池原生认知对账 beat 重新接入。
-            本页现展示 KB / RAG 检索健康。
+            知识库反馈环（归因分析 / 重试链）已在挖掘流水线改造中停用；
+            将在第二阶段以流水线原生的知识库对账定时任务重新接入。
+            本页现展示知识库与知识检索的健康状况。
           </span>
         }
       />
 
       <OpsSectionCard
-        title="知识库与 RAG 健康（live R8 遥测）"
+        title="知识库与知识检索健康（实时遥测）"
         source="service"
         loading={r8.loading || r8Query.loading}
         onRefresh={() => {
@@ -111,11 +111,11 @@ export default function CoSTEERMonitor() {
           />
         </Space>
 
-        {/* 当前 Flag 状态行 */}
+        {/* 当前开关状态行 */}
         <Alert
           message={
             <Space wrap>
-              <strong>RAG Flag 状态：</strong>
+              <strong>知识检索开关状态：</strong>
               {Object.entries(r8Payload.flags || {}).map(([k, v]) => flagTag(k, v))}
               {Object.entries(r8QueryPayload.flags || {})
                 .filter(([k]) => k === 'ENABLE_R8_QUERY_LOG')
@@ -130,25 +130,25 @@ export default function CoSTEERMonitor() {
         {/* KPI 行 */}
         <Row gutter={[16, 16]}>
           <Col xs={24} md={6}>
-            <AntdTooltip title="知识库内活跃（未衰减）条目总数 — 层级 RAG 可匹配的语料深度">
+            <AntdTooltip title="知识库内活跃（未过期）条目总数 — 层级知识检索可匹配的语料深度">
               <Statistic title="活跃条目总数" value={r8Payload.total_active ?? 0} />
             </AntdTooltip>
           </Col>
           <Col xs={24} md={6}>
-            <AntdTooltip title="已被标记衰减的条目数 — 仅 FAILURE 侧检索仍会包含，SUCCESS 侧排除">
-              <Statistic title="已衰减条目总数" value={r8Payload.total_decayed ?? 0} />
+            <AntdTooltip title="已被标记过期的条目数 — 仅失败经验侧检索仍会包含，成功经验侧排除">
+              <Statistic title="已过期条目总数" value={r8Payload.total_decayed ?? 0} />
             </AntdTooltip>
           </Col>
           <Col xs={24} md={6}>
-            <AntdTooltip title="窗口内 RAG 检索总次数（仅 ENABLE_R8_QUERY_LOG 打开时记录）">
+            <AntdTooltip title="窗口内知识检索总次数（仅检索日志开关打开时记录）">
               <Statistic
-                title={`RAG 检索次数（近 ${days} 天）`}
+                title={`知识检索次数（近 ${days} 天）`}
                 value={r8QueryPayload.total_queries ?? 0}
               />
             </AntdTooltip>
           </Col>
           <Col xs={24} md={6}>
-            <AntdTooltip title="窗口内任一层从 Redis 缓存命中的查询比例">
+            <AntdTooltip title="窗口内任一层从缓存命中的查询比例">
               <Statistic
                 title="缓存命中率"
                 value={((r8QueryPayload.cache_hit_rate ?? 0) * 100).toFixed(2)}
@@ -162,7 +162,7 @@ export default function CoSTEERMonitor() {
       {/* R8 知识库 shape — 语料形状（活跃 vs 已衰减 + 支柱覆盖） */}
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
-          <OpsSectionCard title="知识库条目类型（活跃 vs 已衰减）">
+          <OpsSectionCard title="知识库条目类型（活跃 vs 已过期）">
             {entryTypeBars.length === 0 ? (
               <Empty description="知识库无数据" />
             ) : (
@@ -172,7 +172,7 @@ export default function CoSTEERMonitor() {
                   <XAxis dataKey="type" />
                   <YAxis allowDecimals={false} />
                   <Tooltip />
-                  <Legend formatter={(v) => (v === 'active' ? '活跃' : '已衰减')} />
+                  <Legend formatter={(v) => (v === 'active' ? '活跃' : '已过期')} />
                   <Bar dataKey="active" stackId="kb" fill="#1677ff" />
                   <Bar dataKey="decayed" stackId="kb" fill="#bfbfbf" />
                 </BarChart>
@@ -180,7 +180,7 @@ export default function CoSTEERMonitor() {
             )}
             <Space wrap style={{ marginTop: 12 }}>
               <Tag color="blue">活跃总数：{r8Payload.total_active ?? 0}</Tag>
-              <Tag>已衰减总数：{r8Payload.total_decayed ?? 0}</Tag>
+              <Tag>已过期总数：{r8Payload.total_decayed ?? 0}</Tag>
               <Tag color="success">
                 活跃成功模式：{r8Payload.success_pattern_active ?? 0}
               </Tag>
@@ -188,16 +188,16 @@ export default function CoSTEERMonitor() {
                 活跃失败教训：{r8Payload.failure_pitfall_active ?? 0}
               </Tag>
               <Tag color="purple">
-                R5 可排序条数：{r8Payload.r5_rankable_success_count ?? 0}
+                可排序成功条数：{r8Payload.r5_rankable_success_count ?? 0}
               </Tag>
             </Space>
           </OpsSectionCard>
         </Col>
 
         <Col xs={24} lg={10}>
-          <OpsSectionCard title="支柱覆盖（活跃条目）">
+          <OpsSectionCard title="因子类别覆盖（活跃条目）">
             {pillarPie.length === 0 ? (
-              <Empty description="暂无支柱数据" />
+              <Empty description="暂无因子类别数据" />
             ) : (
               <ResponsiveContainer width="100%" height={260}>
                 <PieChart>
@@ -223,7 +223,7 @@ export default function CoSTEERMonitor() {
               </ResponsiveContainer>
             )}
             <div style={{ marginTop: 12, color: '#8c8c8c', fontSize: 12 }}>
-              「none」桶表示条目缺 pillar 标签——RAG L1 层无法命中，是回填候选。
+              「none」一桶表示条目缺少因子类别标签——知识检索的类别层无法命中，是待补全的候选。
             </div>
           </OpsSectionCard>
         </Col>
@@ -232,13 +232,13 @@ export default function CoSTEERMonitor() {
       {/* R8 实时层命中率 — 仅在 ENABLE_R8_QUERY_LOG 打开时有数据 */}
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
-          <OpsSectionCard title="RAG 实时层级命中率（窗口内每层被命中的比例）">
+          <OpsSectionCard title="知识检索实时层级命中率（窗口内每层被命中的比例）">
             {(r8QueryPayload.total_queries ?? 0) === 0 ? (
               <Empty
                 description={
                   r8QueryPayload.flags?.ENABLE_R8_QUERY_LOG
                     ? '窗口内暂无查询'
-                    : 'ENABLE_R8_QUERY_LOG 未开启 — 打开后才会记录实时层级跳转'
+                    : '检索日志开关未开启 — 打开后才会记录实时层级跳转'
                 }
               />
             ) : (
@@ -266,14 +266,14 @@ export default function CoSTEERMonitor() {
               </Tag>
             </Space>
             <div style={{ marginTop: 8, color: '#8c8c8c', fontSize: 12 }}>
-              健康部署应 L0+L1 主导（高特异性命中）、L2/L3 为兜底长尾；若 L3 主导
-              说明语料对高层太薄。
+              健康状态下应由 L0、L1 层主导（高特异性命中），L2、L3 层只作兜底长尾；
+              若 L3 层主导，说明语料对高层覆盖太薄。
             </div>
           </OpsSectionCard>
         </Col>
 
         <Col xs={24} lg={10}>
-          <OpsSectionCard title="RAG 各地区查询数">
+          <OpsSectionCard title="知识检索各地区查询数">
             {regionBars.length === 0 ? (
               <Empty description="暂无地区数据" />
             ) : (

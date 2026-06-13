@@ -185,11 +185,11 @@ export default function Dashboard() {
         <Col xs={24} sm={12} lg={8}>
           <Card className="glass-card">
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <Text type="secondary">池运行状态 (HG/S/E)</Text>
+              <Text type="secondary">挖掘流水线状态（想法生成 / 回测 / 评估）</Text>
               {poolStatus && (
                 poolEnabled
-                  ? <Badge status="processing" text="ON" />
-                  : <Badge status="default" text="OFF" />
+                  ? <Badge status="processing" text="运行中" />
+                  : <Badge status="default" text="已停用" />
               )}
             </div>
             {poolLoading ? (
@@ -198,41 +198,41 @@ export default function Dashboard() {
               </div>
             ) : poolError ? (
               <div style={{ textAlign: 'center', padding: 32 }}>
-                <Text type="secondary">无法获取池状态 (/ops/pools/status)</Text>
+                <Text type="secondary">无法获取流水线状态</Text>
               </div>
             ) : (
               <div style={{ marginTop: 16 }}>
                 <Space direction="vertical" style={{ width: '100%' }} size={10}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <Text type="secondary">常驻 worker</Text>
+                    <Text type="secondary">常驻工作进程</Text>
                     <Tag color={workersHealthy ? 'processing' : 'warning'} icon={<ThunderboltOutlined />}>
                       {workersCount} / {expectedWorkers || '?'}
                     </Tag>
                   </div>
                   <Row gutter={[8, 8]}>
                     <Col span={12}>
-                      <Tooltip title="candidate_queue 待模拟(HG 产出、等 S 池消费)">
+                      <Tooltip title="候选队列中排队待回测（想法生成已产出，等回测环节处理）">
                         <Tag color={backlogged ? 'red' : pendingSim > 0 ? 'blue' : 'default'} style={{ width: '100%', textAlign: 'center', margin: 0 }}>
-                          待模拟 <b>{pendingSim}</b>
+                          待回测 <b>{pendingSim}</b>
                         </Tag>
                       </Tooltip>
                     </Col>
                     <Col span={12}>
-                      <Tooltip title="candidate_queue 模拟中(S 池在飞)">
+                      <Tooltip title="候选队列回测中（回测环节正在处理）">
                         <Tag color={simulating > 0 ? 'gold' : 'default'} style={{ width: '100%', textAlign: 'center', margin: 0 }}>
-                          模拟中 <b>{simulating}</b>
+                          回测中 <b>{simulating}</b>
                         </Tag>
                       </Tooltip>
                     </Col>
                     <Col span={12}>
-                      <Tooltip title="candidate_queue 待评估(等 E 池消费)">
+                      <Tooltip title="候选队列中排队待评估（等评估环节处理）">
                         <Tag color={pendingEval > 0 ? 'cyan' : 'default'} style={{ width: '100%', textAlign: 'center', margin: 0 }}>
                           待评估 <b>{pendingEval}</b>
                         </Tag>
                       </Tooltip>
                     </Col>
                     <Col span={12}>
-                      <Tooltip title="candidate_queue 已完成(累计)">
+                      <Tooltip title="候选队列已完成（累计）">
                         <Tag color={cqDone > 0 ? 'green' : 'default'} style={{ width: '100%', textAlign: 'center', margin: 0 }}>
                           已完成 <b>{cqDone}</b>
                         </Tag>
@@ -240,7 +240,7 @@ export default function Dashboard() {
                     </Col>
                   </Row>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <Text type="secondary">近 90min 产出</Text>
+                    <Text type="secondary">近 90 分钟产出</Text>
                     <Text>
                       <Text style={{ color: '#9c88ff' }}>{tpCandidates}</Text> 候选 /{' '}
                       <Text style={{ color: tpAlphas > 0 ? '#00ff88' : undefined }}>{tpAlphas}</Text> alpha
@@ -254,14 +254,14 @@ export default function Dashboard() {
                       style={{ padding: '4px 8px' }}
                       message={
                         <Text style={{ fontSize: 12 }}>
-                          待模拟积压 {pendingSim}(HG≫S):S 池消费跟不上 HG 产出
+                          待回测积压 {pendingSim}：回测环节消费跟不上想法生成的产出
                         </Text>
                       }
                     />
                   )}
                   {!poolEnabled && (
                     <Text type="secondary" style={{ fontSize: 12 }}>
-                      ENABLE_POOL_PIPELINE OFF — 池未启用
+                      挖掘流水线未启用
                     </Text>
                   )}
                 </Space>
@@ -278,7 +278,7 @@ export default function Dashboard() {
               <Space direction="vertical" style={{ width: '100%' }} size={10}>
                 {/* 池开关:enabled=ON 绿,OFF 灰中性(关闭非故障) */}
                 <HealthRow
-                  label="池流水线 (ENABLE_POOL_PIPELINE)"
+                  label="挖掘流水线"
                   ok={poolEnabled}
                   neutral={poolSuccess && !poolEnabled}
                   okText="已启用"
@@ -287,20 +287,20 @@ export default function Dashboard() {
                 />
                 {/* worker 健康:实际 >= 期望 */}
                 <HealthRow
-                  label="常驻 worker"
+                  label="常驻工作进程"
                   ok={workersHealthy}
                   neutral={poolSuccess && expectedWorkers === 0}
                   okText={`${workersCount}/${expectedWorkers} 健康`}
-                  neutralText="无期望基线"
+                  neutralText="无应有数量基线"
                   badText={`${workersCount}/${expectedWorkers || '?'} 缺失`}
                   sub={poolSuccess ? undefined : '加载中'}
                 />
                 {/* 无卡死:stuck_past_lease 合计==0 */}
                 <HealthRow
-                  label="队列卡死 (past lease)"
+                  label="队列处理超时"
                   ok={poolSuccess ? noStuck : true}
-                  okText={poolSuccess ? '无卡死' : '—'}
-                  badText={`${stuckTotal} 行卡死`}
+                  okText={poolSuccess ? '无超时' : '—'}
+                  badText={`${stuckTotal} 行超时卡住`}
                 />
                 {/* DB:请求成功隐性证明(任一池/stats 请求 200 即在线) */}
                 <HealthRow
@@ -314,8 +314,8 @@ export default function Dashboard() {
                 {/* BRAIN 模拟并发槽(live: getSimSlots) */}
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <Text>
-                    BRAIN 模拟并发{' '}
-                    <Text type="secondary" style={{ fontSize: 12 }}>({slots.role})</Text>
+                    BRAIN 并发回测名额{' '}
+                    <Text type="secondary" style={{ fontSize: 12 }}>({slots.role === 'USER' ? '普通用户' : slots.role === 'CONSULTANT' ? '顾问' : slots.role})</Text>
                   </Text>
                   <Tag color={slots.current >= slots.limit ? 'error' : slots.current > 0 ? 'processing' : 'default'}>
                     {slots.current} / {slots.limit}
@@ -340,7 +340,7 @@ export default function Dashboard() {
         <Col xs={12} sm={6}>
           <Card className="glass-card">
             <Statistic
-              title="今日模拟次数"
+              title="今日回测次数"
               value={metrics.today_simulations}
               prefix={<ClockCircleOutlined />}
               valueStyle={{ color: '#00d4ff' }}
@@ -418,7 +418,7 @@ export default function Dashboard() {
         <Col xs={24} lg={12}>
           <Card
             className="glass-card"
-            title={<span><ApiOutlined style={{ marginRight: 8 }} />池吞吐与队列概览</span>}
+            title={<span><ApiOutlined style={{ marginRight: 8 }} />流水线吞吐与队列概览</span>}
             style={{ height: 400 }}
           >
             {poolLoading ? (
@@ -429,8 +429,8 @@ export default function Dashboard() {
               <Alert
                 type="error"
                 showIcon
-                message="无法获取池吞吐数据"
-                description="端点 /ops/pools/status 请求失败。"
+                message="无法获取流水线吞吐数据"
+                description="流水线状态请求失败。"
               />
             ) : (
               <div style={{ height: 320, overflow: 'auto' }}>
@@ -438,7 +438,7 @@ export default function Dashboard() {
                   <Col xs={12}>
                     <Card size="small" bordered={false} style={{ background: 'rgba(255,255,255,0.03)' }}>
                       <Statistic
-                        title="alpha 产出 (近 90min)"
+                        title="alpha 产出（近 90 分钟）"
                         value={tpAlphas}
                         valueStyle={{ color: tpAlphas > 0 ? '#00ff88' : '#888' }}
                         prefix={<RocketOutlined />}
@@ -448,7 +448,7 @@ export default function Dashboard() {
                   <Col xs={12}>
                     <Card size="small" bordered={false} style={{ background: 'rgba(255,255,255,0.03)' }}>
                       <Statistic
-                        title="候选产出 (近 90min)"
+                        title="候选产出（近 90 分钟）"
                         value={tpCandidates}
                         valueStyle={{ color: '#9c88ff' }}
                         prefix={<ThunderboltOutlined />}
@@ -458,7 +458,7 @@ export default function Dashboard() {
                   <Col xs={12}>
                     <Card size="small" bordered={false} style={{ background: 'rgba(255,255,255,0.03)' }}>
                       <Statistic
-                        title="待模拟 (PENDING_SIM)"
+                        title="排队待回测"
                         value={pendingSim}
                         valueStyle={{ color: backlogged ? '#ff4d4f' : '#00d4ff' }}
                         prefix={<ClockCircleOutlined />}
@@ -468,7 +468,7 @@ export default function Dashboard() {
                   <Col xs={12}>
                     <Card size="small" bordered={false} style={{ background: 'rgba(255,255,255,0.03)' }}>
                       <Statistic
-                        title="待评估 (PENDING_EVAL)"
+                        title="排队待评估"
                         value={pendingEval}
                         valueStyle={{ color: '#13c2c2' }}
                         prefix={<LineChartOutlined />}
@@ -478,7 +478,7 @@ export default function Dashboard() {
                   <Col xs={12}>
                     <Card size="small" bordered={false} style={{ background: 'rgba(255,255,255,0.03)' }}>
                       <Statistic
-                        title="队列已完成 (DONE)"
+                        title="队列已完成"
                         value={cqDone}
                         valueStyle={{ color: '#52c41a' }}
                         prefix={<CheckCircleOutlined />}
@@ -488,7 +488,7 @@ export default function Dashboard() {
                   <Col xs={12}>
                     <Card size="small" bordered={false} style={{ background: 'rgba(255,255,255,0.03)' }}>
                       <Statistic
-                        title="今日 sim 计数"
+                        title="今日回测次数"
                         value={poolStatus?.budget_sims_today ?? 0}
                         valueStyle={{ color: '#ffb700' }}
                         prefix={<DatabaseOutlined />}
@@ -502,12 +502,12 @@ export default function Dashboard() {
                     showIcon
                     icon={<WarningOutlined />}
                     style={{ marginTop: 12 }}
-                    message={`待模拟积压 ${pendingSim} 超 ${PENDING_SIM_BACKLOG}`}
-                    description="HG 池产出远快于 S 池消费,模拟侧瓶颈。"
+                    message={`待回测积压 ${pendingSim} 超 ${PENDING_SIM_BACKLOG}`}
+                    description="想法生成产出远快于回测环节消费，回测侧瓶颈。"
                   />
                 )}
                 <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 12 }}>
-                  注:暂无每日 alpha 产出时间序列端点,此处展示真实瞬时/近况数字而非折线。
+                  注：暂无每日 alpha 产出的时间序列数据，此处展示实时 / 近况数字而非折线图。
                 </Text>
               </div>
             )}

@@ -35,6 +35,12 @@ const { Search } = Input
 
 const REGIONS = ['USA', 'CHN', 'EUR', 'ASI', 'GLB', 'KOR', 'HKG', 'JPN']
 
+// 排序字段的中文名（标题栏用，避免裸显英文字段名）
+const SORT_LABELS = {
+  sharpe: 'Sharpe', fitness: 'Fitness', turnover: '换手率',
+  returns: '收益率', drawdown: '回撤', created_at: '创建时间', id: 'ID',
+}
+
 const EMPTY_FILTERS = {
   region: undefined,
   quality_status: undefined,
@@ -55,7 +61,7 @@ export default function AlphaList() {
   // Submit-state is now a SERVER-side filter (submitted / submittable /
   // rejected / unchecked) so the pagination total stays honest.
   const [submitState, setSubmitState] = useState(undefined)
-  const [sortBy, setSortBy] = useState('sharpe')
+  const [sortBy, setSortBy] = useState('created_at')
   const [sortOrder, setSortOrder] = useState('desc')
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(25)
@@ -149,12 +155,12 @@ export default function AlphaList() {
   const refreshIqcMutation = useMutation({
     mutationFn: () => api.refreshFactorIqc({ scope: 'submittable', limit: 50 }),
     onSuccess: (res) => {
-      message.success(res.message || `已触发 ${res.enqueued} 个 IQC 审计`)
+      message.success(res.message || `已触发 ${res.enqueued} 个竞赛评分变化审计`)
       setTimeout(() => queryClient.invalidateQueries(['alphas-list']), 30_000)
     },
     onError: (err) => {
       const detail = err?.response?.data?.detail || err.message
-      message.error(`IQC 审计触发失败: ${detail}`)
+      message.error(`竞赛评分审计触发失败: ${detail}`)
     },
   })
 
@@ -164,7 +170,7 @@ export default function AlphaList() {
   const resetFilters = () => {
     setFilters(EMPTY_FILTERS)
     setSubmitState(undefined)
-    setSortBy('sharpe')
+    setSortBy('created_at')
     setSortOrder('desc')
     setPage(1)
     setResetKey((k) => k + 1)
@@ -371,14 +377,14 @@ export default function AlphaList() {
         <Col>
           <Title level={3} style={{ margin: 0 }}>Alpha 列表</Title>
           <Text type="secondary">
-            当前筛选 {total} 条 · 按 {sortBy} {sortOrder === 'desc' ? '降序' : '升序'}
+            当前筛选 {total} 条 · 按 {SORT_LABELS[sortBy] || sortBy} {sortOrder === 'desc' ? '降序' : '升序'}
           </Text>
         </Col>
         <Col>
           <Space wrap>
             <Popconfirm
               title="批量刷新可提交性"
-              description="对最近 50 个 PASS alpha 重新调用 BRAIN 校验 is.checks（顺序执行，约 1 个/秒，可能耗时近 1 分钟）。确认?"
+              description="对最近 50 个「通过」的 alpha 重新调用 BRAIN 做提交前检查（顺序执行，约 1 个/秒，可能耗时近 1 分钟）。确认?"
               okText="开始"
               cancelText="取消"
               onConfirm={() => refreshCanSubmitMutation.mutate()}
@@ -391,8 +397,8 @@ export default function AlphaList() {
               </Button>
             </Popconfirm>
             <Popconfirm
-              title="刷新 IQC Δscore"
-              description="对可提交的 alpha 触发 IQC 边际贡献审计（后台排队，稍后刷新查看 Δscore）。确认?"
+              title="刷新竞赛评分变化"
+              description="对可提交的 alpha 触发竞赛评分变化（边际贡献）审计（后台排队，稍后刷新查看评分变化）。确认?"
               okText="触发"
               cancelText="取消"
               onConfirm={() => refreshIqcMutation.mutate()}
@@ -401,7 +407,7 @@ export default function AlphaList() {
                 icon={<TrophyOutlined />}
                 loading={refreshIqcMutation.isPending}
               >
-                刷新 IQC Δscore
+                刷新竞赛评分变化
               </Button>
             </Popconfirm>
             <Popconfirm
@@ -467,7 +473,7 @@ export default function AlphaList() {
               不可提交 {stats?.rejected ?? 0}
             </Tag>
           </AntdTooltip>
-          <AntdTooltip title="点击筛选未校验 can_submit">
+          <AntdTooltip title="点击筛选未校验可提交性">
             <Tag
               style={{ cursor: 'pointer', opacity: submitState === 'unchecked' ? 1 : 0.7 }}
               color={submitState === 'unchecked' ? 'warning' : 'default'}
@@ -519,16 +525,18 @@ export default function AlphaList() {
             />
           </Space>
           <Space size={6}>
-            <Text>Delay:</Text>
+            <AntdTooltip title="数据延迟：0 用当日数据，1 用隔日数据">
+              <Text>数据延迟:</Text>
+            </AntdTooltip>
             <Select
               allowClear
               placeholder="全部"
-              style={{ width: 100 }}
+              style={{ width: 110 }}
               value={filters.delay}
               onChange={(v) => { setFilters((f) => ({ ...f, delay: v })); setPage(1) }}
               options={[
-                { value: 0, label: '0 (原生)' },
-                { value: 1, label: '1' },
+                { value: 0, label: '0(当日)' },
+                { value: 1, label: '1(隔日)' },
               ]}
             />
           </Space>
@@ -625,7 +633,7 @@ export default function AlphaList() {
           </Space>
           <Search
             key={resetKey}
-            placeholder="搜索表达式 (substring)"
+            placeholder="搜索表达式（关键词）"
             allowClear
             enterButton
             defaultValue={filters.expression}

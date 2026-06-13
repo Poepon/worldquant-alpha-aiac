@@ -37,6 +37,11 @@ import api from '../../services/api'
 
 const { Title, Text } = Typography
 
+// 开关键名的中文显示（不改 key，仅用于展示）
+const FLAG_LABEL = {
+  ENABLE_COST_TELEMETRY: '成本遥测',
+}
+
 /**
  * CostMonitor — /ops/cost-monitor (2026-05-19).
  *
@@ -70,12 +75,12 @@ export default function CostMonitor() {
       <Alert
         type="error"
         showIcon
-        message="加载 cost telemetry 失败"
+        message="加载成本遥测数据失败"
         description={error?.response?.data?.detail || error?.message || '未知错误'}
       />
     )
   }
-  if (!data) return <Empty description="无 cost telemetry 数据" />
+  if (!data) return <Empty description="无成本遥测数据" />
 
   const flagOn = !!data.flags?.ENABLE_COST_TELEMETRY
   const healthy = !!data.is_healthy
@@ -177,7 +182,7 @@ export default function CostMonitor() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           <DollarOutlined style={{ marginRight: 8 }} />
-          LLM 成本监控（G2 Phase A）
+          LLM 成本监控
         </Title>
         <Space>
           <Text type="secondary">时间窗口:</Text>
@@ -205,24 +210,24 @@ export default function CostMonitor() {
             <strong>健康状态：{healthy ? '健康' : '不健康'}</strong>
             {flagsList.map(([k, v]) => (
               <Tag key={k} color={v ? 'success' : 'default'}>
-                {k}: {v ? '开' : '关'}
+                {FLAG_LABEL[k] || k}: {v ? '开' : '关'}
               </Tag>
             ))}
             <Text type="secondary">
-              健康门槛：error_rate ≤ {((data.healthy_gates?.error_rate_max ?? 0.1) * 100).toFixed(0)}%
-              {' · '}min_total_calls ≥ {data.healthy_gates?.min_total_calls ?? 1}
+              健康门槛：错误率 ≤ {((data.healthy_gates?.error_rate_max ?? 0.1) * 100).toFixed(0)}%
+              {' · '}最少总调用数 ≥ {data.healthy_gates?.min_total_calls ?? 1}
             </Text>
           </Space>
         }
         description={
           !flagOn ? (
             <Text type="warning" style={{ fontSize: 12 }}>
-              ENABLE_COST_TELEMETRY 关闭中,llm_call_log 不会被写入。Feature Flag 控制台开启后才能采集数据。
+              成本遥测开关关闭中，调用日志不会被写入。需在功能开关控制台开启后才能采集数据。
             </Text>
           ) : !healthy ? (
             <Text type="warning" style={{ fontSize: 12 }}>
-              窗口内 total_calls = {data.total_calls},error_rate = {errPct.toFixed(2)}%
-              。请确认 flag 已生效或检查 LLM provider 健康。
+              窗口内总调用数 = {data.total_calls}，错误率 = {errPct.toFixed(2)}%
+              。请确认开关已生效或检查模型厂商服务是否健康。
             </Text>
           ) : null
         }
@@ -232,7 +237,7 @@ export default function CostMonitor() {
       <Row gutter={[16, 16]}>
         <Col xs={12} sm={6}>
           <Card className="glass-card">
-            <Tooltip title="窗口内累计 LLM 成本(USD)。覆盖所有 caller：round + R1b + macro + R5">
+            <Tooltip title="窗口内累计 LLM 成本(USD)。覆盖所有调用方：每轮挖掘 + 重试 + 宏观叙事提取 + 成功经验排序">
               <Statistic
                 title={
                   <Space>
@@ -315,7 +320,7 @@ export default function CostMonitor() {
           </Card>
         </Col>
         <Col xs={24} lg={12}>
-          <Card className="glass-card" title="按 node_key 分布（成本降序）" size="small">
+          <Card className="glass-card" title="按功能模块分布（成本降序）" size="small">
             {byNodeChart.length === 0 ? (
               <Empty description="窗口内暂无数据" />
             ) : (
@@ -336,7 +341,7 @@ export default function CostMonitor() {
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} lg={12}>
-          <Card className="glass-card" title="按 pillar 分布（成本降序）" size="small">
+          <Card className="glass-card" title="按因子类别分布（成本降序）" size="small">
             {byPillarChart.length === 0 ? (
               <Empty description="窗口内暂无数据" />
             ) : (

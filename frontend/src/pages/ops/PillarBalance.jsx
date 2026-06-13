@@ -116,7 +116,7 @@ export default function PillarBalance() {
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <OpsSectionCard
-        title="五支柱平衡"
+        title="五大因子类别平衡"
         source={latest.data?.source}
         staleDays={latest.data?.payload?._stale_days}
         onRefresh={latest.refetch}
@@ -124,7 +124,7 @@ export default function PillarBalance() {
         rerunSlot={
           <RerunButton
             triggerFn={api.rerunOpsPillar}
-            label="重跑 pillar-balance"
+            label="重跑因子类别平衡"
             onSuccess={handleRerunSuccess}
           />
         }
@@ -132,11 +132,11 @@ export default function PillarBalance() {
         {latest.loading && !latest.data ? (
           <Spin />
         ) : regions.length === 0 ? (
-          <Empty description="暂无 pillar 数据(7 日内无 alpha 或 beat 未跑过)" />
+          <Empty description="暂无因子类别数据（7 日内无 alpha 或定时任务未跑过）" />
         ) : (
           <Row gutter={[16, 16]} align="middle">
             <Col xs={24} sm={8}>
-              <span style={{ marginRight: 8 }}>Region:</span>
+              <span style={{ marginRight: 8 }}>地区:</span>
               <Select
                 value={activeRegion}
                 onChange={setSelectedRegion}
@@ -145,20 +145,20 @@ export default function PillarBalance() {
               />
             </Col>
             <Col xs={12} sm={4}>
-              <Statistic title="已 stamped" value={regionBlock.stamped_total || 0} />
+              <Statistic title="已标注" value={regionBlock.stamped_total || 0} />
             </Col>
             <Col xs={12} sm={4}>
-              <Statistic title="legacy inferred" value={regionBlock.legacy_inferred_total || 0} />
+              <Statistic title="旧数据推断" value={regionBlock.legacy_inferred_total || 0} />
             </Col>
             <Col xs={12} sm={4}>
               <Statistic
-                title="skew"
+                title="偏斜度"
                 value={regionBlock.skew}
                 precision={3}
               />
             </Col>
             <Col xs={12} sm={4}>
-              <span style={{ fontSize: 12, color: '#888' }}>Nudge target:</span>
+              <span style={{ fontSize: 12, color: '#888' }}>下一个倾斜目标:</span>
               <div>
                 {deficit.data?.next_pillar ? (
                   <Tag color="orange" style={{ fontSize: 13 }}>
@@ -176,11 +176,11 @@ export default function PillarBalance() {
       <Row gutter={[16, 16]}>
         <Col xs={24} md={12}>
           <OpsSectionCard
-            title={`Radar · target vs actual${activeRegion ? ` · ${activeRegion}` : ''}`}
+            title={`目标占比 vs 实际占比${activeRegion ? ` · ${activeRegion}` : ''}`}
             source={latest.data?.source}
           >
             {radarRows.length === 0 ? (
-              <Empty description="无 region 数据" />
+              <Empty description="无地区数据" />
             ) : (
               <ResponsiveContainer width="100%" height={320}>
                 <RadarChart data={radarRows}>
@@ -190,14 +190,14 @@ export default function PillarBalance() {
                   <Tooltip contentStyle={{ background: '#1f2937', border: '1px solid #444' }} />
                   <Legend />
                   <Radar
-                    name="target %"
+                    name="目标占比 %"
                     dataKey="target"
                     stroke="#9c88ff"
                     fill="#9c88ff"
                     fillOpacity={0.3}
                   />
                   <Radar
-                    name="actual %"
+                    name="实际占比 %"
                     dataKey="actual"
                     stroke="#00d4ff"
                     fill="#00d4ff"
@@ -210,9 +210,9 @@ export default function PillarBalance() {
         </Col>
 
         <Col xs={24} md={12}>
-          <OpsSectionCard title="Deficit 排序" source={latest.data?.source}>
+          <OpsSectionCard title="缺口排序" source={latest.data?.source}>
             {deficitRows.length === 0 ? (
-              <Empty description="所有 pillar 已达标 ✓" />
+              <Empty description="所有因子类别已达标 ✓" />
             ) : (
               <ResponsiveContainer width="100%" height={320}>
                 <BarChart data={deficitRows} layout="vertical">
@@ -220,7 +220,7 @@ export default function PillarBalance() {
                   <XAxis type="number" stroke="#888" unit="%" />
                   <YAxis dataKey="pillar" type="category" stroke="#888" width={100} />
                   <Tooltip contentStyle={{ background: '#1f2937', border: '1px solid #444' }} />
-                  <Bar dataKey="gap" fill="#ff8c00" name="deficit %" />
+                  <Bar dataKey="gap" fill="#ff8c00" name="缺口 %" />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -228,7 +228,7 @@ export default function PillarBalance() {
         </Col>
       </Row>
 
-      <OpsSectionCard title="14 天 shares 趋势(按 pillar)" source="docs_archived">
+      <OpsSectionCard title="14 天占比趋势（按因子类别）" source="docs_archived">
         {trendRows.length === 0 ? (
           <Empty description="历史不足" />
         ) : (

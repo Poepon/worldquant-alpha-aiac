@@ -45,11 +45,11 @@ const { Text } = Typography
 
 // hyp_intent 漏斗阶段(顺序即漏斗走向)
 const INTENT_FUNNEL = [
-  { key: 'PENDING', label: '待认领 PENDING', color: '#1677ff', desc: 'scheduler beat 已落 hyp_intent,等 HG worker 认领' },
-  { key: 'CLAIMED', label: '认领中 CLAIMED', color: '#faad14', desc: 'HG worker 已 lease,正在生成候选(应短暂;超 lease 见池监控页)' },
-  { key: 'DONE', label: '已完成 DONE', color: '#52c41a', desc: 'HG 已据此 intent 产出候选(终态)' },
-  { key: 'FAILED', label: '失败 FAILED', color: '#ff4d4f', desc: 'HG 处理失败(终态)' },
-  { key: 'PURGED', label: '清理 PURGED', color: '#8c8c8c', desc: '被清理/作废(终态)' },
+  { key: 'PENDING', label: '待认领', color: '#1677ff', desc: '调度器已把想法放入队列,等待想法生成环节认领' },
+  { key: 'CLAIMED', label: '认领中', color: '#faad14', desc: '想法生成环节已领取,正在生成候选(应短暂;处理超时见挖掘流水线监控页)' },
+  { key: 'DONE', label: '已完成', color: '#52c41a', desc: '想法生成环节已据此产出候选(终态)' },
+  { key: 'FAILED', label: '失败', color: '#ff4d4f', desc: '想法生成处理失败(终态)' },
+  { key: 'PURGED', label: '已清除', color: '#8c8c8c', desc: '被清理 / 作废(终态)' },
 ]
 
 // pillar bar 调色板
@@ -105,27 +105,27 @@ export default function HypothesisHealthMonitor() {
       <Alert
         type="info"
         showIcon
-        message="Hypothesis 生命周期晋升已停用 — 当前池内假设恒为 PROPOSED"
+        message="假设生命周期晋升已停用 — 当前流水线内假设恒为「待定」状态"
         description={
           <span>
-            Hypothesis 生命周期晋升(PROPOSED → ACTIVE → PROMOTED)依赖 Phase 2 池认知对账 beat
-            (<Text code>ENABLE_POOL_COGNITIVE_RECONCILE</Text>,当前 OFF / 未部署);现阶段池内假设
-            恒为 PROPOSED,触发器(trigger_histogram)/ RoundStats 维度结构性恒空,已停用。本页改以
-            <Text strong> hyp_intent 池漏斗 </Text>(HG worker 认领源)+ <Text strong>Hypothesis.pillar 分布</Text>
-            (live)观测假设供给侧。
+            假设生命周期晋升(待定 → 生效中 → 提升复用)依赖第二阶段的知识库对账定时任务
+            (功能开关 <Text code>ENABLE_POOL_COGNITIVE_RECONCILE</Text>,当前关闭 / 未部署);现阶段流水线内假设
+            恒为「待定」,触发器分布 / 每轮统计维度结构性恒空,已停用。本页改以
+            <Text strong> 想法队列漏斗 </Text>(想法生成环节认领源)+ <Text strong>假设的因子类别分布</Text>
+            (实时)观测假设供给侧。
           </span>
         }
       />
 
       <OpsSectionCard
-        title="hyp_intent 池漏斗(HG 认领源)"
+        title="想法队列漏斗（想法生成环节认领源）"
         source={pool.data ? 'service' : 'missing'}
         onRefresh={pool.refetch}
         loading={pool.loading}
         rerunSlot={
           <RerunButton
             triggerFn={api.rerunOpsHypothesisHealth}
-            label="重跑 hypothesis-health"
+            label="重新统计假设健康度"
             onSuccess={() =>
               setTimeout(() => {
                 latest.refetch()
@@ -138,9 +138,9 @@ export default function HypothesisHealthMonitor() {
         {pool.loading && !pool.data ? (
           <Spin />
         ) : !pool.data?.enabled ? (
-          <Empty description="ENABLE_POOL_PIPELINE OFF — 池未启用,hyp_intent 漏斗无数据" />
+          <Empty description="挖掘流水线开关已关闭 — 流水线未启用,想法队列漏斗无数据" />
         ) : intentTotal === 0 ? (
-          <Empty description="hyp_intent 队列为空(scheduler beat 尚未落 intent,或全部已 PURGED)" />
+          <Empty description="想法队列为空(调度器尚未放入想法,或全部已清除)" />
         ) : (
           <>
             <Row gutter={[16, 16]} style={{ marginBottom: 8 }}>
@@ -193,19 +193,19 @@ export default function HypothesisHealthMonitor() {
 
             <div style={{ marginTop: 12 }}>
               <Space size={[8, 8]} wrap>
-                <Tag>合计 intent: <b>{intentTotal.toLocaleString()}</b></Tag>
+                <Tag>合计想法: <b>{intentTotal.toLocaleString()}</b></Tag>
                 {(pool.data?.stuck_past_lease?.hyp_intent || 0) > 0 ? (
                   <Tag color="red">
-                    超 lease 卡死(CLAIMED): {pool.data.stuck_past_lease.hyp_intent}
+                    处理超时卡死（认领后未完成）: {pool.data.stuck_past_lease.hyp_intent}
                   </Tag>
                 ) : (
-                  <Tag color="green">无超 lease 卡死 ✓</Tag>
+                  <Tag color="green">无处理超时卡死 ✓</Tag>
                 )}
               </Space>
               <div style={{ marginTop: 6 }}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  漏斗源 = <Text code>GET /ops/pools/status</Text> 的 hyp_intent;CLAIMED 应短暂流转,
-                  长期堆积或超 lease 卡死请到「挖掘池」监控页排查 worker / lease。
+                  漏斗数据源 = <Text code>GET /ops/pools/status</Text> 的想法队列;「认领中」应短暂流转,
+                  长期堆积或处理超时卡死请到「挖掘流水线」监控页排查工作进程 / 超时时限。
                 </Text>
               </div>
             </div>
@@ -216,7 +216,7 @@ export default function HypothesisHealthMonitor() {
       <Row gutter={[16, 16]}>
         <Col xs={24} md={14}>
           <OpsSectionCard
-            title="Hypothesis.pillar 分布(跨 region 聚合)"
+            title="假设的因子类别分布（跨地区聚合）"
             source={pillar.data?.source}
             staleDays={pillarStale}
             onRefresh={pillar.refetch}
@@ -225,7 +225,7 @@ export default function HypothesisHealthMonitor() {
             {pillar.loading && !pillar.data ? (
               <Spin />
             ) : pillarRows.length === 0 ? (
-              <Empty description="暂无 pillar 数据(7 日内无 stamped alpha,或 pillar beat 未跑过)" />
+              <Empty description="暂无因子类别数据(7 日内无已标注 alpha,或因子类别统计任务未跑过)" />
             ) : (
               <>
                 <ResponsiveContainer width="100%" height={280}>
@@ -248,8 +248,8 @@ export default function HypothesisHealthMonitor() {
                   </BarChart>
                 </ResponsiveContainer>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  近似计数 = 各 region <Text code>shares × stamped_total</Text> 求和;权威分桶/趋势/
-                  deficit 见「五支柱平衡」页。
+                  近似计数 = 各地区「占比 × 已标注总数」求和;权威分桶 / 趋势 /
+                  缺口见「五大因子类别平衡」页。
                 </Text>
               </>
             )}
@@ -258,7 +258,7 @@ export default function HypothesisHealthMonitor() {
 
         <Col xs={24} md={10}>
           <OpsSectionCard
-            title="Hypothesis 概览(仍 live 维度)"
+            title="假设概览（仍实时的维度）"
             source={latest.data?.source}
             staleDays={summary.stale_days}
             onRefresh={latest.refetch}
@@ -270,13 +270,13 @@ export default function HypothesisHealthMonitor() {
               <Space direction="vertical" style={{ width: '100%' }} size="large">
                 <Row gutter={[16, 16]}>
                   <Col span={12}>
-                    <Tooltip title="ACTIVE + PROMOTED 计数(晋升 beat 未部署时通常为 0)">
-                      <Statistic title="ACTIVE+PROMOTED" value={summary.total_active || 0} />
+                    <Tooltip title="「生效中 + 已提升复用」计数(晋升定时任务未部署时通常为 0)">
+                      <Statistic title="生效中 + 已提升复用" value={summary.total_active || 0} />
                     </Tooltip>
                   </Col>
                   <Col span={12}>
-                    <Tooltip title="pillar 近似计数合计(跨 region)">
-                      <Statistic title="pillar 计数合计" value={pillarTotal} />
+                    <Tooltip title="因子类别近似计数合计(跨地区)">
+                      <Statistic title="因子类别计数合计" value={pillarTotal} />
                     </Tooltip>
                   </Col>
                 </Row>
@@ -284,11 +284,11 @@ export default function HypothesisHealthMonitor() {
                   type="warning"
                   showIcon
                   banner
-                  message="触发率 / thesis_score / 30d 趋势已停用"
+                  message="触发率 / 假设评分 / 30 天趋势已停用"
                   description={
                     <Text style={{ fontSize: 12 }}>
-                      trigger_histogram、score_buckets、recent_rounds 依赖 HypothesisRoundStats
-                      (池内不写),结构性恒空,已从本页移除。
+                      触发器分布、评分分桶、近期各轮统计依赖「每轮假设统计」
+                      (流水线内不写),结构性恒空,已从本页移除。
                     </Text>
                   }
                 />

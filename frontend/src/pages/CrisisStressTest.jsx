@@ -62,7 +62,7 @@ function deltaTag(crisis, baseline) {
   const color = delta > 0.1 ? 'red' : delta > 0.05 ? 'orange' : 'default'
   return (
     <Tag color={color} style={{ marginLeft: 4 }}>
-      {arrow}{Math.abs(delta).toFixed(2)} vs baseline
+      {arrow}{Math.abs(delta).toFixed(2)} 对比基准
     </Tag>
   )
 }
@@ -76,21 +76,21 @@ function WindowCard({ name, summary, baseline }) {
         <Space direction="vertical" size={0}>
           <Text strong>{WINDOW_LABELS[name] || name}</Text>
           <Text type="secondary" style={{ fontSize: 12 }}>
-            性格：{WINDOW_CHARACTER[name] || '—'} · {summary?.n_alphas ?? 0} alphas / {summary?.n_obs ?? 0} obs
+            类型：{WINDOW_CHARACTER[name] || '—'} · {summary?.n_alphas ?? 0} 个 alpha / {summary?.n_obs ?? 0} 个样本点
           </Text>
         </Space>
       }
     >
       {empty ? (
         <Empty
-          description={`数据不足 (status: ${summary?.status || 'empty'})`}
+          description={`数据不足（状态：${summary?.status || 'empty'}）`}
           styles={{ image: { height: 40 } }}
         />
       ) : (
         <Row gutter={8}>
           <Col span={8}>
             <Statistic
-              title="Max pairwise"
+              title="最大两两相关"
               value={fmtCorr(summary.max_pairwise)}
               valueStyle={{ color: summary.max_pairwise >= 0.7 ? '#cf1322' : '#3f8600', fontSize: 18 }}
               suffix={deltaTag(summary.max_pairwise, baseline?.max_pairwise)}
@@ -98,7 +98,7 @@ function WindowCard({ name, summary, baseline }) {
           </Col>
           <Col span={8}>
             <Statistic
-              title="Median pairwise"
+              title="中位两两相关"
               value={fmtCorr(summary.median_pairwise)}
               valueStyle={{ fontSize: 18 }}
               suffix={deltaTag(summary.median_pairwise, baseline?.median_pairwise)}
@@ -106,7 +106,7 @@ function WindowCard({ name, summary, baseline }) {
           </Col>
           <Col span={8}>
             <Statistic
-              title="Mean pairwise"
+              title="平均两两相关"
               value={fmtCorr(summary.mean_pairwise)}
               valueStyle={{ fontSize: 18 }}
               suffix={deltaTag(summary.mean_pairwise, baseline?.mean_pairwise)}
@@ -115,7 +115,7 @@ function WindowCard({ name, summary, baseline }) {
           {summary.hotspots && summary.hotspots.length > 0 && (
             <Col span={24} style={{ marginTop: 12 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                <WarningOutlined /> {summary.hotspots.length} 个 hotspot ≥ 阈值
+                <WarningOutlined /> {summary.hotspots.length} 个高相关热点 ≥ 阈值
               </Text>
             </Col>
           )}
@@ -144,7 +144,7 @@ function HotspotsTable({ payload }) {
   Object.entries(payload?.windows || {}).forEach(([k, v]) => push(k, v.hotspots))
 
   if (!rows.length) {
-    return <Empty description="No hotspots above threshold" />
+    return <Empty description="没有超过阈值的高相关热点" />
   }
 
   const columns = [
@@ -152,7 +152,7 @@ function HotspotsTable({ payload }) {
       title: '窗口',
       dataIndex: 'window',
       filters: [
-        { text: 'Baseline (4yr)', value: 'baseline' },
+        { text: '基准（4 年）', value: 'baseline' },
         ...Object.keys(payload?.windows || {}).map((k) => ({
           text: WINDOW_LABELS[k] || k,
           value: k,
@@ -161,7 +161,7 @@ function HotspotsTable({ payload }) {
       onFilter: (val, row) => row.window === val,
       render: (val) =>
         val === 'baseline' ? (
-          <Tag>Baseline</Tag>
+          <Tag>基准</Tag>
         ) : (
           <Tag color="purple">{WINDOW_LABELS[val] || val}</Tag>
         ),
@@ -186,7 +186,7 @@ function HotspotsTable({ payload }) {
       ),
     },
     {
-      title: 'Correlation',
+      title: '相关度',
       dataIndex: 'corr',
       sorter: (a, b) => a.corr - b.corr,
       defaultSortOrder: 'descend',
@@ -233,7 +233,7 @@ export default function CrisisStressTest() {
             <ThunderboltOutlined /> 危机窗口压力测试
           </Title>
           <Text type="secondary">
-            评估 OS 因子池在历史危机区间下的相关性收敛度。每日 06:30 自动刷新。
+            评估样本外因子池在历史危机区间下的相关性收敛度。每日 06:30 自动刷新。
           </Text>
         </Col>
         <Col>
@@ -264,7 +264,7 @@ export default function CrisisStressTest() {
             <Space>
               <Text>快照时间：{new Date(payload.computed_at).toLocaleString()}</Text>
               <Text type="secondary">·</Text>
-              <Text>Hotspot 阈值：{payload.hotspot_threshold}</Text>
+              <Text>高相关热点阈值：{payload.hotspot_threshold}</Text>
             </Space>
           }
         />
@@ -275,10 +275,10 @@ export default function CrisisStressTest() {
           description={
             <Space direction="vertical">
               <Text>
-                还没有 {region} 区域的 OS PnL 缓存（status: {payload?.status || 'empty'}）。
+                还没有 {region} 地区的样本外收益曲线缓存（状态：{payload?.status || 'empty'}）。
               </Text>
               <Text type="secondary">
-                需要先运行 Celery beat 任务 <code>refresh_os_correlation_cache</code>，
+                需要先运行定时任务 <code>refresh_os_correlation_cache</code>，
                 或等待每日 06:30 的自动刷新。
               </Text>
             </Space>
@@ -291,15 +291,15 @@ export default function CrisisStressTest() {
             style={{ marginBottom: 16 }}
             title={
               <Space>
-                <Text strong>Baseline (LOOKBACK=4yr)</Text>
-                <Tag>{payload.baseline.n_alphas} alphas · {payload.baseline.n_obs} obs</Tag>
+                <Text strong>基准（回看 4 年）</Text>
+                <Tag>{payload.baseline.n_alphas} 个 alpha · {payload.baseline.n_obs} 个样本点</Tag>
               </Space>
             }
           >
             <Row gutter={16}>
               <Col span={6}>
                 <Statistic
-                  title="Max pairwise"
+                  title="最大两两相关"
                   value={fmtCorr(payload.baseline.max_pairwise)}
                   valueStyle={{
                     color: payload.baseline.max_pairwise >= 0.7 ? '#cf1322' : '#3f8600',
@@ -308,19 +308,19 @@ export default function CrisisStressTest() {
               </Col>
               <Col span={6}>
                 <Statistic
-                  title="Median pairwise"
+                  title="中位两两相关"
                   value={fmtCorr(payload.baseline.median_pairwise)}
                 />
               </Col>
               <Col span={6}>
                 <Statistic
-                  title="Mean pairwise"
+                  title="平均两两相关"
                   value={fmtCorr(payload.baseline.mean_pairwise)}
                 />
               </Col>
               <Col span={6}>
                 <Statistic
-                  title="Hotspots"
+                  title="高相关热点"
                   value={payload.baseline.hotspots?.length || 0}
                   valueStyle={{
                     color: (payload.baseline.hotspots?.length || 0) > 0 ? '#fa541c' : '#52c41a',
@@ -342,9 +342,9 @@ export default function CrisisStressTest() {
             size="small"
             title={
               <Space>
-                <Text strong>Hotspot pairs</Text>
+                <Text strong>高相关热点配对</Text>
                 <Text type="secondary">
-                  pairwise corr ≥ {payload.hotspot_threshold} 的 alpha 对
+                  两两相关 ≥ {payload.hotspot_threshold} 的 alpha 对
                 </Text>
               </Space>
             }
@@ -354,14 +354,14 @@ export default function CrisisStressTest() {
 
           <Card size="small" style={{ marginTop: 16 }}>
             <Descriptions title="如何解读" column={1} size="small">
-              <Descriptions.Item label="Baseline vs 危机窗口">
-                Baseline 用 4 年滚动窗口；危机窗口在 baseline 之外独立切片。
-                同一对 alpha 在 baseline 看起来不相关 (0.3)，但在 COVID 窗口跳到 0.85，
+              <Descriptions.Item label="基准 vs 危机窗口">
+                基准用 4 年滚动窗口；危机窗口在基准之外独立切片。
+                同一对 alpha 在基准期看起来不相关（0.3），但在 COVID 窗口跳到 0.85，
                 意味着"正常时期独立、危机时期共振"——典型的隐性集中度风险。
               </Descriptions.Item>
               <Descriptions.Item label="使用方式">
-                提交决策时优先检查待提交 alpha 在 4 个窗口下相对池子的 max-corr
-                （AlphaDetail 页面的危机相关性面板）。若任一窗口 ≥ 0.7，慎重提交。
+                提交决策时优先检查待提交 alpha 在 4 个窗口下相对池子的最大相关度
+                （alpha 详情页的危机相关性面板）。若任一窗口 ≥ 0.7，慎重提交。
               </Descriptions.Item>
             </Descriptions>
           </Card>

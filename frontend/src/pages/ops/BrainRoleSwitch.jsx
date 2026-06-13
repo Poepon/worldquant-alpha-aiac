@@ -25,21 +25,27 @@ import { formatDateTime, formatRelative } from '../../utils/time'
 
 const { Title, Text, Paragraph } = Typography
 
+// 模式代号 → 中文展示（CONSULTANT/USER 是后端返回的 key，不改 key 只加 label）
+const MODE_LABEL = {
+  CONSULTANT: '顾问模式',
+  USER: '普通用户模式',
+}
+
 // CONSULTANT mode targets — sourced from CLAUDE.md §"P3-Brain" + plan §14.
 // effective_sharpe_submit_min = max(SHARPE_MIN, 1.58), testPeriod = P0Y,
 // regions = 5 (USA/CHN/HKG/JPN/EUR). These are documentation constants,
 // not fetched live — the backend state endpoint only reports the *current*
 // mode's effective values, so the inactive column shows the spec.
 const CONSULTANT_TARGETS = {
-  sharpe_submit_min: '≥ 1.58 (max with env SHARPE_MIN)',
-  test_period: 'P0Y',
-  region_count: '5 (USA / CHN / HKG / JPN / EUR)',
+  sharpe_submit_min: '≥ 1.58（取环境配置 SHARPE_MIN 与 1.58 中的较大值）',
+  test_period: 'P0Y（全样本）',
+  region_count: '5 个地区（美国 / 中国 / 香港 / 日本 / 欧洲）',
 }
 
 const USER_TARGETS = {
-  sharpe_submit_min: 'env SHARPE_MIN (default 1.25)',
-  test_period: 'env default',
-  region_count: 'limited (typically USA only)',
+  sharpe_submit_min: '环境配置 SHARPE_MIN（默认 1.25）',
+  test_period: '环境默认',
+  region_count: '受限（通常仅美国）',
 }
 
 function ModeColumn({ label, color, isCurrent, targets, state, showCurrent }) {
@@ -63,14 +69,14 @@ function ModeColumn({ label, color, isCurrent, targets, state, showCurrent }) {
             <Text type="secondary">{targets.sharpe_submit_min}</Text>
           )}
         </Descriptions.Item>
-        <Descriptions.Item label="testPeriod">
+        <Descriptions.Item label="测试区间">
           {isCurrent && showCurrent ? (
             <Text strong>{state.effective_default_test_period}</Text>
           ) : (
             <Text type="secondary">{targets.test_period}</Text>
           )}
         </Descriptions.Item>
-        <Descriptions.Item label="可用 region">
+        <Descriptions.Item label="可用地区">
           {isCurrent && showCurrent ? (
             <Space wrap>
               {Object.entries(state.effective_region_universes).map(([r, u]) => (
@@ -99,7 +105,7 @@ export default function BrainRoleSwitch() {
       const data = await api.getBrainRoleState()
       setState(data)
     } catch (e) {
-      message.error(`加载 BRAIN role state 失败：${e?.response?.data?.detail || e.message}`)
+      message.error(`加载 BRAIN 账号模式状态失败：${e?.response?.data?.detail || e.message}`)
     } finally {
       setLoading(false)
     }
@@ -123,8 +129,8 @@ export default function BrainRoleSwitch() {
       const result = await fn()
       message.success(
         isConsultant
-          ? '已切回 USER 模式（running task 的 Sharpe/testPeriod 不变；multi-sim/PROD-corr 立即降级）'
-          : `已切到 CONSULTANT 模式${result?.sync_enqueued ? '（后台全球数据同步已触发）' : ''}`,
+          ? '已切回普通用户模式（运行中任务的 Sharpe 门槛/测试区间不变；批量回测与生产相关性检查立即降级）'
+          : `已切到顾问模式${result?.sync_enqueued ? '（后台全球数据同步已触发）' : ''}`,
       )
       setModalOpen(false)
       await fetchState()
@@ -144,7 +150,7 @@ export default function BrainRoleSwitch() {
   }
 
   if (!state) {
-    return <Empty description="无 state 数据" />
+    return <Empty description="暂无状态数据" />
   }
 
   return (
@@ -152,7 +158,7 @@ export default function BrainRoleSwitch() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           <SwapOutlined style={{ marginRight: 8 }} />
-          BRAIN 模式
+          BRAIN 账号模式
         </Title>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={fetchState} loading={loading}>
@@ -164,7 +170,7 @@ export default function BrainRoleSwitch() {
             icon={<ArrowRightOutlined />}
             onClick={openSwitchModal}
           >
-            {isConsultant ? '切回 USER 模式' : '切换到 CONSULTANT 模式'}
+            {isConsultant ? '切回普通用户模式' : '切换到顾问模式'}
           </Button>
         </Space>
       </Space>
@@ -176,26 +182,26 @@ export default function BrainRoleSwitch() {
         message={
           <Space>
             <span>当前模式：</span>
-            <Tag color={isConsultant ? 'gold' : 'green'}>{state.mode}</Tag>
+            <Tag color={isConsultant ? 'gold' : 'green'}>{MODE_LABEL[state.mode] || state.mode}</Tag>
             {state.last_switched_at && (
               <Text type="secondary">
-                上次切换 {formatRelative(state.last_switched_at)}（{formatDateTime(state.last_switched_at)}） by {state.last_switched_by || '—'}
+                上次切换 {formatRelative(state.last_switched_at)}（{formatDateTime(state.last_switched_at)}） 操作人 {state.last_switched_by || '—'}
               </Text>
             )}
-            <Text type="secondary">· 运行中 task {state.running_tasks_count} 个（快照已冻结，不受切换影响）</Text>
+            <Text type="secondary">· 运行中任务 {state.running_tasks_count} 个（配置快照已冻结，不受切换影响）</Text>
           </Space>
         }
       />
 
-      <Title level={5}>USER vs CONSULTANT 能力对比</Title>
+      <Title level={5}>普通用户模式 vs 顾问模式 能力对比</Title>
       <Paragraph type="secondary" style={{ marginTop: 0 }}>
-        当前模式列显示 backend 实时返回的 effective_* 值；对面列显示文档约定（plan §14）。切换前请核对差异是否符合预期。
+        当前模式列显示后端实时返回的生效值；对面列显示文档约定的目标值。切换前请核对差异是否符合预期。
       </Paragraph>
 
       <Row gutter={16} style={{ marginBottom: 16 }}>
         <Col xs={24} md={12}>
           <ModeColumn
-            label="USER"
+            label="普通用户模式"
             color="green"
             isCurrent={!isConsultant}
             targets={USER_TARGETS}
@@ -205,7 +211,7 @@ export default function BrainRoleSwitch() {
         </Col>
         <Col xs={24} md={12}>
           <ModeColumn
-            label="CONSULTANT"
+            label="顾问模式"
             color="gold"
             isCurrent={isConsultant}
             targets={CONSULTANT_TARGETS}
@@ -237,12 +243,12 @@ export default function BrainRoleSwitch() {
       </Card>
 
       <Modal
-        title={isConsultant ? '切回 USER 模式' : '切换到 CONSULTANT 模式'}
+        title={isConsultant ? '切回普通用户模式' : '切换到顾问模式'}
         open={modalOpen}
         onCancel={() => setModalOpen(false)}
         onOk={handleConfirmSwitch}
         okButtonProps={{ disabled: !acknowledged, loading: switching, danger: isConsultant }}
-        okText={isConsultant ? '确认切回 USER' : '确认切换到 CONSULTANT'}
+        okText={isConsultant ? '确认切回普通用户' : '确认切换到顾问'}
         cancelText="取消"
         width={640}
       >
@@ -263,8 +269,8 @@ export default function BrainRoleSwitch() {
               </li>
               <li>
                 <Text type="warning">
-                  <b>注意历史 alpha</b>：早期未关联任务的 alpha 在下次同步时会用新 Sharpe = 1.58 重新判定，
-                  可能从『通过』降级为『临时通过』。建议切换前先回填任务归属，或接受此一次性降级。
+                  <b>注意历史 alpha</b>：早期未关联任务的 alpha 在下次同步时会用新 Sharpe 门槛 1.58 重新判定，
+                  可能从『通过』降级为『暂定通过』。建议切换前先回填任务归属，或接受此一次性降级。
                 </Text>
               </li>
               <li>
@@ -292,7 +298,7 @@ export default function BrainRoleSwitch() {
               </li>
               <li>
                 <b>生产相关性检查立即停用</b>
-                ；后续提交的 alpha 只走本地 self_corr 预检 — BRAIN 服务端可能在提交时拒绝
+                ；后续提交的 alpha 只走本地的「与已提交策略相关度」预检 — BRAIN 服务端可能在提交时拒绝
               </li>
               <li>
                 如需完全停止任务，请在任务详情页执行『干预』操作收尾（暂停 → 完成）

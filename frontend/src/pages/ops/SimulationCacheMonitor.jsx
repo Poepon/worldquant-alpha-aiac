@@ -44,12 +44,12 @@ export default function SimulationCacheMonitor() {
       <Alert
         type="error"
         showIcon
-        message="加载 R9 cache stats 失败"
+        message="加载回测缓存统计失败"
         description={error?.response?.data?.detail || error?.message || '未知错误'}
       />
     )
   }
-  if (!data) return <Empty description="无 R9 cache 数据" />
+  if (!data) return <Empty description="无回测缓存数据" />
 
   const flagOn = data.flags?.ENABLE_SIMULATION_CACHE
   const hitRate = data.hit_rate_approx ?? 0
@@ -61,7 +61,7 @@ export default function SimulationCacheMonitor() {
       <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
           <DatabaseOutlined style={{ marginRight: 8 }} />
-          模拟缓存监控（R9）
+          回测缓存监控
         </Title>
         <Space>
           <Text type="secondary">窗口(天):</Text>
@@ -82,7 +82,7 @@ export default function SimulationCacheMonitor() {
         style={{ marginBottom: 16 }}
         message={
           <Space>
-            <span>模拟缓存开关 (ENABLE_SIMULATION_CACHE)：</span>
+            <span>回测缓存开关：</span>
             <Tag color={flagOn ? 'green' : 'default'}>{flagOn ? '已开启' : '已关闭'}</Tag>
             <Text type="secondary">缓存有效期 {data.ttl_days} 天 · 已过期但未清理 {data.expired_rows} 条</Text>
           </Space>
@@ -90,7 +90,7 @@ export default function SimulationCacheMonitor() {
         description={
           !flagOn ? (
             <Text type="warning" style={{ fontSize: 12 }}>
-              开关当前已关闭，新的 BRAIN 模拟调用不会走缓存。可在 Feature Flag 控制台开启。
+              开关当前已关闭，新的 BRAIN 回测调用不会走缓存。可在功能开关控制台开启。
             </Text>
           ) : null
         }
@@ -167,7 +167,7 @@ export default function SimulationCacheMonitor() {
 
       <Row gutter={[16, 16]} style={{ marginTop: 16 }}>
         <Col xs={24} sm={12}>
-          <Card className="glass-card" size="small" title="模拟成功率">
+          <Card className="glass-card" size="small" title="回测成功率">
             <Statistic
               value={data.success_rate * 100}
               precision={1}
@@ -175,7 +175,7 @@ export default function SimulationCacheMonitor() {
               valueStyle={{ color: data.success_rate >= 0.5 ? '#00ff88' : '#ffb700' }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              缓存中模拟成功的占比（失败的模拟结果也会被缓存以避免重复浪费）
+              缓存中回测成功的占比（失败的回测结果也会被缓存以避免重复浪费）
             </Text>
           </Card>
         </Col>

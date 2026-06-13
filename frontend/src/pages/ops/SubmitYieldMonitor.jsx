@@ -106,14 +106,14 @@ export default function SubmitYieldMonitor() {
   const hasAnyData = produced > 0 || daily.length > 0
 
   if (isLoading) {
-    return <Spin tip="加载提交产率..." style={{ marginTop: 80, display: 'block' }} />
+    return <Spin tip="加载提交产出率..." style={{ marginTop: 80, display: 'block' }} />
   }
 
   return (
     <div>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
         <Title level={3} style={{ margin: 0 }}>
-          <FunnelPlotOutlined /> 提交产率 (submit-yield)
+          <FunnelPlotOutlined /> 提交产出率
         </Title>
         <Space>
           <Select
@@ -139,7 +139,7 @@ export default function SubmitYieldMonitor() {
           type="error"
           showIcon
           style={{ marginBottom: 16 }}
-          message="拉取提交产率失败(端点 /ops/submit-yield)。"
+          message="拉取提交产出率失败。"
           description={String(error?.message || error || '未知错误')}
         />
       )}
@@ -157,7 +157,7 @@ export default function SubmitYieldMonitor() {
             style={{ marginBottom: 12 }}
             message={
               `全窗口 ${fmtInt(produced)} 产出 → ${fmtInt(canSubmit)} 可提交 → ${fmtInt(submitted)} 已提交，` +
-              `提交是真瓶颈(execution-limited)——绝大多数挖出的 alpha 从不被提交。`
+              `提交才是真正的瓶颈——绝大多数挖出来的 alpha 从来没被提交。`
             }
             description={
               `可提交率 ${fmtPct(conversion.can_submit_rate)} · ` +
@@ -172,7 +172,7 @@ export default function SubmitYieldMonitor() {
               showIcon
               icon={<WarningOutlined />}
               style={{ marginBottom: 16 }}
-              message="成熟批次(已剔除最近 ~3 天未成熟 cohort)can_submit 合计 ≈ 0 — 疑 submit-yield 塌方(字段卫生缺失),需排查生成层字段过滤。"
+              message="成熟批次(已剔除最近 ~3 天未成熟的批次)可提交数合计 ≈ 0 — 疑似提交产出率塌方(字段卫生缺失),需排查想法生成环节的字段过滤。"
             />
           )}
 
@@ -181,7 +181,7 @@ export default function SubmitYieldMonitor() {
             <Row align="middle" justify="space-around" gutter={[8, 16]} wrap>
               <Col flex="none">
                 <Statistic
-                  title="产出 (produced)"
+                  title="产出"
                   value={produced}
                   valueStyle={{ color: '#1677ff' }}
                 />
@@ -191,7 +191,7 @@ export default function SubmitYieldMonitor() {
 
               <Col flex="none">
                 <Statistic
-                  title="可提交 (can_submit)"
+                  title="可提交"
                   value={canSubmit}
                   valueStyle={{ color: '#faad14' }}
                 />
@@ -201,7 +201,7 @@ export default function SubmitYieldMonitor() {
 
               <Col flex="none">
                 <Statistic
-                  title="已提交 (submitted)"
+                  title="已提交"
                   value={submitted}
                   valueStyle={{ color: submitted > 0 ? '#3f8600' : '#cf1322' }}
                 />
@@ -209,7 +209,7 @@ export default function SubmitYieldMonitor() {
             </Row>
             <div style={{ textAlign: 'center', marginTop: 12 }}>
               <Text type="secondary" style={{ fontSize: 12 }}>
-                端到端提交率(submit_rate)= 已提交 / 产出 ={' '}
+                端到端提交率 = 已提交 / 产出 ={' '}
                 <b>{fmtPct(conversion.submit_rate)}</b>
                 {region ? ` · 区域 ${region}` : ' · 全部区域'} · 近 {data?.window_days ?? days} 天
               </Text>
@@ -217,7 +217,7 @@ export default function SubmitYieldMonitor() {
           </Card>
 
           {/* ---- daily 趋势图(双轴)---------------------------------- */}
-          <Card size="small" title="每日趋势(produced 左轴 · can_submit/submitted 右轴)">
+          <Card size="small" title="每日趋势(产出 左轴 · 可提交/已提交 右轴)">
             {daily.length === 0 ? (
               <Empty description="窗口内无每日数据" />
             ) : (
@@ -228,20 +228,20 @@ export default function SubmitYieldMonitor() {
                   <YAxis
                     yAxisId="left"
                     stroke="#1677ff"
-                    label={{ value: 'produced', angle: -90, position: 'insideLeft', fill: '#1677ff', fontSize: 12 }}
+                    label={{ value: '产出', angle: -90, position: 'insideLeft', fill: '#1677ff', fontSize: 12 }}
                   />
                   <YAxis
                     yAxisId="right"
                     orientation="right"
                     stroke="#faad14"
-                    label={{ value: 'can_submit / submitted', angle: 90, position: 'insideRight', fill: '#faad14', fontSize: 12 }}
+                    label={{ value: '可提交 / 已提交', angle: 90, position: 'insideRight', fill: '#faad14', fontSize: 12 }}
                   />
                   <ReTooltip contentStyle={{ background: '#1f2937', border: '1px solid #444' }} />
                   <Legend />
                   <Bar
                     yAxisId="left"
                     dataKey="produced"
-                    name="产出 (produced)"
+                    name="产出"
                     fill="#1677ff"
                     fillOpacity={0.35}
                     barSize={18}
@@ -250,7 +250,7 @@ export default function SubmitYieldMonitor() {
                     yAxisId="right"
                     type="monotone"
                     dataKey="can_submit"
-                    name="可提交 (can_submit)"
+                    name="可提交"
                     stroke="#faad14"
                     strokeWidth={2}
                     dot={{ r: 2 }}
@@ -259,7 +259,7 @@ export default function SubmitYieldMonitor() {
                     yAxisId="right"
                     type="monotone"
                     dataKey="submitted"
-                    name="已提交 (submitted)"
+                    name="已提交"
                     stroke="#3f8600"
                     strokeWidth={2}
                     dot={{ r: 3 }}
@@ -268,9 +268,9 @@ export default function SubmitYieldMonitor() {
               </ResponsiveContainer>
             )}
             <Text type="secondary" style={{ fontSize: 12, display: 'block', marginTop: 8 }}>
-              说明:daily 按 alpha「创建日」聚合;can_submit/submitted 是该批「至今」的累计结局(非当日事件)。
-              最近 ~2-3 天 cohort 尚未评估完/提交,近端结构性偏低,趋势看成熟天数。
-              (created_at 为 UTC、date_submitted 为北京时区,跨日有 ≤8h 偏移。)
+              说明:每日数据按 alpha「创建日」聚合;可提交/已提交是该批「至今」的累计结局(不是当日事件)。
+              最近 ~2-3 天的批次尚未评估完/提交,近端结构性偏低,趋势看成熟天数。
+              (创建时间为 UTC、提交时间为北京时区,跨日有 ≤8 小时偏移。)
             </Text>
           </Card>
         </>

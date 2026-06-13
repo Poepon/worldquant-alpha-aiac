@@ -59,16 +59,16 @@ function BrainRoleEntryCard() {
       style={{ marginTop: 16 }}
       message={
         <Space>
-          <span>BRAIN 模式</span>
+          <span>BRAIN 账号模式</span>
           {state && <Tag color={isConsultant ? 'gold' : 'green'}>{modeLabel}</Tag>}
-          <Link to="/ops/brain-role">前往 BRAIN 模式专属页 →</Link>
+          <Link to="/ops/brain-role">前往 BRAIN 账号模式专属页 →</Link>
         </Space>
       }
       description={
         <Text type="secondary" style={{ fontSize: 12 }}>
           普通模式 ↔ 顾问模式 的切换、能力对比、操作确认都在专属页完成。
-          <code>ENABLE_BRAIN_CONSULTANT_MODE</code> 这条 Flag 在下方表里是只读的——
-          直接切换会跳过批量模拟控制位重置和全球数据同步任务。
+          <code>ENABLE_BRAIN_CONSULTANT_MODE</code> 这条开关在下方表里是只读的——
+          直接切换会跳过批量回测控制位重置和全球数据同步任务。
         </Text>
       }
     />
@@ -106,7 +106,7 @@ export default function FeatureFlagsConsole() {
       const data = await api.listFeatureFlags()
       setFlags(data)
     } catch (e) {
-      message.error(`加载 Flag 失败：${e?.response?.data?.detail || e.message}`)
+      message.error(`加载功能开关失败：${e?.response?.data?.detail || e.message}`)
     } finally {
       setLoading(false)
     }
@@ -202,7 +202,7 @@ export default function FeatureFlagsConsole() {
 
   const columns = [
     {
-      title: 'Flag 名称',
+      title: '开关名称',
       dataIndex: 'name',
       width: 320,
       render: (name, row) => (
@@ -231,7 +231,7 @@ export default function FeatureFlagsConsole() {
         // latch 清理 + sync_datasets enqueue,Consultant 模式有名无实。
         if (row.name === 'ENABLE_BRAIN_CONSULTANT_MODE') {
           return (
-            <Tooltip title="此 Flag 必须通过上方『BRAIN 模式』卡片切换 — 直接修改会跳过批量模拟控制位重置和全球数据同步任务">
+            <Tooltip title="此开关必须通过上方『BRAIN 账号模式』卡片切换 — 直接修改会跳过批量回测控制位重置和全球数据同步任务">
               <Tag color={row.effective_value ? 'gold' : 'default'}>
                 {String(row.effective_value)} · 见上方卡片
               </Tag>
@@ -312,7 +312,7 @@ export default function FeatureFlagsConsole() {
         align="center"
       >
         <Title level={3} style={{ margin: 0 }}>
-          Feature Flag 控制台
+          功能开关控制台
         </Title>
         <Space>
           <Tooltip title="强制立即重读所有覆盖（不必等待 60 秒自动刷新）">
@@ -346,7 +346,7 @@ export default function FeatureFlagsConsole() {
           <Spin />
         </div>
       ) : groupedFlags.length === 0 ? (
-        <Empty description="无可控 Flag（请检查后端白名单配置）" />
+        <Empty description="无可控开关（请检查后端白名单配置）" />
       ) : (
         groupedFlags.map(([group, rows]) => (
           <Card
@@ -368,7 +368,7 @@ export default function FeatureFlagsConsole() {
       )}
 
       <Drawer
-        title="Flag 变更记录（最近 50 条）"
+        title="功能开关变更记录（最近 50 条）"
         open={auditOpen}
         onClose={() => setAuditOpen(false)}
         width={520}

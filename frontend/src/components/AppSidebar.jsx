@@ -40,9 +40,9 @@ const menuItems = [
     label: '提交中心',
     children: [
       { key: '/ops/submit-backlog', label: '提交积压' },
-      { key: '/ops/submit-yield', label: '提交产率 (yield)' },
+      { key: '/ops/submit-yield', label: '提交产出率' },
       { key: '/ops/auto-submit', label: '自动提交' },
-      { key: '/ops/optimization-cycles', label: '优化 sweep 审计' },
+      { key: '/ops/optimization-cycles', label: '参数优化审计' },
     ],
   },
   { key: '/data', icon: <DatabaseOutlined />, label: '数据管理' },
@@ -57,43 +57,43 @@ const menuItems = [
         label: '池总览',
         children: [
           { key: '/ops/overview', label: '总览' },
-          { key: '/ops/pool-pipeline', icon: <ThunderboltOutlined />, label: '挖掘池 (HG/S/E · 总览/队列/工作器)' },
-          { key: '/ops/regime-monitor', icon: <RadarChartOutlined />, label: 'Regime 转向监测' },
+          { key: '/ops/pool-pipeline', icon: <ThunderboltOutlined />, label: '挖掘流水线（想法生成/回测/评估 · 总览/队列/工作进程）' },
+          { key: '/ops/regime-monitor', icon: <RadarChartOutlined />, label: '行情切换监测' },
         ],
       },
       {
         type: 'group',
-        label: '生成阶段 · HG',
+        label: '想法生成阶段',
         children: [
-          { key: '/ops/pillar-balance', label: '五支柱平衡' },
-          { key: '/ops/g3-monitor', icon: <CopyOutlined />, label: 'AST 原创性' },
+          { key: '/ops/pillar-balance', label: '五大因子类别平衡' },
+          { key: '/ops/g3-monitor', icon: <CopyOutlined />, label: '代码结构去重' },
           { key: '/ops/g8-monitor', icon: <ApartmentOutlined />, label: '假设森林' },
           { key: '/ops/macro-narratives', label: '宏观叙事' },
-          { key: '/ops/negative-knowledge', label: '失败模式沉淀' },
+          { key: '/ops/negative-knowledge', label: '失败经验库' },
         ],
       },
       {
         type: 'group',
-        label: '模拟阶段 · S',
+        label: '回测模拟阶段',
         children: [
-          { key: '/ops/r9-cache', icon: <DatabaseOutlined />, label: '模拟缓存 (R9)' },
+          { key: '/ops/r9-cache', icon: <DatabaseOutlined />, label: '回测缓存' },
         ],
       },
       {
         type: 'group',
-        label: '评估阶段 · E',
+        label: '评估入库阶段',
         children: [
           { key: '/ops/alpha-health', icon: <HeartOutlined />, label: '评估诊断 (健康/容量/因子)' },
         ],
       },
       {
         type: 'group',
-        label: '知识库 & RAG',
+        label: '知识库 & 检索',
         children: [
-          { key: '/ops/costeer', icon: <ReadOutlined />, label: '知识库与 RAG' },
-          { key: '/ops/cognitive-reconcile', label: '池认知对账 (Phase 2)' },
+          { key: '/ops/costeer', icon: <ReadOutlined />, label: '知识库与检索' },
+          { key: '/ops/cognitive-reconcile', label: '知识库对账（第二阶段）' },
           { key: '/ops/llm-op-monitor', label: 'LLM 算子监控' },
-          { key: '/ops/hypothesis-health', label: 'Hypothesis 池漏斗' },
+          { key: '/ops/hypothesis-health', label: '假设队列漏斗' },
         ],
       },
       {
@@ -102,8 +102,8 @@ const menuItems = [
         children: [
           { key: '/ops/llm-routing', icon: <FunctionOutlined />, label: 'LLM 路由' },
           { key: '/ops/cost-monitor', icon: <DollarOutlined />, label: 'LLM 成本' },
-          { key: '/ops/feature-flags', label: 'Feature Flag' },
-          { key: '/ops/brain-role', icon: <SwapOutlined />, label: 'BRAIN 模式' },
+          { key: '/ops/feature-flags', label: '功能开关' },
+          { key: '/ops/brain-role', icon: <SwapOutlined />, label: 'BRAIN 账号模式' },
         ],
       },
       {

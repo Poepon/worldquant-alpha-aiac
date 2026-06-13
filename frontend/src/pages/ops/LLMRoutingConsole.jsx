@@ -266,16 +266,16 @@ export default function LLMRoutingConsole() {
       const label = (r.node_key || '').trim() || `第 ${idx + 1} 行`
       const key = (r.node_key || '').trim()
       if (!key) {
-        errors.push(`${label}：node_key 不能为空`)
+        errors.push(`${label}：功能模块不能为空`)
       } else if (seenKeys.has(key)) {
-        errors.push(`node_key 重复：${key}`)
+        errors.push(`功能模块重复：${key}`)
       } else {
         seenKeys.add(key)
       }
       if (!r.model || !r.model.trim()) {
-        errors.push(`${label}：model 不能为空`)
+        errors.push(`${label}：模型不能为空`)
       } else if (!known.has(r.model.trim())) {
-        warnings.push(`${label}：model「${r.model.trim()}」不在可选清单内（允许，但请确认拼写）`)
+        warnings.push(`${label}：模型「${r.model.trim()}」不在可选清单内（允许，但请确认拼写）`)
       }
       const ref = (r.provider_ref || '').trim()
       if (!ref) {
@@ -339,7 +339,7 @@ export default function LLMRoutingConsole() {
       setDefaultModel((def && def.model) || '')
       const nNodes = Object.keys(payload).filter((k) => k !== DEFAULT_KEY).length
       message.success(
-        `路由配置已保存（${nNodes} 个 node_key${payload[DEFAULT_KEY] ? ' + 默认兜底' : ''}）。点『立即生效』让本 API 进程立刻读取；跑挖掘的 worker 进程走自身 60s 后台刷新（≤60s 生效）。`,
+        `路由配置已保存（${nNodes} 个功能模块${payload[DEFAULT_KEY] ? ' + 默认兜底' : ''}）。点『立即生效』让本接口进程立刻读取；跑挖掘的工作进程走自身 60 秒后台刷新（≤60 秒生效）。`,
       )
     } catch (e) {
       message.error(`保存失败：${e?.response?.data?.detail || e.message}`)
@@ -354,7 +354,7 @@ export default function LLMRoutingConsole() {
     try {
       const { refreshed, flags: names } = await api.refreshAllFlags()
       message.success(
-        `已强制刷新本 API 进程缓存（共 ${refreshed} 条覆盖：${(names || []).join('、') || '无'}）。worker 进程不受此影响，走自身 60s 后台刷新。`,
+        `已强制刷新本接口进程缓存（共 ${refreshed} 条覆盖：${(names || []).join('、') || '无'}）。工作进程不受此影响，走自身 60 秒后台刷新。`,
       )
       await fetchAll()
     } catch (e) {
@@ -384,26 +384,26 @@ export default function LLMRoutingConsole() {
 
   const columns = [
     {
-      title: 'node_key',
+      title: '功能模块',
       dataIndex: 'node_key',
       width: 200,
       render: (val, row) => (
         <Input
           value={val}
-          placeholder="如 hypothesis / code_gen"
+          placeholder="如 hypothesis（假设生成）/ code_gen（代码生成）"
           onChange={(e) => updateRow(row._id, { node_key: e.target.value })}
           style={{ fontFamily: 'monospace' }}
         />
       ),
     },
     {
-      title: '当前 model',
+      title: '当前模型',
       dataIndex: 'model',
       width: 160,
       render: (val) => <Text code>{val || '—'}</Text>,
     },
     {
-      title: '选择 model',
+      title: '选择模型',
       width: 220,
       render: (_, row) => (
         <Select
@@ -441,7 +441,7 @@ export default function LLMRoutingConsole() {
             />
             {prof ? (
               <Text type="secondary" style={{ fontSize: 11 }}>
-                {prof.sdk} · {prof.base_url || 'SDK 默认'}
+                {prof.sdk} · {prof.base_url || 'SDK 默认地址'}
               </Text>
             ) : val ? (
               <Text type="danger" style={{ fontSize: 11 }}>
@@ -453,13 +453,13 @@ export default function LLMRoutingConsole() {
       },
     },
     {
-      title: 'thinking_effort (可选)',
+      title: '推理强度（可选）',
       dataIndex: 'thinking_effort',
       width: 160,
       render: (val, row) => (
         <Input
           value={val}
-          placeholder="如 high / low"
+          placeholder="如 high（高）/ low（低）"
           onChange={(e) => updateRow(row._id, { thinking_effort: e.target.value })}
         />
       ),
@@ -468,7 +468,7 @@ export default function LLMRoutingConsole() {
       title: '操作',
       width: 70,
       render: (_, row) => (
-        <Popconfirm title="删除此 node_key 路由？" onConfirm={() => removeRow(row._id)}>
+        <Popconfirm title="删除此功能模块的路由？" onConfirm={() => removeRow(row._id)}>
           <Button size="small" type="link" danger icon={<DeleteOutlined />} />
         </Popconfirm>
       ),
@@ -482,10 +482,10 @@ export default function LLMRoutingConsole() {
         align="center"
       >
         <Title level={3} style={{ margin: 0 }}>
-          LLM 按功能路由控制台
+          LLM 按功能模块路由控制台
         </Title>
         <Space>
-          <Tooltip title="强制立即重读所有覆盖（不必等待 60 秒自动刷新）">
+          <Tooltip title="强制本进程立即重读所有配置覆盖（不必等待 60 秒自动刷新）">
             <Button
               icon={<ThunderboltOutlined />}
               onClick={handleRefreshAll}
@@ -504,11 +504,11 @@ export default function LLMRoutingConsole() {
       </Space>
 
       <Paragraph type="secondary">
-        为每个功能块（node_key）选择厂商并路由到不同 LLM 模型。热路径（hypothesis / code_gen）走质量优模型，
-        辅助路径（self_correct / retry）走便宜快模型。厂商的 endpoint + 密钥在{' '}
+        为每个功能模块（如假设生成、代码生成）选择厂商并路由到不同 LLM 模型。主力环节（假设生成 / 代码生成）走质量优模型，
+        辅助环节（自我纠错 / 重试）走便宜快模型。厂商的网关地址 + 密钥在{' '}
         <Link to="/config">配置中心 → LLM 厂商</Link> 预先登记，这里只需选厂商 + 填模型。修改后点『保存映射』
-        提交，再点『立即生效』让本进程与其它后台进程立刻读取（否则 60 秒内自动同步）。底层 Flag 都在{' '}
-        <Link to="/ops/feature-flags">Feature Flag 控制台</Link> 的{' '}
+        提交，再点『立即生效』让本进程立刻读取（否则 60 秒内自动同步）。底层开关都在{' '}
+        <Link to="/ops/feature-flags">功能开关控制台</Link> 的{' '}
         <Text code>LLM-Routing</Text> 分组中。
       </Paragraph>
 
@@ -531,7 +531,7 @@ export default function LLMRoutingConsole() {
         <Space size="large" align="center">
           <Space>
             <Text strong>总开关</Text>
-            <Tooltip title="OFF=所有 node 走全局默认模型（byte-for-byte legacy）。ON=按下表为每个 node 选模型。">
+            <Tooltip title="关=所有功能模块走全局默认模型（与旧版默认完全一致）。开=按下表为每个功能模块单独选模型。">
               <InfoCircleOutlined style={{ color: '#9c88ff' }} />
             </Tooltip>
           </Space>
@@ -553,7 +553,7 @@ export default function LLMRoutingConsole() {
                 : '默认值'}
           </Tag>
           {!masterOn && (
-            <Text type="secondary">（当前关闭 — 下表配置不生效，所有 node 走全局默认模型）</Text>
+            <Text type="secondary">（当前关闭 — 下表配置不生效，所有功能模块走全局默认模型）</Text>
           )}
         </Space>
       </Card>
@@ -565,7 +565,7 @@ export default function LLMRoutingConsole() {
         title={
           <Space>
             <Text strong>默认兜底路由</Text>
-            <Tooltip title="任何未在下表单独配置的功能块（以及未标记 node_key 的调用）都走这里。不设=回退到 .env 的构造默认端点（如 token-plan），可能命中你没打算用的网关。">
+            <Tooltip title="任何未在下表单独配置的功能模块（以及未标记功能模块的调用）都走这里。不设=回退到 .env 里的构造默认网关（如默认网关），可能命中你没打算用的网关。">
               <InfoCircleOutlined style={{ color: '#9c88ff' }} />
             </Tooltip>
           </Space>
@@ -602,20 +602,20 @@ export default function LLMRoutingConsole() {
             </Text>
           ) : (
             <Text type="warning" style={{ fontSize: 12 }}>
-              未设 → 未配置的功能块回退到 .env 构造默认端点
+              未设 → 未配置的功能模块回退到 .env 构造默认网关
             </Text>
           )}
         </Space>
       </Card>
 
       <Card
-        title="功能块 → 模型 映射"
+        title="功能模块 → 模型 映射"
         size="small"
         className="glass-card"
         extra={
           <Space>
             <Button icon={<PlusOutlined />} onClick={addRow}>
-              新增 node_key
+              新增功能模块
             </Button>
             <Button
               type="primary"
@@ -636,9 +636,9 @@ export default function LLMRoutingConsole() {
           <Empty
             description={
               <Space direction="vertical" align="center">
-                <span>暂无路由映射。点『新增 node_key』开始配置。</span>
+                <span>暂无路由映射。点『新增功能模块』开始配置。</span>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  典型 node_key：{SUGGESTED_NODE_KEYS.join(' / ')}
+                  常见功能模块：{SUGGESTED_NODE_KEYS.join(' / ')}
                 </Text>
               </Space>
             }
@@ -659,7 +659,7 @@ export default function LLMRoutingConsole() {
         type="info"
         showIcon
         style={{ marginTop: 16 }}
-        message="可选模型清单来自 LLM_AVAILABLE_MODELS Flag"
+        message="可选模型清单来自 LLM_AVAILABLE_MODELS 开关"
         description={
           <Space wrap>
             {availableModels.map((m) => (
@@ -670,7 +670,7 @@ export default function LLMRoutingConsole() {
       />
 
       <Drawer
-        title="LLM-Routing Flag 变更记录"
+        title="LLM 路由开关变更记录"
         open={auditOpen}
         onClose={() => setAuditOpen(false)}
         width={520}

@@ -13,9 +13,9 @@ export const STATUS_COLORS = {
 
 export const STATUS_LABELS = {
   PASS: '通过',
-  PASS_PROVISIONAL: '临时通过',
+  PASS_PROVISIONAL: '暂定通过',
   OPTIMIZE: '待优化',
-  FAIL: '失败',
+  FAIL: '未通过',
   PENDING: '待处理',
   REJECT: '拒绝',
 }

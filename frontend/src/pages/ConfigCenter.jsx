@@ -342,13 +342,13 @@ export default function ConfigCenter() {
       },
       { title: '展示名', dataIndex: 'label', width: 160 },
       {
-        title: 'SDK',
+        title: '接口类型',
         dataIndex: 'sdk',
         width: 110,
         render: (v) => <Tag color={v === 'anthropic' ? 'purple' : 'geekblue'}>{v}</Tag>,
       },
       {
-        title: 'Endpoint',
+        title: '接口地址',
         dataIndex: 'base_url',
         ellipsis: true,
         render: (v) => v
@@ -373,7 +373,7 @@ export default function ConfigCenter() {
             </Button>
             <Popconfirm
               title={`删除厂商「${row.name}」？`}
-              description="路由表中引用此厂商的条目将回退到全局默认。"
+              description="模型路由表中引用此厂商的条目将回退到全局默认。"
               onConfirm={() => deleteMutation.mutate(row.name)}
             >
               <Button size="small" type="link" danger icon={<DeleteOutlined />} />
@@ -402,12 +402,12 @@ export default function ConfigCenter() {
           type="info"
           showIcon
           style={{ marginBottom: 16 }}
-          message="预配置厂商 endpoint + 密钥，路由表按名称引用"
+          message="预先配置各模型厂商的接口地址 + 密钥，模型路由表按名称引用"
           description={
             <span>
-              在这里登记不同 LLM 厂商（endpoint + 密钥，密钥加密存库）。随后到{' '}
-              <Text code>Ops → LLM 路由控制台</Text> 为每个功能块选择厂商并填模型。
-              密钥永不回显；编辑时留空表示保留原密钥。anthropic SDK 的 Endpoint 留空即用官方默认。
+              在这里登记不同 LLM 厂商（接口地址 + 密钥，密钥加密存库）。随后到{' '}
+              <Text code>运维 → LLM 模型路由控制台</Text> 为每个功能模块选择厂商并填模型。
+              密钥永不回显；编辑时留空表示保留原密钥。Claude 原生（anthropic）接口的接口地址留空即用官方默认。
             </span>
           }
         />
@@ -433,7 +433,7 @@ export default function ConfigCenter() {
           <Form form={providerForm} layout="vertical" requiredMark>
             <Form.Item
               name="name"
-              label="厂商标识 (slug)"
+              label="厂商标识"
               tooltip="唯一标识，仅字母/数字/下划线/连字符，如 moonshot、aliyun_maas"
               rules={[
                 { required: true, message: '请输入厂商标识' },
@@ -445,18 +445,18 @@ export default function ConfigCenter() {
             <Form.Item name="label" label="展示名">
               <Input placeholder="Moonshot 官方" />
             </Form.Item>
-            <Form.Item name="sdk" label="SDK 类型" rules={[{ required: true }]}>
+            <Form.Item name="sdk" label="接口类型" rules={[{ required: true }]}>
               <Select
                 options={[
-                  { value: 'openai', label: 'openai (OpenAI 兼容：DeepSeek/Qwen/Kimi/GLM/Moonshot…)' },
-                  { value: 'anthropic', label: 'anthropic (Claude 原生)' },
+                  { value: 'openai', label: 'openai（OpenAI 兼容：DeepSeek/Qwen/Kimi/GLM/Moonshot…）' },
+                  { value: 'anthropic', label: 'anthropic（Claude 原生）' },
                 ]}
               />
             </Form.Item>
             <Form.Item
               name="base_url"
-              label="API Base URL"
-              tooltip="anthropic SDK 留空=官方 api.anthropic.com；openai 兼容厂商必填"
+              label="接口地址 (API Base URL)"
+              tooltip="Claude 原生（anthropic）接口留空=官方 api.anthropic.com；OpenAI 兼容厂商必填"
             >
               <Input placeholder="https://api.moonshot.cn/v1" />
             </Form.Item>
@@ -552,7 +552,7 @@ export default function ConfigCenter() {
               </Row>
             </Form.Item>
 
-            <Form.Item label="最大相关性 (多样性)">
+            <Form.Item label="最大相关度（多样性 / 与已有策略的不重复程度）">
               <Row gutter={16}>
                 <Col span={16}>
                   <Slider 
@@ -604,12 +604,14 @@ export default function ConfigCenter() {
                   </Text>
                 ),
               },
-              { 
-                title: '状态', 
-                dataIndex: 'status', 
+              {
+                title: '状态',
+                dataIndex: 'status',
                 key: 'status',
                 render: (status) => (
-                  <Tag color={status === 'ACTIVE' ? 'success' : 'error'}>{status}</Tag>
+                  <Tag color={status === 'ACTIVE' ? 'success' : 'error'}>
+                    {status === 'ACTIVE' ? '启用' : status === 'BANNED' ? '禁用' : status}
+                  </Tag>
                 ),
               },
               {
@@ -647,7 +649,7 @@ export default function ConfigCenter() {
     },
     {
       key: 'knowledge-library',
-      label: '因子库 KB',
+      label: '因子知识库',
       children: <KnowledgeLibraryTab />,
     },
     {
@@ -722,7 +724,7 @@ function KnowledgeLibraryTab() {
   const deactivateMutation = useMutation({
     mutationFn: (id) => api.updateKnowledgeEntry(id, { is_active: false }),
     onSuccess: () => {
-      message.success('已软删除')
+      message.success('已停用')
       queryClient.invalidateQueries({ queryKey: ['knowledge-library'] })
     },
   })
@@ -745,26 +747,29 @@ function KnowledgeLibraryTab() {
       title: '来源',
       dataIndex: 'created_by',
       width: 90,
-      render: (s) => (
-        <Tag color={s === 'HITL' ? 'gold' : s === 'USER' ? 'blue' : 'default'}>
-          {s || 'SYSTEM'}
-        </Tag>
-      ),
+      render: (s) => {
+        const label = s === 'HITL' ? '人工' : s === 'USER' ? '用户' : '系统'
+        return (
+          <Tag color={s === 'HITL' ? 'gold' : s === 'USER' ? 'blue' : 'default'}>
+            {label}
+          </Tag>
+        )
+      },
     },
     {
-      title: 'Region',
+      title: '地区',
       width: 80,
       render: (_, row) => row.meta_data?.region || '—',
     },
     {
-      title: 'Dataset',
+      title: '数据集',
       width: 130,
       ellipsis: true,
       render: (_, row) =>
         row.meta_data?.dataset_id || row.meta_data?.dataset || '—',
     },
     {
-      title: 'Confidence',
+      title: '置信度',
       width: 110,
       render: (_, row) => {
         const c = row.meta_data?.confidence
@@ -772,12 +777,12 @@ function KnowledgeLibraryTab() {
       },
     },
     {
-      title: 'Usage',
+      title: '使用次数',
       dataIndex: 'usage_count',
       width: 70,
     },
     {
-      title: 'Active',
+      title: '启用',
       dataIndex: 'is_active',
       width: 80,
       render: (a, row) => (
@@ -836,12 +841,12 @@ function KnowledgeLibraryTab() {
           value={filters.source}
           onChange={(v) => setFilters((f) => ({ ...f, source: v }))}
           options={[
-            { value: 'SYSTEM', label: 'SYSTEM' },
-            { value: 'HITL', label: 'HITL' },
-            { value: 'USER', label: 'USER' },
+            { value: 'SYSTEM', label: '系统' },
+            { value: 'HITL', label: '人工' },
+            { value: 'USER', label: '用户' },
           ]}
         />
-        <Text>Region:</Text>
+        <Text>地区:</Text>
         <Select
           allowClear
           placeholder="全部"
@@ -857,7 +862,7 @@ function KnowledgeLibraryTab() {
           checked={filters.only_active}
           onChange={(v) => setFilters((f) => ({ ...f, only_active: v }))}
         />
-        <Text>仅显示 active</Text>
+        <Text>仅显示启用</Text>
       </Space>
       <Table
         rowKey="id"
@@ -896,7 +901,7 @@ function KnowledgeDetailModal({ entry, onClose, onSaveConfidence }) {
   return (
     <Modal
       open
-      title={`KB Entry #${entry.id}`}
+      title={`知识条目 #${entry.id}`}
       onCancel={onClose}
       onOk={() => {
         onSaveConfidence(entry.id, confidence)
@@ -905,23 +910,25 @@ function KnowledgeDetailModal({ entry, onClose, onSaveConfidence }) {
       width={720}
     >
       <Descriptions bordered size="small" column={1}>
-        <Descriptions.Item label="Pattern">
+        <Descriptions.Item label="模式">
           <Text code style={{ wordBreak: 'break-all' }}>{entry.pattern}</Text>
         </Descriptions.Item>
-        <Descriptions.Item label="Description">
+        <Descriptions.Item label="描述">
           {entry.description || '—'}
         </Descriptions.Item>
-        <Descriptions.Item label="Region / Dataset">
+        <Descriptions.Item label="地区 / 数据集">
           {meta.region || '—'} / {meta.dataset_id || meta.dataset || '—'}
         </Descriptions.Item>
-        <Descriptions.Item label="Source">{entry.created_by || 'SYSTEM'}</Descriptions.Item>
-        <Descriptions.Item label="Usage / Active">
-          {entry.usage_count} / {entry.is_active ? 'YES' : 'NO'}
+        <Descriptions.Item label="来源">
+          {entry.created_by === 'HITL' ? '人工' : entry.created_by === 'USER' ? '用户' : '系统'}
         </Descriptions.Item>
-        <Descriptions.Item label="alpha_id_ref">
+        <Descriptions.Item label="使用次数 / 是否启用">
+          {entry.usage_count} / {entry.is_active ? '是' : '否'}
+        </Descriptions.Item>
+        <Descriptions.Item label="关联 alpha ID">
           {meta.alpha_id_ref ?? '—'}
         </Descriptions.Item>
-        <Descriptions.Item label="Confidence">
+        <Descriptions.Item label="置信度">
           <InputNumber
             value={confidence}
             min={0}
@@ -930,10 +937,10 @@ function KnowledgeDetailModal({ entry, onClose, onSaveConfidence }) {
             onChange={(v) => setConfidence(v)}
           />
           <Text type="secondary" style={{ marginLeft: 8 }}>
-            (确定后保存到 meta_data.confidence)
+            （确定后保存为该条目的置信度）
           </Text>
         </Descriptions.Item>
-        <Descriptions.Item label="Full meta_data">
+        <Descriptions.Item label="完整元数据">
           <Paragraph style={{ marginBottom: 0 }}>
             <code style={{ fontSize: 11 }}>
               {JSON.stringify(meta, null, 2)}

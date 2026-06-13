@@ -28,9 +28,9 @@ import useOpsData from './hooks/useOpsData'
 const { Text } = Typography
 
 const SCOPE_TABS = [
-  { key: 'field', label: 'Field-scope' },
-  { key: 'dataset', label: 'Dataset-scope' },
-  { key: 'category', label: 'Category-scope' },
+  { key: 'field', label: '按字段' },
+  { key: 'dataset', label: '按数据集' },
+  { key: 'category', label: '按类别' },
 ]
 
 // Soft daily LLM budget for the macro extractor — used as the
@@ -64,8 +64,9 @@ export default function MacroNarratives() {
   const treemapData = useMemo(() => {
     const byScope = cov.by_scope || {}
     const colors = { field: '#00d4ff', dataset: '#9c88ff', category: '#ffb700' }
+    const scopeLabel = { field: '字段', dataset: '数据集', category: '类别' }
     return Object.entries(byScope).map(([scope, n]) => ({
-      name: `${scope} · ${n}`,
+      name: `${scopeLabel[scope] || scope} · ${n}`,
       size: n,
       fill: colors[scope] || '#888',
     }))
@@ -79,30 +80,30 @@ export default function MacroNarratives() {
   const columns = [
     { title: 'ID', dataIndex: 'id', width: 60 },
     {
-      title: activeScope === 'field' ? 'field_id'
-        : activeScope === 'dataset' ? 'dataset_id'
-          : 'dataset_category',
+      title: activeScope === 'field' ? '字段'
+        : activeScope === 'dataset' ? '数据集'
+          : '数据集类别',
       dataIndex: activeScope === 'field' ? 'field_id'
         : activeScope === 'dataset' ? 'dataset_id'
           : 'dataset_category',
       width: 200,
       render: (v) => <Text code>{v || '—'}</Text>,
     },
-    { title: 'Region', dataIndex: 'region', width: 80 },
+    { title: '地区', dataIndex: 'region', width: 80 },
     {
-      title: 'Confidence',
+      title: '置信度',
       dataIndex: 'confidence',
       width: 100,
       render: (v) => (typeof v === 'number' ? v.toFixed(2) : '—'),
     },
     {
-      title: 'Source',
+      title: '来源',
       dataIndex: 'source',
       width: 120,
-      render: (v) => <Tag>{v || 'unknown'}</Tag>,
+      render: (v) => <Tag>{v || '未知'}</Tag>,
     },
     {
-      title: 'Mechanism',
+      title: '机制',
       dataIndex: 'mechanism',
       ellipsis: true,
       render: (v) => <Text type="secondary">{v || '—'}</Text>,
@@ -119,25 +120,25 @@ export default function MacroNarratives() {
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <OpsSectionCard
-        title="宏观叙事 KB"
+        title="宏观叙事知识库"
         source={latest.data?.source}
         onRefresh={refreshAll}
         loading={latest.loading}
         rerunSlot={
           <RerunButton
             triggerFn={api.rerunOpsMacro}
-            label="重跑 macro-narrative"
+            label="重跑宏观叙事提取"
             onSuccess={() => setTimeout(refreshAll, 3000)}
           />
         }
       >
         <Row gutter={[16, 16]}>
           <Col xs={12} sm={6}>
-            <Statistic title="narrative 总数" value={cov.total ?? '—'} />
+            <Statistic title="叙事总数" value={cov.total ?? '—'} />
           </Col>
           <Col xs={12} sm={6}>
             <Statistic
-              title="覆盖 field 数"
+              title="覆盖字段数"
               value={`${cov.fields_with_narrative ?? 0}/${cov.fields_total ?? 0}`}
             />
             <Progress
@@ -156,8 +157,8 @@ export default function MacroNarratives() {
           </Col>
           <Col xs={12} sm={6}>
             <Statistic
-              title="Redis"
-              value={budget.data?.redis_ok ? 'OK' : 'offline'}
+              title="Redis 缓存"
+              value={budget.data?.redis_ok ? '正常' : '离线'}
               valueStyle={{
                 color: budget.data?.redis_ok ? '#00ff88' : '#ff4d4f',
               }}
@@ -168,9 +169,9 @@ export default function MacroNarratives() {
 
       <Row gutter={[16, 16]}>
         <Col xs={24} md={14}>
-          <OpsSectionCard title="按 scope 计数(Treemap)" source="service">
+          <OpsSectionCard title="按范围计数（矩形树图）" source="service">
             {treemapData.length === 0 ? (
-              <Empty description="无 narrative" />
+              <Empty description="暂无叙事" />
             ) : (
               <ResponsiveContainer width="100%" height={300}>
                 <Treemap
@@ -212,7 +213,7 @@ export default function MacroNarratives() {
         </Col>
       </Row>
 
-      <OpsSectionCard title="按 scope 浏览" source={records.data?.source}>
+      <OpsSectionCard title="按范围浏览" source={records.data?.source}>
         <Tabs
           activeKey={activeScope}
           onChange={setActiveScope}

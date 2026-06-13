@@ -64,9 +64,9 @@ function verdictTag(verdict, pending, selfCorr) {
       <Tooltip
         title={
           <span>
-            边际推荐本应 <strong>{m.label}</strong>(质量门),但 self-corr ≥ 0.7
-            已撞门(资格门)→ 实际无法提交。<br />
-            意味"想法对但实现重复" — 可重做去相关,而非删除。
+            边际贡献推荐本应 <strong>{m.label}</strong>(质量门槛),但与已提交策略的相关度 ≥ 0.7
+            已撞资格门槛 → 实际无法提交。<br />
+            意味"想法对但实现重复" — 可重做以降低相关度,而非删除。
           </span>
         }
       >
@@ -81,9 +81,9 @@ function verdictTag(verdict, pending, selfCorr) {
 
 // Self-correlation gate: ≥0.7 vs already-submitted is BRAIN's hard reject.
 function selfCorrTag(v) {
-  if (v === null || v === undefined) return <Tag color="default">未算</Tag>
-  if (v >= 0.7) return <Tag color="error">撞门 {v.toFixed(3)}</Tag>
-  if (v >= 0.5) return <Tag color="gold">近门槛 {v.toFixed(3)}</Tag>
+  if (v === null || v === undefined) return <Tag color="default">未计算</Tag>
+  if (v >= 0.7) return <Tag color="error">撞门槛 {v.toFixed(3)}</Tag>
+  if (v >= 0.5) return <Tag color="gold">接近门槛 {v.toFixed(3)}</Tag>
   return <Tag color="success">{v.toFixed(3)}</Tag>
 }
 
@@ -102,7 +102,7 @@ function deltaSharpeTag(v, significant = true, se = null) {
   if (v === null || v === undefined) return <Tag>—</Tag>
   if (!significant) {
     return (
-      <Tooltip title={`|ΔSharpe| 未超噪声地板(1.64·SE${se != null ? `, SE=${se.toFixed(3)}` : ''}) → 与 0 不可区分,未用于排序`}>
+      <Tooltip title={`Sharpe 增量的绝对值未超过噪声地板(1.64·标准误${se != null ? `, 标准误=${se.toFixed(3)}` : ''}) → 与 0 无法区分,未用于排序`}>
         <Tag color="default" style={{ opacity: 0.5 }}>{v > 0 ? '+' : ''}{v.toFixed(3)} ·噪声</Tag>
       </Tooltip>
     )
@@ -113,20 +113,22 @@ function deltaSharpeTag(v, significant = true, se = null) {
 
 // Robustness (#39) — per-alpha OS-survival proxy from sub-period Sharpe
 // consistency (frozen-IS window). ROBUST=一致/无深亏段;FRAGILE=孤峰货。
+const ROBUSTNESS_LABEL = { ROBUST: '稳健', MODERATE: '一般', FRAGILE: '脆弱' }
 function robustnessTag(score, verdict) {
-  if (score === null || score === undefined) return <Tag color="default">无PnL</Tag>
+  if (score === null || score === undefined) return <Tag color="default">无收益数据</Tag>
   const meta = {
     ROBUST: 'success', MODERATE: 'gold', FRAGILE: 'error',
   }[verdict] || 'default'
   return (
-    <Tooltip title={`稳健分 ${score.toFixed(3)}(子周期 Sharpe 一致性,冻结 IS 口径;提交前仍需 re-sim 当前数据确认)`}>
-      <Tag color={meta}>{verdict || '—'} {score.toFixed(2)}</Tag>
+    <Tooltip title={`稳健性评分 ${score.toFixed(3)}(各子周期 Sharpe 一致性,样本内口径;提交前仍需在当前数据上重新回测确认)`}>
+      <Tag color={meta}>{ROBUSTNESS_LABEL[verdict] || verdict || '—'} {score.toFixed(2)}</Tag>
     </Tooltip>
   )
 }
 
 // BRAIN-official sub-universe Sharpe (#39) — narrow-universe robustness.
 // WQ 隐性标准要求 > ~0.7。
+// 子股票池 Sharpe — 窄股票池稳健度。
 function subUnivTag(v) {
   if (v === null || v === undefined) return <Tag>—</Tag>
   const color = v >= 1.0 ? 'success' : v >= 0.7 ? 'gold' : 'error'
@@ -143,7 +145,8 @@ const CARD_OVERALL_META = {
   SKIP: { color: 'error', label: '不提交' },
 }
 const CARD_DIM_COLOR = { ok: 'success', warn: 'gold', risk: 'error', unknown: 'default' }
-const CARD_DIM_LABEL = { overfit: '过拟合', liquidity: '流动性', crowding: '拥挤', sub_universe: '子宇宙' }
+const CARD_DIM_LEVEL_LABEL = { ok: '正常', warn: '注意', risk: '风险', unknown: '未知' }
+const CARD_DIM_LABEL = { overfit: '过拟合', liquidity: '流动性', crowding: '拥挤', sub_universe: '子股票池' }
 
 function cardTag(card) {
   if (!card) return <Tag>—</Tag>
@@ -155,14 +158,14 @@ function cardTag(card) {
         <div style={{ fontSize: 12 }}>
           <div style={{ marginBottom: 6 }}>
             综合 <strong>{m.label}</strong> — {card.reason}
-            <br />口径=IS(BRAIN 隐藏 OS,非 OS 预测)
+            <br />口径=样本内(BRAIN 隐藏样本外数据,这不是样本外预测)
           </div>
           {['overfit', 'liquidity', 'crowding', 'sub_universe'].map((k) => {
             const d = dims[k] || {}
             return (
               <div key={k} style={{ marginBottom: 2 }}>
                 <Tag color={CARD_DIM_COLOR[d.level] || 'default'} style={{ marginRight: 4 }}>
-                  {CARD_DIM_LABEL[k]} {d.level}
+                  {CARD_DIM_LABEL[k]} {CARD_DIM_LEVEL_LABEL[d.level] || d.level}
                 </Tag>
                 <Text style={{ fontSize: 11 }} type="secondary">{d.note}</Text>
               </div>
@@ -200,16 +203,16 @@ function resimTag(row) {
       title={
         <div style={{ fontSize: 12 }}>
           <div>
-            baseline <strong>{bs}</strong> → 当前 <strong>{rs}</strong>
-            {row.resim_pct != null ? `(${(row.resim_pct * 100).toFixed(0)}% of baseline)` : ''}
+            提交时基准 <strong>{bs}</strong> → 当前 <strong>{rs}</strong>
+            {row.resim_pct != null ? `(为基准的 ${(row.resim_pct * 100).toFixed(0)}%)` : ''}
           </div>
           <div style={{ marginTop: 2 }}>{row.reason}</div>
           <div style={{ marginTop: 4 }} className="">
-            口径=当前 IS(BRAIN 隐藏 OS,非 OS 预测)。
-            {row.reused_from_regime ? '复用 regime 探针结果(<6h)。' : ''}
+            口径=当前样本内(BRAIN 隐藏样本外数据,这不是样本外预测)。
+            {row.reused_from_regime ? '复用了行情监测探针的结果(6 小时内)。' : ''}
           </div>
           <div style={{ color: '#ff7875', marginTop: 2 }}>
-            ⚠️ 「持平」≠ 该提交 — 仍需过 self_corr&lt;0.7 + marginal 稀释门(#40)。
+            ⚠️ 「持平」≠ 该提交 — 仍需通过相关度&lt;0.7 + 边际贡献不稀释组合这两道门。
           </div>
         </div>
       }
@@ -221,10 +224,10 @@ function resimTag(row) {
 
 // Self-corr 状态分桶:与 KPI 卡(撞门/近门槛/安全/未算)同口径,客户端过滤复用。
 const SELF_CORR_BUCKETS = {
-  breach: { label: '撞门(≥0.7)', test: (v) => v !== null && v !== undefined && v >= 0.7 },
-  near: { label: '近门槛(0.5-0.7)', test: (v) => v !== null && v !== undefined && v >= 0.5 && v < 0.7 },
+  breach: { label: '撞门槛(≥0.7)', test: (v) => v !== null && v !== undefined && v >= 0.7 },
+  near: { label: '接近门槛(0.5-0.7)', test: (v) => v !== null && v !== undefined && v >= 0.5 && v < 0.7 },
   safe: { label: '安全(<0.5)', test: (v) => v !== null && v !== undefined && v < 0.5 },
-  unknown: { label: '未算', test: (v) => v === null || v === undefined },
+  unknown: { label: '未计算', test: (v) => v === null || v === undefined },
 }
 
 // verdict 桶包含 pending(待扫描)— pending 行没 verdict,单独成档。
@@ -314,9 +317,9 @@ export default function SubmitBacklogMonitor() {
       })
     }
     if (resimJob.status === 'done') {
-      message.success(`当前数据 re-sim 完成（${resimJob.done ?? 0}/${resimJob.total ?? 0}）`)
+      message.success(`当前数据重新回测完成（${resimJob.done ?? 0}/${resimJob.total ?? 0}）`)
     } else if (resimJob.status === 'error') {
-      message.error(`re-sim 失败：${resimJob.error || '未知'}`)
+      message.error(`重新回测失败：${resimJob.error || '未知'}`)
     }
   }, [resimJob])
 
@@ -440,7 +443,7 @@ export default function SubmitBacklogMonitor() {
   const triggerResim = async (pks) => {
     const uniq = Array.from(new Set((pks || []).filter((p) => p != null)))
     if (uniq.length === 0) {
-      message.info('无候选可 re-sim')
+      message.info('无候选可重新回测')
       return
     }
     setResimPosting(true)
@@ -448,9 +451,9 @@ export default function SubmitBacklogMonitor() {
       const res = await api.resimBacklogCurrent(uniq)
       setResimActivePks(uniq)
       setResimJobId(res.job_id)
-      message.success(`已入队 ${res.enqueued} 个当前数据 re-sim（worker 异步，约 ${Math.max(1, Math.ceil(uniq.length / 2)) * 2}min）`)
+      message.success(`已入队 ${res.enqueued} 个当前数据重新回测（工作进程后台执行，约 ${Math.max(1, Math.ceil(uniq.length / 2)) * 2} 分钟）`)
     } catch (e) {
-      message.error(e?.response?.data?.detail || e?.message || 're-sim 触发失败')
+      message.error(e?.response?.data?.detail || e?.message || '重新回测触发失败')
     } finally {
       setResimPosting(false)
     }
@@ -495,8 +498,8 @@ export default function SubmitBacklogMonitor() {
     },
     {
       title: (
-        <Tooltip title="Self-correlation vs 已提交集(BRAIN 硬门 < 0.7)。BRAIN 端 SELF_CORRELATION 经常 PENDING 不出值,can_submit 仍 true,但本地算的撞门会让真实 submit 被 BRAIN 拒。">
-          <Space size={4}>Self-corr <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        <Tooltip title="与已提交策略集的相关度(BRAIN 硬门槛 < 0.7)。BRAIN 端这个值经常迟迟算不出来,导致系统仍标为可提交,但本地算出的撞门槛会让真实提交被 BRAIN 拒绝。">
+          <Space size={4}>相关度 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
       dataIndex: 'self_corr',
@@ -515,7 +518,7 @@ export default function SubmitBacklogMonitor() {
     },
     {
       title: (
-        <Tooltip title="边际综合评分（marginal composite_score）— 同推荐档内排序依据">
+        <Tooltip title="边际贡献综合评分 — 同一推荐档内的排序依据">
           <Space size={4}>综合评分 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
@@ -527,7 +530,7 @@ export default function SubmitBacklogMonitor() {
     },
     {
       title: (
-        <Tooltip title="alpha 自身 margin（bps）— ≥5bps 才扣成本盈利，是经济门">
+        <Tooltip title="alpha 自身的 Margin(每单位交易利润,单位 bps)— 要 ≥5bps 才能覆盖交易成本盈利,是经济门槛">
           <Space size={4}>Margin <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
@@ -593,7 +596,7 @@ export default function SubmitBacklogMonitor() {
   const drainMetricCols = [
     {
       title: (
-        <Tooltip title="IS 5 维体检卡(Phase C):聚合 过拟合/流动性/拥挤/子宇宙 + 边际打分 → 综合提交建议(经济门→硬风险维→边际)。口径=IS,非 OS 预测。悬停看各维。">
+        <Tooltip title="样本内 5 维体检卡:聚合 过拟合/流动性/拥挤/子股票池 + 边际打分 → 综合提交建议(经济门槛→硬风险维度→边际贡献)。口径=样本内,不是样本外预测。悬停看各维度。">
           <Space size={4}>体检卡 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
@@ -604,7 +607,7 @@ export default function SubmitBacklogMonitor() {
     },
     {
       title: (
-        <Tooltip title="按需在当前数据 re-sim,对比冻结-IS baseline 判衰减(持平/软/硬/margin死/缓存无法测)。只读不提交。口径=当前 IS 非 OS。点「测」跑单个;批量见上方「复核 REVIEW」按钮。⚠️「持平」≠ 该提交。">
+        <Tooltip title="按需在当前数据上重新回测,对比提交时的样本内基准判断是否衰减(持平/软衰减/硬衰减/margin死/缓存无法测)。只读、不提交。口径=当前样本内,不是样本外。点「测」跑单个;批量见上方「复核」按钮。⚠️「持平」≠ 该提交。">
           <Space size={4}>当前数据 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
@@ -630,8 +633,8 @@ export default function SubmitBacklogMonitor() {
     },
     {
       title: (
-        <Tooltip title="与「已选 ∪ 已提交」集的最大相关性 — 越低这次提交加的独立广度越多">
-          <Space size={4}>Δ广度(max-corr) <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        <Tooltip title="与「已选 ∪ 已提交」集合的最大相关性 — 越低,这次提交带来的独立广度越多">
+          <Space size={4}>新增广度(最大相关) <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
       dataIndex: 'max_corr_to_selected',
@@ -642,8 +645,8 @@ export default function SubmitBacklogMonitor() {
     },
     {
       title: (
-        <Tooltip title="加入此 alpha 后「已提交池组合」的 Sharpe 增量（等风险加权，OS 窗口）。>0=改善组合、值得提交；<0=稀释。组合层(L2)排序依据。">
-          <Space size={4}>Δ组合Sharpe <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        <Tooltip title="加入这个 alpha 后「已提交组合」的 Sharpe 增量（等风险加权，样本外窗口）。大于 0=改善组合、值得提交；小于 0=稀释。组合层排序依据。">
+          <Space size={4}>组合Sharpe增量 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
       dataIndex: 'delta_sharpe',
@@ -654,7 +657,7 @@ export default function SubmitBacklogMonitor() {
     },
     {
       title: (
-        <Tooltip title="基于经对账验证的 ΔSharpe 方向的排序层:增益(先提交)→中性→稀释(排最后,提交会拖累组合)→无PnL。对账 FALSIFIED/样本不足时退纯广度,此列为「—」。">
+        <Tooltip title="基于经对账验证的 Sharpe 增量方向的排序层:增益(先提交)→中性→稀释(排最后,提交会拖累组合)→无收益数据。对账被证伪 / 样本不足时退回纯广度排序,此列显示「—」。">
           <Space size={4}>方向层 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
@@ -667,15 +670,15 @@ export default function SubmitBacklogMonitor() {
           0: { c: 'green', label: '增益' },
           1: { c: 'gold', label: '中性' },
           2: { c: 'red', label: '稀释' },
-          3: { c: 'default', label: '无PnL' },
+          3: { c: 'default', label: '无收益数据' },
         }[t] || { c: 'default', label: String(t) }
         return <Tag color={meta.c}>{meta.label}</Tag>
       },
     },
     {
       title: (
-        <Tooltip title="抗过拟合稳健性(#39):子周期 Sharpe 一致性 → ROBUST(一致)/ MODERATE / FRAGILE(孤峰货,易 OS 衰减)。BRAIN 隐藏 OS,这是提交前唯一可控质量代理。冻结 IS 口径。">
-          <Space size={4}>稳健 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        <Tooltip title="抗过拟合稳健性:各子周期 Sharpe 一致性 → 稳健(一致)/ 一般 / 脆弱(孤峰货,样本外容易衰减)。BRAIN 隐藏样本外数据,这是提交前唯一可控的质量代理。样本内口径。">
+          <Space size={4}>稳健性 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
       dataIndex: 'robustness_score',
@@ -685,8 +688,8 @@ export default function SubmitBacklogMonitor() {
     },
     {
       title: (
-        <Tooltip title="BRAIN 官方 sub-universe Sharpe — 窄宇宙稳健度(WQ 隐性标准 >0.7)。比冻结-PnL 稳健性更直接;auto-submit 以此为 G5b 软门。">
-          <Space size={4}>Sub-univ <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
+        <Tooltip title="BRAIN 官方的子股票池 Sharpe — 窄股票池稳健度(WQ 隐性标准 >0.7)。比基于历史收益的稳健性更直接;自动提交以此作为一道软门槛。">
+          <Space size={4}>子股票池 <InfoCircleOutlined style={{ color: '#9c88ff' }} /></Space>
         </Tooltip>
       ),
       dataIndex: 'sub_universe_sharpe',
@@ -696,7 +699,7 @@ export default function SubmitBacklogMonitor() {
       render: (v) => subUnivTag(v),
     },
     {
-      title: 'self-corr',
+      title: '相关度',
       dataIndex: 'self_corr',
       key: 'self_corr',
       width: 110,
@@ -774,7 +777,7 @@ export default function SubmitBacklogMonitor() {
           />
           <Popconfirm
             title="全量重新审计积压"
-            description={`将对待扫描/陈旧的 alpha 逐个调 BRAIN 重算边际推荐（每个约 5-20s，消耗 BRAIN 配额）。worker 后台异步执行，确认触发？`}
+            description={`将对待扫描/陈旧的 alpha 逐个调 BRAIN 重算边际贡献推荐（每个约 5-20 秒，消耗 BRAIN 配额）。工作进程后台执行，确认触发？`}
             okText="确认扫描"
             cancelText="取消"
             onConfirm={() => scanMutation.mutate()}
@@ -798,7 +801,7 @@ export default function SubmitBacklogMonitor() {
         style={{ marginBottom: 16 }}
         message={
           <Space wrap align="center">
-            <span>边际审计覆盖进度</span>
+            <span>边际贡献审计覆盖进度</span>
             <Progress
               percent={progressPct}
               size="small"
@@ -807,15 +810,15 @@ export default function SubmitBacklogMonitor() {
             />
             <Text type="secondary">
               已审计 {audited} / {total}
-              {pending > 0 ? `，${pending} 个待扫描（陈旧 schema 或未审计）` : '，全部已带推荐'}
+              {pending > 0 ? `，${pending} 个待扫描（旧数据格式或未审计）` : '，全部已带推荐'}
             </Text>
           </Space>
         }
         description={
           pending > 0 ? (
             <Text type="secondary" style={{ fontSize: 12 }}>
-              「待扫描」是仍带旧赛季(IQC2026S1)审计或从未审计的 alpha — 点「扫描全部」用当前
-              scope(IQC2026S2)+ 边际打分卡刷新出 SUBMIT/NEUTRAL/SKIP 推荐。周期 beat 也会逐批补,
+              「待扫描」是仍带旧赛季审计结果或从未审计的 alpha — 点「扫描全部」用当前
+              赛季 + 边际贡献打分卡刷新出「建议提交 / 中性 / 不建议」推荐。定时任务也会逐批补,
               手动扫描更快。
             </Text>
           ) : null
@@ -827,7 +830,7 @@ export default function SubmitBacklogMonitor() {
         <Col xs={12} sm={6} lg={4}>
           <Card className="glass-card">
             <Statistic title="积压总数" value={total} valueStyle={{ color: '#00d4ff' }} />
-            <Text type="secondary" style={{ fontSize: 12 }}>can_submit 且未提交</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>可提交但还没提交</Text>
           </Card>
         </Col>
         <Col xs={12} sm={6} lg={4}>
@@ -861,11 +864,11 @@ export default function SubmitBacklogMonitor() {
       <Row gutter={[16, 16]} style={{ marginTop: 12 }}>
         <Col xs={12} sm={6} lg={6}>
           <Card className="glass-card">
-            <Tooltip title="本地算 self-corr ≥ 0.7 vs 已提交集 → BRAIN 提交时硬门拒。这些不应被选去批量提交,checkbox 已禁用。">
+            <Tooltip title="本地算出与已提交集的相关度 ≥ 0.7 → BRAIN 提交时硬门槛拒绝。这些不应被选去批量提交,勾选框已禁用。">
               <Statistic
                 title={
                   <Space>
-                    Self-corr 撞门
+                    相关度撞门槛
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }
@@ -879,7 +882,7 @@ export default function SubmitBacklogMonitor() {
         <Col xs={12} sm={6} lg={6}>
           <Card className="glass-card">
             <Statistic
-              title="近门槛"
+              title="接近门槛"
               value={summary.self_corr_near ?? 0}
               valueStyle={{ color: '#ffb700' }}
             />
@@ -898,18 +901,18 @@ export default function SubmitBacklogMonitor() {
         </Col>
         <Col xs={12} sm={6} lg={6}>
           <Card className="glass-card">
-            <Tooltip title="本地未算 self-corr(BRAIN 端可能 PENDING 不出值)。提交前需用 refresh-can-submit 触发本地重算,或冒险提交。">
+            <Tooltip title="本地还没算出相关度(BRAIN 端可能一直算不出值)。提交前需触发本地重算,或冒险提交。">
               <Statistic
                 title={
                   <Space>
-                    未算
+                    未计算
                     <InfoCircleOutlined style={{ color: '#9c88ff' }} />
                   </Space>
                 }
                 value={summary.self_corr_unknown ?? 0}
                 valueStyle={{ color: '#888' }}
               />
-              <Text type="secondary" style={{ fontSize: 12 }}>无本地 _self_corr</Text>
+              <Text type="secondary" style={{ fontSize: 12 }}>本地还没有相关度</Text>
             </Tooltip>
           </Card>
         </Col>
@@ -923,11 +926,11 @@ export default function SubmitBacklogMonitor() {
           style={{ marginTop: 12 }}
           message={
             <span>
-              <strong>提交陷阱</strong>:积压里有 <strong>{summary.self_corr_breach}</strong> 个本地算 self-corr ≥ 0.7,
-              虽然 <code>can_submit=true</code>(因为 BRAIN 端 SELF_CORRELATION 常 PENDING 不出值)但
-              真实提交时会被 BRAIN 拒。表格里这些行 checkbox 已禁用、且已沉到队列末尾。
+              <strong>提交陷阱</strong>:积压里有 <strong>{summary.self_corr_breach}</strong> 个本地算出与已提交策略相关度 ≥ 0.7,
+              虽然系统标为可提交(因为 BRAIN 端的相关度常常一直算不出值)但
+              真实提交时会被 BRAIN 拒。表格里这些行勾选框已禁用、且已沉到队列末尾。
               真正可提交 ≈ <strong>{(summary.self_corr_safe ?? 0) + (summary.self_corr_near ?? 0)}</strong> 个
-              + <strong>{summary.self_corr_unknown ?? 0}</strong> 个未算(冒险或先 refresh)。
+              + <strong>{summary.self_corr_unknown ?? 0}</strong> 个未计算(冒险或先重算相关度)。
             </span>
           }
         />
@@ -940,7 +943,7 @@ export default function SubmitBacklogMonitor() {
           description={
             pickedSubmitCount < selectedRowKeys.length
               ? `注意：选中项里有 ${selectedRowKeys.length - pickedSubmitCount} 个非「建议提交」档，仍会逐个尝试提交。`
-              : '逐个调用 /alphas/{id}/submit 提交到 BRAIN。'
+              : '逐个提交到 BRAIN。'
           }
           okText="确认提交"
           cancelText="取消"
@@ -962,13 +965,13 @@ export default function SubmitBacklogMonitor() {
         >
           刷新
         </Button>
-        <Tooltip title="把积压重排成「广度最大化」的提交顺序：每步挑与已选∪已提交集最不相关的 alpha 先提交（零 BRAIN 成本）">
+        <Tooltip title="把积压重排成「广度最大化」的提交顺序：每步挑与已选∪已提交集最不相关的 alpha 先提交（不消耗 BRAIN 配额）">
           <Button
             icon={<OrderedListOutlined />}
             type={showDrain ? 'primary' : 'default'}
             onClick={() => setShowDrain((s) => !s)}
           >
-            {showDrain ? '隐藏正交抽干顺序' : '正交抽干顺序'}
+            {showDrain ? '隐藏差异化抽干顺序' : '差异化抽干顺序'}
           </Button>
         </Tooltip>
         {selectedRowKeys.length > 0 && (
@@ -988,7 +991,7 @@ export default function SubmitBacklogMonitor() {
           title={
             <Space>
               <OrderedListOutlined />
-              <span>正交抽干顺序（最大化组合广度）</span>
+              <span>差异化抽干顺序（最大化组合广度）</span>
               {drainFetching && <Spin size="small" />}
             </Space>
           }
@@ -999,32 +1002,32 @@ export default function SubmitBacklogMonitor() {
             style={{ marginBottom: 12 }}
             message={
               drainData?.objective === 'value'
-                ? '质量×广度排序：在不撞相关墙的前提下，先提交最能提升组合 Sharpe 的 alpha'
+                ? '质量×广度排序：在不撞相关性墙的前提下，先提交最能提升组合 Sharpe 的 alpha'
                 : '纯广度排序：每步挑与已选∪已提交集最不相关的 alpha 先提交'
             }
             description={
               <Text style={{ fontSize: 12 }}>
                 {drainData?.objective === 'value' ? (
                   <>
-                    组合层(L2)：广度作硬约束（与已选集 max-corr &lt; 阈值），<b>Δ组合Sharpe</b> 作目标——
-                    每步挑「加入后最能抬升已提交池组合 Sharpe」的 alpha（基准池 {drainData?.n_base_pool} 个已提交，
-                    等风险加权，OS 窗口）。ΔSharpe 与相关性均来自本地 PnL（零 BRAIN 成本）。
+                    组合层：广度作硬约束（与已选集的最大相关性 &lt; 阈值），<b>组合 Sharpe 增量</b> 作目标——
+                    每步挑「加入后最能抬升已提交组合 Sharpe」的 alpha（基准组合 {drainData?.n_base_pool} 个已提交，
+                    等风险加权，样本外窗口）。Sharpe 增量与相关性均来自本地收益数据（不消耗 BRAIN 配额）。
                   </>
                 ) : (
                   <>
-                    贪心：每步挑「与已选 ∪ 已提交集 最大相关性最低」的 alpha（Grinold-Kahn：有效广度 ≤ 1/ρ，
-                    先提交最正交的才真正增加独立下注）。相关性来自本地 PnL + 已存 self_corr。
+                    贪心策略：每步挑「与已选 ∪ 已提交集 最大相关性最低」的 alpha（有效广度 ≤ 1/相关性，
+                    先提交差异最大的才真正增加独立下注）。相关性来自本地收益数据 + 已存的相关度。
                   </>
                 )}
-                {' '}阻塞项=与已选集 max-corr ≥ 阈值，是近重复、提交价值低。
+                {' '}被阻塞项=与已选集最大相关性 ≥ 阈值，属于近重复、提交价值低。
                 {drainData?.note ? (<><br /><Text type="warning">{drainData.note}</Text></>) : null}
               </Text>
             }
           />
           <Space wrap style={{ marginBottom: 8 }}>
-            <Tooltip title="抗过拟合稳健门(#39):>0 时把 FRAGILE / 无PnL 候选剔进 fragile 桶,只让稳健者进提交序。0 = 仅标注不过滤。口径=冻结 IS 子周期一致性。">
+            <Tooltip title="抗过拟合稳健门槛:>0 时把脆弱 / 无收益数据的候选剔进脆弱桶,只让稳健者进提交序列。0 = 仅标注不过滤。口径=样本内各子周期一致性。">
               <Space size={4}>
-                <Text type="secondary" style={{ fontSize: 12 }}>稳健门:</Text>
+                <Text type="secondary" style={{ fontSize: 12 }}>稳健门槛:</Text>
                 <Select
                   size="small"
                   value={minRobustness}
@@ -1041,8 +1044,8 @@ export default function SubmitBacklogMonitor() {
             </Tooltip>
             <Tag color={drainData?.objective === 'value' ? 'purple' : 'default'}>
               {drainData?.objective === 'value'
-                ? `质量×广度 (ΔSharpe · 基准池 ${drainData?.n_base_pool ?? 0})`
-                : '纯广度 (无基准池)'}
+                ? `质量×广度 (Sharpe 增量 · 基准组合 ${drainData?.n_base_pool ?? 0})`
+                : '纯广度 (无基准组合)'}
             </Tag>
             <Tag color="cyan">候选 {drainData?.n_candidates ?? 0}</Tag>
             <Tag color="success">可提交 {drainData?.n_selected ?? 0}</Tag>
@@ -1050,23 +1053,23 @@ export default function SubmitBacklogMonitor() {
             {(drainData?.min_robustness ?? 0) > 0 && (
               <Tag color="volcano">稳健剔除 {drainData?.n_fragile ?? 0}</Tag>
             )}
-            <Tag>有本地 PnL {drainData?.n_with_pnl ?? 0}/{drainData?.n_candidates ?? 0}</Tag>
+            <Tag>有本地收益数据 {drainData?.n_with_pnl ?? 0}/{drainData?.n_candidates ?? 0}</Tag>
             {drainData?.objective === 'value' && (
-              <Tooltip title={`ΔSharpe 超出自身噪声地板(|Δ|>1.64·SE)的数量;越 deflated 期望最大值(${drainData?.deflated_threshold ?? '—'})的数量。0 显著 = ΔSharpe 幅度统计上全是噪声 → 不作精排,改用经对账验证的方向(sign)分层。`}>
+              <Tooltip title={`Sharpe 增量超出自身噪声地板(绝对值>1.64·标准误)的数量;以及超过去偏后期望最大值(${drainData?.deflated_threshold ?? '—'})的数量。0 个显著 = Sharpe 增量幅度统计上全是噪声 → 不作精细排序,改用经对账验证的方向分层。`}>
                 <Tag color={(drainData?.n_significant ?? 0) > 0 ? 'purple' : 'warning'}>
-                  ΔSh 幅度显著 {drainData?.n_significant ?? 0}/{drainData?.n_with_pnl ?? 0} · 越deflated {drainData?.n_survives_deflation ?? 0}
+                  Sharpe 增量显著 {drainData?.n_significant ?? 0}/{drainData?.n_with_pnl ?? 0} · 去偏后仍超 {drainData?.n_survives_deflation ?? 0}
                 </Tag>
               </Tooltip>
             )}
             {drainData?.recon_verdict && (
               <Tooltip
                 title={
-                  `方法论 kill-switch（在 drain 端点内对本积压实时计算,真正 gating 排序）:` +
-                  `离线 ΔSharpe 与 BRAIN 权威 before-and-after 边际的符号一致率 ` +
+                  `方法论自检开关（对本积压实时计算,真正决定排序方式）:` +
+                  `本地离线算的 Sharpe 增量,与 BRAIN 权威的提交前后边际,两者符号一致率 ` +
                   `${drainData.recon_sign_rate != null ? (drainData.recon_sign_rate * 100).toFixed(0) + '%' : '—'} ` +
-                  `(n=${drainData.recon_n_compared})。verdict=${drainData.recon_verdict}。` +
-                  `≤60%(FALSIFIED) ⇒ 离线代理失效,自动停用 sign 排序退纯广度。` +
-                  `注意:这是 predicted↔BRAIN(两者都是回测-merge 估计),非 live realized。`
+                  `(样本数=${drainData.recon_n_compared})。结论=${drainData.recon_verdict}。` +
+                  `≤60%(被证伪) ⇒ 离线代理失效,自动停用方向排序、退回纯广度排序。` +
+                  `注意:这是本地预测↔BRAIN(两者都是回测估计),不是真实样本外结果。`
                 }
               >
                 <Tag
@@ -1085,23 +1088,23 @@ export default function SubmitBacklogMonitor() {
             {forwardReconData && (
               <Tooltip
                 title={
-                  `Forward-test:提交时冻结的预测(metrics._recon_predicted_delta_sharpe),不随池增长漂移。` +
+                  `前瞻验证:提交时冻结的预测,不随组合增长漂移。` +
                   `已冻结 ${forwardReconData.n_frozen} 个(可度量 ${forwardReconData.n_measurable})。` +
-                  `当前仅核验 predicted↔BRAIN-before-and-after(两者都是回测-merge 估计,非 live realized);` +
-                  `predicted↔realized 尚无任何数据:${forwardReconData.realized_blocked_reason || ''}`
+                  `当前仅核验 本地预测↔BRAIN 提交前后(两者都是回测估计,不是真实样本外结果);` +
+                  `本地预测↔真实结果 尚无任何数据:${forwardReconData.realized_blocked_reason || ''}`
                 }
               >
                 <Tag color={forwardReconData.n_frozen > 0 ? 'geekblue' : 'default'}>
-                  forward 冻结 {forwardReconData.n_frozen ?? 0}
+                  前瞻冻结 {forwardReconData.n_frozen ?? 0}
                   {forwardReconData.n_with_realized > 0
-                    ? ` · realized ${forwardReconData.n_with_realized}`
-                    : ' · realized 结构性不可得'}
+                    ? ` · 真实结果 ${forwardReconData.n_with_realized}`
+                    : ' · 真实结果结构性不可得'}
                 </Tag>
               </Tooltip>
             )}
             <Popconfirm
-              title={`按正交顺序提交选中的 ${drainSelectedKeys.length} 个`}
-              description="逐个调 /alphas/{id}/submit 提交到 BRAIN（不可逆，消耗配额）。"
+              title={`按差异化顺序提交选中的 ${drainSelectedKeys.length} 个`}
+              description="逐个提交到 BRAIN（不可逆，消耗配额）。"
               okText="确认提交"
               cancelText="取消"
               disabled={drainSelectedKeys.length === 0 || submitting}
@@ -1130,7 +1133,7 @@ export default function SubmitBacklogMonitor() {
             >
               全选可提交 {drainData?.n_selected ?? 0}
             </Button>
-            <Tooltip title="对当前所有 REVIEW(体检卡=复核)候选批量在当前数据 re-sim,判衰减。只读不提交。约 2min/2个(分块并发)。需 ENABLE_RESIM_BACKLOG。">
+            <Tooltip title="对当前所有「复核」档(体检卡=复核)候选批量在当前数据上重新回测,判断是否衰减。只读、不提交。约 2 分钟/2 个(分块并发)。">
               <Button
                 size="small"
                 icon={<ExperimentOutlined />}
@@ -1138,12 +1141,12 @@ export default function SubmitBacklogMonitor() {
                 disabled={reviewPks.length === 0 || resimJobRunning}
                 onClick={() => triggerResim(reviewPks)}
               >
-                复核 REVIEW 当前数据（{reviewPks.length}）
+                复核「复核」档当前数据（{reviewPks.length}）
               </Button>
             </Tooltip>
             {resimJobRunning && (
               <Text type="secondary" style={{ fontSize: 12 }}>
-                re-sim 中 {resimJob?.done ?? 0}/{resimJob?.total ?? 0}…
+                重新回测中 {resimJob?.done ?? 0}/{resimJob?.total ?? 0}…
               </Text>
             )}
           </Space>
@@ -1153,9 +1156,9 @@ export default function SubmitBacklogMonitor() {
             style={{ marginBottom: 8 }}
             message={
               <Text style={{ fontSize: 12 }}>
-                「当前数据」列 = 按需 re-sim 于当前 BRAIN 数据(口径 <b>当前 IS,非 OS</b>),对比冻结-IS baseline 判衰减。
-                <b>「持平」≠ 该提交</b> — 个体不衰减不代表对组合有边际,仍需过 self_corr&lt;0.7 + marginal 稀释门(#40)。
-                命中 BRAIN dedup 缓存的标「无法测」(返存储值非当前数据)。此功能只读、绝不提交。
+                「当前数据」列 = 按需在当前 BRAIN 数据上重新回测(口径 <b>当前样本内,不是样本外</b>),对比提交时的样本内基准判断是否衰减。
+                <b>「持平」≠ 该提交</b> — 个体不衰减不代表对组合有边际贡献,仍需通过相关度&lt;0.7 + 不稀释组合这两道门。
+                命中 BRAIN 去重缓存的标「无法测」(返回的是存储值,不是当前数据)。此功能只读、绝不提交。
               </Text>
             }
           />
@@ -1166,12 +1169,12 @@ export default function SubmitBacklogMonitor() {
             dataSource={drainData?.selected || []}
             columns={drainColumns}
             pagination={{ pageSize: 20 }}
-            locale={{ emptyText: drainFetching ? '计算中…' : '无可正交提交的干净 alpha' }}
+            locale={{ emptyText: drainFetching ? '计算中…' : '无可差异化提交的干净 alpha' }}
           />
           {(drainData?.blocked?.length ?? 0) > 0 && (
             <details style={{ marginTop: 8 }}>
               <summary style={{ cursor: 'pointer', color: '#888', fontSize: 12 }}>
-                相关性阻塞 {drainData.blocked.length} 个（与已选集 max-corr ≥ {drainData?.threshold ?? 0.7}，提交近重复、价值低）
+                相关性阻塞 {drainData.blocked.length} 个（与已选集最大相关性 ≥ {drainData?.threshold ?? 0.7}，提交近重复、价值低）
               </summary>
               <Table
                 size="small"
@@ -1186,7 +1189,7 @@ export default function SubmitBacklogMonitor() {
           {(drainData?.fragile?.length ?? 0) > 0 && (
             <details style={{ marginTop: 8 }}>
               <summary style={{ cursor: 'pointer', color: '#ff7a45', fontSize: 12 }}>
-                稳健门剔除 {drainData.fragile.length} 个(robustness_score &lt; {drainData?.min_robustness} 或无本地 PnL — 孤峰货,易 OS 衰减;提交风险高)
+                稳健门槛剔除 {drainData.fragile.length} 个(稳健性评分 &lt; {drainData?.min_robustness} 或无本地收益数据 — 孤峰货,样本外容易衰减;提交风险高)
               </summary>
               <Table
                 size="small"
@@ -1221,7 +1224,7 @@ export default function SubmitBacklogMonitor() {
             allowClear
             value={selfCorrFilter}
             onChange={(v) => resetFilter(() => setSelfCorrFilter(v))}
-            placeholder="Self-corr 状态"
+            placeholder="相关度状态"
             style={{ minWidth: 220 }}
             maxTagCount="responsive"
             options={Object.entries(SELF_CORR_BUCKETS).map(([k, m]) => ({ value: k, label: m.label }))}
@@ -1231,7 +1234,7 @@ export default function SubmitBacklogMonitor() {
             allowClear
             value={universeFilter}
             onChange={(v) => resetFilter(() => setUniverseFilter(v))}
-            placeholder={universeOptions.length ? 'Universe' : '当前无 universe 数据'}
+            placeholder={universeOptions.length ? '股票池' : '当前无股票池数据'}
             style={{ minWidth: 200 }}
             maxTagCount="responsive"
             disabled={universeOptions.length === 0}
@@ -1268,7 +1271,7 @@ export default function SubmitBacklogMonitor() {
           locale={{
             emptyText: anyFilterActive
               ? '当前筛选条件下无 alpha — 试着放宽或清空筛选'
-              : '无积压 alpha（can_submit 且未提交为空）',
+              : '无积压 alpha（可提交但未提交的为空）',
           }}
         />
       </Card>

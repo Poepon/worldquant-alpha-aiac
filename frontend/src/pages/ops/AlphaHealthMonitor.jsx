@@ -41,6 +41,15 @@ const BAND_COLORS = {
 
 const BAND_ORDER = ['GREEN', 'YELLOW', 'ORANGE', 'RED', 'UNKNOWN']
 
+// 健康档位代号 → 中文展示（GREEN/RED 等是后端返回的 key，不改 key 只加 label）
+const BAND_LABEL = {
+  GREEN: '健康',
+  YELLOW: '偏注意',
+  ORANGE: '注意',
+  RED: '异常',
+  UNKNOWN: '未知',
+}
+
 /**
  * AlphaHealthMonitor — /ops/alpha-health page.
  *
@@ -107,19 +116,19 @@ export default function AlphaHealthMonitor() {
         </a>
       ),
     },
-    { title: 'Region', dataIndex: 'region', width: 80 },
+    { title: '地区', dataIndex: 'region', width: 80 },
     {
-      title: 'Band',
+      title: '健康档位',
       dataIndex: 'health_band',
       width: 100,
       render: (b) => (
         <Tag color={BAND_COLORS[b] || 'default'} style={{ color: '#000', borderColor: 'transparent' }}>
-          {b}
+          {BAND_LABEL[b] || b}
         </Tag>
       ),
     },
     {
-      title: 'Score',
+      title: '健康分',
       dataIndex: 'health_score',
       width: 80,
       render: (s) => (typeof s === 'number' ? s.toFixed(1) : '—'),
@@ -151,7 +160,7 @@ export default function AlphaHealthMonitor() {
         rerunSlot={
           <RerunButton
             triggerFn={api.rerunOpsAlphaHealth}
-            label="重跑 health-check"
+            label="重跑健康检查"
             onSuccess={handleRerunSuccess}
           />
         }
@@ -159,13 +168,13 @@ export default function AlphaHealthMonitor() {
         {latest.loading && !latest.data ? (
           <Spin />
         ) : total === 0 ? (
-          <Empty description="今日尚无 health-check 数据;点右上 Rerun 触发" />
+          <Empty description="今日尚无健康检查数据；点右上『重跑健康检查』触发" />
         ) : (
           <Row gutter={[16, 16]}>
             {BAND_ORDER.map((band) => (
               <Col key={band} xs={12} sm={8} md={4}>
                 <Statistic
-                  title={band}
+                  title={BAND_LABEL[band] || band}
                   value={summary.band_counts?.[band] || 0}
                   suffix={
                     <span style={{ fontSize: 12, color: '#888' }}>
@@ -188,7 +197,7 @@ export default function AlphaHealthMonitor() {
         )}
       </OpsSectionCard>
 
-      <OpsSectionCard title="各区域 band 分布" source={source}>
+      <OpsSectionCard title="各地区健康档位分布" source={source}>
         {regionRows.length === 0 ? (
           <Empty description="无数据" />
         ) : (
@@ -205,6 +214,7 @@ export default function AlphaHealthMonitor() {
                 <Bar
                   key={band}
                   dataKey={band}
+                  name={BAND_LABEL[band] || band}
                   stackId="b"
                   fill={BAND_COLORS[band]}
                 />
@@ -214,7 +224,7 @@ export default function AlphaHealthMonitor() {
         )}
       </OpsSectionCard>
 
-      <OpsSectionCard title="30 天 GREEN / (RED+ORANGE) 趋势" source="docs_archived">
+      <OpsSectionCard title="30 天 健康 / 异常(异常+注意) 占比趋势" source="docs_archived">
         {trendRows.length === 0 ? (
           <Empty description="历史数据不足" />
         ) : (
@@ -227,8 +237,8 @@ export default function AlphaHealthMonitor() {
                 contentStyle={{ background: '#1f2937', border: '1px solid #444' }}
               />
               <Legend />
-              <Line type="monotone" dataKey="GREEN%" stroke="#00ff88" strokeWidth={2} dot={false} />
-              <Line type="monotone" dataKey="RED%" stroke="#ff4d4f" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="GREEN%" name="健康占比" stroke="#00ff88" strokeWidth={2} dot={false} />
+              <Line type="monotone" dataKey="RED%" name="异常占比" stroke="#ff4d4f" strokeWidth={2} dot={false} />
             </LineChart>
           </ResponsiveContainer>
         )}
@@ -252,7 +262,7 @@ export default function AlphaHealthMonitor() {
                 color: filterBand === b ? '#000' : undefined,
               }}
             >
-              {b}
+              {BAND_LABEL[b] || b}
             </Tag.CheckableTag>
           ))}
           {Object.keys(byRegion).map((r) => (

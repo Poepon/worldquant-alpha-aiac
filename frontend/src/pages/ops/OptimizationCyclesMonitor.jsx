@@ -59,28 +59,28 @@ const DECISION_LABELS = {
   GO: {
     color: 'success',
     icon: <CheckCircleTwoTone twoToneColor="#52c41a" />,
-    label: 'GO — 转化率达标',
-    desc: '14d 转化率 > 20% AND cycles ≥ 30 → 可考虑升级 Stage B(表达式 rewrite + auto-submit)',
+    label: '继续 — 转化率达标',
+    desc: '近 14 天转化率 > 20% 且优化轮次 ≥ 30 → 可考虑升级到第二阶段(表达式改写 + 自动提交)',
   },
   STOP: {
     color: 'error',
     icon: <CloseCircleTwoTone twoToneColor="#ff4d4f" />,
-    label: 'STOP — selection-limited 实证',
-    desc: '14d 转化率 < 10% → 优化不是真杠杆,改抽 121 提交积压(/ops/submit-backlog),验证了 competitive_analysis_v3 诊断',
+    label: '停止 — 证明瓶颈在选择而非优化',
+    desc: '近 14 天转化率 < 10% → 优化不是真正的杠杆,改去抽干提交积压,验证了竞品分析的诊断',
   },
   TUNE: {
     color: 'warning',
     icon: <QuestionCircleTwoTone twoToneColor="#faad14" />,
-    label: 'TUNE — 调参再判',
-    desc: '14d 转化率 10-20% → 调 SettingsSweepGenerator 参数(decay/window 取值)或延期观察,不直接升档',
+    label: '调参 — 调整后再判',
+    desc: '近 14 天转化率 10-20% → 调整参数优化器的参数(衰减/窗口取值)或延期观察,不直接升档',
   },
   SAMPLE: {
     // 'info' (合法 Alert type;decisionMeta.color 仅喂 line 528 的 <Alert>,
     // 不用于 Tag — antd Alert type 只接受 success/info/warning/error)
     color: 'info',
     icon: <ClockCircleTwoTone twoToneColor="#1890ff" />,
-    label: 'SAMPLE — 样本不足',
-    desc: '累计 cycles < 30,等更多数据(典型 4 cycle/天 × 8 天 ≈ 32 cycles 满阈)',
+    label: '样本不足',
+    desc: '累计优化轮次 < 30,等更多数据(典型 4 轮/天 × 8 天 ≈ 32 轮满足阈值)',
   },
 }
 
@@ -95,26 +95,26 @@ function statusTag(cycle) {
   if (cycle.error) {
     return (
       <Tooltip title={cycle.error}>
-        <Tag color="error">FAIL</Tag>
+        <Tag color="error">失败</Tag>
       </Tooltip>
     )
   }
   if (!cycle.cycle_finished_at) {
-    return <Tag color="processing">RUNNING</Tag>
+    return <Tag color="processing">进行中</Tag>
   }
   if (cycle.n_winners > 0) {
-    return <Tag color="success">WINNER ×{cycle.n_winners}</Tag>
+    return <Tag color="success">优胜 ×{cycle.n_winners}</Tag>
   }
-  return <Tag color="default">0 winner</Tag>
+  return <Tag color="default">0 优胜</Tag>
 }
 
 // trigger_source → distinguishable colored tag. 'manual' (user clicked
 // 「以此为蓝本优化」on an alpha) vs 'beat' (6h auto scan) vs 'pipeline_hook'
 // (Stage C near-miss push). Unknown sources fall back to the raw string.
 const TRIGGER_META = {
-  beat: { color: 'blue', label: '定时 beat', tip: '6h 自动 beat 扫描近门 alpha 触发(现已停)' },
-  manual: { color: 'purple', label: '手动', tip: '用户在前端以某 alpha 为蓝本手动触发（POST /alphas/{id}/optimize）— 独立于 flag 仍可用' },
-  pipeline_hook: { color: 'cyan', label: '管线', tip: 'Stage C pipeline-hook 推送 near-miss 触发' },
+  beat: { color: 'blue', label: '定时任务', tip: '每 6 小时自动定时任务扫描接近门槛的 alpha 触发(现已停)' },
+  manual: { color: 'purple', label: '手动', tip: '用户在前端以某 alpha 为蓝本手动触发 — 独立于开关仍可用' },
+  pipeline_hook: { color: 'cyan', label: '流水线', tip: '第三阶段流水线推送接近门槛的候选触发' },
 }
 
 function triggerTag(source) {
@@ -181,7 +181,7 @@ export default function OptimizationCyclesMonitor() {
   const stopMutation = useMutation({
     mutationFn: () => api.stopOpsOptimization(),
     onSuccess: (res) => {
-      message.warning({ content: res?.message || 'Stage A 已停止', duration: 6 })
+      message.warning({ content: res?.message || '优化已停止', duration: 6 })
       qc.invalidateQueries({ queryKey: ['ops/optimization-cycles'] })
     },
     onError: (e) =>
@@ -276,7 +276,7 @@ export default function OptimizationCyclesMonitor() {
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
     {
-      title: 'Parent',
+      title: '蓝本',
       dataIndex: 'parent_alpha_id',
       key: 'parent_alpha_id',
       width: 80,
@@ -290,37 +290,37 @@ export default function OptimizationCyclesMonitor() {
         ),
     },
     {
-      title: 'Generator',
+      title: '生成器',
       dataIndex: 'generator_name',
       key: 'generator_name',
       width: 130,
       render: (v) => <Tag>{v}</Tag>,
     },
     {
-      title: 'Trigger',
+      title: '触发来源',
       dataIndex: 'trigger_source',
       key: 'trigger_source',
       width: 100,
       filters: [
         { text: '手动', value: 'manual' },
-        { text: '定时 beat', value: 'beat' },
-        { text: '管线', value: 'pipeline_hook' },
+        { text: '定时任务', value: 'beat' },
+        { text: '流水线', value: 'pipeline_hook' },
       ],
       onFilter: (value, c) => c.trigger_source === value,
       render: (v) => triggerTag(v),
     },
     {
-      title: 'Variants',
+      title: '变异数',
       key: 'variants',
       width: 100,
       render: (_, c) => (
-        <Tooltip title={`generated=${c.n_variants}, sims=${c.sim_budget_used}/${c.sim_budget_granted}`}>
-          {c.n_variants} ({c.sim_budget_used} sims)
+        <Tooltip title={`生成=${c.n_variants}, 回测=${c.sim_budget_used}/${c.sim_budget_granted}`}>
+          {c.n_variants} ({c.sim_budget_used} 次回测)
         </Tooltip>
       ),
     },
     {
-      title: 'Winners',
+      title: '优胜数',
       dataIndex: 'n_winners',
       key: 'n_winners',
       width: 150,
@@ -328,7 +328,7 @@ export default function OptimizationCyclesMonitor() {
         const ids = c.winner_alpha_ids || []
         const count =
           c.n_variants > 0 ? (
-            <Tooltip title={`本 cycle 转化率 = ${v} / ${c.n_variants} = ${((v / c.n_variants) * 100).toFixed(1)}%`}>
+            <Tooltip title={`本轮转化率 = ${v} / ${c.n_variants} = ${((v / c.n_variants) * 100).toFixed(1)}%`}>
               <Text strong={v > 0} type={v > 0 ? 'success' : undefined}>{v}</Text>
             </Tooltip>
           ) : (
@@ -345,7 +345,7 @@ export default function OptimizationCyclesMonitor() {
                 </Link>
               ))
             ) : (
-              <Tooltip title="cycle 记录有 winner,但其 alpha 行未回链(持久化失败或已被清理)— 无法跳转">
+              <Tooltip title="本轮记录有优胜,但对应的 alpha 行没有回链(入库失败或已被清理)— 无法跳转">
                 <Tag color="warning" style={{ marginInlineEnd: 0 }}>ID 缺失</Tag>
               </Tooltip>
             )}
@@ -354,7 +354,7 @@ export default function OptimizationCyclesMonitor() {
       },
     },
     {
-      title: 'Submitted',
+      title: '已提交',
       dataIndex: 'n_submitted',
       key: 'n_submitted',
       width: 90,
@@ -364,7 +364,7 @@ export default function OptimizationCyclesMonitor() {
             {v}
           </Text>
         ) : (
-          <Tooltip title="Stage A SubmitPolicy 永远返回 queue → n_submitted 恒为 0。winner 进 /ops/submit-backlog 待人工确认">
+          <Tooltip title="本阶段的提交策略永远只入队、不直接提交 → 已提交数恒为 0。优胜者进提交积压页待人工确认">
             <Text type="secondary">0</Text>
           </Tooltip>
         ),
@@ -398,27 +398,27 @@ export default function OptimizationCyclesMonitor() {
         type="warning"
         showIcon
         icon={<PoweroffOutlined />}
-        message="6h 自动优化闭环已停(ENABLE_OPTIMIZATION_LOOP OFF)"
+        message="每 6 小时的自动优化闭环已停(优化闭环开关已关闭)"
         description={
           <Space direction="vertical" size={4} style={{ width: '100%' }}>
             <Text>
-              14d 转化率 KPI 不再更新(下方决策卡 / 累计 KPI 仅作历史参照)。
-              手动「以 alpha 为蓝本」优化仍可用(独立于此 flag),入口在
+              近 14 天转化率指标不再更新(下方决策卡 / 累计指标仅作历史参照)。
+              手动「以 alpha 为蓝本」优化仍可用(独立于此开关),入口在
               {' '}
               <Link to="/alphas">Alpha 详情页</Link>。
             </Text>
             {flagPresent && (
               <Text type="secondary" style={{ fontSize: 12 }}>
-                后端报告 flag 状态:
+                后端报告的开关状态:
                 <Tag
                   color={flagEnabled ? 'success' : 'default'}
                   style={{ marginInlineStart: 6, marginInlineEnd: 0 }}
                 >
-                  ENABLE_OPTIMIZATION_LOOP = {flagEnabled ? 'ON' : 'OFF'}
+                  优化闭环开关 = {flagEnabled ? '开' : '关'}
                 </Tag>
                 {flagEnabled && (
                   <Text type="warning" style={{ fontSize: 12, marginInlineStart: 8 }}>
-                    ⚠️ flag 实际为 ON —— 6h beat 仍会 fire 并与四池抢 sim 槽,建议点【停止 Stage A】。
+                    ⚠️ 开关实际为「开」—— 每 6 小时的定时任务仍会触发并与挖掘流水线抢并发回测名额,建议点【停止优化】。
                   </Text>
                 )}
                 {flagNote && (
@@ -444,41 +444,41 @@ export default function OptimizationCyclesMonitor() {
       >
         <div style={{ flex: 1 }}>
           <Title level={4} style={{ marginBottom: 4 }}>
-            <ThunderboltOutlined /> 优化闭环 Stage A — 14d 观测(已冻结)
+            <ThunderboltOutlined /> 优化闭环 第一阶段 — 近 14 天观测(已冻结)
             {isFetching && <Spin size="small" style={{ marginLeft: 12 }} />}
           </Title>
           <Paragraph type="secondary" style={{ marginBottom: 0 }}>
-            SettingsSweepGenerator 对 1230 个 delay-1 近门 alpha(sharpe ∈ [1.0, 1.5))做 10 变异 sweep。
-            6h beat × 10 候选 = 40 cycle/天 —— <Text type="warning">该自动 beat 现已停</Text>。
-            NEVER auto-submit:winner 落 alpha 表 → 进 <Link to="/ops/submit-backlog">/ops/submit-backlog</Link> 人工 review。
+            参数优化器对 1230 个接近门槛的 alpha(Sharpe ∈ [1.0, 1.5))各做 10 个变体的参数扫描。
+            每 6 小时定时任务 × 10 候选 = 40 轮/天 —— <Text type="warning">该自动定时任务现已停</Text>。
+            绝不自动提交:优胜者落入 alpha 表 → 进 <Link to="/ops/submit-backlog">提交积压页</Link> 人工复核。
           </Paragraph>
         </div>
         {/* 紧急止血控件(2026-06-07)。Start 被禁用 —— 四池世界下启动会跑与
             HG/S/E 抢 sim 槽的孤立 Celery 任务;Stop / abort 保留可用。 */}
         <Space direction="vertical" align="end" size={4} style={{ minWidth: 240 }}>
           <Space>
-            <Tooltip title="四池世界下启动会跑与 HG/S/E 抢 sim 槽的孤立 Celery 任务,默认禁用;如需紧急手动跑,改 .env 开 flag(ENABLE_OPTIMIZATION_LOOP=true)后重启。">
+            <Tooltip title="当前架构下启动会跑一个与挖掘流水线抢并发回测名额的孤立后台任务,默认禁用;如需紧急手动跑,改配置打开优化闭环开关后重启。">
               <Button
                 type="primary"
                 icon={<PlayCircleOutlined />}
                 disabled
               >
-                启动 Stage A(已禁用)
+                启动优化(已禁用)
               </Button>
             </Tooltip>
             <Popconfirm
-              title="停止 Stage A?(紧急止血)"
+              title="停止优化?(紧急止血)"
               description={
                 <div style={{ maxWidth: 360 }}>
                   <Text>3 步停止保证<strong>不会自动再启动</strong>:</Text>
                   <ul style={{ paddingLeft: 18, margin: '4px 0' }}>
-                    <li>翻 <code>ENABLE_OPTIMIZATION_LOOP=false</code>(DB 持久化,worker 15s 内读到)</li>
-                    <li>设 Redis abort 标志(worker 当前 cycle 跑完即跳出 for-loop)</li>
-                    <li>标记所有进行中 cycle 为 <Tag color="error" style={{ margin: 0 }}>aborted_by_user:stop</Tag></li>
+                    <li>关闭优化闭环开关(持久化到数据库,工作进程 15 秒内读到)</li>
+                    <li>设置中止标志(工作进程当前一轮跑完即跳出循环)</li>
+                    <li>标记所有进行中的轮次为 <Tag color="error" style={{ margin: 0 }}>已被用户中止</Tag></li>
                   </ul>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    已 dispatch 到 BRAIN 的 sim 自然完成(BRAIN 无 recall API)。
-                    此操作仅在 flag 意外为 ON 时需要。
+                    已下发到 BRAIN 的回测会自然完成(BRAIN 没有撤回接口)。
+                    此操作仅在开关意外为「开」时需要。
                   </Text>
                 </div>
               }
@@ -493,17 +493,17 @@ export default function OptimizationCyclesMonitor() {
                 icon={<StopOutlined />}
                 loading={stopMutation.isPending}
               >
-                停止 Stage A
+                停止优化
               </Button>
             </Popconfirm>
           </Space>
           <Popconfirm
-            title="中止当前批次?(只停 in-flight cycle,不翻 flag)"
+            title="中止当前批次?(只停进行中的轮次,不动开关)"
             description={
               <div style={{ maxWidth: 320 }}>
                 <Text type="secondary" style={{ fontSize: 12 }}>
-                  比【停止】更窄的紧急止血:设 Redis abort 标志让当前 batch 跑完即止,
-                  但不翻 ENABLE_OPTIMIZATION_LOOP(下个 beat 仍可能 fire,要彻底停请用【停止 Stage A】)。
+                  比【停止】更窄的紧急止血:设置中止标志让当前批次跑完即止,
+                  但不关闭优化闭环开关(下次定时任务仍可能触发,要彻底停请用【停止优化】)。
                 </Text>
               </div>
             }
@@ -534,7 +534,7 @@ export default function OptimizationCyclesMonitor() {
           <Space>
             <Text strong>{decisionMeta.label}</Text>
             <Text>
-              ({(conv * 100).toFixed(1)}% 转化 · {totalCycles} cycles · {totalWinners}/{totalVariants} winners)
+              ({(conv * 100).toFixed(1)}% 转化 · {totalCycles} 轮 · {totalWinners}/{totalVariants} 优胜)
             </Text>
             <Tag color="default">历史参照 · 已冻结</Tag>
           </Space>
@@ -547,7 +547,7 @@ export default function OptimizationCyclesMonitor() {
         <Col xs={12} md={6}>
           <Card>
             <Statistic
-              title="14d 转化率(已冻结)"
+              title="近 14 天转化率(已冻结)"
               value={(conv * 100).toFixed(1)}
               suffix="%"
               valueStyle={{
@@ -558,37 +558,37 @@ export default function OptimizationCyclesMonitor() {
               }}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              winners / variants ratio
+              优胜数 / 变异数 比值
             </Text>
           </Card>
         </Col>
         <Col xs={12} md={6}>
           <Card>
-            <Statistic title="14d 累计 cycles" value={totalCycles} />
+            <Statistic title="近 14 天累计轮次" value={totalCycles} />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              GO/STOP 阈 ≥ 30 cycles
+              继续/停止 判定阈值 ≥ 30 轮
             </Text>
           </Card>
         </Col>
         <Col xs={12} md={6}>
           <Card>
             <Statistic
-              title="14d winners / variants"
+              title="近 14 天 优胜 / 变异"
               value={`${totalWinners} / ${totalVariants}`}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              winners 已落 alphas 表
+              优胜者已落入 alpha 表
             </Text>
           </Card>
         </Col>
         <Col xs={12} md={6}>
           <Card>
             <Statistic
-              title="14d submitted"
+              title="近 14 天 已提交"
               value={totalSubmitted}
             />
             <Text type="secondary" style={{ fontSize: 12 }}>
-              人工通过 backlog 提交数
+              人工通过积压页提交数
             </Text>
           </Card>
         </Col>
@@ -597,7 +597,7 @@ export default function OptimizationCyclesMonitor() {
       {/* Today budget + currently running */}
       <Row gutter={16}>
         <Col xs={24} md={12}>
-          <Card title="今日 sim 配额(OPT_DAILY_SIM_BUDGET=400)" size="small">
+          <Card title="今日回测配额(每日上限 400 次)" size="small">
             <Space direction="vertical" style={{ width: '100%' }}>
               <Progress
                 percent={budgetPct}
@@ -609,31 +609,31 @@ export default function OptimizationCyclesMonitor() {
                 format={() => `${todaySpend} / ${OPT_DAILY_BUDGET}`}
               />
               <Text type="secondary" style={{ fontSize: 12 }}>
-                Stage A 软限制(全程记录到 Redis aiac:opt:sim_budget:&lt;YYYYMMDD&gt;)。自动 beat 已停,
-                正常应为 0;若 &gt; 0 说明仍有手动蓝本 / 残留批次在烧四池共享的 sim 槽。
+                优化的软限制(全程记录)。自动定时任务已停,
+                正常应为 0;若 &gt; 0 说明仍有手动蓝本 / 残留批次在烧挖掘流水线共享的回测名额。
               </Text>
             </Space>
           </Card>
         </Col>
         <Col xs={24} md={12}>
           <Card
-            title={`当前进行中 cycle (${runningCycles.length})`}
+            title={`当前进行中的轮次 (${runningCycles.length})`}
             size="small"
           >
             {runningCycles.length === 0 ? (
               <Text type="secondary">
-                无进行中 cycle。自动 6h beat 已停;手动「以 alpha 为蓝本」触发的 cycle 会显示在此(独立于 flag)。
+                无进行中的轮次。每 6 小时的自动定时任务已停;手动「以 alpha 为蓝本」触发的轮次会显示在此(独立于开关)。
               </Text>
             ) : (
               <Space direction="vertical" style={{ width: '100%' }}>
                 {runningCycles.map((c) => (
                   <div key={c.id}>
                     <Text>
-                      <Tag color="processing">run #{c.id}</Tag>
+                      <Tag color="processing">第 #{c.id} 轮</Tag>
                       {triggerTag(c.trigger_source)}
-                      parent=<Link to={`/alphas/${c.parent_alpha_id}`} target="_blank">#{c.parent_alpha_id}</Link>
+                      蓝本=<Link to={`/alphas/${c.parent_alpha_id}`} target="_blank">#{c.parent_alpha_id}</Link>
                       &nbsp;已 {formatDuration(durationSec(c.cycle_started_at, null))}
-                      ({c.sim_budget_used}/{c.sim_budget_granted} sims)
+                      ({c.sim_budget_used}/{c.sim_budget_granted} 次回测)
                     </Text>
                   </div>
                 ))}
@@ -650,7 +650,7 @@ export default function OptimizationCyclesMonitor() {
             <Text strong>手动「以 alpha 为蓝本」优化历史</Text>
             <Tag color="purple">{manualCycles.length}</Tag>
             <Text type="secondary" style={{ fontSize: 12, fontWeight: 'normal' }}>
-              trigger_source = manual · 独立于 ENABLE_OPTIMIZATION_LOOP 仍可用
+              触发来源 = 手动 · 独立于优化闭环开关仍可用
             </Text>
           </Space>
         }
@@ -658,15 +658,15 @@ export default function OptimizationCyclesMonitor() {
       >
         {manualCycles.length === 0 ? (
           <Text type="secondary">
-            近 14d 无手动蓝本优化记录。入口:在 <Link to="/alphas">Alpha 详情页</Link> 点【以此为蓝本优化】(POST /alphas/{'{'}id{'}'}/optimize)。
+            近 14 天无手动蓝本优化记录。入口:在 <Link to="/alphas">Alpha 详情页</Link> 点【以此为蓝本优化】。
           </Text>
         ) : (
           <Space direction="vertical" style={{ width: '100%' }} size={6}>
             {manualCycles.map((c) => (
               <div key={c.id}>
                 <Space size={6} wrap>
-                  <Tag color="purple">run #{c.id}</Tag>
-                  parent=
+                  <Tag color="purple">第 #{c.id} 轮</Tag>
+                  蓝本=
                   {c.parent_alpha_id ? (
                     <Link to={`/alphas/${c.parent_alpha_id}`} target="_blank">#{c.parent_alpha_id}</Link>
                   ) : (
@@ -674,9 +674,9 @@ export default function OptimizationCyclesMonitor() {
                   )}
                   {statusTag(c)}
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    {c.n_winners > 0 ? `winner ×${c.n_winners}` : `${c.n_variants} 变异 / 0 winner`}
+                    {c.n_winners > 0 ? `优胜 ×${c.n_winners}` : `${c.n_variants} 个变异 / 0 优胜`}
                     {' · '}
-                    {c.sim_budget_used}/{c.sim_budget_granted} sims
+                    {c.sim_budget_used}/{c.sim_budget_granted} 次回测
                     {' · '}
                     {formatTs(c.cycle_started_at)}
                   </Text>
@@ -688,7 +688,7 @@ export default function OptimizationCyclesMonitor() {
       </Card>
 
       {/* Cycle table */}
-      <Card title={`最近 cycles(14d 内,最多 100 行)`} size="small">
+      <Card title={`最近轮次(近 14 天内,最多 100 行)`} size="small">
         <Table
           dataSource={cycles}
           columns={columns}
@@ -696,11 +696,11 @@ export default function OptimizationCyclesMonitor() {
           pagination={{
             pageSize: 20,
             showSizeChanger: false,
-            showTotal: (n) => `共 ${n} cycles`,
+            showTotal: (n) => `共 ${n} 轮`,
           }}
           size="small"
           locale={{
-            emptyText: '无 cycle 数据 — ENABLE_OPTIMIZATION_LOOP=False(自动 beat 已停)时为空;手动蓝本优化产生的 cycle 仍会出现在此。',
+            emptyText: '无轮次数据 — 优化闭环开关关闭(自动定时任务已停)时为空;手动蓝本优化产生的轮次仍会出现在此。',
           }}
         />
       </Card>
