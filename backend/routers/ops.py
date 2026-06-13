@@ -102,7 +102,8 @@ class FlagStateOut(BaseModel):
     """Wire shape of FeatureFlagService.list_all entries."""
     name: str
     flag_type: str
-    group: str
+    lifecycle: str
+    domain: str
     description: str
     env_default: Any = None
     override_value: Optional[Any] = None

@@ -382,3 +382,23 @@ def test_flagstate_carries_lifecycle_domain():
     fields = {f.name for f in dataclasses.fields(FlagState)}
     assert "group" not in fields
     assert {"lifecycle", "domain"} <= fields
+
+
+def test_flagstateout_wire_model_has_lifecycle_domain_no_group():
+    """The /ops/flags wire model must mirror FlagState (lifecycle/domain, no group)
+    so `FlagStateOut(**state.__dict__)` serializes without a ValidationError."""
+    from backend.routers.ops import FlagStateOut
+    from backend.services.feature_flag_service import FlagState
+    model_fields = set(FlagStateOut.model_fields.keys())
+    assert "group" not in model_fields
+    assert {"lifecycle", "domain"} <= model_fields
+    # round-trip a real FlagState through the wire model (the exact ops.py call)
+    s = FlagState(
+        name="X", flag_type="bool", lifecycle="operational", domain="submit",
+        description="d", env_default=False, override_value=None,
+        effective_value=False, source="default",
+    )
+    dumped = FlagStateOut(**s.__dict__).model_dump()
+    assert dumped["lifecycle"] == "operational"
+    assert dumped["domain"] == "submit"
+    assert "group" not in dumped
