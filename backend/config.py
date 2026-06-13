@@ -28,7 +28,6 @@ def _load_thinking_overrides() -> Dict[str, str]:
         "code_gen":         "xhigh",
         "self_correct":     "low",
         "distill_context":  "disabled",
-        "attribution":      "disabled",
         "strategy":         "high",
         "round_analysis":   "high",
         "failure_analysis": "high",
@@ -97,13 +96,6 @@ def _load_llm_function_model_map() -> Dict[str, Dict[str, str]]:
         "hypothesis":          {"model": _K, "provider_ref": _CP},
         "code_gen":            {"model": _K, "provider_ref": _CP},
         "self_correct":        {"model": _K, "provider_ref": _CP},
-        "r1b_retry":           {"model": _K, "provider_ref": _CP},
-        "llm_mutate_alpha":    {"model": _K, "provider_ref": _CP},
-        "llm_crossover_alpha": {"model": _K, "provider_ref": _CP},
-        "r1b_mutate":          {"model": _K, "provider_ref": _CP},
-        "r5_alignment_c1":     {"model": _K, "provider_ref": _CP},
-        "r5_alignment_c2":     {"model": _K, "provider_ref": _CP},
-        "attribution":         {"model": _K, "provider_ref": _CP},
         "distill_context":     {"model": _K, "provider_ref": _CP},
         "__default__":         {"model": _K, "provider_ref": _CP},
     }
@@ -558,7 +550,6 @@ class Settings(BaseSettings):
     # Declared here so the llm_mode_service can reason about expected
     # cross-flag state without circular import on feature_flag_service.
     LLM_ASSISTANT_SENTINEL_FLAGS: list = [
-        "ENABLE_R1B_HYPOTHESIS_MUTATE",
         "ENABLE_G5_CROSSOVER",
         "ENABLE_HYPOTHESIS_FOREST_REUSE",
         "ENABLE_R8_L0",
@@ -593,7 +584,6 @@ class Settings(BaseSettings):
         "g5_pending_offspring",
         "__pending_hypothesis",
         "__g5_consumed_offspring",
-        "__r1b_consumed_pending_hypothesis",
         "contextual_bandit_v1",  # mining_agent._BANDIT_CONFIG_KEY value
     ]
 
@@ -826,15 +816,6 @@ class Settings(BaseSettings):
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     ENABLE_DEFAULT_FLAT_SESSION: bool = False
 
-    # ----- flat-F3 LLM-driven wrapper mutation (Phase 3, 2026-05-18) -----
-    # LLM 看 _failed_tests + P2-D pitfalls 选 2-3 wrappers,替代盲目穷举。
-    # 降 BRAIN sim cost 40-75%,提 PASS rate (LLM 偏避有名失败模式)。
-    # Soft-fail:LLM 失败 fall back to legacy enumerate。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    ENABLE_LLM_MUTATE_ALPHA: bool = False
-    LLM_MUTATE_TOP_K: int = 3                    # cap variants per seed
-    LLM_MUTATE_MODEL: str = "claude-haiku-4-5-20251001"  # cost-effective default
-
     # ----- R9 simulation cache (Phase 3, 2026-05-18) -----
     # Cache BRAIN sim results keyed on (region, universe, expression, settings).
     # Hit → skip BRAIN call, return cached result; miss → BRAIN sim + write cache。
@@ -908,67 +889,9 @@ class Settings(BaseSettings):
     QLIB_SNAPSHOT_DIR: str = os.getenv("QLIB_SNAPSHOT_DIR", "backend/data/qlib_ohlcv_snapshot")
     QLIB_ENGINE_PREFER_PANDAS: bool = False  # force tier-3 for testing
 
-    # ===== Phase 3 R1b CoSTEER loop activation (2026-05-18) =====
-    # Plan: ~/.claude/plans/phase3-r1b-costeer-loop-2026-05-18.md v1.3
-    # Each sub-phase has its own flag for independent rollout per
-    # [[feedback_light_wiring_deferred_gate]]. Default OFF — every flag
-    # registered in backend/services/feature_flag_service.py SUPPORTED_FLAGS.
-    # ----- R1b.1 — implementation retry loop -----
-    ENABLE_R1B_RETRY_LOOP: bool = False
-    R1B_MAX_RETRIES_PER_ALPHA: int = 3
-    R1B_RETRY_MODEL: str = "claude-haiku-4-5-20251001"
-    # ----- R1b.2 — hypothesis mutation loop -----
-    # BOTH attribution → mutate dominates retry per plan [V1.0-A2-3].
-    ENABLE_R1B_HYPOTHESIS_MUTATE: bool = False
-    R1B_MAX_MUTATIONS_PER_DATASET_CYCLE: int = 2
-    # R1b.2 review MEDIUM (2026-05-18): per-round cap was inadequate against
-    # cross-round mutation chain spirals (round N mutate → round N+1 inject →
-    # fail (hyp attribution) → round N+1 mutate → round N+2 inject → ...).
-    # The Hypothesis row stores r1b_mutation_depth (bumped at INSERT in
-    # _insert_mutated_hypothesis); node_hypothesis_mutate now reads the
-    # parent's depth and refuses when >= this cap to prevent runaway BRAIN
-    # + LLM cost on shallow hypothesis spaces.
-    R1B_MAX_MUTATION_DEPTH: int = 3
-    # Pipeline-only (2026-05-28 — task 3735 amplification): a HARD per-session cap
-    # on R1b mutate regenerations in the sim-pipeline. The DB depth cap
-    # (R1B_MAX_MUTATION_DEPTH) is SKIPPED when the failed alpha has no
-    # current_hypothesis_id (parent=None) — common on fresh FLAT alphas — and the
-    # classifier's statement-dedupe can't catch ever-changing LLM statements, so
-    # without this cap many distinct failing hypotheses each spawn a FULL (~95s
-    # LLM) regeneration with no overall bound. This guarantees the mutate feedback
-    # loop terminates regardless of depth-chaining. 0 disables.
-    R1B_PIPELINE_MAX_MUTATIONS: int = 20
-    R1B_MUTATE_MODEL: str = "claude-haiku-4-5-20251001"
-    # ----- R1b.3 — cross-round failure trees -----
-    ENABLE_R1B_FAILURE_TREE: bool = False
-    R1B_FAILURE_TREE_MAX_DEPTH: int = 4
-    # R1b.3 review LOW (2026-05-18): retention TTL for FAILURE_PITFALL rows
-    # that carry meta_data->'failure_tree'. record_failure_tree dedupes on
-    # root_skeleton(200 chars) via UPSERT but the table still grows linearly
-    # at scale (50 alpha/round × N rounds × multi-root mutations). The
-    # weekly Sunday 04:00 SH beat task ``run_failure_tree_pruner`` deletes
-    # rows older than this value. Operational tunable — no feature flag.
-    R1B_FAILURE_TREE_RETENTION_DAYS: int = 90
-    # Mining orchestrator config retired in Phase 1c-delete follow-up
-    # (tasks/orchestrator.py removed; resident pool needs no auto-launch).
-    # ----- R1b outcome reconciliation (Break 2 fix, 2026-05-22) -----
-    # Max pending r1b_retry_log rows reconcile_r1b_outcomes processes per run.
-    R1B_RECONCILE_MAX_ROWS: int = 1000
     # ----- Self-healing data-field prune (2026-05-22) -----
     DATAFIELD_PRUNE_WINDOW_DAYS: int = 14
     DATAFIELD_PRUNE_MAX_PER_RUN: int = 500
-    # ----- Shared budget guard -----
-    R1B_TOKEN_COST_CEILING_USD_PER_ALPHA: float = 0.05
-    # ----- R1b.1 review LOW 2 — per-round cost cap -----
-    # Soft cap on cumulative R1b LLM cost (retry + mutate) within a single
-    # LangGraph invocation (one round). When state.r1b_cost_this_round +
-    # estimated_next_call_cost would exceed this, the retry/mutate node
-    # skips the LLM call + logs info (alpha NOT failed — just left as-is).
-    # Worst-case envelope without cap: $0.05 × 3 retries × 50 alphas = $7.50
-    # /round × 100 rounds/day = $750/day. With 5.00 default a round soft-caps
-    # at $5; 100 rounds/day worst case $500/day — still bounded.
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    R1B_MAX_COST_USD_PER_ROUND: float = 5.00
 
     # R8-v2 #2 (2026-05-18): per-layer Redis cache for hierarchical RAG。
     # cache_key = sha256[:16](layer + sorted params),TTL = RAG_HIER_CACHE_TTL_SEC
@@ -2143,14 +2066,6 @@ class Settings(BaseSettings):
     # 双文件注册: 本文件 + backend/services/feature_flag_service.py per
     # [[feedback_enable_flag_double_file]]
     ENABLE_FAIL_ALPHA_PERSIST: bool = False
-
-    # P4: R1b mutate prompt v2 — parent context 富化为 failure-metrics-with-
-    # diagnosis;tri-state 因 shadow-mode A/B 需求 [V1.1-S2]:
-    #   'off'    — byte-equivalent legacy prompt(default)
-    #   'shadow' — 生成 OLD+NEW 两份 prompt,把 NEW 写 llm_call_log 但只发
-    #              OLD 给 LLM(零行为变化,纯 cost/parse-failure 对比)
-    #   'active' — 只生成 NEW prompt 发给 LLM
-    ENABLE_R1B_MUTATE_PROMPT_V2: str = "off"
 
     # Logging
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")

@@ -12,17 +12,15 @@ from backend.agents.graph.state import (
 )
 from backend.agents.graph.workflow import (
     MiningWorkflow,
-    create_mining_graph
 )
 
 __all__ = [
     # State
     "MiningState",
-    "AlphaCandidate", 
+    "AlphaCandidate",
     "AlphaResult",
     "FailureRecord",
     "TraceStepData",
     # Workflow
     "MiningWorkflow",
-    "create_mining_graph",
 ]

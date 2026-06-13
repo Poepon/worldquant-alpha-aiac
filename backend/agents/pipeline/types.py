@@ -53,9 +53,7 @@ class SimResult:
     state: Any = None
 
 
-# Feedback-event kinds (F2 — close the CoSTEER loop in the pipeline).
-FEEDBACK_RETRY = "RETRY"          # R1b: FAIL+implementation → rewrite expression, re-sim
-FEEDBACK_MUTATE = "MUTATE"        # R1b: FAIL+hypothesis → mutate hypothesis, regenerate
+# Feedback-event kind (G5 — close the crossover loop in the pipeline).
 FEEDBACK_PASS_LANDED = "PASS_LANDED"  # G5: a PASS persisted → maybe crossover offspring
 
 

@@ -554,28 +554,12 @@ const api = {
     const { data } = await client.get('/ops/r1a/telemetry', { params: { days } })
     return data
   },
-  getOpsR1bTelemetry: async (days = 7, topN = 5) => {
-    const { data } = await client.get('/ops/r1b/telemetry', {
-      params: { days, top_n: topN },
-    })
-    return data
-  },
-  getOpsR1bChainDepth: async () => {
-    const { data } = await client.get('/ops/r1b/chain-depth-distribution')
-    return data
-  },
   getOpsR8KbShape: async () => {
     const { data } = await client.get('/ops/r8/kb-shape')
     return data
   },
   getOpsR8QueryStats: async (days = 7) => {
     const { data } = await client.get('/ops/r8/query-stats', { params: { days } })
-    return data
-  },
-  getOpsCoSTEERDeployRecommendation: async (days = 7) => {
-    const { data } = await client.get('/ops/costeer/deploy-recommendation', {
-      params: { days },
-    })
     return data
   },
 

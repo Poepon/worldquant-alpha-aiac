@@ -331,99 +331,6 @@ async def node_distill_context(
 # NODE: Hypothesis Generation
 # =============================================================================
 
-async def _node_hypothesis_inject_consumed(
-    *,
-    state: MiningState,
-    consumed: Dict,
-    config: RunnableConfig,
-    trace_service: Any,
-    start_time: float,
-    node_name: str,
-) -> Dict:
-    """R1b.2-v2 (2026-05-18): construct a 1-element hypotheses list from the
-    mutated hypothesis dict consumed at round entry, skipping the LLM call.
-
-    Mirrors node_hypothesis's return shape so the workflow continues
-    unchanged. Falls back to LLM via caller's try/except if anything raises.
-
-    The consumed dict may carry partial fields (statement + rationale
-    minimally); we fill the rest with conservative defaults that keep
-    downstream code_gen / persistence sane.
-    """
-    statement = str(consumed.get("statement", "")).strip()
-    if not statement:
-        raise ValueError("consumed hypothesis missing statement")
-
-    legacy_anchor = state.dataset_id
-    selected = consumed.get("selected_datasets") or [legacy_anchor]
-    if not isinstance(selected, list) or not selected:
-        selected = [legacy_anchor]
-
-    hypothesis_dict = {
-        "statement": statement,
-        "rationale": str(consumed.get("rationale", "")),
-        "selected_datasets": selected,
-        "key_fields": consumed.get("key_fields") or [],
-        "suggested_operators": consumed.get("suggested_operators") or [],
-        "pillar": consumed.get("pillar") or "unknown",
-        # Marker so attribution / KB writes can tell this round was
-        # CoSTEER-mutate-driven rather than fresh exploration.
-        "_r1b_origin": "mutate_v2",
-    }
-    hypotheses = [hypothesis_dict]
-
-    logger.info(
-        f"[{node_name}] R1b.2-v2 inject ACTIVE | task={state.task_id} "
-        f"skipping LLM | statement={statement[:80]}"
-    )
-
-    duration_ms = int((time.time() - start_time) * 1000)
-    trace_update = await record_trace(
-        state, trace_service, node_name,
-        {
-            "dataset_id": state.dataset_id,
-            "mode": "r1b_mutate_inject_v2",
-            "consumed_origin": consumed.get("_r1b_origin", "hypothesis_mutate"),
-        },
-        {
-            "hypotheses_count": 1,
-            "hypotheses": hypotheses,
-            "knowledge_transfer": {},
-            "analysis": {"inject_path": True},
-        },
-        duration_ms,
-        "SUCCESS",
-        None,
-    )
-
-    # CoSTEER loop-closure fix (2026-05-22): the consumed dict carries the
-    # mutated Hypothesis row id (r1b_loop._insert_mutated_hypothesis stamped it
-    # into pending["hypothesis_id"] on a successful INSERT). Propagate it as
-    # this round's current_hypothesis_id so (1) the alphas generated from the
-    # mutated hypothesis link to it (alpha.hypothesis_id = mutated id → the
-    # mutation actually drives next-round output, previously 0/10108 referenced
-    # IMPROVEMENT_RULE) and (2) when one of these alphas fails and triggers a
-    # further mutation, node_hypothesis_mutate finds a real parent → the chain
-    # deepens past depth 1 (previously parent_hypothesis_id was always None).
-    # Stays None when the parent INSERT had failed (no id) — downstream handles
-    # None gracefully exactly as before.
-    _consumed_hid = consumed.get("hypothesis_id")
-    return {
-        "hypotheses": hypotheses,
-        "knowledge_transfer": {},
-        "current_hypothesis_datasets": selected,
-        "current_hypothesis_fields": [],
-        "current_hypothesis_id": _consumed_hid,
-        "current_hypothesis_ids": [_consumed_hid] if _consumed_hid else [],
-        # F4/F5 review fix: explicitly return cleared cognitive_layer_id_used
-        # so LangGraph state-merge guarantees the reset takes effect on this
-        # inject-path round (the in-place mutation at node_hypothesis entry
-        # is defense-in-depth).
-        "cognitive_layer_id_used": "",
-        **trace_update,
-    }
-
-
 async def node_hypothesis(
     state: MiningState,
     llm_service: LLMService,
@@ -459,39 +366,10 @@ async def node_hypothesis(
 
     logger.info(f"[{node_name}] Starting | task={state.task_id} trace_len={len(experiment_trace)}")
 
-    # F4/F5 review fix (Sprint 3 R3): cross-round transient cleanup. Both
-    # paths (R1b inject + LLM exploration) must reset state.cognitive_
-    # layer_id_used so a stale layer ID from the previous round doesn't
-    # get stamped on the new alphas. Mirrors G8's g8_forest_referenced_ids
-    # reset at line 788. Done HERE (before the inject early-return) so
-    # both branches share the reset.
+    # Cross-round transient cleanup: reset the cognitive layer id so a stale
+    # layer ID from the previous round doesn't get stamped on the new alphas
+    # (mirrors G8's g8_forest_referenced_ids reset).
     state.cognitive_layer_id_used = ""
-
-    # ------------------------------------------------------------------
-    # R1b.2-v2 (2026-05-18): inject path — when the prior round's
-    # hypothesis_mutate emitted a pending hypothesis (consumed by
-    # pipeline round + plumbed via workflow.run), use it directly
-    # as the round's primary hypothesis and SKIP the exploration LLM call.
-    # Flag-gated by ENABLE_R1B_HYPOTHESIS_MUTATE so consumed-but-flag-OFF is
-    # a no-op (legacy LLM-driven path runs).
-    # ------------------------------------------------------------------
-    _consumed = getattr(state, "r1b_consumed_pending_hypothesis", None)
-    if _consumed and isinstance(_consumed, dict) and _consumed.get("statement"):
-        try:
-            if bool(getattr(_gen_settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False)):
-                return await _node_hypothesis_inject_consumed(
-                    state=state,
-                    consumed=_consumed,
-                    config=config,
-                    trace_service=trace_service,
-                    start_time=start_time,
-                    node_name=node_name,
-                )
-        except Exception as _inject_ex:
-            logger.warning(
-                f"[{node_name}] R1b.2-v2 inject path failed, falling back to "
-                f"LLM exploration: {_inject_ex}"
-            )
 
     target_fields = state.focused_fields if state.focused_fields else state.fields[:20]
     target_fields = _prepend_target_field(target_fields, state)

@@ -1117,35 +1117,6 @@ async def node_save_results(state: MiningState, config: RunnableConfig = None) -
             None
         )
 
-    # R1b.2c wire (2026-05-18): persist cross-round R1b state (pending hypothesis
-    # + budget ledger) to MiningTask.config so next round's
-    # pipeline round can consume it. Flag-gated by either retry or
-    # mutate flag — when both OFF this block is byte-equivalent legacy
-    # (early-out before any DB I/O). Soft-fail per plan §6.2: never raises.
-    try:
-        from backend.config import settings as _r1b_settings
-        if (
-            bool(getattr(_r1b_settings, "ENABLE_R1B_RETRY_LOOP", False))
-            or bool(getattr(_r1b_settings, "ENABLE_R1B_HYPOTHESIS_MUTATE", False))
-        ):
-            _db = configurable.get("db_session")
-            _task_id = getattr(state, "task_id", None)
-            if _db is not None and _task_id is not None:
-                from backend.models import MiningTask
-                from sqlalchemy import select as _sa_select
-                _task_row = (
-                    await _db.execute(_sa_select(MiningTask).where(MiningTask.id == _task_id))
-                ).scalar_one_or_none()
-                if _task_row is not None:
-                    from backend.agents.graph.nodes.r1b_persistence import (
-                        persist_after_round,
-                    )
-                    await persist_after_round(state, _task_row, _db)
-    except Exception as _r1b_ex:
-        logger.warning(
-            f"[{node_name}] R1b.2c persist_after_round failed (round unaffected): {_r1b_ex}"
-        )
-
     return {
         "generated_alphas": state.generated_alphas + success_batch,
         "failures": state.failures + fail_batch,
@@ -1175,12 +1146,9 @@ async def _process_hypothesis_feedback(
 ) -> Dict[int, List[Dict]]:
     """Round-level lifecycle update for every hypothesis proposed this round.
 
-    B5 v1: heuristic attribution via early_stop.classify_attribution
-           (75% rule on syntax+simulate vs quality fails).
-    B5 v2 (2026-05-06): when llm_service is provided, defer to
-           classify_attribution_llm which reads hypothesis statement +
-           sample alpha attempts and judges semantically. Falls back to
-           heuristic on LLM failure / empty hypothesis / cheap-skip cases.
+    Attribution: heuristic early_stop.classify_attribution (75% rule on
+    syntax+simulate vs quality fails). (The B5-v2 LLM classifier was
+    retired with the FLAT path — node_key="attribution" 已退役 2026-06-13.)
 
     For each hypothesis_id in state.current_hypothesis_ids:
       1. Compute round counts: alpha_count, pass_count, syntax_fail,
@@ -1197,7 +1165,6 @@ async def _process_hypothesis_feedback(
         should_abandon_hypothesis,
         should_abandon_hypothesis_from_memory,
     )
-    from backend.agents.graph.attribution import classify_attribution_llm
     from backend.config import settings as _cfg_settings
     from backend.database import AsyncSessionLocal
     from backend.services.hypothesis_service import HypothesisService
@@ -1272,24 +1239,6 @@ async def _process_hypothesis_feedback(
             except Exception:
                 pass
 
-    # B5 v2: LLM-based attribution when llm_service available; falls back
-    # to heuristic on LLM failure / empty hypothesis / unknown shortcuts.
-    # Resolve hypothesis statement for the LLM context — read from the
-    # primary hypothesis row (just persisted by B3).
-    hypothesis_statement = None
-    if llm_service is not None and primary_hid is not None:
-        try:
-            # V-27.D: pure read — reuse the workflow-injected db_session
-            # when present. The lifecycle WRITES below keep self-opening
-            # their own AsyncSessionLocal (transaction isolation, intended).
-            async with resolve_db(config) as _qdb:
-                from backend.models import Hypothesis as _H
-                _row = await _qdb.get(_H, primary_hid)
-                if _row is not None:
-                    hypothesis_statement = _row.statement
-        except Exception as _e:
-            logger.warning(f"[B5 v2] hypothesis statement lookup failed: {_e}")
-
     # V-27.71: attribution sees only real_alphas + clean counts — flip
     # products are implementation-layer salvage and would dilute the
     # hypothesis-vs-implementation signal.
@@ -1310,16 +1259,14 @@ async def _process_hypothesis_feedback(
             "gate; only the sign-flipped variant produced signal"
         )
     else:
-        attribution, attribution_reason = await classify_attribution_llm(
-            hypothesis_statement=hypothesis_statement,
-            pending_alphas=real_alphas,
+        attribution = classify_attribution(
             alpha_count=alpha_count,
             pass_count=pass_count,
             syntax_fail_count=syntax_fail,
             simulate_fail_count=simulate_fail,
             quality_fail_count=quality_fail,
-            llm_service=llm_service,
         )
+        attribution_reason = None
     entry = {
         "round_index": round_index,
         "alpha_count": alpha_count,

@@ -368,74 +368,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "校准)。0=shadow 不跑 R5。仅在 W_ALIGNMENT>0 时生效。"
         ),
     ),
-    # --- R1b CoSTEER loop (5 sub-stages — independent rollback, ordered deps) ---
-    # 设计:5 个 sub-stage 各自独立 flag。Ship 顺序 stage 1→5 但任一可 OFF 单独回滚。
-    # 依赖关系在 description 中标注;ops UI 按 group 排序看到完整 stage 列表。
-    "ENABLE_R1B_RETRY_LOOP": FlagSpec(
-        name="ENABLE_R1B_RETRY_LOOP",
-        flag_type="bool",
-        group="R1b-CoSTEER",
-        description=(
-            "[stage 1/5 — no deps] R1b.1 (2026-05-18): LangGraph cycle EVAL → "
-            "CODE_GEN_RETRY for IMPLEMENTATION attribution. Budget "
-            "R1B_MAX_RETRIES_PER_ALPHA=3 + token ceiling "
-            "R1B_TOKEN_COST_CEILING_USD_PER_ALPHA=$0.05. Soft-fall: LLM "
-            "error → drop-fail legacy. Prereq R1a (attribution source) + "
-            "R5 LLM judge (typed attribution; without R5 ~91% UNKNOWN)."
-        ),
-    ),
-    "ENABLE_R1B_HYPOTHESIS_MUTATE": FlagSpec(
-        name="ENABLE_R1B_HYPOTHESIS_MUTATE",
-        flag_type="bool",
-        group="R1b-CoSTEER",
-        description=(
-            "[stage 2/5 — deps: R1B_RETRY_LOOP for full BOTH-attribution effect] "
-            "R1b.2 (2026-05-18): LangGraph cycle EVAL → HYPOTHESIS_MUTATE for "
-            "HYPOTHESIS attribution. Budget R1B_MAX_MUTATIONS_PER_DATASET_CYCLE=2. "
-            "BOTH attribution → mutate dominates retry per plan [V1.0-A2-3]. "
-            "Creates parent_hypothesis_id chain on Hypothesis."
-        ),
-    ),
-    "R1B_MAX_MUTATION_DEPTH": FlagSpec(
-        name="R1B_MAX_MUTATION_DEPTH",
-        flag_type="int",
-        group="R1b-CoSTEER",
-        description=(
-            "[stage 2/5 config — caps mutation chain depth across rounds] "
-            "R1b.2 review MEDIUM (2026-05-18): R1B_MAX_MUTATIONS_PER_DATASET_CYCLE "
-            "limits within a single round but pending → inject → mutate could "
-            "spiral across rounds. node_hypothesis_mutate now reads parent "
-            "Hypothesis.r1b_mutation_depth and refuses when >= this cap. "
-            "Default 3 = up to 3 levels of mutation from the original RAG-"
-            "seeded hypothesis."
-        ),
-    ),
-    "ENABLE_R1B_FAILURE_TREE": FlagSpec(
-        name="ENABLE_R1B_FAILURE_TREE",
-        flag_type="bool",
-        group="R1b-CoSTEER",
-        description=(
-            "[stage 3/5 — deps: HYPOTHESIS_MUTATE for full failure-tree population] "
-            "R1b.3 (2026-05-18): knowledge_extraction writes failure_tree JSONB "
-            "to KnowledgeEntry.meta_data; surfaced by R8 RAG L2 for related "
-            "hypothesis families. Soft-fail: KB write error never blocks round."
-        ),
-    ),
-    "R1B_MAX_COST_USD_PER_ROUND": FlagSpec(
-        name="R1B_MAX_COST_USD_PER_ROUND",
-        flag_type="float",
-        group="R1b-CoSTEER",
-        description=(
-            "Phase 3 R1b.1 review LOW 2 (2026-05-18): soft cap on cumulative "
-            "R1b LLM cost (retry + mutate) within a single round. Per-alpha "
-            "ceiling alone allows $0.05 × 3 retries × 50 alphas = $7.50/round "
-            "worst case (×100 rounds/day = $750/day). Default 5.00 USD caps "
-            "round at $5; retry node skips LLM call + logs info when "
-            "state.r1b_cost_this_round + est_next_cost would exceed cap. Alpha "
-            "left as-is (NOT failed). Lower to tighten budget; raise to disable "
-            "(soft cap, no fail)."
-        ),
-    ),
     # --- G5 Phase A — Trajectory crossover ---
     "ENABLE_G5_CROSSOVER": FlagSpec(
         name="ENABLE_G5_CROSSOVER",
@@ -525,20 +457,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "treated as miss but row kept for analytics。"
             "默认 OFF — flag ON 后 cached_simulate_batch wraps brain.simulate_batch。"
             "Soft-fail: cache DB error → fall back to direct BRAIN call (never blocks)。"
-        ),
-    ),
-    # --- Mining-Strategy: LLM-driven wrapper mutation (used by both flat & cascade) ---
-    "ENABLE_LLM_MUTATE_ALPHA": FlagSpec(
-        name="ENABLE_LLM_MUTATE_ALPHA",
-        flag_type="bool",
-        group="Mining-Strategy",
-        description=(
-            "[no deps — concept independent of flat/cascade] Phase 3 flat-F3 "
-            "(master plan §4.5): wrapper-mutation 路径让 LLM 看 _failed_tests + "
-            "P2-D pitfalls 选 2-3 wrappers,替代盲目穷举。降 BRAIN sim cost "
-            "~40-75%,提 PASS rate (LLM 偏避有名失败模式)。Soft-fail: LLM 失败 "
-            "fall back to legacy enumerate。Cost: haiku-4-5 ~$0.01/call/seed,"
-            "top_k=3 variants。"
         ),
     ),
     # --- Flat-Mode (2 sub-flags — entry switch + default routing) ---
@@ -679,18 +597,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "写 alphas 表;OFF 时回到 PASS-only legacy 行为。修复 mining-time"
             "write filter — alpha_failures.QUALITY_CHECK_FAILED 不再丢 BRAIN"
             "handle。Flip ON 后 ≥1h 才能跑 P2 backfill 脚本(脚本自检)。"
-        ),
-    ),
-    "ENABLE_R1B_MUTATE_PROMPT_V2": FlagSpec(
-        name="ENABLE_R1B_MUTATE_PROMPT_V2",
-        flag_type="str",
-        group="Persistence-Ontology",
-        description=(
-            "P4:R1b mutate prompt v2 — parent context 富化为 failure-metrics-"
-            "with-diagnosis。Tri-state:'off' = byte-equivalent legacy / "
-            "'shadow' = 双 prompt 生成,只发 OLD 给 LLM,NEW 仅写 llm_call_log "
-            "供对比 / 'active' = 只发 NEW prompt。Rollout: off → shadow(7d) "
-            "→ active。"
         ),
     ),
     # --- Phase 4 Sprint 1 A2 R14 task_stop_loss (2026-05-19) ---

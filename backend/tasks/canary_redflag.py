@@ -39,13 +39,6 @@ RED_FLAGS: List[Tuple[str, str, str, str]] = [
         "ENABLE_R1A_HOOK",
     ),
     (
-        "R1b cumulative LLM cost since T-0 (USD)",
-        "SELECT COALESCE(SUM(llm_cost_usd), 0.0) "
-        "FROM r1b_retry_log WHERE created_at > :t0",
-        "value > 5.0",
-        "ENABLE_R1A_HOOK",
-    ),
-    (
         "R8 failure-tree elevation pct",
         "SELECT COALESCE((COUNT(*) FILTER (WHERE had_failure_tree_elevation = true))::float "
         "/ NULLIF(COUNT(*), 0), 0.0) "

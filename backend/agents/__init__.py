@@ -9,7 +9,6 @@ from backend.agents.feedback_agent import FeedbackAgent
 from backend.agents.graph import (
     MiningWorkflow,
     MiningState,
-    create_mining_graph
 )
 
 __all__ = [
@@ -18,5 +17,4 @@ __all__ = [
     # LangGraph
     "MiningWorkflow",
     "MiningState",
-    "create_mining_graph",
 ]

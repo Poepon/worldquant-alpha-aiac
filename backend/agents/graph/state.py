@@ -346,35 +346,6 @@ class MiningState(BaseModel):
     effective_sharpe_submit_min: Optional[float] = None
     effective_region_universes_at_start: Optional[Dict[str, str]] = None
 
-    # ===== Phase 3 R1b CoSTEER loop counters (2026-05-18) =====
-    # Plan: ~/.claude/plans/phase3-r1b-costeer-loop-2026-05-18.md v1.3 §5.1
-    # All Optional / default-safe per phase15-C serialization-compat (mirror
-    # brain_consultant_mode_at_start pattern above).
-    # Reset boundary: per LangGraph invocation (one round of mining_tasks
-    # pipeline round). Across rounds these reset to defaults.
-    # Cross-round persistence handled via MiningTask.config in persistence
-    # node when budget actually fired (R1b.1c wiring).
-    r1b_retries_attempted_this_alpha: int = 0
-    r1b_mutations_attempted_this_cycle: int = 0   # R1b.2 sub-phase uses this
-    r1b_token_cost_this_alpha: float = 0.0
-    # R1b.1 review LOW 2 (2026-05-18): cumulative R1b LLM cost across all
-    # alphas in current round. Soft cap = settings.R1B_MAX_COST_USD_PER_ROUND
-    # (default $5). Retry node checks BEFORE the LLM call; on hit it skips
-    # the call + logs info (alpha not failed). Resets per LangGraph
-    # invocation along with the other R1b counters above.
-    r1b_cost_this_round: float = 0.0
-    r1b_loop_attribution_evidence: List[Dict] = Field(default_factory=list)
-    r1b_mutated_hypothesis_ids: List[int] = Field(default_factory=list)
-    r1b_pending_new_hypothesis: Optional[Dict] = None
-
-    # R1b.2-v2 (2026-05-18): consumed-side mirror of r1b_pending_new_hypothesis.
-    # Populated by workflow.run from configurable when pipeline round's
-    # consume_pending_hypothesis returned non-None. node_hypothesis checks this
-    # at entry — if set AND ENABLE_R1B_HYPOTHESIS_MUTATE flag ON, skips the
-    # exploration LLM call and uses the mutated hypothesis directly so the
-    # CoSTEER loop directive flows into next round's alpha generation.
-    r1b_consumed_pending_hypothesis: Optional[Dict] = None
-
     # -------------------------------------------------------------------------
     # Control Flags
     # -------------------------------------------------------------------------

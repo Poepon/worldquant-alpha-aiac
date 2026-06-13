@@ -97,11 +97,6 @@ from backend.models.ast_distance_log import AstDistanceLog
 # call; dedicated table per same R1a lesson)
 from backend.models.qlib_prescreen_log import QlibPrescreenLog
 
-# R1b retry/mutate log (Phase 3 R1b.1a — one row per CoSTEER loop firing;
-# dedicated per [[feedback_r1a_dedicated_log_table]] for independent
-# outcome reconciliation from alpha persistence)
-from backend.models.r1b_retry import R1bRetryLog
-
 # R8 query-level telemetry (per-call layer_hits + cache_hit row, flag-gated)
 from backend.models.r8_query_log import R8QueryLog
 

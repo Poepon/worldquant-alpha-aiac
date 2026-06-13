@@ -491,12 +491,6 @@ def build_registry(known_ops, operators) -> Dict[str, NodeBench]:
     from backend.agents.prompts.hypothesis import HYPOTHESIS_SYSTEM, build_hypothesis_prompt, DISTILL_SYSTEM
     from backend.agents.prompts.legacy import DISTILL_USER
     from backend.agents.prompts.validation import SELF_CORRECT_SYSTEM, build_self_correct_prompt
-    from backend.agents.prompts.r1b_retry import build_r1b_retry_prompt
-    from backend.agents.prompts.r1b_mutate import build_r1b_mutate_prompt
-    from backend.agents.prompts.r5_alignment import (
-        R5_C1_SYSTEM, R5_C2_SYSTEM, build_r5_c1_prompt, build_r5_c2_prompt)
-    from backend.agents.llm_mutate_alpha import MUTATE_SYSTEM, build_mutate_prompt
-    from backend.agents.llm_crossover_alpha import CROSSOVER_SYSTEM, build_crossover_prompt
     from backend.config import settings
 
     hyp_mt = getattr(settings, "HYPOTHESIS_MAX_TOKENS", 6000)
@@ -532,31 +526,6 @@ def build_registry(known_ops, operators) -> Dict[str, NodeBench]:
     reg["self_correct"] = NodeBench("self_correct", "expr", _selfcorrect_calls, _fix_usability,
                                     max_tokens=1200, runs=3)
 
-    def _r1b_retry_calls():
-        return [build_r1b_retry_prompt(
-            original_expression=bad, original_hypothesis=HYP_FIXTURE["statement"],
-            failure_metrics={"sharpe": 0.3, "fitness": 0.2, "turnover": 0.4},
-            r1a_evidence=[emsg], r5_c2_reason=emsg,
-            allowed_fields=FIELD_NAMES, operators=operators) for bad, etype, emsg in BAD_EXPRS]
-
-    reg["r1b_retry"] = NodeBench("r1b_retry", "expr", _r1b_retry_calls, _fix_usability,
-                                 max_tokens=1200, runs=3)
-
-    reg["llm_mutate_alpha"] = NodeBench(
-        "llm_mutate_alpha", "expr",
-        lambda: [(MUTATE_SYSTEM, build_mutate_prompt(seed_expression=SEED_EXPR, region="USA",
-                                                     failure_context="", decay_context="", top_k=5))],
-        lambda outs, c: _expr_usability([e.replace("<SEED>", SEED_EXPR) for e in _extract_exprs(outs[0])], c),
-        max_tokens=2048, runs=2)
-
-    reg["llm_crossover_alpha"] = NodeBench(
-        "llm_crossover_alpha", "expr",
-        lambda: [(CROSSOVER_SYSTEM, build_crossover_prompt(
-            PARENT_A, PARENT_B, parent_a_pillar="momentum", parent_b_pillar="value",
-            parent_a_metrics={"sharpe": 1.4}, parent_b_metrics={"sharpe": 1.3}, top_k=3))],
-        lambda outs, c: _expr_usability(
-            [e.replace("<A>", PARENT_A).replace("<B>", PARENT_B) for e in _extract_exprs(outs[0])], c),
-        max_tokens=2048, runs=2)
 
     # --- semi-structured ------------------------------------------------------
     def _hyp_usability(outs, c):
@@ -576,21 +545,6 @@ def build_registry(known_ops, operators) -> Dict[str, NodeBench]:
                                   lambda: [(HYPOTHESIS_SYSTEM, build_hypothesis_prompt(ctx(5)))],
                                   _hyp_usability, max_tokens=hyp_mt, runs=3)
 
-    def _r1b_mutate_score(outs, c):
-        data = outs[0] or {}
-        nh = data.get("new_hypothesis") if isinstance(data, dict) else None
-        if not isinstance(nh, dict):
-            return {"n": 0, "schema_ok": None}
-        ok = 1.0 if (nh.get("statement") and nh.get("expected_signal")) else 0.0
-        return {"n": 1, "schema_ok": ok}
-
-    reg["r1b_mutate"] = NodeBench(
-        "r1b_mutate", "struct",
-        lambda: [build_r1b_mutate_prompt(
-            original_hypothesis=HYP_FIXTURE["statement"],
-            original_alpha_outcomes=[{"expression": PARENT_A, "sharpe": 0.4, "fitness": 0.3}],
-            r5_c1_reason="hypothesis too broad", pillar="momentum", region="USA")],
-        _r1b_mutate_score, max_tokens=1536, runs=2)
 
     def _distill_usability(outs, c):
         data = outs[0] or {}
@@ -611,72 +565,6 @@ def build_registry(known_ops, operators) -> Dict[str, NodeBench]:
         lambda: [(DISTILL_SYSTEM, DISTILL_USER.format(**DISTILL_FIXTURE))],
         _distill_usability, max_tokens=4096, runs=3)
 
-    # --- judge / consistency --------------------------------------------------
-    def _verdict_score(fixtures_expected: List[bool], key: str = "aligned"):
-        def _scorer(outs, c):
-            k = CONSISTENCY_REPEATS
-            groups = [outs[i * k:(i + 1) * k] for i in range(len(fixtures_expected))]
-            correct, stable, schema = [], [], []
-            for verdicts, expected in zip(groups, fixtures_expected):
-                vals = []
-                for v in verdicts:
-                    if isinstance(v, dict) and isinstance(v.get(key), bool):
-                        vals.append(v[key]); schema.append(1.0)
-                    else:
-                        schema.append(0.0)
-                if vals:
-                    mode, cnt = Counter(vals).most_common(1)[0]
-                    stable.append(cnt / len(vals)); correct.append(1.0 if mode == expected else 0.0)
-                else:
-                    stable.append(0.0); correct.append(0.0)
-            return {"n": len(outs), "correct": round(statistics.mean(correct), 3) if correct else 0.0,
-                    "stability": round(statistics.mean(stable), 3) if stable else 0.0,
-                    "schema_ok": round(statistics.mean(schema), 3) if schema else 0.0}
-        return _scorer
-
-    reg["r5_alignment_c1"] = NodeBench(
-        "r5_alignment_c1", "judge",
-        lambda: [(R5_C1_SYSTEM, build_r5_c1_prompt(fx["hyp"], fx["desc"])) for _, fx, _ in R5_C1_FIXTURES],
-        _verdict_score([exp for _, _, exp in R5_C1_FIXTURES]),
-        max_tokens=600, temperature=JUDGE_TEMPERATURE, repeats=CONSISTENCY_REPEATS, runs=1)
-    reg["r5_alignment_c2"] = NodeBench(
-        "r5_alignment_c2", "judge",
-        lambda: [(R5_C2_SYSTEM, build_r5_c2_prompt(fx["desc"], fx["expr"], fx["ops"])) for _, fx, _ in R5_C2_FIXTURES],
-        _verdict_score([exp for _, _, exp in R5_C2_FIXTURES]),
-        max_tokens=600, temperature=JUDGE_TEMPERATURE, repeats=CONSISTENCY_REPEATS, runs=1)
-
-    try:
-        from backend.agents.graph.attribution import _SYSTEM as ATTR_SYSTEM, _build_user_prompt as _attr_user
-
-        def _attr_score(outs, c):
-            k = CONSISTENCY_REPEATS
-            expected = [exp for _, _, exp in ATTRIBUTION_FIXTURES]
-            groups = [outs[i * k:(i + 1) * k] for i in range(len(ATTRIBUTION_FIXTURES))]
-            valid_vals = {"hypothesis", "implementation", "both", "unknown", "neither"}
-            correct, stable, schema = [], [], []
-            for verdicts, exp in zip(groups, expected):
-                labels = []
-                for v in verdicts:
-                    lab = v.get("attribution") if isinstance(v, dict) else None
-                    if isinstance(lab, str) and lab.lower() in valid_vals:
-                        labels.append(lab.lower()); schema.append(1.0)
-                    else:
-                        schema.append(0.0)
-                if labels:
-                    mode, cnt = Counter(labels).most_common(1)[0]
-                    stable.append(cnt / len(labels)); correct.append(1.0 if mode == exp else 0.0)
-                else:
-                    stable.append(0.0); correct.append(0.0)
-            return {"n": len(outs), "correct": round(statistics.mean(correct), 3) if correct else 0.0,
-                    "stability": round(statistics.mean(stable), 3) if stable else 0.0,
-                    "schema_ok": round(statistics.mean(schema), 3) if schema else 0.0}
-
-        reg["attribution"] = NodeBench(
-            "attribution", "judge",
-            lambda: [(ATTR_SYSTEM, _attr_user(**fx)) for _, fx, _ in ATTRIBUTION_FIXTURES],
-            _attr_score, max_tokens=800, temperature=JUDGE_TEMPERATURE, repeats=CONSISTENCY_REPEATS, runs=1)
-    except Exception as e:  # noqa: BLE001
-        print(f"[bench] attribution node skipped (import failed: {e})", flush=True)
 
     return reg
 
@@ -785,9 +673,7 @@ async def main(argv=None) -> int:
     print(f"[bench] catalog method={cat['method']} reachable={cat['reachable']} unreachable={cat['unreachable']}", flush=True)
     # incumbent reachability — flags the qwen3.6-flash live-routing problem
     incumbents = {nk: incumbent_for(nk, live_map) for nk in
-                  ["code_gen", "hypothesis", "self_correct", "r1b_retry", "r5_alignment_c1",
-                   "llm_mutate_alpha", "llm_crossover_alpha", "r1b_mutate", "r5_alignment_c2",
-                   "attribution", "distill_context", "__default__"]}
+                  ["code_gen", "hypothesis", "self_correct", "distill_context", "__default__"]}
     incumbent_unreachable = {}
     for nk, m in incumbents.items():
         if m and m not in cat["reachable"]:

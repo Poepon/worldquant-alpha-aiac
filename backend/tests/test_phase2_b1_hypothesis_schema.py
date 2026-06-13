@@ -84,7 +84,6 @@ def test_tracesteptype_phase2_extensions():
 def test_hypothesis_relationships_wired():
     rels = {r.key for r in Hypothesis.__mapper__.relationships}
     assert "alphas" in rels
-    assert "parent_hypothesis" in rels
     assert "parent_alpha" in rels
 
 

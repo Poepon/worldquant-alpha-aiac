@@ -1,8 +1,8 @@
 """Phase 4 Sprint 1 A1.2 — R12 sentinel guard + restore integration tests.
 
 Coverage:
-  - set(ENABLE_LLM_ASSISTANT_MODE, True) cascades 6 sentinel flags OFF
-    + writes 7 audit rows (1 primary + 6 cascade)
+  - set(ENABLE_LLM_ASSISTANT_MODE, True) cascades 5 sentinel flags OFF
+    + writes 6 audit rows (1 primary + 5 cascade)
   - set(ENABLE_LLM_ASSISTANT_MODE, False) does NOT cascade
   - restore_sentinel() reverses the cascade
   - restore_sentinel() preserves operator's prior override (if existed)
@@ -29,7 +29,7 @@ async def test_set_r12_cascades_six_sentinel_flags_off(db_session):
     # Seed: 1 sentinel flag has an existing True override; the other 5
     # have no override (env default). This lets us check both paths.
     svc.db.add(FeatureFlagOverride(
-        flag_name="ENABLE_R1B_HYPOTHESIS_MUTATE",
+        flag_name="ENABLE_G5_CROSSOVER",
         flag_value=json.dumps(True),
         flag_type="bool",
         updated_by="seed",
@@ -49,20 +49,20 @@ async def test_set_r12_cascades_six_sentinel_flags_off(db_session):
             f"sentinel {sf} flag_value should be 'false', got {row.flag_value!r}"
         )
 
-    # Audit: 1 row for the primary set + 6 for the cascade = 7 total
+    # Audit: 1 row for the primary set + 5 for the cascade = 6 total
     audit_rows = list((await db_session.execute(
         select(FeatureFlagAudit).order_by(FeatureFlagAudit.id)
     )).scalars().all())
     primary = [r for r in audit_rows if r.flag_name == "ENABLE_LLM_ASSISTANT_MODE"]
     cascade = [r for r in audit_rows if r.flag_name != "ENABLE_LLM_ASSISTANT_MODE"]
     assert len(primary) == 1 and primary[0].action == "set"
-    assert len(cascade) == 6
+    assert len(cascade) == 5
     for r in cascade:
         assert r.action == "sentinel_set"
         assert r.sentinel_trigger_for == "ENABLE_LLM_ASSISTANT_MODE"
         assert r.flag_name in set(sentinel_flags)
-        # The R1b row had a prior True override; the other 5 had nothing
-        if r.flag_name == "ENABLE_R1B_HYPOTHESIS_MUTATE":
+        # The G5 row had a prior True override; the other 4 had nothing
+        if r.flag_name == "ENABLE_G5_CROSSOVER":
             assert r.old_value == json.dumps(True)
         else:
             assert r.old_value is None
@@ -88,7 +88,7 @@ async def test_set_r12_false_does_not_cascade(db_session):
 
 @pytest.mark.asyncio
 async def test_restore_sentinel_reverts_cascade(db_session):
-    """After R12 cascade fires + restore_sentinel: 5 sentinel overrides
+    """After R12 cascade fires + restore_sentinel: 4 sentinel overrides
     are DELETED (no prior state) and 1 is REVERTED to its prior True."""
     from backend.models import FeatureFlagAudit, FeatureFlagOverride
     from backend.services.feature_flag_service import FeatureFlagService
@@ -96,9 +96,9 @@ async def test_restore_sentinel_reverts_cascade(db_session):
     from sqlalchemy import select
 
     svc = FeatureFlagService(db_session)
-    # Seed prior R1b True override
+    # Seed prior G5 True override
     svc.db.add(FeatureFlagOverride(
-        flag_name="ENABLE_R1B_HYPOTHESIS_MUTATE",
+        flag_name="ENABLE_G5_CROSSOVER",
         flag_value=json.dumps(True),
         flag_type="bool",
         updated_by="seed",
@@ -113,14 +113,14 @@ async def test_restore_sentinel_reverts_cascade(db_session):
     assert result["sentinel_for"] == "ENABLE_LLM_ASSISTANT_MODE"
     assert set(result["restored_flags"]) == set(settings.LLM_ASSISTANT_SENTINEL_FLAGS)
     assert result["skipped"] == []
-    assert result["audit_rows"] == 6
+    assert result["audit_rows"] == 5
 
-    # The 5 sentinel flags that had no prior override → DELETE
+    # The 4 sentinel flags that had no prior override → DELETE
     for sf in settings.LLM_ASSISTANT_SENTINEL_FLAGS:
         row = (await db_session.execute(
             select(FeatureFlagOverride).where(FeatureFlagOverride.flag_name == sf)
         )).scalar_one_or_none()
-        if sf == "ENABLE_R1B_HYPOTHESIS_MUTATE":
+        if sf == "ENABLE_G5_CROSSOVER":
             # Reverted to prior True
             assert row is not None
             assert row.flag_value == json.dumps(True)
@@ -134,7 +134,7 @@ async def test_restore_sentinel_reverts_cascade(db_session):
             FeatureFlagAudit.sentinel_trigger_for == "ENABLE_LLM_ASSISTANT_MODE",
         )
     )).scalars().all())
-    assert len(cascade_rows) == 6
+    assert len(cascade_rows) == 5
     for r in cascade_rows:
         assert r.restored_at is not None
         assert r.restored_by == "restore_op"
@@ -145,7 +145,7 @@ async def test_restore_sentinel_reverts_cascade(db_session):
             FeatureFlagAudit.action == "sentinel_restore"
         )
     )).scalars().all()
-    assert len(list(restore_rows)) == 6
+    assert len(list(restore_rows)) == 5
 
 
 @pytest.mark.asyncio
@@ -156,7 +156,7 @@ async def test_restore_sentinel_idempotent_second_call_is_noop(db_session):
     svc = FeatureFlagService(db_session)
     await svc.set("ENABLE_LLM_ASSISTANT_MODE", True, actor="test_op")
     first = await svc.restore_sentinel(actor="op1")
-    assert first["audit_rows"] == 6
+    assert first["audit_rows"] == 5
 
     second = await svc.restore_sentinel(actor="op2")
     assert second["audit_rows"] == 0
@@ -201,9 +201,9 @@ async def test_list_audit_include_sentinel_shows_all(db_session):
 
     rows = await svc.list_audit(limit=100, include_sentinel=True)
     # 1 primary + 6 cascade
-    assert len(rows) == 7
+    assert len(rows) == 6
     sentinel_rows = [r for r in rows if r.sentinel_trigger_for is not None]
-    assert len(sentinel_rows) == 6
+    assert len(sentinel_rows) == 5
 
 
 @pytest.mark.asyncio
@@ -211,7 +211,7 @@ async def test_restore_sentinel_skips_retired_flag_gracefully(db_session):
     """F5 + S1-C MUST: retired SUPPORTED_FLAGS skip path was docstring-
     declared but never tested. Patch SUPPORTED_FLAGS to drop one of the
     sentinel flags, then verify restore_sentinel skips it (records in
-    `skipped` list) while restoring the other 5."""
+    `skipped` list) while restoring the other 4."""
     from backend.models import FeatureFlagAudit, FeatureFlagOverride
     from backend.services.feature_flag_service import (
         FeatureFlagService, SUPPORTED_FLAGS,
@@ -223,7 +223,7 @@ async def test_restore_sentinel_skips_retired_flag_gracefully(db_session):
 
     # Simulate retirement of one sentinel flag: pop from SUPPORTED_FLAGS
     # for the duration of this test, then restore after.
-    retired_flag = "ENABLE_R1B_HYPOTHESIS_MUTATE"
+    retired_flag = "ENABLE_G5_CROSSOVER"
     saved_spec = SUPPORTED_FLAGS.pop(retired_flag, None)
     try:
         result = await svc.restore_sentinel(actor="restore_op")
@@ -233,7 +233,7 @@ async def test_restore_sentinel_skips_retired_flag_gracefully(db_session):
 
     # Retired flag → in `skipped`, others → in `restored_flags`
     assert retired_flag in result["skipped"]
-    assert len(result["restored_flags"]) == 5  # 6 - 1 retired
+    assert len(result["restored_flags"]) == 4  # 6 - 1 retired
     # Sentinel audit row for retired flag still gets restored_at stamp
     # (otherwise repeated restore_sentinel would loop on it forever)
     retired_audit = (await db_session.execute(
@@ -279,7 +279,7 @@ async def test_restore_sentinel_preserves_operator_manual_set(db_session):
     import json
     assert row.flag_value == json.dumps(True)
     # Other 5 sentinel flags should still be reverted
-    assert len(result["restored_flags"]) == 5
+    assert len(result["restored_flags"]) == 4
 
 
 @pytest.mark.asyncio
@@ -300,7 +300,7 @@ async def test_restore_sentinel_drains_active_task_residue(db_session):
         status="RUNNING",
         config={
             "g5_pending_offspring": [{"expr": "stale"}],
-            "__r1b_consumed_pending_hypothesis": {"statement": "stale"},
+            "__g5_consumed_offspring": {"statement": "stale"},
             "brain_role_snapshot": {"role": "consultant"},  # MUST be preserved
         },
     )
@@ -316,7 +316,7 @@ async def test_restore_sentinel_drains_active_task_residue(db_session):
     # Verify the task's config: residue gone, but brain_role_snapshot kept
     await db_session.refresh(task)
     assert "g5_pending_offspring" not in task.config
-    assert "__r1b_consumed_pending_hypothesis" not in task.config
+    assert "__g5_consumed_offspring" not in task.config
     assert task.config["brain_role_snapshot"]["role"] == "consultant"
 
 
