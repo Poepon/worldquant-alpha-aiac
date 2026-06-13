@@ -80,3 +80,4 @@ backups/
 # R13 factor-data vendor sources — large binaries, re-downloadable from
 # the vendor; the derived parquet + cleaned CSVs are committed instead.
 /data/AQR_*.xlsx
+.superpowers/
