@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -79,6 +79,21 @@ export default function AlphaDetail() {
     retry: false,
     staleTime: 5 * 60 * 1000,
   })
+
+  // 智能条件拉：can_submit 通过且未提交的 alpha 进页自动拉边际建议；
+  // 其余情况(不可提交/已提交/无 BRAIN id)保持手动，避免无谓消耗 BRAIN 配额。
+  useEffect(() => {
+    if (
+      alpha &&
+      alpha.can_submit === true &&
+      !alpha.date_submitted &&
+      alpha.alpha_id &&
+      !marginalEnabled
+    ) {
+      setMarginalEnabled(true)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [alpha?.id, alpha?.can_submit, alpha?.date_submitted, alpha?.alpha_id])
 
   const feedbackMutation = useMutation({
     mutationFn: ({ rating, comment }) => api.submitAlphaFeedback(id, rating, comment),
