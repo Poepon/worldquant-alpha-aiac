@@ -525,7 +525,7 @@ class ExternalKnowledgeSyncer:
         because the legacy `_pattern_exists(pattern)` does string-equality
         lookup which would re-import semantically identical rows whose
         existing pattern_hash column happens to be NULL (older import paths
-        never set it — see backfill_kb_requires_role.py for the one-shot fix).
+        never set it; a one-shot backfill fixed the legacy rows).
         """
         query = select(KnowledgeEntry).where(
             KnowledgeEntry.pattern_hash == pattern_hash,

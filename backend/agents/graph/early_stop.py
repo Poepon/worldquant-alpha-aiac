@@ -165,7 +165,7 @@ def should_abandon_hypothesis_from_memory(
         (should_abandon, reason).
 
     V-24.A diagnostic logging (2026-05-13): every non-trivial path emits a
-    structured log so scripts/abandon_path_audit.py can answer "why is the
+    structured log so an offline audit can answer "why is the
     ABANDONED column 0?" without re-running the workflow. Three log levels:
 
     - history_len < n_rounds  → TRACE (still accumulating, normal)
@@ -204,7 +204,7 @@ def should_abandon_hypothesis_from_memory(
 
     if has_any_pass or has_non_hypothesis_attr or has_empty_round:
         # Window satisfied N but condition didn't fire — log why so
-        # abandon_path_audit can quantify the attribution distribution.
+        # an offline audit can quantify the attribution distribution.
         skip_reason = (
             "has_pass" if has_any_pass
             else "non_hypothesis_attr" if has_non_hypothesis_attr

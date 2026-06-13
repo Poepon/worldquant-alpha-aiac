@@ -1,6 +1,6 @@
 """Integration: GET /ops/r1a/telemetry (2026-05-18).
 
-Replaces the standalone ``scripts/r1a_attribution_report.py`` per plan
+Replaces an earlier standalone diagnostic script per plan
 §1.7 + feedback_no_reflex_flag_cleanup memory. R1a hook has been
 production-ON for months; this endpoint surfaces attribution distribution
 + R5 c1/c2 agreement rates without manual SQL.

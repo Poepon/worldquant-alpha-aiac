@@ -90,7 +90,7 @@ class HypothesisIntent(SQLAlchemyBase):
     # pool world (its dispatch-era columns drop in Phase 1d). Nullable so the
     # scheduler can also insert ad-hoc scope-less intents. ondelete SET NULL
     # (mirrors the hypotheses FK + g5_crossover_log) so a task hard-delete
-    # (scripts/cleanup_historical_tasks.py) doesn't FK-block on queue rows.
+    # doesn't FK-block on queue rows.
     task_id = Column(
         Integer, ForeignKey("mining_tasks.id", ondelete="SET NULL"), nullable=True,
     )

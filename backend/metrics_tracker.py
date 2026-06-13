@@ -169,8 +169,7 @@ class NodeMetrics:
     Used to track tokens / latency / success rate broken down by graph
     node (hypothesis / code_gen / self_correct / ...) and effort tier.
     LLMService emits one sample per call via `record_llm_call`; the
-    A/B comparison report (`scripts/ab_thinking_effort.py`) reads
-    snapshots from `get_node_metrics_snapshot`.
+    An offline A/B comparison reads snapshots from `get_node_metrics_snapshot`.
     """
     node_key: str
     # effort_breakdown[effort_tier] → call count at that tier (covers the

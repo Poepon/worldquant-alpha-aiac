@@ -1394,8 +1394,8 @@ async def flat_region_distribution(
 # =============================================================================
 # R1a hook + R5 LLM-judge telemetry (2026-05-18) — operator decision support
 # =============================================================================
-# Replaces the standalone scripts/r1a_attribution_report.py with a live
-# endpoint. R1a has been production-ON for months but operators have only
+# A live telemetry endpoint (replaces an earlier standalone diagnostic
+# script). R1a has been production-ON for months but operators have only
 # raw SQL to see attribution distribution + R5 c1/c2 agreement rates.
 # Plan §1.7 + feedback_no_reflex_flag_cleanup memory: R1a flag stays ON
 # long-term — telemetry needs to be a permanent ops endpoint, not a
@@ -1431,7 +1431,7 @@ async def r1a_telemetry(
     _token: str = Depends(_require_ops_token),
     db: AsyncSession = Depends(get_db),
 ) -> R1aTelemetryOut:
-    """R1a hook + R5 LLM judge telemetry — replaces r1a_attribution_report.py.
+    """R1a hook + R5 LLM judge telemetry (live operator decision support).
 
     Aggregates ``r1a_attribution_log`` over the last ``days`` window:
       - per-attribution distribution + counts + errs + avg confidence

@@ -14,8 +14,7 @@ alpha we attribute the DOMINANT dataset (most contributing fields), with an
 alphabetical tie-break for determinism.
 
 Used by:
-  - persistence._incremental_save_alphas — stamp at INSERT when dataset_id empty (B)
-  - scripts/backfill_alpha_dataset_id.py — retroactive fill of NULL rows (A)
+  - persistence._incremental_save_alphas — stamp at INSERT when dataset_id empty.
 """
 from __future__ import annotations
 

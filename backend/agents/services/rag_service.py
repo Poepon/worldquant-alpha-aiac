@@ -1024,7 +1024,7 @@ class RAGService:
             4. global by usage_count       (last resort)
 
         Pillar matching reads ``meta_data->>'hypothesis_pillar'`` (backfilled
-        by scripts/backfill_kb_hypothesis_pillar.py before the migration).
+        by a one-time migration).
 
         Changes vs. v1 (unchanged from pre-removal):
           - Dataset mismatch is a HARD filter (not -0.2 score).

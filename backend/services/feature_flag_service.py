@@ -251,7 +251,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "Redis cache TTL RAG_HIER_CACHE_TTL_SEC=300。Additive overlay — "
             "legacy query() preserved; flag dispatch routes to query_hierarchical。"
             "Rollback < 1 min via flag flip OFF。前置 Alembic b3c8d9e2f4a1 KB "
-            "meta_data GIN index + backfill_kb_pillar_family_signature.py 3K+ entries。"
+            "meta_data GIN index + 一次性回填 3K+ entries。"
         ),
     ),
     # --- RAG category-overlap A/B experiment harness ---
