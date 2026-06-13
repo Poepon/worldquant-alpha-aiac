@@ -16,6 +16,11 @@
 
 ---
 
+> 📌 **项目缘起**:本项目以 [lavender1203/worldquant-alpha-aiac](https://github.com/lavender1203/worldquant-alpha-aiac) 为蓝本改进而来,在其基础上做了大量架构演进与功能重构(详见 `CLAUDE.md` 与 `docs/INDEX.md`)。
+> This project is adapted from [lavender1203/worldquant-alpha-aiac](https://github.com/lavender1203/worldquant-alpha-aiac) as its blueprint, with substantial architectural evolution and refactoring on top of it.
+
+---
+
 > ⚠️ **现状以 `CLAUDE.md` 与 `docs/INDEX.md` 为准。** 本 README 的**功能列表、架构图、Roadmap、Changelog** 反映早期版本(2026-01),部分已过时。已知主要偏差:
 > - **架构**:已从「单 task 跑全 cycle 的串行/FLAT/ONESHOT」迁移为**四池解耦流水线**(常驻 HG/S/E worker + DB 持久队列,`ENABLE_POOL_PIPELINE`;FLAT/ONESHOT/CASCADE 已于 `b89b732` 2026-06-06 退役)。
 > - **LLM**:默认模型由 DeepSeek 改为 **kimi-k2.5 / 阿里云 coding-plan**(`coding.dashscope`;旧 token-plan MaaS 已于 2026-06-04 停用)。
