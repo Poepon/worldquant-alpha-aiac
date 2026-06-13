@@ -509,31 +509,9 @@ class Settings(BaseSettings):
     # caller 路径不 continue,service 仍可 skip 计数器)。
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.2
-    ENABLE_TASK_STOP_LOSS: bool = False
     TASK_STOP_LOSS_EMA_ALPHA: float = 0.3
     TASK_STOP_LOSS_MIN_ROUNDS: int = 5         # warmup — 前 N round 不 trigger
-    TASK_STOP_LOSS_PASS_RATE_FLOOR: float = 0.005    # Spike-calibrated 0.5% (production p50=0)
-    TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS: int = 3  # 主 trigger
     TASK_STOP_LOSS_EXCLUDE_CB_SKIPPED: bool = True   # race fix (defense-in-depth)
-
-    # ----- A3 flat-F4 cross-region quota (Sprint 1) -----
-    # Millennium 320 pods / Citadel 5 业务线 multi-strategy 启示 — AIAC 当前
-    # region 严重偏 USA(production 数据印证)。flat-F4 在 POST 时校验新 task
-    # 加入后的 region 分布是否越过 FLAT_CROSS_REGION_QUOTA。
-    # ENFORCE=True → POST 拒绝越界(400);ENFORCE=False(default)→ 仅 warn log。
-    # Phase A 真效果(per [[feedback_按效果选择]]):default ENFORCE=False 配合
-    # warn 阶段先观察 7d,然后翻 ENFORCE=True 真改 mining 决策。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.3
-    FLAT_CROSS_REGION_QUOTA: dict = {
-        "USA": 0.30,
-        "CHN": 0.20,
-        "JPN": 0.15,
-        "EUR": 0.20,
-        "HKG": 0.15,
-    }
-    FLAT_CROSS_REGION_ENFORCE: bool = False
-    FLAT_CROSS_REGION_LOOKBACK_DAYS: int = 30  # last-N-days window for share computation
 
     # ----- A1.1 R12 LLM_MODE=assistant — service + state machine (Sprint 1) -----
     # Critical path 工业派共识吸收 — "LLM 是 research assistant 不是 expression-
@@ -550,7 +528,6 @@ class Settings(BaseSettings):
     # Declared here so the llm_mode_service can reason about expected
     # cross-flag state without circular import on feature_flag_service.
     LLM_ASSISTANT_SENTINEL_FLAGS: list = [
-        "ENABLE_G5_CROSSOVER",
         "ENABLE_HYPOTHESIS_FOREST_REUSE",
         "ENABLE_R8_L0",
         "ENABLE_AST_ORIGINALITY_GATE",
@@ -711,27 +688,6 @@ class Settings(BaseSettings):
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     # plan: docs/phase4_a_b_plan_v5_2026-05-19.md §6.14
     ENABLE_GRAMMAR_VALIDATOR: bool = False
-    # F4 review fix (Sprint 4 R3): RESERVED — not yet wired. node_code_gen
-    # currently BUFFERS parse-fail candidates + degrades-open above a 50%
-    # drop floor; it does NOT re-emit via LLM. A future PR may wire
-    # retry_with_whole_output_hint into a bounded re-emit loop reading this
-    # setting. Until then this is a no-op knob (kept so the future wire
-    # doesn't need a config migration).
-    GRAMMAR_VALIDATOR_RETRY_MAX: int = 2  # RESERVED — see comment above
-
-    # ----- R1a: enhance_existing_node_evaluate hook (Phase 0, 2026-05-17) -----
-    # 启用 backend/agents/core/integration.py:342-407 DORMANT shim,把
-    # AttributionType (HYPOTHESIS/IMPLEMENTATION/BOTH/UNKNOWN) 写入
-    # alpha.metrics["_r1a_attribution"] 等 7 个字段,为 Phase 1 R2/Q7 bandit
-    # arm 集设计提供 attribution 反证数据。
-    # 数据量观察期门槛(详 docs/master_implementation_plan_2026-05-17.md §4.1
-    # + ~/.claude/plans/docs-master-implementation-plan-2026-05-compressed-shore.md §7):
-    # - 触发 ≥ 200 / non_null_pct ≥ 95% / non_unknown_pct ≥ 70% / errs < 10
-    # - 0 production crash(per-alpha try/except 守护)
-    # 默认 False,通过 FeatureFlagOverride (flag_type=bool, flag_value="true")
-    # 翻开,无需重启。软回滚:UPDATE feature_flag_overrides SET flag_value='false'
-    # (< 1 分钟)。
-    ENABLE_R1A_HOOK: bool = False
 
     # ----- R4' Dual-channel RAG (Phase 1, 2026-05-17) -----
     # 把 hypothesis prompt 的 Historical Patterns 段 (现单段渲染
@@ -797,24 +753,9 @@ class Settings(BaseSettings):
     AST_ORIGINALITY_HISTORY_K: int = 50         # compare new alpha vs top-K recent
 
     # ----- flat-F1 Advanced: FLAT_CONTINUOUS mining mode (Phase 3, 2026-05-18) -----
-    # 第二个 mining_mode = FLAT_CONTINUOUS,与 legacy CONTINUOUS_CASCADE 并行。
-    # Hypothesis-driven flat session:dataset × hypothesis 元组迭代,无 T1→T2→T3
-    # 级联。master plan §6 D3 "保留 legacy(渐进切换)" — F1 默认 OFF,默认 mining_mode
-    # 不变(仍 CONTINUOUS_CASCADE / DISCRETE);flat-F2 后续 PR 翻默认值。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py(per
-    # [[feedback_enable_flag_double_file]] Phase 0 v1.4 教训)。
-    # plan: ~/.claude/plans/flat-F1-kickoff-2026-05-18.md v1.5 SHIP-READY。
-    ENABLE_FLAT_CONTINUOUS: bool = False
+    # legacy FLAT session params (entry flags retired 2026-06-13).
     FLAT_CONTINUOUS_DAILY_GOAL: int = 20         # alphas/iteration cap
     FLAT_CONTINUOUS_MAX_ITERATIONS: int = 100    # safety bound per session
-
-    # ----- flat-F2 default mining_mode flip (Phase 3, 2026-05-18) -----
-    # 默认 mining_mode 翻 CONTINUOUS_CASCADE → FLAT_CONTINUOUS — POST
-    # /mining-session/start 不再创建 cascade task,改创 flat task。
-    # 前置:ENABLE_FLAT_CONTINUOUS ON + flat-F1 2 周灰度 PASS。决策 5A lock。
-    # 默认 OFF — 翻 ON 后新 task 走 flat,既有 cascade task 不影响。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    ENABLE_DEFAULT_FLAT_SESSION: bool = False
 
     # ----- R9 simulation cache (Phase 3, 2026-05-18) -----
     # Cache BRAIN sim results keyed on (region, universe, expression, settings).
@@ -924,16 +865,8 @@ class Settings(BaseSettings):
     # SUPPORTED_FLAGS in backend/services/feature_flag_service.py).
 
     # ----- Phase 2 R5: Hypothesis-Alignment LLM judge (2026-05-18) -----
-    # AlphaAgent Eq. 7: C(h, d, f) = α·c₁(h, d) + (1-α)·c₂(d, f), α=0.5
-    # c₁ judges hypothesis ↔ description; c₂ judges description ↔ expression
-    # 失败时 attribution 标 AttributionType.hypothesis/implementation/both
-    # 与 R1a heuristic 互补:R5 verdict 非 None 时 OVERWRITE R1a 字段(R5 wins
-    # per plan v1.0 [V1.0-A2-3])。R5 None(both PASS / low confidence)时
-    # 保 R1a。原 R1a verdict 存 r5_agrees_r1a 供分析。
-    # 成本:haiku-4-5 med effort ~$0.01/call,GO gate $0.05/call 满足。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    # plan: ~/.claude/plans/phase2-r5-llm-judge-2026-05-18.md v1.0
-    ENABLE_LLM_JUDGE: bool = False
+    # R5 judge entry flag (ENABLE_LLM_JUDGE) retired 2026-06-13; the model /
+    # low-conf params below are kept as inert config (no live reader).
     R5_JUDGE_MODEL: str = "claude-haiku-4-5-20251001"   # cheaper than opus, med effort
     R5_JUDGE_LOW_CONF: float = 0.55                      # below this R5 abstains → R1a wins
 
@@ -955,15 +888,6 @@ class Settings(BaseSettings):
     # 双文件注册:本文件 + backend/services/feature_flag_service.py。
     ENABLE_FAMILY_CAP: bool = False
     FAMILY_CAP_TOP_K: int = 2          # Hubble v2 default;OFF + flip K=5 用于探索期
-
-    # ----- Phase 1.5-C: TaskSchema v2 cut-over (2026-05-18) -----
-    # 切 read paths 从 legacy cols (mining_mode / cascade_phase / agent_mode)
-    # 到 new authoritative cols (schedule / starting_tier / runtime_state).
-    # 默认 OFF 保留 legacy 行为 — dual-write 已在 Phase 1.5-B 启 → flag 翻 ON
-    # 应 byte-equivalent 在 Revision B 之后创建的 task 上。
-    # Gray rollout: staging → single task → region 全量(plan §3.5)。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    ENABLE_TASK_SCHEMA_V2: bool = False
 
     # ----- Flat evaluation thresholds (post tier-system removal, 2026-05-18) -----
     # Single threshold band replaces the old TIER1/TIER2/TIER3 ladder. Values
@@ -1864,22 +1788,9 @@ class Settings(BaseSettings):
     LLM_CALL_LOG_RETENTION_DAYS: int = 90
 
     # ----- G5 Phase A — Trajectory crossover (2026-05-19) -----
-    # QuantaAlpha arxiv 2602.07085 (2026-02). Combine 2 high-reward PASS
-    # alpha "siblings" into hybrid offspring via LLM. Offspring persist on
-    # task.config["g5_pending_offspring"] via R1b.2-v2 same mechanism; next
-    # round consumes + injects into MiningState.g5_offspring_candidates;
-    # node_code_gen prepends them to pending_alphas so they walk full
-    # validate → simulate → evaluate → save_results pipeline.
-    # OFF byte-for-byte legacy. Soft-fail全链 — crossover 异常永不 block round。
-    # 双文件注册:本文件 + backend/services/feature_flag_service.py。
-    ENABLE_G5_CROSSOVER: bool = False
-    # 选 sibling pair 的过滤 — 要求两个 parent 都 PASS sharpe ≥ X 才 trigger。
-    # Lookback 是 SQL window(最近 X round 内本 task PASS alpha 池)。
-    # max_pair_pillar_overlap True 时不允许两 parent 同 pillar(强制 diversity)。
-    G5_CROSSOVER_MIN_PARENT_SHARPE: float = 1.25
-    G5_CROSSOVER_LOOKBACK_ROUNDS: int = 10
-    G5_CROSSOVER_TOP_K_OFFSPRING: int = 2
-    G5_CROSSOVER_REQUIRE_DIFFERENT_PILLAR: bool = True
+    # G5 crossover entry flag (ENABLE_G5_CROSSOVER) + sibling-pair filter
+    # params retired 2026-06-13 (producer had zero callers). The pipeline cap
+    # + LLM model override below are kept as inert config.
     # F2-4 pipeline-only: hard cap on total G5 crossovers per pipeline session.
     # A crossover offspring that PASSes can itself trigger another crossover with
     # the growing PASS pool; at a low PASS rate this converges, but the cap

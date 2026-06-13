@@ -348,3 +348,16 @@ async def test_list_audit_clamps_limit(svc):
     assert isinstance(audits, list)
     audits = await svc.list_audit(limit=10_000)
     assert isinstance(audits, list)
+
+
+def test_retired_flags_removed_from_whitelist():
+    from backend.services.feature_flag_service import SUPPORTED_FLAGS
+    removed = {
+        "ENABLE_DEFAULT_FLAT_SESSION", "ENABLE_FLAT_CONTINUOUS",
+        "GRAMMAR_VALIDATOR_RETRY_MAX", "ENABLE_R1A_HOOK", "ENABLE_LLM_JUDGE",
+        "ENABLE_G5_CROSSOVER", "ENABLE_TASK_SCHEMA_V2",
+        "FLAT_CROSS_REGION_QUOTA", "FLAT_CROSS_REGION_ENFORCE",
+        "ENABLE_TASK_STOP_LOSS", "TASK_STOP_LOSS_PASS_RATE_FLOOR",
+        "TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS",
+    }
+    assert removed.isdisjoint(SUPPORTED_FLAGS.keys())

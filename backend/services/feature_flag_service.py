@@ -180,13 +180,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         group="P3-Brain",
         description="BRAIN Consultant 模式 — 解锁 multi-sim/PROD-corr/全球 region/Sharpe≥1.58。仅在收到 BRAIN 升级邮件后翻。",
     ),
-    # --- Phase 0 R1a ---
-    "ENABLE_R1A_HOOK": FlagSpec(
-        name="ENABLE_R1A_HOOK",
-        flag_type="bool",
-        group="Phase0-R1a",
-        description="启用 enhance_existing_node_evaluate shim,把 AttributionType 写入 alpha.metrics 供 Phase 1 R2/Q7 bandit arm-set 反证。≥200 触发观察期门槛。",
-    ),
     # --- Phase 1 R4' Dual-channel RAG ---
     "ENABLE_DUAL_CHANNEL_RAG": FlagSpec(
         name="ENABLE_DUAL_CHANNEL_RAG",
@@ -368,26 +361,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "校准)。0=shadow 不跑 R5。仅在 W_ALIGNMENT>0 时生效。"
         ),
     ),
-    # --- G5 Phase A — Trajectory crossover ---
-    "ENABLE_G5_CROSSOVER": FlagSpec(
-        name="ENABLE_G5_CROSSOVER",
-        flag_type="bool",
-        group="G5-Crossover",
-        description=(
-            "G5 Phase A (2026-05-19, QuantaAlpha arxiv 2602.07085):mining_agent "
-            "round 末选 2 个 PASS alpha → llm_crossover_alpha 产 ≤"
-            "G5_CROSSOVER_TOP_K_OFFSPRING 个 hybrid expression → persist 到 "
-            "task.config['g5_pending_offspring'](R1b.2-v2 同模式)→ 下一 round "
-            "pipeline round consume → state.g5_offspring_candidates → "
-            "node_code_gen prepend pending_alphas → 真走 validate/simulate/"
-            "evaluate/save_results 全 pipeline → offspring alpha.metrics 标 "
-            "_g5_crossover_parent_ids=[id_a, id_b] 反向 attribution。"
-            "每 call 写 g5_crossover_log。Soft-fail:LLM 异常 → 空 list → 下一 "
-            "round 正常进行。前置:同 task 内 ≥2 PASS alpha 且 sharpe ≥ "
-            "G5_CROSSOVER_MIN_PARENT_SHARPE。Phase B 看数据后决定 promote 到 "
-            "Phase C(可能加 R6 DAG sibling 加权或与 R1b retry 双轨)。"
-        ),
-    ),
     # --- G8 Phase A — Hypothesis forest cross-task reference ---
     "ENABLE_HYPOTHESIS_FOREST_REUSE": FlagSpec(
         name="ENABLE_HYPOTHESIS_FOREST_REUSE",
@@ -459,28 +432,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "Soft-fail: cache DB error → fall back to direct BRAIN call (never blocks)。"
         ),
     ),
-    # --- Flat-Mode (2 sub-flags — entry switch + default routing) ---
-    "ENABLE_DEFAULT_FLAT_SESSION": FlagSpec(
-        name="ENABLE_DEFAULT_FLAT_SESSION",
-        flag_type="bool",
-        group="Flat-Mode",
-        description=(
-            "[entry routing — deps: FLAT_CONTINUOUS ON] "
-            "Phase 3 flat-F2: POST /mining-session/start 默认创建 flat task。"
-            "前置 ENABLE_FLAT_CONTINUOUS ON 才生效。"
-        ),
-    ),
-    "ENABLE_FLAT_CONTINUOUS": FlagSpec(
-        name="ENABLE_FLAT_CONTINUOUS",
-        flag_type="bool",
-        group="Flat-Mode",
-        description=(
-            "[core flat session switch — no deps] Phase 3 flat-F1 Advanced: "
-            "启用 FLAT 持续 session。Hypothesis-driven — dataset × hypothesis "
-            "迭代。POST /ops/start-flat-session + /ops/flat-sessions/{id}/resume "
-            "入口。"
-        ),
-    ),
     "ENABLE_REGIME_MONITOR": FlagSpec(
         name="ENABLE_REGIME_MONITOR",
         flag_type="bool",
@@ -534,32 +485,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "计算两机制 false-positive rate)。误杀时 flag flip OFF 或 FAMILY_CAP_TOP_K=5 放宽。"
         ),
     ),
-    # --- Phase 2 R5: Hypothesis-Alignment Dual-Bridge LLM Judge ---
-    "ENABLE_LLM_JUDGE": FlagSpec(
-        name="ENABLE_LLM_JUDGE",
-        flag_type="bool",
-        group="Phase2-R5",
-        description=(
-            "Phase 2 R5 (AlphaAgent Eq. 7): 在 evaluation node R1a hook 后 "
-            "运行双向 LLM judge — c₁(hypothesis ↔ description) + "
-            "c₂(description ↔ expression) 写入 r1a_attribution_log 的 r5_* 列。"
-            "R5 verdict 非 None 时 OVERWRITE R1a heuristic attribution (R5 wins)。"
-            "成本:haiku-4-5 med effort ~$0.01/call,GO gate $0.05/call 满足。"
-            "默认 OFF,flag 翻 ON 启动 attribution distribution shift 观察。"
-        ),
-    ),
-    # --- Phase 1.5-C: TaskSchema v2 cut-over (post tier-removal: schedule 唯一权威) ---
-    "ENABLE_TASK_SCHEMA_V2": FlagSpec(
-        name="ENABLE_TASK_SCHEMA_V2",
-        flag_type="bool",
-        group="Phase15-C",
-        description=(
-            "Phase 1.5-C: 切 router responses / ops dashboard 的 read paths "
-            "走 task.schedule (sole authoritative scheduling column post "
-            "tier-system removal)。Tier removal 后 legacy fallback 已删,"
-            "flag 仍保留作 staged rollout 节流入口。"
-        ),
-    ),
     # --- Phase 4 Sprint 0 (2026-05-19) ---
     "ENABLE_LLM_API_CIRCUIT": FlagSpec(
         name="ENABLE_LLM_API_CIRCUIT",
@@ -599,39 +524,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "handle。Flip ON 后 ≥1h 才能跑 P2 backfill 脚本(脚本自检)。"
         ),
     ),
-    # --- Phase 4 Sprint 1 A2 R14 task_stop_loss (2026-05-19) ---
-    "ENABLE_TASK_STOP_LOSS": FlagSpec(
-        name="ENABLE_TASK_STOP_LOSS",
-        flag_type="bool",
-        group="Phase4-Sprint1",
-        description=(
-            "Phase 4 A2 R14:Millennium-style hard stop-loss — task 累计 PASS "
-            "rate 低于 EMA floor OR 连续 CONSECUTIVE_FAIL_ROUNDS round 0 PASS "
-            "→ auto-pause task + INSERT task_stop_loss_events 行。Default OFF;"
-            "翻 ON 前看 scripts/sprint0_baseline_spike.py 校准 PASS_RATE_FLOOR "
-            "(production p50=0 → 推荐 floor=0.005)。Race fix:flat loop 已在 "
-            "BRAIN_AUTH_CIRCUIT skip 时 continue,CB-skipped round 不计 counter。"
-        ),
-    ),
-    "TASK_STOP_LOSS_PASS_RATE_FLOOR": FlagSpec(
-        name="TASK_STOP_LOSS_PASS_RATE_FLOOR",
-        flag_type="float",
-        group="Phase4-Sprint1",
-        description=(
-            "R14 EMA PASS rate 阈值。Default 0.005(0.5%)— spike-calibrated;"
-            "production p50 round PASS rate = 0,floor 设 5% 会全部 false-trigger。"
-            "Operator 想更保守可调到 0.001。"
-        ),
-    ),
-    "TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS": FlagSpec(
-        name="TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS",
-        flag_type="int",
-        group="Phase4-Sprint1",
-        description=(
-            "R14 连续 0-PASS round 数阈值。Default 3 — production 主 trigger "
-            "(EMA floor 因 p50=0 受 noise 干扰大)。调高 → 更宽松,调低 → 更早 pause。"
-        ),
-    ),
     # --- A1.2 R12 LLM_MODE=assistant (Sprint 1, 2026-05-20) ---
     "ENABLE_LLM_ASSISTANT_MODE": FlagSpec(
         name="ENABLE_LLM_ASSISTANT_MODE",
@@ -646,30 +538,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "switch — sentinel flag 不会自动恢复,需 POST /ops/llm-mode/"
             "restore-sentinel 显式回滚。task.config['llm_mode']='assistant' 控制 "
             "per-task opt-in。"
-        ),
-    ),
-    # --- A3 flat-F4 cross-region quota (Sprint 1, 2026-05-19) ---
-    "FLAT_CROSS_REGION_QUOTA": FlagSpec(
-        name="FLAT_CROSS_REGION_QUOTA",
-        flag_type="json",
-        group="Phase4-Sprint1",
-        description=(
-            "Phase 4 A3 flat-F4:每 region 的 active task share 上限(0-1)。"
-            "POST /ops/start-flat-session 前查 last-N-day active task by region,"
-            "新加入 task 后是否越过 quota — 越过则按 FLAT_CROSS_REGION_ENFORCE 决定 "
-            "reject 还是 warn。default: USA 0.30 / CHN 0.20 / JPN 0.15 / EUR 0.20 / "
-            "HKG 0.15(对 Millennium 320-pod 多策略启示的实操化)。"
-        ),
-    ),
-    "FLAT_CROSS_REGION_ENFORCE": FlagSpec(
-        name="FLAT_CROSS_REGION_ENFORCE",
-        flag_type="bool",
-        group="Phase4-Sprint1",
-        description=(
-            "Phase 4 A3:default False = warn-only 阶段观察 7d 数据;翻 True = POST "
-            "时越过 quota 直接 reject 400。Phase A 真效果(per "
-            "[[feedback_按效果选择]]):observation-only 是 fallback,不是 default — "
-            "operator 看 7d /ops/flat-region/distribution 数据后翻 ENFORCE=True。"
         ),
     ),
     # --- B1 R11 alpha_capacity_estimator (Sprint 2, 2026-05-20) ---
@@ -899,18 +767,6 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
             "validate fail → retry_with_whole_output_hint → node_code_gen 重发 "
             "GRAMMAR_VALIDATOR_RETRY_MAX 次。lark 未安装时 degrade-open(返回 "
             "ok=True 让 caller 走 legacy 检查)。"
-        ),
-    ),
-    "GRAMMAR_VALIDATOR_RETRY_MAX": FlagSpec(
-        name="GRAMMAR_VALIDATOR_RETRY_MAX",
-        flag_type="int",
-        group="Phase4-Sprint4",
-        description=(
-            "⚠️ RESERVED — not yet wired (Sprint 4 F4 review fix). "
-            "node_code_gen 当前对 parse-fail candidate 做 BUFFER + 50% drop "
-            "floor degrade-open,**不** 走 LLM re-emit。未来 PR 可把 "
-            "retry_with_whole_output_hint 接进 bounded re-emit loop 读此值。"
-            "调它当前无行为变化。"
         ),
     ),
     # --- Breadth: dataset-steering value bandit (2026-05-22) ---
