@@ -49,6 +49,10 @@ import { STATUS_COLORS, STATUS_LABELS } from '../../utils/alphaStatus'
 import HeroMetrics from './HeroMetrics'
 import CanSubmitTag from './CanSubmitTag'
 import CrisisCorrelationPanel from './CrisisCorrelationPanel'
+import MarginalRiskPanel from './MarginalRiskPanel'
+import PnlPanel from './PnlPanel'
+import TransitionsPanel from './TransitionsPanel'
+import DetailsPanel from './DetailsPanel'
 
 const { Title, Text, Paragraph } = Typography
 
@@ -455,7 +459,7 @@ export default function AlphaDetail() {
                 </Space>
               ),
               children: (
-                <MarginalPanel
+                <MarginalRiskPanel
                   alpha={alpha}
                   marginal={marginal}
                   loading={marginalLoading}
@@ -467,6 +471,7 @@ export default function AlphaDetail() {
                     setMarginalEnabled(true)
                     if (marginalEnabled) refetchMarginal()
                   }}
+                  crisis={metrics?._crisis_correlations}
                 />
               ),
             },
@@ -479,42 +484,7 @@ export default function AlphaDetail() {
                   {transitions.length > 0 && <Tag>{transitions.length}</Tag>}
                 </Space>
               ),
-              children: transLoading ? (
-                <Spin />
-              ) : transitions.length === 0 ? (
-                <Empty description="尚无状态变迁记录" />
-              ) : (
-                <Timeline
-                  items={transitions.map((t) => ({
-                    color: STATUS_COLORS[t.new_status] || 'gray',
-                    children: (
-                      <Space direction="vertical" size={2}>
-                        <Space>
-                          {t.old_status && (
-                            <Tag color={STATUS_COLORS[t.old_status]}>{STATUS_LABELS[t.old_status] || t.old_status}</Tag>
-                          )}
-                          <span>→</span>
-                          <Tag color={STATUS_COLORS[t.new_status]}>{STATUS_LABELS[t.new_status] || t.new_status}</Tag>
-                          {t.sharpe_at_transition != null && (
-                            <Text type="secondary">
-                              当时 Sharpe={t.sharpe_at_transition.toFixed(2)}
-                            </Text>
-                          )}
-                        </Space>
-                        {t.reason && <Text type="secondary">{t.reason}</Text>}
-                        <Space>
-                          {t.source && <Tag>{t.source}</Tag>}
-                          <AntTooltip title={formatDateTime(t.transitioned_at)}>
-                            <Text type="secondary" style={{ fontSize: 11 }}>
-                              {formatRelative(t.transitioned_at)}
-                            </Text>
-                          </AntTooltip>
-                        </Space>
-                      </Space>
-                    ),
-                  }))}
-                />
-              ),
+              children: <TransitionsPanel transitions={transitions} loading={transLoading} />,
             },
             {
               key: 'pnl',
@@ -525,28 +495,7 @@ export default function AlphaDetail() {
                   {pnlData.length > 0 && <Tag>{pnlData.length}d</Tag>}
                 </Space>
               ),
-              children: pnlLoading ? (
-                <Spin />
-              ) : pnlData.length === 0 ? (
-                <Empty description="尚无 PnL 数据（挖掘 / 同步命中本地缓存后落库）" />
-              ) : (
-                <ResponsiveContainer width="100%" height={320}>
-                  <LineChart data={pnlData}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
-                    <XAxis dataKey="date" stroke="rgba(255,255,255,0.5)" minTickGap={40} />
-                    <YAxis stroke="rgba(255,255,255,0.5)" width={70} />
-                    <Tooltip
-                      contentStyle={{
-                        background: '#131a2b',
-                        border: '1px solid rgba(255,255,255,0.1)',
-                        borderRadius: 8,
-                      }}
-                      formatter={(v) => [Number(v).toLocaleString(), '累计 PnL']}
-                    />
-                    <Line type="monotone" dataKey="cum" stroke="#00ff88" strokeWidth={2} dot={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              ),
+              children: <PnlPanel pnlData={pnlData} loading={pnlLoading} />,
             },
           ]}
         />
@@ -651,176 +600,3 @@ export default function AlphaDetail() {
   )
 }
 
-// ---------------------------------------------------------------------------
-// Marginal-contribution panel (BRAIN before-and-after). Fetch is lazy and
-// owned by the parent so the decision card can mirror the recommendation.
-// ---------------------------------------------------------------------------
-function MarginalPanel({ alpha, marginal, loading, error, enabled, competition, setCompetition, onFetch }) {
-  const analysis = marginal?.analysis
-  return (
-    <div>
-      <Alert
-        type="info"
-        message="BRAIN 加入组合前后的表现对比"
-        description={
-          <Space direction="vertical" size={4} style={{ fontSize: 12 }}>
-            <span>
-              独立运行 vs 并入组合 的 Sharpe / Fitness / 换手率
-              对比 — 决定是否值得提交。
-            </span>
-            <span style={{ color: '#888' }}>
-              竞赛范围下含「评分变化」；以并入组合后的指标增量衡量边际贡献。换手率 / 回撤 越低越好。
-            </span>
-          </Space>
-        }
-        style={{ marginBottom: 16 }}
-        showIcon
-      />
-      <Space style={{ marginBottom: 16 }} wrap>
-        <Input
-          placeholder="竞赛 ID（留空=默认范围）"
-          value={competition}
-          onChange={(e) => setCompetition(e.target.value)}
-          style={{ width: 220 }}
-        />
-        <Button
-          type="primary"
-          icon={<ReloadOutlined />}
-          loading={loading}
-          disabled={!alpha?.alpha_id}
-          onClick={onFetch}
-        >
-          拉取 BRAIN 数据
-        </Button>
-        {!alpha?.alpha_id && <Text type="warning">该 alpha 无 BRAIN ID，不能拉取</Text>}
-      </Space>
-
-      {error && (
-        <Alert type="error" message="拉取失败" description={error.message || '未知错误'} style={{ marginBottom: 16 }} />
-      )}
-      {loading && <Spin tip="BRAIN 计算中(可能 5-20s)..." />}
-
-      {marginal && (
-        <>
-          {analysis && (
-            <Alert
-              type={{ SUBMIT: 'success', SKIP: 'error', NEUTRAL: 'warning' }[analysis.recommendation] || 'info'}
-              showIcon
-              style={{ marginBottom: 16 }}
-              message={
-                <Space wrap>
-                  <Text strong style={{ fontSize: 15 }}>{analysis.label}</Text>
-                  {analysis.composite_score != null && (
-                    <Tag color={analysis.composite_score > 0 ? 'green' : analysis.composite_score < 0 ? 'red' : 'default'}>
-                      综合边际评分 {analysis.composite_score > 0 ? '+' : ''}{analysis.composite_score}
-                    </Tag>
-                  )}
-                  {analysis.margin_bps != null && (
-                    <Tag color={analysis.margin_bps < 0 ? 'red' : analysis.margin_bps < 5 ? 'orange' : 'blue'}>
-                      Margin {analysis.margin_bps}bps（门槛 5bps）
-                    </Tag>
-                  )}
-                </Space>
-              }
-              description={
-                <Space direction="vertical" size={6} style={{ fontSize: 12, width: '100%' }}>
-                  {analysis.rationale && <Text>{analysis.rationale}</Text>}
-                  {(analysis.guardrails || []).length > 0 && (
-                    <div>
-                      {analysis.guardrails.map((g, i) => (
-                        <div key={i} style={{ color: '#cf1322' }}>⚠ {g}</div>
-                      ))}
-                    </div>
-                  )}
-                  <Row gutter={16}>
-                    <Col span={12}>
-                      <Text strong style={{ color: '#389e0d' }}>
-                        ✓ 正向贡献 ({(analysis.positives || []).length})
-                      </Text>
-                      {(analysis.positives || []).length === 0 ? (
-                        <div style={{ color: '#999' }}>—</div>
-                      ) : (
-                        analysis.positives.map((p) => <div key={p.metric}>· {p.text}</div>)
-                      )}
-                    </Col>
-                    <Col span={12}>
-                      <Text strong style={{ color: '#cf1322' }}>
-                        ✗ 负向拖累 ({(analysis.negatives || []).length})
-                      </Text>
-                      {(analysis.negatives || []).length === 0 ? (
-                        <div style={{ color: '#999' }}>—</div>
-                      ) : (
-                        analysis.negatives.map((n) => <div key={n.metric}>· {n.text}</div>)
-                      )}
-                    </Col>
-                  </Row>
-                  {(analysis.reference || []).length > 0 && (
-                    <div style={{ color: '#888' }}>
-                      参考（不计入评分）：{analysis.reference.map((r) => r.text).join('；')}
-                    </div>
-                  )}
-                </Space>
-              }
-            />
-          )}
-          <Descriptions title={`范围：${marginal.scope}`} bordered size="small" column={1} style={{ marginBottom: 16 }}>
-            {marginal.raw?.score != null && (
-              <Descriptions.Item label="竞赛评分变化（排名分，越高越好）">
-                <Space size={8} wrap>
-                  <Text type="secondary">加入前: {Number(marginal.raw.score.before).toLocaleString()}</Text>
-                  <Text strong>加入后: {Number(marginal.raw.score.after).toLocaleString()}</Text>
-                  {marginal.deltas?.score != null && (
-                    <Tag color={marginal.deltas.score >= 0 ? 'green' : 'red'}>
-                      变化 {marginal.deltas.score > 0 ? '+' : ''}{Number(marginal.deltas.score).toLocaleString()}
-                    </Tag>
-                  )}
-                </Space>
-              </Descriptions.Item>
-            )}
-            <Descriptions.Item label="分区">
-              <Text code>{marginal.partition_name ?? marginal.raw?.partitionName ?? '—'}</Text>
-            </Descriptions.Item>
-          </Descriptions>
-          <Row gutter={16}>
-            {['sharpe', 'fitness', 'margin', 'returns', 'pnl', 'turnover', 'drawdown'].map((k) => {
-              const METRIC_LABELS = {
-                sharpe: 'Sharpe', fitness: 'Fitness', margin: 'Margin',
-                returns: '收益', pnl: '盈亏 PnL', turnover: '换手率', drawdown: '回撤',
-              }
-              const before = marginal.raw?.stats?.before?.[k]
-              const after = marginal.raw?.stats?.after?.[k]
-              const delta = marginal.deltas?.[k]
-              const isMoney = k === 'pnl'
-              const fmt = (v) =>
-                typeof v === 'number' ? (isMoney ? v.toLocaleString() : v.toFixed(4)) : '—'
-              return (
-                <Col span={8} key={k} style={{ marginBottom: 12 }}>
-                  <Card size="small" title={METRIC_LABELS[k] || k.toUpperCase()}>
-                    <Space direction="vertical" size={2} style={{ fontSize: 12 }}>
-                      <Text type="secondary">加入前: {fmt(before)}</Text>
-                      <Text strong>加入后: {fmt(after)}</Text>
-                      {delta != null && (
-                        <Tag
-                          color={
-                            (k === 'turnover' || k === 'drawdown')
-                              ? (delta <= 0 ? 'green' : 'red')
-                              : (delta >= 0 ? 'green' : 'red')
-                          }
-                        >
-                          变化 {delta > 0 ? '+' : ''}{fmt(delta)}
-                        </Tag>
-                      )}
-                    </Space>
-                  </Card>
-                </Col>
-              )
-            })}
-          </Row>
-        </>
-      )}
-      {!enabled && !loading && !marginal && (
-        <Empty description="点击「拉取 BRAIN 数据」开始，首次调用 BRAIN 可能 5-20s" />
-      )}
-    </div>
-  )
-}
