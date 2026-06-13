@@ -88,14 +88,12 @@ def test_f2_canary_sop_doc_corrected():
 # F4/F5: RETRY_MAX + retry_with_whole_output_hint marked RESERVED
 # ---------------------------------------------------------------------------
 
-def test_f4_retry_max_marked_reserved():
-    """GRAMMAR_VALIDATOR_RETRY_MAX has no production reader — config +
-    flagspec must honestly mark it RESERVED."""
-    import inspect
+def test_f4_grammar_validator_retry_max_retired():
+    """GRAMMAR_VALIDATOR_RETRY_MAX was an unwired RESERVED flag — the
+    2026-06-13 feature-flag cleanup intentionally removed it from
+    SUPPORTED_FLAGS (census REMOVE_SET). Assert it is no longer registered."""
     from backend.services import feature_flag_service as ffs
-    spec = ffs.SUPPORTED_FLAGS.get("GRAMMAR_VALIDATOR_RETRY_MAX")
-    assert spec is not None
-    assert "RESERVED" in spec.description
+    assert ffs.SUPPORTED_FLAGS.get("GRAMMAR_VALIDATOR_RETRY_MAX") is None
 
 
 def test_f5_retry_hint_docstring_marks_reserved():

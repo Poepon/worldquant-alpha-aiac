@@ -4,13 +4,16 @@ import {
   Alert,
   Button,
   Card,
+  Collapse,
   Drawer,
   Empty,
+  Input,
   Popconfirm,
   Space,
   Spin,
   Switch,
   Table,
+  Tabs,
   Tag,
   Timeline,
   Tooltip,
@@ -37,9 +40,17 @@ const SOURCE_TAG_COLORS = {
   'runtime-override': 'gold',
 }
 
-// Order the groups appear top→bottom in the page. Anything not in this
-// list falls back to alphabetic order.
-const GROUP_ORDER = ['P0', 'P1', 'P2-A', 'P2-B', 'P2-C', 'P2-D', 'P3-Brain']
+// 双轴控制台:顶部 3 个生命周期 tab × tab 内按功能域 (domain) 折叠分组。
+const LIFECYCLE_TABS = [
+  { key: 'operational', label: '🟢 运维' },
+  { key: 'experimental', label: '🧪 实验' },
+  { key: 'dormant', label: '💤 休眠' },
+]
+const DOMAIN_LABELS = {
+  submit: '提交', rag: 'RAG', evaluation: '评估门', generation: '生成·prompt',
+  'llm-routing': 'LLM 路由', regime: '市场体制', breadth: '广度·数据',
+  brain: 'BRAIN 账号', kb: '知识库', misc: '其它',
+}
 
 // BrainRoleEntryCard — 轻量入口卡，跳转到 /ops/brain-role 专属页
 function BrainRoleEntryCard() {
@@ -99,6 +110,8 @@ export default function FeatureFlagsConsole() {
   const [auditOpen, setAuditOpen] = useState(false)
   const [audit, setAudit] = useState([])
   const [auditLoading, setAuditLoading] = useState(false)
+  const [activeTab, setActiveTab] = useState('operational')
+  const [search, setSearch] = useState('')
 
   const fetchFlags = useCallback(async () => {
     setLoading(true)
@@ -116,27 +129,30 @@ export default function FeatureFlagsConsole() {
     fetchFlags()
   }, [fetchFlags])
 
-  // Group the flat array into { groupName: [...flags] }, ordered by GROUP_ORDER
-  const groupedFlags = useMemo(() => {
-    const map = new Map()
+  // 轴 1:按生命周期分桶(未知 lifecycle 落 dormant)
+  const byLifecycle = useMemo(() => {
+    const buckets = { operational: [], experimental: [], dormant: [] }
     for (const f of flags) {
-      const g = f.group || 'misc'
-      if (!map.has(g)) map.set(g, [])
-      map.get(g).push(f)
+      const lc = buckets[f.lifecycle] ? f.lifecycle : 'dormant'
+      buckets[lc].push(f)
     }
-    const ordered = []
-    for (const g of GROUP_ORDER) {
-      if (map.has(g)) {
-        ordered.push([g, map.get(g)])
-        map.delete(g)
-      }
-    }
-    // Append any unknown groups alphabetically
-    for (const g of [...map.keys()].sort()) {
-      ordered.push([g, map.get(g)])
-    }
-    return ordered
+    return buckets
   }, [flags])
+
+  // 轴 2:当前 tab 内按功能域分组 + 搜索过滤(未知 domain 落 misc)
+  const domainGroups = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    const rows = byLifecycle[activeTab].filter(
+      (f) => !q || f.name.toLowerCase().includes(q) || (f.description || '').toLowerCase().includes(q),
+    )
+    const map = new Map()
+    for (const f of rows) {
+      const d = DOMAIN_LABELS[f.domain] ? f.domain : 'misc'
+      if (!map.has(d)) map.set(d, [])
+      map.get(d).push(f)
+    }
+    return [...map.entries()].sort((a, b) => a[0].localeCompare(b[0]))
+  }, [byLifecycle, activeTab, search])
 
   const handleToggle = async (flag, nextValue) => {
     setBusyFlag(flag.name)
@@ -345,26 +361,46 @@ export default function FeatureFlagsConsole() {
         <div style={{ textAlign: 'center', padding: 40 }}>
           <Spin />
         </div>
-      ) : groupedFlags.length === 0 ? (
+      ) : flags.length === 0 ? (
         <Empty description="无可控开关（请检查后端白名单配置）" />
       ) : (
-        groupedFlags.map(([group, rows]) => (
-          <Card
-            key={group}
-            title={`分组 · ${group}`}
-            size="small"
-            style={{ marginTop: 16 }}
-            className="glass-card"
-          >
-            <Table
-              rowKey="name"
-              size="small"
-              columns={columns}
-              dataSource={rows}
-              pagination={false}
+        <Card size="small" style={{ marginTop: 16 }} className="glass-card">
+          <Input.Search
+            placeholder="按开关名 / 描述过滤"
+            allowClear
+            style={{ maxWidth: 360, marginTop: 12 }}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+          <Tabs
+            activeKey={activeTab}
+            onChange={setActiveTab}
+            items={LIFECYCLE_TABS.map((t) => ({
+              key: t.key,
+              label: `${t.label} (${byLifecycle[t.key].length})`,
+            }))}
+            style={{ marginTop: 8 }}
+          />
+          {domainGroups.length === 0 ? (
+            <Empty description="该层无开关" />
+          ) : (
+            <Collapse
+              defaultActiveKey={domainGroups.map(([d]) => d)}
+              items={domainGroups.map(([domain, rows]) => ({
+                key: domain,
+                label: `${DOMAIN_LABELS[domain] || domain} · ${rows.length}`,
+                children: (
+                  <Table
+                    rowKey="name"
+                    size="small"
+                    columns={columns}
+                    dataSource={rows}
+                    pagination={false}
+                  />
+                ),
+              }))}
             />
-          </Card>
-        ))
+          )}
+        </Card>
       )}
 
       <Drawer

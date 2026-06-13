@@ -131,7 +131,7 @@ class FeatureFlagAudit(SQLAlchemyBase):
 
     # Phase 4 A1.2 (2026-05-20): R12 LLM_MODE=assistant sentinel cascade.
     # When ENABLE_LLM_ASSISTANT_MODE is set True, feature_flag_service
-    # forces the 6 LLM_ASSISTANT_SENTINEL_FLAGS to False in the same
+    # forces the 4 LLM_ASSISTANT_SENTINEL_FLAGS to False in the same
     # transaction. Each forced flip writes an audit row with
     # sentinel_trigger_for='ENABLE_LLM_ASSISTANT_MODE' so restore_sentinel()
     # can reverse the cascade later via a single WHERE clause.

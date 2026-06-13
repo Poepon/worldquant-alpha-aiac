@@ -102,7 +102,8 @@ class FlagStateOut(BaseModel):
     """Wire shape of FeatureFlagService.list_all entries."""
     name: str
     flag_type: str
-    group: str
+    lifecycle: str
+    domain: str
     description: str
     env_default: Any = None
     override_value: Optional[Any] = None
@@ -1261,7 +1262,7 @@ async def llm_mode_restore_sentinel(
 
     Operator runbook:
       - Use this after deciding R12 assistant mode obs window failed and
-        you want to immediately restore the 6 sentinel flags to their
+        you want to immediately restore the 4 sentinel flags to their
         pre-R12 production state.
       - Setting ``ENABLE_LLM_ASSISTANT_MODE=False`` via the regular
         /ops/flags PATCH endpoint does NOT auto-restore — that just
@@ -1343,51 +1344,6 @@ class FlatSessionOut(BaseModel):
     status: str
     runtime_state_inherited: bool = False
 
-
-
-
-# ----- A3 flat-F4 distribution endpoint -----
-class FlatRegionStatus(BaseModel):
-    region: str
-    count: int
-    share: float
-    quota: Optional[float] = None
-    status: str  # ok / warn / exceeded / no_quota
-
-
-class FlatRegionDistributionOut(BaseModel):
-    total_active_tasks: int
-    regions: List[FlatRegionStatus]
-    enforce: bool
-    lookback_days: int
-
-
-@router.get("/flat-region/distribution", response_model=FlatRegionDistributionOut)
-async def flat_region_distribution(
-    _token: str = Depends(_require_ops_token),
-    db: AsyncSession = Depends(get_db),
-) -> FlatRegionDistributionOut:
-    """A3 flat-F4: per-region active-task share + configured quota with
-    over-quota / warn / ok chips. Powers the frontend FlatRegionMonitor
-    page (defer to next session) and the operator decision to flip
-    FLAT_CROSS_REGION_ENFORCE from warn → reject.
-    """
-    from backend.config import settings
-    from backend.services.flat_region_quota import (
-        compute_region_share as _compute_share,
-        build_distribution_summary as _summary,
-    )
-    _quota = dict(getattr(settings, "FLAT_CROSS_REGION_QUOTA", {}) or {})
-    _enforce = bool(getattr(settings, "FLAT_CROSS_REGION_ENFORCE", False))
-    _lookback = int(getattr(settings, "FLAT_CROSS_REGION_LOOKBACK_DAYS", 30))
-    _share = await _compute_share(db, lookback_days=_lookback)
-    _summary_dict = _summary(_share, _quota)
-    return FlatRegionDistributionOut(
-        total_active_tasks=int(_summary_dict["total_active_tasks"]),
-        regions=[FlatRegionStatus(**r) for r in _summary_dict["regions"]],
-        enforce=_enforce,
-        lookback_days=_lookback,
-    )
 
 
 
@@ -2809,222 +2765,11 @@ async def r5_judge_stats(
 
 
 
-# =============================================================================
-# G5 Phase A follow-up — trajectory crossover telemetry (2026-05-19)
-# =============================================================================
-# Reads g5_crossover_log (per-call) + outcome_alpha_ids reverse JOIN
-# (back-filled by _incremental_save_alphas when offspring INSERT).
-# Healthy deploy: ENABLE_G5_CROSSOVER=True AND total_crossover_calls > 0
-# (LLM 真在 produce offspring) AND offspring_pass_rate > 0 (≥1 offspring
-# 真 PASS — 证明 crossover 不只是 LLM hallucination)。
-
-
-class G5StrategyBucket(BaseModel):
-    strategy: str
-    calls: int
-    avg_offspring_count: float
-    outcome_pass_count: int
-
-
-class G5PillarPairBucket(BaseModel):
-    pillar_pair: str   # e.g. "momentum→value"
-    calls: int
-    outcome_pass_count: int
-
-
-class G5RecentEvent(BaseModel):
-    id: int
-    task_id: Optional[int] = None
-    round_idx: Optional[int] = None
-    parent_a_alpha_id: Optional[int] = None
-    parent_b_alpha_id: Optional[int] = None
-    offspring_count: int = 0
-    outcome_pass_count: Optional[int] = None
-    llm_cost_usd: Optional[float] = None
-    created_at: Optional[str] = None
-
-
-class G5CrossoverStatsOut(BaseModel):
-    flags: Dict[str, bool]
-    window_days: int
-    total_crossover_calls: int
-    total_offspring: int
-    total_offspring_referenced_alphas: int
-    offspring_pass_count: int
-    offspring_pass_rate: float
-    avg_offspring_per_call: float
-    per_strategy: List[G5StrategyBucket]
-    per_pillar_pair: List[G5PillarPairBucket]
-    recent_events: List[G5RecentEvent]
-    healthy_gates: Dict[str, float]
-    is_healthy: bool
-
-
-@router.get("/g5/crossover-stats", response_model=G5CrossoverStatsOut)
-async def g5_crossover_stats(
-    days: int = 7,
-    top_n: int = 20,
-    _token: str = Depends(_require_ops_token),
-    db: AsyncSession = Depends(get_db),
-) -> G5CrossoverStatsOut:
-    """DEPRECATED 2026-06-07 (四池重设计): /ops/g5-monitor page removed —
-    llm_crossover_alpha deleted (1c) + ENABLE_G5_CROSSOVER OFF; g5_crossover_log
-    has no writer in the pool world. Endpoint kept to avoid 404s.
-
-    G5 Phase A follow-up — trajectory crossover telemetry.
-
-    Reads g5_crossover_log over the last ``days`` window + reverse JOIN
-    alphas via outcome_alpha_ids JSONB (back-filled by _incremental_save
-    _alphas). Six aggregates:
-      1. Headline: total_crossover_calls, total_offspring, outcome PASS
-         count + rate
-      2. avg_offspring_per_call (LLM productivity — 0 implies prompt is
-         too restrictive; 3+ implies LLM ignores top_k cap)
-      3. per_strategy: counts + avg_offspring_count + outcome_pass per
-         combination_strategy (5 strategies: weighted_sum /
-         sequential_filter / cross_sectional_confirm / wrapper_graft /
-         difference_filter) — shows which strategy LLM picks + which
-         actually produces PASS
-      4. per_pillar_pair: counts + outcome_pass for each
-         "pillar_a→pillar_b" combination — shows which cross-pillar
-         pairings are productive
-      5. recent_events: top-N most recent calls (chronological newest first)
-      6. Healthy gate: flag ON + total_calls > 0 + offspring_pass_rate > 0
-    """
-    from sqlalchemy import text as _text
-    from backend.config import settings as _stg
-
-    flags = {
-        "ENABLE_G5_CROSSOVER": bool(getattr(_stg, "ENABLE_G5_CROSSOVER", False)),
-    }
-
-    head = (await db.execute(_text(
-        "SELECT "
-        "  COUNT(*) AS total_calls, "
-        "  COALESCE(SUM(offspring_count), 0) AS total_offspring, "
-        # Same json-null guard as the strategy CTE below — jsonb_array_length
-        # also errors on a scalar, so degrade non-arrays to '[]' (length 0).
-        "  COALESCE(SUM(jsonb_array_length("
-        "    CASE WHEN jsonb_typeof(outcome_alpha_ids) = 'array' "
-        "         THEN outcome_alpha_ids ELSE '[]'::jsonb END)), 0) AS total_outcome_alphas, "
-        "  COALESCE(SUM(outcome_pass_count), 0) AS total_pass "
-        "FROM g5_crossover_log "
-        "WHERE created_at > now() - (:days || ' day')::interval"
-    ), {"days": str(int(days))})).one()
-    total_calls = int(head[0] or 0)
-    total_offspring = int(head[1] or 0)
-    total_outcome = int(head[2] or 0)
-    total_pass = int(head[3] or 0)
-    pass_rate = round(total_pass / total_outcome, 4) if total_outcome > 0 else 0.0
-    avg_offspring = round(total_offspring / total_calls, 2) if total_calls > 0 else 0.0
-
-    # per_strategy: needs to unpack offspring_expressions JSONB — each entry
-    # carries its own combination_strategy. Use jsonb_array_elements to
-    # explode, then GROUP BY the strategy text.
-    strat_rows = (await db.execute(_text(
-        "WITH expanded AS ("
-        "  SELECT id, "
-        "         (elem->>'combination_strategy') AS strategy, "
-        "         offspring_count, "
-        "         outcome_pass_count "
-        "  FROM g5_crossover_log, "
-        # COALESCE only traps SQL NULL — historical rows persisted Python None
-        # as JSONB scalar 'null' (not SQL NULL), and jsonb_array_elements()
-        # errors on any non-array scalar. Guard by jsonb_typeof so json-null /
-        # scalar / object all degrade to '[]' instead of 500-ing the endpoint.
-        "       jsonb_array_elements("
-        "         CASE WHEN jsonb_typeof(offspring_expressions) = 'array' "
-        "              THEN offspring_expressions ELSE '[]'::jsonb END"
-        "       ) AS elem "
-        "  WHERE created_at > now() - (:days || ' day')::interval "
-        ") "
-        "SELECT COALESCE(strategy, '(unspecified)') AS s, "
-        "       COUNT(DISTINCT id) AS calls, "
-        "       COALESCE(AVG(offspring_count), 0.0) AS avg_off, "
-        "       COALESCE(SUM(outcome_pass_count), 0) AS pass_ct "
-        "FROM expanded "
-        "GROUP BY s "
-        "ORDER BY calls DESC"
-    ), {"days": str(int(days))})).all()
-    per_strategy = [
-        G5StrategyBucket(
-            strategy=s or "(unspecified)",
-            calls=int(c or 0),
-            avg_offspring_count=round(float(ao or 0.0), 2),
-            outcome_pass_count=int(pc or 0),
-        )
-        for s, c, ao, pc in strat_rows
-    ]
-
-    # per_pillar_pair: from parent_a_pillar / parent_b_pillar columns
-    pillar_rows = (await db.execute(_text(
-        "SELECT "
-        "  COALESCE(parent_a_pillar, '?') || '→' || COALESCE(parent_b_pillar, '?') AS pair, "
-        "  COUNT(*) AS n, "
-        "  COALESCE(SUM(outcome_pass_count), 0) AS pass_ct "
-        "FROM g5_crossover_log "
-        "WHERE created_at > now() - (:days || ' day')::interval "
-        "GROUP BY pair "
-        "ORDER BY n DESC"
-    ), {"days": str(int(days))})).all()
-    per_pillar = [
-        G5PillarPairBucket(
-            pillar_pair=p or "?→?",
-            calls=int(n or 0),
-            outcome_pass_count=int(pc or 0),
-        )
-        for p, n, pc in pillar_rows
-    ]
-
-    # recent_events: top-N newest crossover events
-    recent_rows = (await db.execute(_text(
-        "SELECT id, task_id, round_idx, parent_a_alpha_id, parent_b_alpha_id, "
-        "       offspring_count, outcome_pass_count, llm_cost_usd, "
-        "       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS ts "
-        "FROM g5_crossover_log "
-        "WHERE created_at > now() - (:days || ' day')::interval "
-        "ORDER BY created_at DESC "
-        "LIMIT :lim"
-    ), {"days": str(int(days)), "lim": int(top_n)})).all()
-    recent_events = [
-        G5RecentEvent(
-            id=int(rid),
-            task_id=int(tid) if tid is not None else None,
-            round_idx=int(ri) if ri is not None else None,
-            parent_a_alpha_id=int(pa) if pa is not None else None,
-            parent_b_alpha_id=int(pb) if pb is not None else None,
-            offspring_count=int(oc or 0),
-            outcome_pass_count=int(opc) if opc is not None else None,
-            llm_cost_usd=float(cost) if cost is not None else None,
-            created_at=ts or None,
-        )
-        for rid, tid, ri, pa, pb, oc, opc, cost, ts in recent_rows
-    ]
-
-    healthy = (
-        bool(flags["ENABLE_G5_CROSSOVER"])
-        and total_calls > 0
-        and pass_rate > 0
-    )
-
-    return G5CrossoverStatsOut(
-        flags=flags,
-        window_days=int(days),
-        total_crossover_calls=total_calls,
-        total_offspring=total_offspring,
-        total_offspring_referenced_alphas=total_outcome,
-        offspring_pass_count=total_pass,
-        offspring_pass_rate=pass_rate,
-        avg_offspring_per_call=avg_offspring,
-        per_strategy=per_strategy,
-        per_pillar_pair=per_pillar,
-        recent_events=recent_events,
-        healthy_gates={
-            "min_total_calls": 1.0,
-            "min_offspring_pass_rate": 0.0,
-        },
-        is_healthy=healthy,
-    )
+# (G5 crossover telemetry endpoint `GET /ops/g5/crossover-stats` removed 2026-06-13:
+# the ENABLE_G5_CROSSOVER flag was retired and its sole reader, the /ops/g5-monitor
+# page, was retired 2026-06-07 — leaving a dead read-only endpoint. The g5_crossover_log
+# table/model and g5_persistence.py source are intentionally kept; only the endpoint
+# + its G5* response models were dropped.)
 
 
 # =============================================================================

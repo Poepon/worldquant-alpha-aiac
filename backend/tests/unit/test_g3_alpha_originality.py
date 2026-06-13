@@ -310,7 +310,8 @@ class TestG3FlagRegistration:
         assert "ENABLE_AST_ORIGINALITY_GATE" in SUPPORTED_FLAGS
         spec = SUPPORTED_FLAGS["ENABLE_AST_ORIGINALITY_GATE"]
         assert spec.flag_type == "bool"
-        assert spec.group == "G3-Originality"
+        assert spec.lifecycle == "experimental"
+        assert spec.domain == "evaluation"
 
 
 # ---------------------------------------------------------------------------

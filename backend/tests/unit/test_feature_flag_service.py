@@ -348,3 +348,57 @@ async def test_list_audit_clamps_limit(svc):
     assert isinstance(audits, list)
     audits = await svc.list_audit(limit=10_000)
     assert isinstance(audits, list)
+
+
+def test_retired_flags_removed_from_whitelist():
+    from backend.services.feature_flag_service import SUPPORTED_FLAGS
+    removed = {
+        "ENABLE_DEFAULT_FLAT_SESSION", "ENABLE_FLAT_CONTINUOUS",
+        "GRAMMAR_VALIDATOR_RETRY_MAX", "ENABLE_R1A_HOOK", "ENABLE_LLM_JUDGE",
+        "ENABLE_G5_CROSSOVER", "ENABLE_TASK_SCHEMA_V2",
+        "FLAT_CROSS_REGION_QUOTA", "FLAT_CROSS_REGION_ENFORCE",
+        "ENABLE_TASK_STOP_LOSS", "TASK_STOP_LOSS_PASS_RATE_FLOOR",
+        "TASK_STOP_LOSS_CONSECUTIVE_FAIL_ROUNDS",
+    }
+    assert removed.isdisjoint(SUPPORTED_FLAGS.keys())
+
+
+def test_flagspec_has_lifecycle_and_domain_no_group():
+    from backend.services.feature_flag_service import (
+        SUPPORTED_FLAGS, FlagSpec, LIFECYCLES, DOMAINS,
+    )
+    import dataclasses
+    field_names = {f.name for f in dataclasses.fields(FlagSpec)}
+    assert "group" not in field_names
+    assert {"lifecycle", "domain"} <= field_names
+    for name, spec in SUPPORTED_FLAGS.items():
+        assert spec.lifecycle in LIFECYCLES, f"{name} bad lifecycle {spec.lifecycle}"
+        assert spec.domain in DOMAINS, f"{name} bad domain {spec.domain}"
+
+
+def test_flagstate_carries_lifecycle_domain():
+    from backend.services.feature_flag_service import FlagState
+    import dataclasses
+    fields = {f.name for f in dataclasses.fields(FlagState)}
+    assert "group" not in fields
+    assert {"lifecycle", "domain"} <= fields
+
+
+def test_flagstateout_wire_model_has_lifecycle_domain_no_group():
+    """The /ops/flags wire model must mirror FlagState (lifecycle/domain, no group)
+    so `FlagStateOut(**state.__dict__)` serializes without a ValidationError."""
+    from backend.routers.ops import FlagStateOut
+    from backend.services.feature_flag_service import FlagState
+    model_fields = set(FlagStateOut.model_fields.keys())
+    assert "group" not in model_fields
+    assert {"lifecycle", "domain"} <= model_fields
+    # round-trip a real FlagState through the wire model (the exact ops.py call)
+    s = FlagState(
+        name="X", flag_type="bool", lifecycle="operational", domain="submit",
+        description="d", env_default=False, override_value=None,
+        effective_value=False, source="default",
+    )
+    dumped = FlagStateOut(**s.__dict__).model_dump()
+    assert dumped["lifecycle"] == "operational"
+    assert dumped["domain"] == "submit"
+    assert "group" not in dumped

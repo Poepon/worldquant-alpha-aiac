@@ -422,3 +422,12 @@ class _MiniRedis:
 
     def get(self, key):
         return self.kv.get(key)
+
+
+def test_task3_orphans_removed():
+    """Task 3: retired-flag orphan service/endpoint are offline."""
+    import importlib.util
+    assert importlib.util.find_spec("backend.services.flat_region_quota") is None
+    assert importlib.util.find_spec("backend.services.task_stop_loss_service") is None
+    from backend.routers import ops as ops_module
+    assert not hasattr(ops_module, "flat_region_distribution")
