@@ -112,8 +112,10 @@ def check_thesis4(cur, since, region_clause):
                  WHEN expression ~ 'trade_when|if_else' THEN '条件交互'
                  WHEN expression ~ 'add\\(' THEN '线性混合add'
                  -- coarse syntactic bucket, first-match precedence; exclude BOTH
-                 -- sign-flip forms multiply(-1,x) and multiply(x,-1)
-                 WHEN expression ~ 'multiply\\(' AND expression !~ 'multiply\\(\\s*-1|,\\s*-1\\s*\\)' THEN '乘法耦合'
+                 -- sign-flip forms multiply(-1,x) and multiply(x,-1). The arg-last
+                 -- form is anchored to multiply( so a trailing ", -1)" inside a
+                 -- non-multiply wrapper (e.g. power(multiply(a,b), -1)) isn't misread.
+                 WHEN expression ~ 'multiply\\(' AND expression !~ 'multiply\\(\\s*-1|multiply\\([^()]*,\\s*-1' THEN '乘法耦合'
                  ELSE '单一信号链' END typ,
                count(*) n,
                round(100.0*count(*) FILTER (WHERE {PASS})/NULLIF(count(*),0),1) pr
@@ -165,6 +167,7 @@ def check_pillar_classification(cur, since):
     for p, mg, r1b in rows:
         print(f"    {p:<12} 主生成={mg:<5} r1b_mutate={r1b}")
     print("  注: pillar='unknown' 仅 r1b_mutate fallback 产生,与命题4/主生成无关 (region-agnostic)")
+    print("  注: (null)=pillar 字段(2026-05-15)前的旧假设;宽 --since 会虚高未分类率,请用重启时间过滤")
     if main_total < MIN_N:
         _verdict("INSUFFICIENT", f"主生成假设仅 {main_total} 个")
         return
@@ -304,13 +307,14 @@ def check_foolsgold(cur, since, region_clause):
         _verdict("INSUFFICIENT", "短<180 样本不足,未判定愚人金")
         return
     prov, hp, cs = short[2], short[3], short[4]
-    if prov > 0 and hp == 0 and cs == 0:
-        _verdict("⚠️ 短 statement 只产 PASS_PROVISIONAL(0 PASS/0 can_submit) → 疑似愚人金,查 self-corr")
-    elif cs == 0 and hp > 0:
-        _verdict("🔶 短 statement 有 PASS 但 0 can_submit → 提交被 self-corr/prod-corr 阻挡"
-                 "(非愚人金,是提交多样性问题)")
-    else:
+    if cs > 0:
         _verdict("✅ 短 statement 有真 can_submit,非愚人金", f"can_submit={cs}")
+    elif prov > 0 and hp == 0:
+        _verdict("⚠️ 短 statement 只产 PASS_PROVISIONAL(0 PASS/0 can_submit) → 疑似愚人金,查 self-corr")
+    elif hp > 0:
+        _verdict("🔶 短 statement 有 PASS 但 0 can_submit → 提交被 self-corr/prod-corr 阻挡(非愚人金,是提交多样性问题)")
+    else:
+        _verdict("🔶 短 statement 全 FAIL(无 PASS/PROVISIONAL) → 命题4 未提升此样本", "can_submit=0")
 
 
 def main():
