@@ -586,8 +586,8 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
         description=(
             "Phase 4 R12:工业 8 家共识(Citadel/Two Sigma/Bridgewater AIA)— "
             "LLM 做 research assistant 不做 expression-author。Default OFF。"
-            "Set True 时联动 6 LLM_ASSISTANT_SENTINEL_FLAGS 强制 False "
-            "(R1b mutate / G5 crossover / G8 forest reuse / R8 L0 / G3 / R9 cache)"
+            "Set True 时联动 4 LLM_ASSISTANT_SENTINEL_FLAGS 强制 False "
+            "(G8 forest reuse / R8 L0 / G3 / R9 cache)"
             ",audit 留 sentinel_trigger_for 标识便于 restore。OFF 仅关 kill "
             "switch — sentinel flag 不会自动恢复,需 POST /ops/llm-mode/"
             "restore-sentinel 显式回滚。task.config['llm_mode']='assistant' 控制 "

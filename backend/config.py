@@ -517,7 +517,7 @@ class Settings(BaseSettings):
     # Critical path 工业派共识吸收 — "LLM 是 research assistant 不是 expression-
     # author"(Citadel / Two Sigma / Bridgewater AIA)。A1 拆 4 sub-PR:
     #   A1.1 (this PR)  — service + state machine + drain residue keys
-    #   A1.2            — sentinel guard 联动 6 LIVE flag + audit + restore
+    #   A1.2            — sentinel guard 联动 4 LIVE flag + audit + restore
     #   A1.3            — code_gen branching + assistant template library
     #   A1.4            — ops endpoint + bootstrap CI GO gate
     # Default OFF — task.config["llm_mode"]='assistant' opt-in 灰度。

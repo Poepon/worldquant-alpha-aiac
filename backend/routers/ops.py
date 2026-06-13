@@ -1262,7 +1262,7 @@ async def llm_mode_restore_sentinel(
 
     Operator runbook:
       - Use this after deciding R12 assistant mode obs window failed and
-        you want to immediately restore the 6 sentinel flags to their
+        you want to immediately restore the 4 sentinel flags to their
         pre-R12 production state.
       - Setting ``ENABLE_LLM_ASSISTANT_MODE=False`` via the regular
         /ops/flags PATCH endpoint does NOT auto-restore — that just
