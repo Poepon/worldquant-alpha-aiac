@@ -19,7 +19,7 @@ import pytest
 
 
 @pytest.mark.asyncio
-async def test_set_r12_cascades_six_sentinel_flags_off(db_session):
+async def test_set_r12_cascades_sentinel_flags_off(db_session):
     from backend.models import FeatureFlagAudit, FeatureFlagOverride
     from backend.services.feature_flag_service import FeatureFlagService
     from backend.config import settings

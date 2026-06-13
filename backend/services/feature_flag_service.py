@@ -44,6 +44,13 @@ logger = logging.getLogger("services.feature_flag")
 # Whitelist + types
 # ---------------------------------------------------------------------------
 
+FLAG_TYPES = ("bool", "int", "float", "str", "json")
+
+LIFECYCLES = ("operational", "experimental", "dormant")
+DOMAINS = ("submit", "rag", "evaluation", "generation", "llm-routing",
+           "regime", "breadth", "brain", "kb", "misc")
+
+
 @dataclass(frozen=True)
 class FlagSpec:
     """Description of a single overridable flag."""
@@ -53,12 +60,11 @@ class FlagSpec:
     domain: str                 # one of DOMAINS — drives frontend sub-group
     description: str
 
-
-FLAG_TYPES = ("bool", "int", "float", "str", "json")
-
-LIFECYCLES = ("operational", "experimental", "dormant")
-DOMAINS = ("submit", "rag", "evaluation", "generation", "llm-routing",
-           "regime", "breadth", "brain", "kb", "misc")
+    def __post_init__(self):
+        if self.lifecycle not in LIFECYCLES:
+            raise ValueError(f"FlagSpec {self.name}: invalid lifecycle {self.lifecycle!r}")
+        if self.domain not in DOMAINS:
+            raise ValueError(f"FlagSpec {self.name}: invalid domain {self.domain!r}")
 
 
 # Source of truth for what /ops/feature-flags is allowed to flip. Keep

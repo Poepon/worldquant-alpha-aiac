@@ -364,16 +364,16 @@ def test_retired_flags_removed_from_whitelist():
 
 
 def test_flagspec_has_lifecycle_and_domain_no_group():
-    from backend.services.feature_flag_service import SUPPORTED_FLAGS, FlagSpec
+    from backend.services.feature_flag_service import (
+        SUPPORTED_FLAGS, FlagSpec, LIFECYCLES, DOMAINS,
+    )
     import dataclasses
     field_names = {f.name for f in dataclasses.fields(FlagSpec)}
     assert "group" not in field_names
     assert {"lifecycle", "domain"} <= field_names
-    LIFE = {"operational", "experimental", "dormant"}
-    DOM = {"submit","rag","evaluation","generation","llm-routing","regime","breadth","brain","kb","misc"}
     for name, spec in SUPPORTED_FLAGS.items():
-        assert spec.lifecycle in LIFE, f"{name} bad lifecycle {spec.lifecycle}"
-        assert spec.domain in DOM, f"{name} bad domain {spec.domain}"
+        assert spec.lifecycle in LIFECYCLES, f"{name} bad lifecycle {spec.lifecycle}"
+        assert spec.domain in DOMAINS, f"{name} bad domain {spec.domain}"
 
 
 def test_flagstate_carries_lifecycle_domain():
