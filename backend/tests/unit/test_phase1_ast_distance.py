@@ -201,7 +201,8 @@ class TestAstDiversityFlag:
         assert "ENABLE_AST_DIVERSITY_DIM" in SUPPORTED_FLAGS
         spec = SUPPORTED_FLAGS["ENABLE_AST_DIVERSITY_DIM"]
         assert spec.flag_type == "bool"
-        assert spec.group == "Phase1-R3Q8"
+        assert spec.lifecycle == "experimental"
+        assert spec.domain == "evaluation"
 
     def test_max_depth_default_3(self):
         from backend.config import settings
