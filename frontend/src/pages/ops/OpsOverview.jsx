@@ -29,7 +29,7 @@ import OpsSectionCard from './components/OpsSectionCard'
 import SourceTagBadge from './components/SourceTagBadge'
 import useOpsData from './hooks/useOpsData'
 
-const { Text, Title } = Typography
+const { Text } = Typography
 
 // Same band palette as AlphaHealthMonitor for consistency.
 const BAND_COLORS = {
@@ -43,21 +43,18 @@ const BAND_ORDER = ['GREEN', 'YELLOW', 'ORANGE', 'RED', 'UNKNOWN']
 
 // Map beat key → human label + target route. Keeps the grid wiring in
 // one place so renaming a beat or moving a page is a single edit.
-//
-// `stale: true` flags beats whose data source is retired / frozen — the
-// grid still shows the row (it's a faithful echo of what the backend
-// returns) but tags it so an operator doesn't trust a stale date.
-//   - regime_infer: regime beat 已退役,数据永久停在 2026-05-19。
-//   - hypothesis_health_check: 触发器口径已弃用(见 hypothesis-health 页 banner)。
 const BEAT_META = {
   alpha_health_check: { label: 'Alpha 健康度', route: '/ops/alpha-health' },
-  hypothesis_health_check: { label: '假设触发器', route: '/ops/hypothesis-health', stale: true },
   pillar_balance: { label: '五大因子类别平衡', route: '/ops/pillar-balance' },
-  regime_infer: { label: '市场行情阶段', route: '/ops/regime', stale: true },
   negative_knowledge_extract: { label: '失败经验库', route: '/ops/negative-knowledge' },
   macro_narrative_extract: { label: '宏观叙事', route: '/ops/macro-narratives' },
   llm_op_monitor: { label: 'LLM 算子监控', route: '/ops/llm-op-monitor' },
 }
+
+// Retired beats — backend get_overview still echoes these in beat_status,
+// but their data source is dead (regime_infer 冻结 2026-05-19 / hypothesis
+// 触发器口径已弃用), so we drop them from the grid entirely.
+const RETIRED_BEATS = new Set(['regime_infer', 'hypothesis_health_check'])
 
 /**
  * OpsOverview — /ops/overview top-of-funnel dashboard.
@@ -103,7 +100,6 @@ export default function OpsOverview() {
   }
 
   const alphaSummary = data.alpha_health_summary || {}
-  const hypSummary = data.hypothesis_health_summary || {}
 
   // Pre-shape by-region rows for the stacked bar — same code path as the
   // dedicated AlphaHealthMonitor so visual matches across both pages.
@@ -151,137 +147,87 @@ export default function OpsOverview() {
         loading={loading}
       >
         <Row gutter={[12, 12]}>
-          {Object.entries(data.beat_status || {}).map(([key, meta]) => {
-            const m = BEAT_META[key] || { label: key, route: null }
-            return (
-              <Col key={key} xs={12} sm={8} md={6} lg={4}>
-                <div
-                  onClick={() => m.route && navigate(m.route)}
-                  style={{
-                    padding: 12,
-                    border: '1px solid rgba(255,255,255,0.1)',
-                    borderRadius: 8,
-                    cursor: m.route ? 'pointer' : 'default',
-                    background: 'rgba(255,255,255,0.02)',
-                    opacity: m.stale ? 0.6 : 1,
-                  }}
-                >
-                  <Space size={4} align="center">
+          {Object.entries(data.beat_status || {})
+            .filter(([key]) => !RETIRED_BEATS.has(key))
+            .map(([key, meta]) => {
+              const m = BEAT_META[key] || { label: key, route: null }
+              return (
+                <Col key={key} xs={12} sm={8} md={6} lg={4}>
+                  <div
+                    onClick={() => m.route && navigate(m.route)}
+                    style={{
+                      padding: 12,
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      borderRadius: 8,
+                      cursor: m.route ? 'pointer' : 'default',
+                      background: 'rgba(255,255,255,0.02)',
+                    }}
+                  >
                     <Text style={{ fontSize: 13 }}>{m.label}</Text>
-                    {m.stale && (
-                      <Tooltip title="数据源已退役 / 冻结，以下日期不可信。">
-                        <Tag color="default" style={{ margin: 0, fontSize: 10, lineHeight: '16px' }}>
-                          已弃用
-                        </Tag>
-                      </Tooltip>
-                    )}
-                  </Space>
-                  <div style={{ marginTop: 6 }}>
-                    <SourceTagBadge source={meta.source} />
+                    <div style={{ marginTop: 6 }}>
+                      <SourceTagBadge source={meta.source} />
+                    </div>
+                    <div style={{ marginTop: 4, fontSize: 11, color: '#888' }}>
+                      {meta.date || '—'}
+                    </div>
                   </div>
-                  <div style={{ marginTop: 4, fontSize: 11, color: '#888' }}>
-                    {meta.date || '—'}
-                  </div>
-                </div>
-              </Col>
-            )
-          })}
+                </Col>
+              )
+            })}
         </Row>
       </OpsSectionCard>
 
-      <Row gutter={[16, 16]}>
-        <Col xs={24} md={12}>
-          <OpsSectionCard
-            title="Alpha 健康度快照"
-            source={alphaSummary.source}
-            staleDays={alphaSummary.stale_days}
-          >
-            <Row gutter={[8, 8]}>
-              <Col span={6}>
-                <Statistic
-                  title="总数"
-                  value={alphaSummary.total_alphas || 0}
-                />
-              </Col>
-              <Col span={6}>
-                <Statistic
-                  title="健康"
-                  value={alphaSummary.band_counts?.GREEN || 0}
-                  valueStyle={{ color: BAND_COLORS.GREEN }}
-                />
-              </Col>
-              <Col span={6}>
-                <Statistic
-                  title="异常"
-                  value={alphaSummary.band_counts?.RED || 0}
-                  valueStyle={{ color: BAND_COLORS.RED }}
-                />
-              </Col>
-              <Col span={6}>
-                <Statistic
-                  title="未知"
-                  value={alphaSummary.band_counts?.UNKNOWN || 0}
-                  valueStyle={{ color: BAND_COLORS.UNKNOWN }}
-                />
-              </Col>
-            </Row>
-            {regionRows.length > 0 && (
-              <div style={{ marginTop: 16 }}>
-                <ResponsiveContainer width="100%" height={180}>
-                  <BarChart data={regionRows}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
-                    <XAxis dataKey="region" stroke="#888" />
-                    <YAxis stroke="#888" />
-                    <ReTooltip contentStyle={{ background: '#1f2937', border: '1px solid #444' }} />
-                    <Legend />
-                    {BAND_ORDER.map((b) => (
-                      <Bar key={b} dataKey={b} stackId="b" fill={BAND_COLORS[b]} />
-                    ))}
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            )}
-          </OpsSectionCard>
-        </Col>
-
-        <Col xs={24} md={12}>
-          <OpsSectionCard
-            title="假设触发概览"
-            source={hypSummary.source}
-            staleDays={hypSummary.stale_days}
-          >
-            <Row gutter={[8, 8]}>
-              <Col span={8}>
-                <Statistic title="生效中 + 已提升复用" value={hypSummary.total_active || 0} />
-              </Col>
-              <Col span={8}>
-                <Statistic
-                  title="今日触发"
-                  value={hypSummary.total_triggered || 0}
-                  valueStyle={{ color: '#ff4d4f' }}
-                />
-              </Col>
-              <Col span={8}>
-                <Statistic
-                  title="平均评分"
-                  value={hypSummary.avg_thesis_score ?? '—'}
-                  precision={2}
-                />
-              </Col>
-            </Row>
-            {Object.keys(hypSummary.trigger_histogram || {}).length > 0 && (
-              <div style={{ marginTop: 12 }}>
-                <Title level={5} style={{ margin: '8px 0' }}>触发类型</Title>
-                {Object.entries(hypSummary.trigger_histogram).map(([k, v]) => (
-                  <Tag key={k} color="orange" style={{ marginBottom: 4 }}>
-                    {k} · {v}
-                  </Tag>
+      <OpsSectionCard
+        title="Alpha 健康度快照"
+        source={alphaSummary.source}
+        staleDays={alphaSummary.stale_days}
+      >
+        <Row gutter={[8, 8]}>
+          <Col span={6}>
+            <Statistic
+              title="总数"
+              value={alphaSummary.total_alphas || 0}
+            />
+          </Col>
+          <Col span={6}>
+            <Statistic
+              title="健康"
+              value={alphaSummary.band_counts?.GREEN || 0}
+              valueStyle={{ color: BAND_COLORS.GREEN }}
+            />
+          </Col>
+          <Col span={6}>
+            <Statistic
+              title="异常"
+              value={alphaSummary.band_counts?.RED || 0}
+              valueStyle={{ color: BAND_COLORS.RED }}
+            />
+          </Col>
+          <Col span={6}>
+            <Statistic
+              title="未知"
+              value={alphaSummary.band_counts?.UNKNOWN || 0}
+              valueStyle={{ color: BAND_COLORS.UNKNOWN }}
+            />
+          </Col>
+        </Row>
+        {regionRows.length > 0 && (
+          <div style={{ marginTop: 16 }}>
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={regionRows}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
+                <XAxis dataKey="region" stroke="#888" />
+                <YAxis stroke="#888" />
+                <ReTooltip contentStyle={{ background: '#1f2937', border: '1px solid #444' }} />
+                <Legend />
+                {BAND_ORDER.map((b) => (
+                  <Bar key={b} dataKey={b} stackId="b" fill={BAND_COLORS[b]} />
                 ))}
-              </div>
-            )}
-          </OpsSectionCard>
-        </Col>
-      </Row>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+      </OpsSectionCard>
 
       <Row gutter={[16, 16]}>
         <Col xs={24} md={12}>
