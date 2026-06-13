@@ -101,6 +101,7 @@ def get_ops_service(
 class FlagStateOut(BaseModel):
     """Wire shape of FeatureFlagService.list_all entries."""
     name: str
+    label: str
     flag_type: str
     lifecycle: str
     domain: str

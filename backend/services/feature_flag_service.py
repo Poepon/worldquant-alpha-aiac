@@ -55,6 +55,7 @@ DOMAINS = ("submit", "rag", "evaluation", "generation", "llm-routing",
 class FlagSpec:
     """Description of a single overridable flag."""
     name: str
+    label: str                  # human-friendly 中文通俗名 — shown in ops UI (raw name → tooltip)
     flag_type: str              # one of FLAG_TYPES
     lifecycle: str              # one of LIFECYCLES — drives frontend top-level tab
     domain: str                 # one of DOMAINS — drives frontend sub-group
@@ -65,6 +66,8 @@ class FlagSpec:
             raise ValueError(f"FlagSpec {self.name}: invalid lifecycle {self.lifecycle!r}")
         if self.domain not in DOMAINS:
             raise ValueError(f"FlagSpec {self.name}: invalid domain {self.domain!r}")
+        if not (self.label and self.label.strip()):
+            raise ValueError(f"FlagSpec {self.name}: empty label")
 
 
 # Source of truth for what /ops/feature-flags is allowed to flip. Keep
@@ -73,6 +76,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- P0 ---
     "ENABLE_SIGNAL_CONTROL_DUAL_RUN": FlagSpec(
         name="ENABLE_SIGNAL_CONTROL_DUAL_RUN",
+        label="信号-对照双跑",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -81,6 +85,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- P1 ---
     "ENABLE_GRADED_SCORE": FlagSpec(
         name="ENABLE_GRADED_SCORE",
+        label="分档评分",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -88,6 +93,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_ROBUSTNESS_CHECK": FlagSpec(
         name="ENABLE_ROBUSTNESS_CHECK",
+        label="鲁棒性扰动门",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -96,6 +102,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- P2-A 宏观叙事 ---
     "ENABLE_MACRO_NARRATIVE_GUIDANCE": FlagSpec(
         name="ENABLE_MACRO_NARRATIVE_GUIDANCE",
+        label="宏观叙事引导",
         flag_type="bool",
         lifecycle="experimental",
         domain="generation",
@@ -103,6 +110,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_MACRO_NARRATIVE_EXTRACT": FlagSpec(
         name="ENABLE_MACRO_NARRATIVE_EXTRACT",
+        label="宏观叙事·每日批生成",
         flag_type="bool",
         lifecycle="dormant",
         domain="generation",
@@ -111,6 +119,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- P2-B 五支柱平衡 ---
     "ENABLE_PILLAR_AWARE_SELECTION": FlagSpec(
         name="ENABLE_PILLAR_AWARE_SELECTION",
+        label="五支柱均衡引导",
         flag_type="bool",
         lifecycle="experimental",
         domain="generation",
@@ -118,6 +127,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_ORTHOGONAL_PROMPT_STEERING": FlagSpec(
         name="ENABLE_ORTHOGONAL_PROMPT_STEERING",
+        label="正交探索导向",
         flag_type="bool",
         lifecycle="experimental",
         domain="generation",
@@ -131,6 +141,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Pool-Phase2 认知层 / 战术生成先验 ---
     "ENABLE_POOL_COGNITIVE_RECONCILE": FlagSpec(
         name="ENABLE_POOL_COGNITIVE_RECONCILE",
+        label="池认知层对账",
         flag_type="bool",
         lifecycle="experimental",
         domain="kb",
@@ -143,6 +154,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_R1A_KB_SKELETON_FREQUENCY": FlagSpec(
         name="ENABLE_R1A_KB_SKELETON_FREQUENCY",
+        label="拥挤结构降权",
         flag_type="bool",
         lifecycle="experimental",
         domain="kb",
@@ -154,6 +166,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_FIELD_HYGIENE": FlagSpec(
         name="ENABLE_FIELD_HYGIENE",
+        label="字段卫生过滤",
         flag_type="bool",
         lifecycle="operational",
         domain="generation",
@@ -167,6 +180,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- P2-C 市场体制 (Consolidated 2026-05-19: single switch + stage str) ---
     "ENABLE_REGIME": FlagSpec(
         name="ENABLE_REGIME",
+        label="市场体制总开关",
         flag_type="bool",
         lifecycle="operational",
         domain="regime",
@@ -178,6 +192,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "REGIME_STAGE": FlagSpec(
         name="REGIME_STAGE",
+        label="市场体制·生效层级",
         flag_type="str",
         lifecycle="operational",
         domain="regime",
@@ -192,6 +207,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- P2-D 负向知识 ---
     "ENABLE_NEGATIVE_KNOWLEDGE_NUDGE": FlagSpec(
         name="ENABLE_NEGATIVE_KNOWLEDGE_NUDGE",
+        label="负向知识警示",
         flag_type="bool",
         lifecycle="experimental",
         domain="generation",
@@ -200,6 +216,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- P3-Brain 角色切换 ---
     "ENABLE_BRAIN_CONSULTANT_MODE": FlagSpec(
         name="ENABLE_BRAIN_CONSULTANT_MODE",
+        label="BRAIN 顾问模式",
         flag_type="bool",
         lifecycle="operational",
         domain="brain",
@@ -208,6 +225,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Phase 1 R4' Dual-channel RAG ---
     "ENABLE_DUAL_CHANNEL_RAG": FlagSpec(
         name="ENABLE_DUAL_CHANNEL_RAG",
+        label="知识双通道分离",
         flag_type="bool",
         lifecycle="experimental",
         domain="rag",
@@ -216,6 +234,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Phase 1 R2/Q7 Contextual Thompson Sampling DirectionBandit ---
     "ENABLE_DIRECTION_BANDIT": FlagSpec(
         name="ENABLE_DIRECTION_BANDIT",
+        label="生成方向自适应选择",
         flag_type="bool",
         lifecycle="experimental",
         domain="generation",
@@ -224,6 +243,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Phase 1 R3/Q8 AST subtree-isomorphism diversity dim ---
     "ENABLE_AST_DIVERSITY_DIM": FlagSpec(
         name="ENABLE_AST_DIVERSITY_DIM",
+        label="结构多样性维度",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -232,6 +252,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- G3 AST originality gate (Phase A shadow, 2026-05-19) ---
     "ENABLE_AST_ORIGINALITY_GATE": FlagSpec(
         name="ENABLE_AST_ORIGINALITY_GATE",
+        label="结构原创度门",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -260,6 +281,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- R8 Hierarchical RAG ---
     "ENABLE_HIERARCHICAL_RAG": FlagSpec(
         name="ENABLE_HIERARCHICAL_RAG",
+        label="分层知识检索",
         flag_type="bool",
         lifecycle="operational",
         domain="rag",
@@ -280,6 +302,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- RAG category-overlap A/B experiment harness ---
     "ENABLE_RAG_CATEGORY_AB": FlagSpec(
         name="ENABLE_RAG_CATEGORY_AB",
+        label="知识检索 A/B 实验",
         flag_type="bool",
         lifecycle="experimental",
         domain="rag",
@@ -296,6 +319,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Phase 3 Q10: pyqlib local pre-screen (Multi-Fidelity Layer 0) ---
     "ENABLE_QLIB_PRESCREEN": FlagSpec(
         name="ENABLE_QLIB_PRESCREEN",
+        label="本地预筛",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -312,6 +336,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "QLIB_PRESCREEN_MODE": FlagSpec(
         name="QLIB_PRESCREEN_MODE",
+        label="本地预筛·模式",
         flag_type="str",
         lifecycle="experimental",
         domain="evaluation",
@@ -326,6 +351,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- SoftReg-P1 软正则 (2026-05-23): AlphaAgent-style 复杂度+原创软惩罚 ---
     "CODE_GEN_SOFT_REG_MODE": FlagSpec(
         name="CODE_GEN_SOFT_REG_MODE",
+        label="软正则惩罚·模式",
         flag_type="str",
         lifecycle="experimental",
         domain="generation",
@@ -339,6 +365,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "CODE_GEN_SOFT_REG_LAMBDA": FlagSpec(
         name="CODE_GEN_SOFT_REG_LAMBDA",
+        label="软正则惩罚·降权强度",
         flag_type="float",
         lifecycle="experimental",
         domain="generation",
@@ -346,6 +373,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "CODE_GEN_SOFT_REG_W_COMPLEXITY": FlagSpec(
         name="CODE_GEN_SOFT_REG_W_COMPLEXITY",
+        label="软正则惩罚·复杂度权重",
         flag_type="float",
         lifecycle="experimental",
         domain="generation",
@@ -353,6 +381,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "CODE_GEN_SOFT_REG_W_ORIGINALITY": FlagSpec(
         name="CODE_GEN_SOFT_REG_W_ORIGINALITY",
+        label="软正则惩罚·原创度权重",
         flag_type="float",
         lifecycle="experimental",
         domain="generation",
@@ -360,6 +389,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "CODE_GEN_SOFT_REG_W_ALIGNMENT": FlagSpec(
         name="CODE_GEN_SOFT_REG_W_ALIGNMENT",
+        label="软正则惩罚·对齐权重",
         flag_type="float",
         lifecycle="experimental",
         domain="generation",
@@ -370,6 +400,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "CODE_GEN_SOFT_REG_COMPLEXITY_C0": FlagSpec(
         name="CODE_GEN_SOFT_REG_COMPLEXITY_C0",
+        label="软正则惩罚·复杂度下限",
         flag_type="float",
         lifecycle="experimental",
         domain="generation",
@@ -377,6 +408,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "CODE_GEN_SOFT_REG_COMPLEXITY_CMAX": FlagSpec(
         name="CODE_GEN_SOFT_REG_COMPLEXITY_CMAX",
+        label="软正则惩罚·复杂度上限",
         flag_type="float",
         lifecycle="experimental",
         domain="generation",
@@ -385,6 +417,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- SoftReg-P2 对齐腿 (R5 c1/c2);总开关 = W_ALIGNMENT>0 ---
     "CODE_GEN_SOFT_REG_ALIGNMENT_TOPK": FlagSpec(
         name="CODE_GEN_SOFT_REG_ALIGNMENT_TOPK",
+        label="软正则惩罚·对齐评判数",
         flag_type="int",
         lifecycle="experimental",
         domain="generation",
@@ -395,6 +428,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "CODE_GEN_SOFT_REG_ALIGNMENT_SHADOW_SAMPLE": FlagSpec(
         name="CODE_GEN_SOFT_REG_ALIGNMENT_SHADOW_SAMPLE",
+        label="软正则惩罚·对齐影子采样",
         flag_type="int",
         lifecycle="experimental",
         domain="generation",
@@ -406,6 +440,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- G8 Phase A — Hypothesis forest cross-task reference ---
     "ENABLE_HYPOTHESIS_FOREST_REUSE": FlagSpec(
         name="ENABLE_HYPOTHESIS_FOREST_REUSE",
+        label="跨任务假设复用",
         flag_type="bool",
         lifecycle="experimental",
         domain="generation",
@@ -423,6 +458,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- G2 Phase A — per-call LLM cost telemetry ---
     "ENABLE_COST_TELEMETRY": FlagSpec(
         name="ENABLE_COST_TELEMETRY",
+        label="LLM 成本采集",
         flag_type="bool",
         lifecycle="dormant",
         domain="llm-routing",
@@ -449,6 +485,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- R8 query-level telemetry (per-call layer_hits + cache_hit row) ---
     "ENABLE_R8_QUERY_LOG": FlagSpec(
         name="ENABLE_R8_QUERY_LOG",
+        label="知识检索查询日志",
         flag_type="bool",
         lifecycle="experimental",
         domain="rag",
@@ -464,6 +501,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- R9 simulation cache ---
     "ENABLE_SIMULATION_CACHE": FlagSpec(
         name="ENABLE_SIMULATION_CACHE",
+        label="回测结果缓存",
         flag_type="bool",
         lifecycle="operational",
         domain="evaluation",
@@ -480,6 +518,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_REGIME_MONITOR": FlagSpec(
         name="ENABLE_REGIME_MONITOR",
+        label="市场体制监测器",
         flag_type="bool",
         lifecycle="operational",
         domain="regime",
@@ -492,6 +531,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_RESIM_BACKLOG": FlagSpec(
         name="ENABLE_RESIM_BACKLOG",
+        label="积压候选重回测",
         flag_type="bool",
         lifecycle="operational",
         domain="submit",
@@ -506,6 +546,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Phase 2 R7: Co-STEER self-correct 半接受 ---
     "ENABLE_SELF_CORRECT_SEMI_ACCEPT": FlagSpec(
         name="ENABLE_SELF_CORRECT_SEMI_ACCEPT",
+        label="自纠半接受",
         flag_type="bool",
         lifecycle="experimental",
         domain="generation",
@@ -521,6 +562,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Phase 2 R10: Family-cap (Hubble v2) ---
     "ENABLE_FAMILY_CAP": FlagSpec(
         name="ENABLE_FAMILY_CAP",
+        label="同族 alpha 限额",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -538,6 +580,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Phase 4 Sprint 0 (2026-05-19) ---
     "ENABLE_LLM_API_CIRCUIT": FlagSpec(
         name="ENABLE_LLM_API_CIRCUIT",
+        label="LLM 接口熔断",
         flag_type="bool",
         lifecycle="operational",
         domain="llm-routing",
@@ -552,6 +595,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_R8_L0": FlagSpec(
         name="ENABLE_R8_L0",
+        label="精确模式匹配检索",
         flag_type="bool",
         lifecycle="operational",
         domain="rag",
@@ -567,6 +611,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Persistence-Ontology (P1-P4 2026-05-19, plan v1.3.1) ---
     "ENABLE_FAIL_ALPHA_PERSIST": FlagSpec(
         name="ENABLE_FAIL_ALPHA_PERSIST",
+        label="失败 alpha 入库",
         flag_type="bool",
         lifecycle="operational",
         domain="evaluation",
@@ -580,6 +625,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- A1.2 R12 LLM_MODE=assistant (Sprint 1, 2026-05-20) ---
     "ENABLE_LLM_ASSISTANT_MODE": FlagSpec(
         name="ENABLE_LLM_ASSISTANT_MODE",
+        label="LLM 助手模式",
         flag_type="bool",
         lifecycle="dormant",
         domain="generation",
@@ -597,6 +643,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- B1 R11 alpha_capacity_estimator (Sprint 2, 2026-05-20) ---
     "ENABLE_CAPACITY_SCORE": FlagSpec(
         name="ENABLE_CAPACITY_SCORE",
+        label="容量评分维度",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -613,6 +660,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "CAPACITY_SCORE_WEIGHT": FlagSpec(
         name="CAPACITY_SCORE_WEIGHT",
+        label="容量评分维度·权重",
         flag_type="float",
         lifecycle="experimental",
         domain="evaluation",
@@ -625,6 +673,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- B3 R10-v2 family hard-ban shadow (Sprint 2, 2026-05-20) ---
     "ENABLE_FAMILY_HARD_BAN": FlagSpec(
         name="ENABLE_FAMILY_HARD_BAN",
+        label="同族高相关硬禁",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -645,6 +694,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "FAMILY_BAN_MIN_PAIRWISE_CORR": FlagSpec(
         name="FAMILY_BAN_MIN_PAIRWISE_CORR",
+        label="同族高相关硬禁·相关阈值",
         flag_type="float",
         lifecycle="experimental",
         domain="evaluation",
@@ -659,6 +709,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- B2 R13 factor_decomposition shadow (Sprint 2, 2026-05-20) ---
     "ENABLE_FACTOR_LENS": FlagSpec(
         name="ENABLE_FACTOR_LENS",
+        label="风格因子分解",
         flag_type="bool",
         lifecycle="experimental",
         domain="evaluation",
@@ -675,6 +726,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "FACTOR_LENS_MODE": FlagSpec(
         name="FACTOR_LENS_MODE",
+        label="风格因子分解·模式",
         flag_type="string",
         lifecycle="experimental",
         domain="evaluation",
@@ -687,6 +739,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "FACTOR_LENS_RESIDUAL_SHARPE_MIN": FlagSpec(
         name="FACTOR_LENS_RESIDUAL_SHARPE_MIN",
+        label="风格因子分解·残差阈值",
         flag_type="float",
         lifecycle="experimental",
         domain="evaluation",
@@ -700,6 +753,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- B5 R8-v3 cognitive layer 7-layer (Sprint 3, 2026-05-20) ---
     "ENABLE_COGNITIVE_LAYER_PROMPT": FlagSpec(
         name="ENABLE_COGNITIVE_LAYER_PROMPT",
+        label="认知层提示注入",
         flag_type="bool",
         lifecycle="experimental",
         domain="generation",
@@ -715,6 +769,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "COGNITIVE_LAYER_SELECT_MODE": FlagSpec(
         name="COGNITIVE_LAYER_SELECT_MODE",
+        label="认知层提示注入·选择策略",
         flag_type="string",
         lifecycle="experimental",
         domain="generation",
@@ -727,6 +782,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET": FlagSpec(
         name="COGNITIVE_LAYER_PROMPT_TOKEN_BUDGET",
+        label="认知层提示注入·token 预算",
         flag_type="int",
         lifecycle="experimental",
         domain="generation",
@@ -739,6 +795,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- A5.1 G10 logic-as-asset PR1 (Sprint 3, 2026-05-20) ---
     "ENABLE_G10_LOGIC_DISTILL": FlagSpec(
         name="ENABLE_G10_LOGIC_DISTILL",
+        label="周末逻辑蒸馏",
         flag_type="bool",
         lifecycle="experimental",
         domain="kb",
@@ -752,6 +809,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "LOGIC_DISTILL_MAX_COST_USD_PER_WEEK": FlagSpec(
         name="LOGIC_DISTILL_MAX_COST_USD_PER_WEEK",
+        label="周末逻辑蒸馏·周成本上限",
         flag_type="float",
         lifecycle="experimental",
         domain="kb",
@@ -763,6 +821,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "LOGIC_DISTILL_TOP_K_PER_GROUP": FlagSpec(
         name="LOGIC_DISTILL_TOP_K_PER_GROUP",
+        label="周末逻辑蒸馏·每组取样数",
         flag_type="int",
         lifecycle="experimental",
         domain="kb",
@@ -774,6 +833,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "LOGIC_DISTILL_MIN_PASS_COUNT": FlagSpec(
         name="LOGIC_DISTILL_MIN_PASS_COUNT",
+        label="周末逻辑蒸馏·最少样本数",
         flag_type="int",
         lifecycle="experimental",
         domain="kb",
@@ -784,6 +844,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "LOGIC_DISTILL_LOOKBACK_DAYS": FlagSpec(
         name="LOGIC_DISTILL_LOOKBACK_DAYS",
+        label="周末逻辑蒸馏·回溯天数",
         flag_type="int",
         lifecycle="experimental",
         domain="kb",
@@ -793,6 +854,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "LOGIC_DISTILL_SIMILARITY_THRESHOLD": FlagSpec(
         name="LOGIC_DISTILL_SIMILARITY_THRESHOLD",
+        label="周末逻辑蒸馏·去重阈值",
         flag_type="float",
         lifecycle="experimental",
         domain="kb",
@@ -804,6 +866,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- A5.2 G10 PR2 (Sprint 4, 2026-05-20) - prompt injection ---
     "ENABLE_G10_LOGIC_INJECT": FlagSpec(
         name="ENABLE_G10_LOGIC_INJECT",
+        label="蒸馏逻辑回注",
         flag_type="bool",
         lifecycle="experimental",
         domain="kb",
@@ -818,6 +881,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "G10_LOGIC_INJECT_TOP_K": FlagSpec(
         name="G10_LOGIC_INJECT_TOP_K",
+        label="蒸馏逻辑回注·注入条数",
         flag_type="int",
         lifecycle="experimental",
         domain="kb",
@@ -829,6 +893,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- B4.1 G3-v2 grammar-aware (Sprint 4, 2026-05-20) ---
     "ENABLE_GRAMMAR_VALIDATOR": FlagSpec(
         name="ENABLE_GRAMMAR_VALIDATOR",
+        label="语法校验器",
         flag_type="bool",
         lifecycle="experimental",
         domain="generation",
@@ -846,6 +911,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Optimization closure Stage A (2026-05-28) ---
     "ENABLE_OPTIMIZATION_LOOP": FlagSpec(
         name="ENABLE_OPTIMIZATION_LOOP",
+        label="自动优化循环",
         flag_type="bool",
         lifecycle="operational",
         domain="submit",
@@ -862,6 +928,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_AUTO_SUBMIT": FlagSpec(
         name="ENABLE_AUTO_SUBMIT",
+        label="自动提交",
         flag_type="bool",
         lifecycle="operational",
         domain="submit",
@@ -876,6 +943,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_CAN_SUBMIT_REFRESH": FlagSpec(
         name="ENABLE_CAN_SUBMIT_REFRESH",
+        label="可提交状态刷新",
         flag_type="bool",
         lifecycle="operational",
         domain="submit",
@@ -889,6 +957,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "ENABLE_DATASET_VALUE_BANDIT": FlagSpec(
         name="ENABLE_DATASET_VALUE_BANDIT",
+        label="数据集价值导流",
         flag_type="bool",
         lifecycle="operational",
         domain="breadth",
@@ -908,6 +977,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- Phase 2 hypothesis-centric level (2026-05-22: make it refreshable) ---
     "HYPOTHESIS_CENTRIC_LEVEL": FlagSpec(
         name="HYPOTHESIS_CENTRIC_LEVEL",
+        label="假设生命周期等级",
         flag_type="int",
         lifecycle="dormant",
         domain="generation",
@@ -925,6 +995,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     # --- LLM-Routing (PR1, 2026-05-29): per-functional-block model routing ---
     "ENABLE_PER_FUNCTION_LLM_ROUTING": FlagSpec(
         name="ENABLE_PER_FUNCTION_LLM_ROUTING",
+        label="分功能 LLM 路由",
         flag_type="bool",
         lifecycle="operational",
         domain="llm-routing",
@@ -936,6 +1007,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "LLM_FUNCTION_MODEL_MAP": FlagSpec(
         name="LLM_FUNCTION_MODEL_MAP",
+        label="LLM 模型路由表",
         flag_type="json",
         lifecycle="operational",
         domain="llm-routing",
@@ -949,6 +1021,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "LLM_PROVIDERS": FlagSpec(
         name="LLM_PROVIDERS",
+        label="LLM 厂商注册表",
         flag_type="json",
         lifecycle="operational",
         domain="llm-routing",
@@ -961,6 +1034,7 @@ SUPPORTED_FLAGS: Dict[str, FlagSpec] = {
     ),
     "LLM_AVAILABLE_MODELS": FlagSpec(
         name="LLM_AVAILABLE_MODELS",
+        label="可选模型清单",
         flag_type="json",
         lifecycle="operational",
         domain="llm-routing",
@@ -984,6 +1058,7 @@ REDIS_FLAGS_TTL = 86400  # 24h
 class FlagState:
     """Effective state of one flag returned to /ops/flags."""
     name: str
+    label: str
     flag_type: str
     lifecycle: str
     domain: str
@@ -1080,6 +1155,7 @@ class FeatureFlagService(BaseService):
                     decoded = _decode_value(row.flag_value, spec.flag_type)
                     out.append(FlagState(
                         name=spec.name,
+                        label=spec.label,
                         flag_type=spec.flag_type,
                         lifecycle=spec.lifecycle,
                         domain=spec.domain,
@@ -1101,6 +1177,7 @@ class FeatureFlagService(BaseService):
 
             out.append(FlagState(
                 name=spec.name,
+                label=spec.label,
                 flag_type=spec.flag_type,
                 lifecycle=spec.lifecycle,
                 domain=spec.domain,
@@ -1129,7 +1206,7 @@ class FeatureFlagService(BaseService):
         )).scalar_one_or_none()
         if row is None:
             return FlagState(
-                name=name, flag_type=spec.flag_type, lifecycle=spec.lifecycle, domain=spec.domain,
+                name=name, label=spec.label, flag_type=spec.flag_type, lifecycle=spec.lifecycle, domain=spec.domain,
                 description=spec.description, env_default=env_default,
                 override_value=None, effective_value=env_default,
                 source="env" if env_default is not None else "default",
@@ -1142,13 +1219,13 @@ class FeatureFlagService(BaseService):
                 name, ex,
             )
             return FlagState(
-                name=name, flag_type=spec.flag_type, lifecycle=spec.lifecycle, domain=spec.domain,
+                name=name, label=spec.label, flag_type=spec.flag_type, lifecycle=spec.lifecycle, domain=spec.domain,
                 description=spec.description, env_default=env_default,
                 override_value=None, effective_value=env_default,
                 source="env" if env_default is not None else "default",
             )
         return FlagState(
-            name=name, flag_type=spec.flag_type, lifecycle=spec.lifecycle, domain=spec.domain,
+            name=name, label=spec.label, flag_type=spec.flag_type, lifecycle=spec.lifecycle, domain=spec.domain,
             description=spec.description, env_default=env_default,
             override_value=decoded, effective_value=decoded,
             source="runtime-override",
@@ -1360,6 +1437,7 @@ class FeatureFlagService(BaseService):
 
         return FlagState(
             name=name,
+            label=spec.label,
             flag_type=spec.flag_type,
             lifecycle=spec.lifecycle,
             domain=spec.domain,
@@ -1410,6 +1488,7 @@ class FeatureFlagService(BaseService):
         env_default = self._env_default(name)
         return FlagState(
             name=name,
+            label=spec.label,
             flag_type=spec.flag_type,
             lifecycle=spec.lifecycle,
             domain=spec.domain,
