@@ -109,6 +109,11 @@ export default function DecisionRail({
 
       <Card className="glass-card" style={{ marginTop: 12 }}
         title={<Space>人工反馈{alpha.human_feedback === 'NONE' && <Tag color="gold">需要你的评价</Tag>}</Space>}>
+        {alpha.human_feedback === 'NONE' && (
+          <Text type="secondary" style={{ display: 'block', marginBottom: 10, fontSize: 12 }}>
+            评价会进知识库：👍 升级为「成功经验」，👎 削弱已知模式，下一轮挖掘学习。
+          </Text>
+        )}
         <Space size="middle" wrap>
           <Button icon={<LikeOutlined />} type={alpha.human_feedback === 'LIKED' ? 'primary' : 'default'}
             loading={feedbackLoading} onClick={() => onFeedback('LIKED')}>👍 点赞</Button>
