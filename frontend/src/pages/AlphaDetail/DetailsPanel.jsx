@@ -1,5 +1,5 @@
 import { Typography, Descriptions, Space, Tag, Divider, Tooltip as AntTooltip } from 'antd'
-import { formatRelative, formatDateTime } from '../../utils/time'
+import { formatRelativeUTC, formatDateTimeUTC } from '../../utils/time'
 
 const { Text, Paragraph } = Typography
 
@@ -42,7 +42,7 @@ export default function DetailsPanel({ alpha }) {
           </Space>
         </Descriptions.Item>
         <Descriptions.Item label="创建时间">
-          <AntTooltip title={formatDateTime(alpha.created_at)}><span>{formatRelative(alpha.created_at)}</span></AntTooltip>
+          <AntTooltip title={formatDateTimeUTC(alpha.created_at)}><span>{formatRelativeUTC(alpha.created_at)}</span></AntTooltip>
         </Descriptions.Item>
       </Descriptions>
     </div>

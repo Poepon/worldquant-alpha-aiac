@@ -27,7 +27,7 @@ import {
   ExperimentOutlined,
 } from '@ant-design/icons'
 import api from '../services/api'
-import { formatRelative } from '../utils/time'
+import { formatRelativeUTC, formatDateTimeUTC } from '../utils/time'
 import { STATUS_COLORS, STATUS_LABELS } from '../utils/alphaStatus'
 
 const { Title, Text } = Typography
@@ -333,8 +333,8 @@ export default function AlphaList() {
       dataIndex: 'created_at',
       width: 100,
       render: (t) => (
-        <AntdTooltip title={t ? new Date(t).toLocaleString() : ''}>
-          <Text type="secondary" style={{ fontSize: 11 }}>{formatRelative(t)}</Text>
+        <AntdTooltip title={t ? formatDateTimeUTC(t) : ''}>
+          <Text type="secondary" style={{ fontSize: 11 }}>{formatRelativeUTC(t)}</Text>
         </AntdTooltip>
       ),
     },
